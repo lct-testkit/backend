@@ -23,6 +23,8 @@ from app.core.metrics import background_tasks_total
 from app.core.redis_client import close_redis
 from app.modules.admin.models import IdempotencyKey
 from app.modules.crm.tasks import sweep_sla_breaches
+from app.modules.imports.tasks import sweep_import_jobs
+from app.modules.registry.tasks import sweep_registry_drift, sweep_registry_imports
 from app.modules.workflow.tasks import sweep_status_mapping_jobs
 
 logger = structlog.get_logger(__name__)
@@ -86,6 +88,9 @@ class WorkerSettings:
         purge_expired_idempotency_keys,
         sweep_status_mapping_jobs,
         sweep_sla_breaches,
+        sweep_registry_imports,
+        sweep_registry_drift,
+        sweep_import_jobs,
     ]
     cron_jobs = [
         # Раз в сутки: партиции аудита на будущее.
@@ -99,6 +104,14 @@ class WorkerSettings:
         cron(sweep_status_mapping_jobs, minute=set(range(60))),
         # Раз в 15 минут: эскалация SLA (new_spec §4.10).
         cron(sweep_sla_breaches, minute={0, 15, 30, 45}),
+        # Раз в минуту: подхватывает `pending`-версию реестра ЕГРЮЛ, если
+        # админ только что запустил импорт (dop.md §11.3).
+        cron(sweep_registry_imports, minute=set(range(60))),
+        # Раз в сутки: сверка реквизитов организаций с локальным реестром
+        # (dop.md §11.7 — интервал внутри самой задачи, `registry_drift_interval_days`).
+        cron(sweep_registry_drift, hour=4, minute=30),
+        # Раз в минуту: батчи применения/отката импорта каталогов (раздел 4.12).
+        cron(sweep_import_jobs, minute=set(range(60))),
     ]
     on_startup = startup
     on_shutdown = shutdown

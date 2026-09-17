@@ -36,6 +36,18 @@ dependencies = [
     # Presigned PUT/GET к SeaweedFS (раздел 9): boto3/botocore чистый Python,
     # версии CPython их не касаются.
     "boto3==1.43.96",
+    # Импорт каталогов и локальный реестр ЕГРЮЛ (раздел 5.11/§4.12, спринт 5).
+    # xlsx — read_only/write_only openpyxl (стриминг, константная память).
+    "openpyxl==3.1.5",
+    # xls (устаревший бинарный формат) — только этим и читается.
+    "xlrd==2.0.1",
+    # Детект кодировки (CP1251/UTF-8-BOM) для .csv — dop.md явно требует.
+    "charset-normalizer==3.4.1",
+    # lxml==5.3.0 не публикует колёса под cp314 и падает на сборке из
+    # исходников без dev-пакетов libxml2/libxslt в контейнере — 6.1.3 их
+    # публикует (тот же приём, что уже применён к pydantic/sqlalchemy/asyncpg
+    # в этом файле). `iterparse` — стриминговый разбор выгрузки ЕГРЮЛ.
+    "lxml==6.1.3",
 ]
 
 [project.optional-dependencies]

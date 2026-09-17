@@ -64,8 +64,15 @@ class AuditAction(StrEnum):
 
     # --- Импорт и отчёты ---
     IMPORT_STARTED = "IMPORT_STARTED"
+    # Раздел 18 не называет отдельно фазу dry-run и сохранение пресета
+    # маппинга, но тот же принцип «100% изменяющих действий — в аудите»
+    # (часть 0, критерий 2), что уже дал `STATUS_MAPPING_STARTED`/
+    # `WORKFLOW_VALIDATED` — dry-run пишет `import_row_results` и счётчики
+    # задания, это не чисто вычислительный предпросмотр.
+    IMPORT_VALIDATED = "IMPORT_VALIDATED"
     IMPORT_APPLIED = "IMPORT_APPLIED"
     IMPORT_ROLLBACK = "IMPORT_ROLLBACK"
+    IMPORT_PRESET_CREATED = "IMPORT_PRESET_CREATED"
     REPORT_EXPORTED = "REPORT_EXPORTED"
     REPORT_FAILED = "REPORT_FAILED"
 

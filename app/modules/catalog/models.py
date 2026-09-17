@@ -11,11 +11,14 @@
   `ContactOut`/аудит/логи всегда маскируют, полные значения отдаёт только
   `POST /api/contacts/{id}/reveal` под своим правом и с отдельной записью
   аудита `PII_REVEALED`. Осознанное упрощение, не забытое требование.
-* **`Organization.registry_version_id`, `import_job_id` — без FK.** Таблицы
-  `registry_versions` и `import_jobs` появляются в спринте 5 (ЕГРЮЛ и
-  импорт). Тот же приём, что `Deal.organization_id` использовал в спринте 3
-  для ещё не существовавшего каталога: логическая ссылка сейчас, реальный
-  FK — миграцией спринта 5.
+* **`Organization.registry_version_id`, `import_job_id` — реальные FK со
+  спринта 5.** До него `registry_versions`/`import_jobs` не существовали
+  (тот же приём, что `Deal.organization_id` использовал в спринте 3 для ещё
+  не существовавшего каталога), значения были «голым» UUID. Миграция 0006
+  добавляет ограничения, ничего в данных менять не нужно. `ON DELETE
+  SET NULL`, а не `RESTRICT`: у обеих таблиц нет ручки удаления, но если она
+  появится, потеря версии реестра/задания импорта не должна тащить за собой
+  запрет удалить организацию.
 * **Дедупликация по ИНН — только частичный уникальный индекс.** Раздел 5.2:
   `UNIQUE(inn) WHERE inn IS NOT NULL AND deleted_at IS NULL`. Проверка
   контрольной суммы ИНН и поиск дублей до записи — в `catalog.service`, это
@@ -49,7 +52,6 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
-from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, Money, SoftDeleteMixin, TimestampMixin, UuidPkMixin, VersionMixin
@@ -170,8 +172,9 @@ class Organization(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteMixin, B
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
     )
     source: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    # Каталог импорта — спринт 5 (см. docstring модуля).
-    import_job_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    import_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("import_jobs.id", ondelete="SET NULL"), nullable=True
+    )
     search_vector: Mapped[str | None] = mapped_column(TSVECTOR, nullable=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
@@ -184,7 +187,7 @@ class Organization(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteMixin, B
     verified_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
     verified_at: Mapped[dt.datetime | None] = mapped_column(nullable=True)
     registry_version_id: Mapped[uuid.UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), nullable=True
+        ForeignKey("registry_versions.id", ondelete="SET NULL"), nullable=True
     )
     registry_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     registry_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
@@ -309,8 +312,9 @@ class Product(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteMixin, Base):
     is_active: Mapped[bool] = mapped_column(nullable=False, server_default=text("true"))
     valid_from: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
     valid_to: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
-    # Каталог импорта — спринт 5.
-    import_job_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    import_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("import_jobs.id", ondelete="SET NULL"), nullable=True
+    )
     # Раздел 19: «вендор», «ПО», признак программы (`product_kind`) — сюда,
     # без отдельных таблиц `vendors`/`it_programs`.
     custom_fields: Mapped[dict[str, Any]] = mapped_column(

@@ -51,6 +51,10 @@ class Permission(StrEnum):
     REPORT_READ = "report:read"
     REPORT_CREATE = "report:create"
 
+    # --- ЕГРЮЛ и автоподстановка (dop.md §11.10, new_spec §3.2 добавления) ---
+    ORG_LOOKUP_USE = "org_lookup:use"
+    REGISTRY_IMPORT = "registry:import"
+
     # --- Интеграции ---
     INTEGRATION_INGEST = "integration:ingest"
     INTEGRATION_ADMIN = "integration:admin"
@@ -79,6 +83,7 @@ _KAM: frozenset[Permission] = frozenset(
         Permission.DEAL_TRANSITION,
         Permission.ORG_READ,
         Permission.ORG_WRITE,
+        Permission.ORG_LOOKUP_USE,
         Permission.CONTACT_READ,
         Permission.CONTACT_WRITE,
         Permission.CONTACT_REVEAL,

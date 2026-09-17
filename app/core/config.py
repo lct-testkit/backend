@@ -100,7 +100,11 @@ class Settings(BaseSettings):
     # --- Файлы -----------------------------------------------------------
     files_max_size_bytes: int = 52428800
     deal_files_max_size_bytes: int = 524288000
-    allowed_file_extensions: str = "png,jpeg,jpg,pdf,zip,gz,gzip,rar,doc,docx,xls,xlsx"
+    # xml/csv — выгрузка ЕГРЮЛ (раздел 5.11) и файлы импорта каталогов
+    # (раздел 4.12) идут через тот же общий `files`-конвейер, что и вложения
+    # сделок: не отдельная загрузка в обход magic-bytes/антивируса, а те же
+    # расширения в общем allowlist.
+    allowed_file_extensions: str = "png,jpeg,jpg,pdf,zip,gz,gzip,rar,doc,docx,xls,xlsx,xml,csv"
 
     # --- Отчёты ----------------------------------------------------------
     reports_max_concurrent: int = 10
@@ -108,13 +112,17 @@ class Settings(BaseSettings):
     reports_retention_days: int = 7
 
     # --- Импорт ----------------------------------------------------------
-    import_max_rows: int = 50000
+    # new_spec §4.12, фаза 2: «лимит 50 МБ / 100 000 строк» — 5 000 строк
+    # там же (§0, критерий 4) это только демо-цель для DoD, не потолок.
+    import_max_rows: int = 100000
     import_max_file_size_bytes: int = 52428800
     import_batch_size: int = 500
 
-    # --- Автоподстановка по ИНН -----------------------------------------
+    # --- Автоподстановка по ИНН и локальный реестр ЕГРЮЛ ------------------
     org_lookup_rate_limit_per_min: int = 30
     external_org_lookup_enabled: bool = False
+    # dop.md §11.7: «раз в 30 дней или при обновлении локального реестра».
+    registry_drift_interval_days: int = 30
 
     # --- ПЭП -------------------------------------------------------------
     public_sign_rate_limit_per_min: int = 10

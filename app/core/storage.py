@@ -156,6 +156,37 @@ async def inspect_object(*, bucket: str, key: str) -> ObjectInspection:
     return await asyncio.to_thread(_inspect)
 
 
+async def download_object_bytes(*, bucket: str, key: str) -> bytes:
+    """Скачивает объект целиком в память — используется фоновыми задачами
+    импорта реестра ЕГРЮЛ и каталогов (раздел 4.12/5.11), которым нужен
+    произвольный доступ (seek) для `openpyxl`/`lxml.iterparse`, а не только
+    последовательное чтение. Оправдано лимитами размера файла на входе
+    (`files_max_size_bytes`/`import_max_file_size_bytes`, десятки МБ, не
+    гигабайты) — тот же приём, что уже применяет `inspect_object` для
+    подсчёта `sha256` при `commit`."""
+
+    def _download() -> bytes:
+        response = _client().get_object(Bucket=bucket, Key=key)
+        body = response["Body"]
+        try:
+            return body.read()
+        finally:
+            body.close()
+
+    return await asyncio.to_thread(_download)
+
+
+async def upload_object_bytes(*, bucket: str, key: str, body: bytes, content_type: str) -> None:
+    """Кладёт объект напрямую с сервера — в отличие от presigned PUT, здесь
+    нет клиента, который сам грузит байты: это отчёты об ошибках импорта
+    (раздел 4.12), сгенерированные фоновой задачей на сервере."""
+
+    def _upload() -> None:
+        _client().put_object(Bucket=bucket, Key=key, Body=body, ContentType=content_type)
+
+    await asyncio.to_thread(_upload)
+
+
 async def delete_object(*, bucket: str, key: str) -> None:
     def _delete() -> None:
         try:

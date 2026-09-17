@@ -256,8 +256,20 @@ class OrganizationService:
             similar = await self.find_similar(name)
         return exact, similar
 
+    async def _lookup_registry(self, inn: str) -> Any:
+        """Раздел 6: «если организация найдена [в ЕГРЮЛ], поля заполняются
+        из реестра». Прямой запрос к `egrul_entries`, не через
+        `registry.OrgLookupService` — это внутреннее обогащение при создании
+        карточки, а не пользовательский поиск с rate-limit и записью в
+        `org_lookup_log` (та ручка — для автоподстановки до отправки формы,
+        не для повторной проверки уже введённого и провалидированного ИНН)."""
+        from app.modules.registry.models import EgrulEntry
+
+        return await self._session.get(EgrulEntry, inn)
+
     async def create(self, principal: Principal, payload: Any) -> Organization:
         inn = payload.inn.strip() if payload.inn else None
+        registry_entry = None
         if inn:
             check = validate_inn(inn)
             if not check.ok:
@@ -279,15 +291,19 @@ class OrganizationService:
                         "deleted": existing.deleted_at is not None,
                     },
                 )
+            registry_entry = await self._lookup_registry(inn)
 
         organization = Organization(
-            name=payload.name or f"Организация (ИНН {inn})",
-            short_name=payload.short_name,
+            name=payload.name or (registry_entry.full_name if registry_entry else None)
+            or f"Организация (ИНН {inn})",
+            short_name=payload.short_name
+            or (registry_entry.short_name if registry_entry else None),
             org_type=payload.org_type,
             inn=inn,
-            kpp=payload.kpp,
-            ogrn=payload.ogrn,
-            legal_address=payload.legal_address,
+            kpp=payload.kpp or (registry_entry.kpp if registry_entry else None),
+            ogrn=payload.ogrn or (registry_entry.ogrn if registry_entry else None),
+            legal_address=payload.legal_address
+            or (registry_entry.legal_address if registry_entry else None),
             actual_address=payload.actual_address,
             region_id=payload.region_id,
             website=payload.website,
@@ -300,6 +316,25 @@ class OrganizationService:
             created_by=principal.user_id,
             custom_fields=payload.custom_fields or {},
         )
+        if registry_entry is not None:
+            # dop.md §11.5, п.5: «сохраняется снапшот ответа целиком».
+            organization.verified_source = "fns_registry"
+            organization.verified_at = dt.datetime.now(dt.UTC)
+            organization.registry_version_id = registry_entry.registry_version_id
+            organization.registry_status = registry_entry.status
+            organization.registry_checked_at = organization.verified_at
+            organization.registry_snapshot = {
+                "full_name": registry_entry.full_name,
+                "short_name": registry_entry.short_name,
+                "ogrn": registry_entry.ogrn,
+                "kpp": registry_entry.kpp,
+                "opf_name": registry_entry.opf_name,
+                "status": registry_entry.status,
+                "legal_address": registry_entry.legal_address,
+                "okved_main": registry_entry.okved_main,
+                "registration_date": _json_safe(registry_entry.registration_date),
+            }
+
         self._session.add(organization)
         await self._session.flush()
         await self._audit.record(

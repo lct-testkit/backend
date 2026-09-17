@@ -60,6 +60,17 @@ from app.modules.identity.models import (
     UserInvite,
 )
 
+# --- импорт каталогов (раздел 5.10/§4.12, спринт 5) ---
+from app.modules.imports.models import ImportJob, ImportPreset, ImportRowResult
+
+# --- ЕГРЮЛ и автоподстановка (раздел 5.11, спринт 5) ---
+from app.modules.registry.models import (
+    EgrulEntry,
+    OrgLookupLog,
+    RegistryVersion,
+    UniversityRegistry,
+)
+
 # --- workflow (раздел 5.4) ---
 from app.modules.workflow.models import (
     SlaRule,
@@ -87,21 +98,28 @@ __all__ = [
     "DealProduct",
     "DealStatusHistory",
     "Direction",
+    "EgrulEntry",
     "FeatureFlag",
     "File",
     "Holiday",
     "IdempotencyKey",
+    "ImportJob",
+    "ImportPreset",
+    "ImportRowResult",
     "LossReason",
     "Organization",
     "OrganizationBranch",
+    "OrgLookupLog",
     "Product",
     "Region",
+    "RegistryVersion",
     "SecurityEvent",
     "SlaRule",
     "StatusMappingJob",
     "SystemSetting",
     "Task",
     "Team",
+    "UniversityRegistry",
     "User",
     "UserDelegation",
     "UserInvite",

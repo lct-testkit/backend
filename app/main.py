@@ -40,6 +40,8 @@ from app.modules.files.router import attachments_router, files_router
 from app.modules.identity.router_admin import router as admin_users_router
 from app.modules.identity.router_auth import router as auth_router
 from app.modules.identity.router_me import router as me_router
+from app.modules.imports.router import import_jobs_router, import_presets_router
+from app.modules.registry.router import org_lookup_router, registry_admin_router
 from app.modules.workflow.router import router as workflow_router
 
 logger = structlog.get_logger(__name__)
@@ -156,6 +158,10 @@ def create_app() -> FastAPI:
     app.include_router(regions_router, prefix=settings.api_prefix)
     app.include_router(files_router, prefix=settings.api_prefix)
     app.include_router(attachments_router, prefix=settings.api_prefix)
+    app.include_router(org_lookup_router, prefix=settings.api_prefix)
+    app.include_router(registry_admin_router, prefix=settings.api_prefix)
+    app.include_router(import_jobs_router, prefix=settings.api_prefix)
+    app.include_router(import_presets_router, prefix=settings.api_prefix)
 
     return app
 

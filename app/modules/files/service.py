@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.errors import AppError, ErrorCode, ForbiddenError, NotFoundError
 from app.core.ids import uuid7
+from app.core.permissions import Permission, has_permission
 from app.core.security import Principal
 from app.core.storage import (
     delete_object,
@@ -133,6 +134,18 @@ async def check_entity_access(
         from app.modules.catalog.service import ContactService
 
         await ContactService(session).get_or_404(entity_id, principal)
+        return
+    if entity_type == "import_job":
+        # Отчёты об ошибках импорта каталогов (раздел 4.12) — доступны тем,
+        # кто вообще может запускать импорт, не только автору конкретного
+        # задания: HEAD должен видеть отчёт коллеги по своей роли, а не
+        # только свой собственный.
+        if not (principal.is_admin or has_permission(principal.role, Permission.IMPORT_RUN)):
+            raise ForbiddenError("Файл импорта недоступен")
+        return
+    if entity_type == "registry_version":
+        if not (principal.is_admin or has_permission(principal.role, Permission.REGISTRY_IMPORT)):
+            raise ForbiddenError("Файл реестра недоступен")
         return
     if not principal.is_admin:
         raise ForbiddenError(
