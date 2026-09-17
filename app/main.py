@@ -1,0 +1,122 @@
+"""Точка входа API.
+
+Модульный монолит: один деплойный артефакт, внутри — пакеты identity, crm,
+workflow, catalog, reporting, integration, notification, audit, signing, admin.
+Кросс-модульные вызовы идут только через сервисные интерфейсы.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+import structlog
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.docs import attach_docs
+from app.api.health import router as health_router
+from app.core.config import get_settings
+from app.core.db import dispose_engine
+from app.core.logging import configure_logging
+from app.core.problem import register_exception_handlers
+from app.core.redis_client import close_redis
+from app.core.security import jwks_cache
+from app.middleware.request_context import RequestContextMiddleware
+from app.modules.admin.router import router as admin_router
+from app.modules.identity.router_auth import router as auth_router
+from app.modules.identity.router_me import router as me_router
+
+logger = structlog.get_logger(__name__)
+
+OPENAPI_DESCRIPTION = """
+Бэкенд CRM ИТ Школы Ростелекома.
+
+**Соглашения (раздел 2 спецификации)**
+
+* Все ошибки — RFC 7807 Problem Details с внутренним кодом вида `CRM-XXYY`.
+* Идентификаторы — UUIDv7, в JSON строками.
+* Даты — ISO 8601 с часовым поясом, внутри хранятся и отдаются в UTC.
+* Деньги — строка `"150000.00"` плюс отдельное поле `currency`.
+* Списки — курсорная пагинация: `limit` (максимум 100) и непрозрачный `cursor`,
+  ответ содержит `items` и `next_cursor`.
+* Обновления — оптимистичная блокировка через `If-Match` и поле `version`.
+* Создание ресурсов и необратимые операции принимают `Idempotency-Key`.
+* `request_id` проходит через логи, аудит и тело ошибки, отдаётся в `X-Request-Id`.
+"""
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    settings = get_settings()
+    configure_logging(level=settings.log_level, json_output=settings.log_json)
+    logger.info(
+        "api_starting",
+        profile=settings.app_profile,
+        version=settings.app_version,
+    )
+
+    # Прогреваем JWKS, чтобы первый запрос не платил за поход в Keycloak.
+    try:
+        await jwks_cache.refresh()
+    except Exception as exc:  # noqa: BLE001
+        # Keycloak может подниматься дольше API: не валим старт, /health/ready покажет.
+        logger.warning("jwks_warmup_failed", error=type(exc).__name__)
+
+    try:
+        yield
+    finally:
+        logger.info("api_stopping")
+        await dispose_engine()
+        await close_redis()
+
+
+def create_app() -> FastAPI:
+    settings = get_settings()
+    configure_logging(level=settings.log_level, json_output=settings.log_json)
+
+    app = FastAPI(
+        title="CRM ИТ Школы Ростелекома — API",
+        version=settings.app_version,
+        description=OPENAPI_DESCRIPTION,
+        lifespan=lifespan,
+        openapi_url=f"{settings.api_prefix}/openapi.json" if settings.expose_docs else None,
+        # Стандартный Swagger тянет JS с CDN и содержит инлайн-скрипт —
+        # Caddy это блокирует, страница белая. Свой UI подключается ниже.
+        docs_url=None,
+        redoc_url=None,
+        # Ошибки отдаются только как Problem Details, поэтому стандартные
+        # ответы FastAPI по валидации переопределены обработчиками.
+        responses={},
+    )
+    # swagger-ui-bundle 4.x понимает только OpenAPI 3.0.x; FastAPI по умолчанию
+    # генерирует 3.1.0, и /api/docs показывает «valid version field».
+    app.openapi_version = "3.0.3"
+
+    app.add_middleware(RequestContextMiddleware)
+
+    # Единая точка входа — Caddy, поэтому CORS нужен только для локальной разработки.
+    if not settings.is_prod:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["http://localhost:5173", "http://localhost:3000"],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+            expose_headers=["X-Request-Id"],
+        )
+
+    register_exception_handlers(app)
+    attach_docs(app, settings)
+
+    # Технические ручки вне /api: их опрашивают Docker, Caddy и Prometheus.
+    app.include_router(health_router)
+
+    app.include_router(auth_router, prefix=settings.api_prefix)
+    app.include_router(me_router, prefix=settings.api_prefix)
+    app.include_router(admin_router, prefix=settings.api_prefix)
+
+    return app
+
+
+app = create_app()

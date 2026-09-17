@@ -1,0 +1,28 @@
+{
+  "identities": [
+    {
+      "name": "crm-api",
+      "credentials": [
+        {
+          "accessKey": "crm_access",
+          "secretKey": "crm_secret_key"
+        }
+      ],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    },
+    {
+      "name": "crm-signatures-writer",
+      "credentials": [
+        {
+          "accessKey": "crm_sign_access",
+          "secretKey": "crm_sign_secret_key"
+        }
+      ],
+      "actions": ["Read:signatures", "Write:signatures", "List:signatures"]
+    },
+    {
+      "name": "anonymous",
+      "actions": []
+    }
+  ]
+}

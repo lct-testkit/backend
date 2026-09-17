@@ -1,0 +1,87 @@
+# Единая точка входа контура.
+#
+# Caddy отвечает за TLS-терминацию и генерирует X-Request-Id, если клиент его
+# не передал. Дальше этот идентификатор проходит через логи, аудит и тело
+# ошибок Problem Details.
+#
+# HTTP-сайт слушает без имени хоста (catch-all), поэтому TLS-сайт обязан
+# иметь имя: два безымянных блока с разными политиками TLS конфликтуют.
+# Имя берётся из CRM_TLS_HOST, по умолчанию localhost.
+
+{
+	admin off
+	# В закрытом контуре внешний ACME недоступен: сертификаты только внутренние.
+	auto_https off
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+(common_headers) {
+	header {
+		# Страница подписания рендерит PDF локально, без внешних ресурсов.
+		Content-Security-Policy "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+		-Server
+	}
+}
+
+(crm_routes) {
+	import common_headers
+
+	# Прокидываем идентификатор запроса или создаём новый.
+	@no_request_id not header X-Request-Id *
+	request_header @no_request_id X-Request-Id {http.request.uuid}
+
+	log {
+		output stdout
+		format json
+	}
+
+	# Keycloak отдаётся под /auth, чтобы весь контур жил на одном порту.
+	# Именно handle, а не handle_path: Keycloak сам слушает на /auth
+	# (KC_HTTP_RELATIVE_PATH), поэтому префикс срезать нельзя.
+	handle /auth/* {
+		reverse_proxy keycloak:8080
+	}
+
+	# Метрики наружу не выставляются: их собирает Prometheus внутри сети.
+	handle /metrics {
+		respond "Not Found" 404
+	}
+
+	handle {
+		reverse_proxy {
+			# Динамическое разрешение DNS вместо статического апстрима:
+			# `docker compose up --scale api=3` подхватывается без
+			# перезапуска Caddy. У api один воркер на контейнер, поэтому
+			# масштабирование идёт именно репликами.
+			dynamic a {
+				name api
+				port 8000
+				refresh 10s
+			}
+			lb_policy least_conn
+			header_up X-Real-IP {remote_host}
+			# Тяжёлые отчёты и импорты отвечают дольше дефолтных таймаутов.
+			transport http {
+				read_timeout 300s
+				write_timeout 300s
+			}
+		}
+	}
+}
+
+:8080 {
+	import crm_routes
+}
+
+{$CRM_TLS_HOST:localhost}:8443 {
+	# Самоподписанный сертификат: в закрытом контуре внешний CA недоступен.
+	tls internal
+	import crm_routes
+}

@@ -1,0 +1,211 @@
+{
+  "realm": "crm",
+  "displayName": "CRM ИТ Школы Ростелекома",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": true,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "verifyEmail": false,
+  "defaultLocale": "ru",
+  "internationalizationEnabled": true,
+  "supportedLocales": ["ru", "en"],
+
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 3600,
+  "ssoSessionMaxLifespan": 43200,
+
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "maxFailureWaitSeconds": 900,
+  "waitIncrementSeconds": 60,
+  "failureFactor": 5,
+
+  "passwordPolicy": "length(12) and upperCase(1) and lowerCase(1) and digits(1) and notUsername(undefined)",
+
+  "roles": {
+    "realm": [
+      {
+        "name": "KAM",
+        "description": "Менеджер по вузам: только свои сделки и связанные сущности"
+      },
+      {
+        "name": "HEAD",
+        "description": "Руководитель: сделки своей команды рекурсивно"
+      },
+      {
+        "name": "ADMIN",
+        "description": "Администратор платформы: полный доступ"
+      },
+      {
+        "name": "AUDITOR",
+        "description": "Аудитор: только журнал аудита, без доступа к ПДн"
+      },
+      {
+        "name": "INTEGRATION",
+        "description": "Сервисная роль для входящих и исходящих интеграций"
+      }
+    ]
+  },
+
+  "clients": [
+    {
+      "clientId": "crm-bff",
+      "name": "CRM BFF (SvelteKit)",
+      "description": "Конфиденциальный клиент BFF-слоя. Браузер токенов не получает.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "secret": "crm-bff-secret",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": false,
+      "redirectUris": [
+        "http://localhost:8080/*",
+        "https://localhost:8443/*",
+        "http://localhost:5173/*"
+      ],
+      "webOrigins": ["http://localhost:8080", "https://localhost:8443", "http://localhost:5173"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "backchannel.logout.session.required": "true",
+        "backchannel.logout.url": "http://api:8000/api/auth/backchannel-logout",
+        "post.logout.redirect.uris": "http://localhost:8080/*##https://localhost:8443/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "audience-crm-bff",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "crm-bff",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        },
+        {
+          "name": "realm-roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "multivalued": "true",
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ],
+      "defaultClientScopes": ["basic", "web-origins", "acr", "profile", "roles", "email"],
+      "optionalClientScopes": ["address", "phone", "offline_access"]
+    },
+    {
+      "clientId": "crm-admin",
+      "name": "CRM Admin API client",
+      "description": "Сервисный клиент для Keycloak Admin API: создание пользователей, роли, блокировка.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "secret": "crm-admin-secret",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "defaultClientScopes": ["basic", "roles"],
+      "optionalClientScopes": []
+    }
+  ],
+
+  "users": [
+    {
+      "username": "service-account-crm-admin",
+      "enabled": true,
+      "serviceAccountClientId": "crm-admin",
+      "clientRoles": {
+        "realm-management": [
+          "manage-users",
+          "view-users",
+          "query-users",
+          "manage-realm",
+          "view-realm"
+        ]
+      }
+    },
+    {
+      "username": "admin.crm",
+      "email": "admin@rt-it-school.ru",
+      "firstName": "Алексей",
+      "lastName": "Администратов",
+      "enabled": true,
+      "emailVerified": true,
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Admin12345678!",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["ADMIN"]
+    },
+    {
+      "username": "head.petrov",
+      "email": "petrov@rt-it-school.ru",
+      "firstName": "Пётр",
+      "lastName": "Петров",
+      "enabled": true,
+      "emailVerified": true,
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Head12345678!",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["HEAD"]
+    },
+    {
+      "username": "kam.ivanov",
+      "email": "ivanov@rt-it-school.ru",
+      "firstName": "Иван",
+      "lastName": "Иванов",
+      "enabled": true,
+      "emailVerified": true,
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Kam123456789!",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["KAM"]
+    },
+    {
+      "username": "auditor.smirnov",
+      "email": "smirnov@rt-it-school.ru",
+      "firstName": "Сергей",
+      "lastName": "Смирнов",
+      "enabled": true,
+      "emailVerified": true,
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Audit12345678!",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["AUDITOR"]
+    }
+  ]
+}

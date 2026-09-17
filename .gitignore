@@ -1,0 +1,77 @@
+# --- Секреты и локальный конфиг ------------------------------------------
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+credentials.json
+secrets/
+
+# --- Python --------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# --- Тесты и линтеры -----------------------------------------------------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pytype/
+.dmypy.json
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+coverage.xml
+*.cover
+
+# --- IDE / редакторы -----------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.settings/
+.classpath
+
+# --- Cursor / локальные агенты -------------------------------------------
+.cursor/
+.claude/
+
+# --- ОС ------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# --- Docker / локальные оверрайды ----------------------------------------
+docker-compose.override.yml
+.docker/
+
+# --- Логи и временные файлы ----------------------------------------------
+*.log
+*.tmp
+*.temp
+/tmp/
+.tmp/
+.cache/
+
+# --- Заготовка PyCharm в корне репозитория -------------------------------
+/main.py

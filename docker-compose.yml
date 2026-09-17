@@ -1,0 +1,258 @@
+# Закрытый контур: всё поднимается одной командой и не требует интернета
+# в рантайме. Наружу смотрит только Caddy.
+#
+#   docker compose up -d --build
+#
+# Стек зафиксирован спецификацией: PostgreSQL 16, Redis 7, SeaweedFS
+# (MinIO запрещён), Keycloak 25, arq, Caddy.
+
+name: rtk-crm
+
+x-api-env: &api-env
+  APP_PROFILE: ${APP_PROFILE:-demo}
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-crm}:${POSTGRES_PASSWORD:-crm}@postgres:5432/${POSTGRES_DB:-crm}
+  KC_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-crm}:${POSTGRES_PASSWORD:-crm}@postgres:5432/keycloak
+  REDIS_URL: redis://redis:6379/0
+  BASE_URL: ${BASE_URL:-http://localhost:8080}
+  # Публичный адрес задаёт issuer токенов, внутренний — путь для серверных
+  # вызовов JWKS, token и Admin API внутри docker-сети.
+  KEYCLOAK_URL: ${KEYCLOAK_PUBLIC_URL:-http://localhost:8080/auth}
+  KEYCLOAK_INTERNAL_URL: http://keycloak:8080/auth
+  KEYCLOAK_REALM: ${KEYCLOAK_REALM:-crm}
+  KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-crm-bff}
+  KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:-crm-bff-secret}
+  KEYCLOAK_ADMIN_CLIENT_ID: ${KEYCLOAK_ADMIN_CLIENT_ID:-crm-admin}
+  KEYCLOAK_ADMIN_CLIENT_SECRET: ${KEYCLOAK_ADMIN_CLIENT_SECRET:-crm-admin-secret}
+  KEYCLOAK_VERIFY_AUDIENCE: ${KEYCLOAK_VERIFY_AUDIENCE:-false}
+  S3_ENDPOINT_URL: http://seaweedfs:8333
+  S3_ACCESS_KEY: ${S3_ACCESS_KEY:-crm_access}
+  S3_SECRET_KEY: ${S3_SECRET_KEY:-crm_secret_key}
+  SIGNATURE_SERVER_SECRET: ${SIGNATURE_SERVER_SECRET:-change-me-in-prod}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_JSON: ${LOG_JSON:-true}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-crm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-crm}
+      POSTGRES_DB: ${POSTGRES_DB:-crm}
+      # Нужна для корректной сортировки русских названий.
+      LANG: ru_RU.utf8
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - work_mem=16MB
+      # Логируем медленные запросы: пригодится на нагрузочном тестировании.
+      - -c
+      - log_min_duration_statement=500
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Отдельная БД для Keycloak создаётся при первом запуске.
+      - ./deploy/postgres/init-keycloak-db.sh:/docker-entrypoint-initdb.d/10-keycloak.sh:ro
+    # 5433, потому что на хосте 5432 часто уже занят локальным Postgres / pgAdmin.
+    # В pgAdmin: localhost:5433, база crm, пользователь crm, пароль crm.
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-crm} -d ${POSTGRES_DB:-crm}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [crm]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 512mb
+      # Сессии и идемпотентность терять нельзя, поэтому вытесняем только
+      # ключи с выставленным TTL.
+      - --maxmemory-policy
+      - volatile-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks: [crm]
+
+  seaweedfs:
+    # S3-совместимое хранилище. Спецификация прямо запрещает замену на MinIO.
+    image: chrislusf/seaweedfs:3.68
+    restart: unless-stopped
+    command: >
+      server
+      -dir=/data
+      -master.volumeSizeLimitMB=1024
+      -volume.max=100
+      -s3
+      -s3.port=8333
+      -s3.config=/etc/seaweedfs/s3.json
+    volumes:
+      - seaweed_data:/data
+      - ./deploy/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
+    healthcheck:
+      # Именно 127.0.0.1, а не localhost: в контейнере localhost резолвится
+      # ещё и в ::1, wget выбирает IPv6, а SeaweedFS слушает только IPv4.
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:9333/cluster/status || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    networks: [crm]
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    restart: unless-stopped
+    command:
+      - start
+      - --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: ${POSTGRES_USER:-crm}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-crm}
+      KC_HTTP_ENABLED: "true"
+      # Keycloak живёт под /auth, чтобы весь контур был на одном порту Caddy.
+      KC_HTTP_RELATIVE_PATH: /auth
+      # Фиксируем публичный frontend-URL: иначе issuer токена зависел бы от
+      # того, обратились к Keycloak через Caddy или напрямую из docker-сети.
+      KC_HOSTNAME_URL: ${KEYCLOAK_PUBLIC_URL:-http://localhost:8080/auth}
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+    volumes:
+      - ./deploy/keycloak:/opt/keycloak/data/import:ro
+    # В образе нет ни curl, ни wget, поэтому стучимся по /dev/tcp из bash.
+    # KC_HEALTH_ENABLED поднимает health на management-порту 9000, причём
+    # KC_HTTP_RELATIVE_PATH действует и там: путь именно /auth/health/ready.
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -c
+        - "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /auth/health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '\"UP\"' <&3"
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [crm]
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["migrate"]
+    environment:
+      <<: *api-env
+      WAIT_FOR_POSTGRES: postgres:5432
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks: [crm]
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["api"]
+    restart: unless-stopped
+    environment:
+      <<: *api-env
+      WAIT_FOR_POSTGRES: postgres:5432
+      WAIT_FOR_REDIS: redis:6379
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # Приложение переживает недоступность Keycloak (JWKS подтягивается
+      # лениво), но ждём его здесь, чтобы после `docker compose up` вход
+      # работал сразу, а не через минуту.
+      keycloak:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks: [crm]
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["worker"]
+    restart: unless-stopped
+    environment:
+      <<: *api-env
+      WAIT_FOR_POSTGRES: postgres:5432
+      WAIT_FOR_REDIS: redis:6379
+    # Образ общий с api, где HEALTHCHECK проверяет HTTP-порт. Воркер HTTP не
+    # слушает, поэтому переопределяем: arq --check читает свой heartbeat в Redis.
+    healthcheck:
+      test: ["CMD", "arq", "app.worker.main.WorkerSettings", "--check"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks: [crm]
+
+  caddy:
+    # Единая точка входа и TLS-терминация. Проставляет X-Request-Id,
+    # который затем проходит через логи, аудит и тело ошибок.
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+      - "${HTTPS_PORT:-8443}:8443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    # Проверяем через себя же: так healthcheck подтверждает и конфиг Caddy,
+    # и доступность api вверх по цепочке. Admin API выключен, проверять там нечего.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8080/health/live || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      - api
+      - keycloak
+    networks: [crm]
+
+volumes:
+  postgres_data:
+  redis_data:
+  seaweed_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  crm:
+    driver: bridge
