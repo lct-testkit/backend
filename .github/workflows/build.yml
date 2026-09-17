@@ -1,0 +1,80 @@
+name: build
+
+# Собирает и пушит образ api (используется также worker/scheduler в deploy —
+# один образ, разный entrypoint) и уведомляет deploy repository_dispatch'ем,
+# чтобы бот там проставил tag/digest в images.yaml.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: build + push + notify deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Короткий sha
+        id: sha
+        run: echo "short=sha-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/lct-testkit/api:${{ steps.sha.outputs.short }}
+          cache-from: type=registry,ref=ghcr.io/lct-testkit/api:buildcache
+          cache-to: type=registry,ref=ghcr.io/lct-testkit/api:buildcache,mode=max
+
+      - name: Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ghcr.io/lct-testkit/api:${{ steps.sha.outputs.short }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: .trivyignore
+
+      - name: Уведомить deploy
+        env:
+          DEPLOY_DISPATCH_TOKEN: ${{ secrets.DEPLOY_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DEPLOY_DISPATCH_TOKEN}" ]; then
+            echo "::warning::DEPLOY_DISPATCH_TOKEN не задан — images.yaml в deploy не обновится, см. docs/ghcr-setup.md в deploy"
+            exit 0
+          fi
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${DEPLOY_DISPATCH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/lct-testkit/deploy/dispatches \
+            -d "$(python3 -c "
+          import json
+          print(json.dumps({
+              'event_type': 'backend-image-built',
+              'client_payload': {
+                  'image': 'api',
+                  'tag': '${{ steps.sha.outputs.short }}',
+                  'digest': '${{ steps.build.outputs.digest }}',
+              },
+          }))
+          ")"

@@ -1,0 +1,73 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: ruff check app tests
+
+  test:
+    name: pytest (офлайн)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      # Settings обязателен app_profile/database_url/redis_url и т.д. —
+      # без .env падает даже офлайн-набор (get_settings() дергается из
+      # CSRF/permissions helpers), реальные БД/Redis/Keycloak не нужны.
+      - run: cp .env.example .env
+      - run: pytest -q
+
+  smoke:
+    name: pytest (со сквозными тестами)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: crm
+          POSTGRES_PASSWORD: crm
+          POSTGRES_DB: crm_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U crm -d crm_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - name: Миграции
+        env:
+          DATABASE_URL: postgresql+asyncpg://crm:crm@localhost:5432/crm_test
+        run: python -m alembic upgrade head
+      - name: pytest
+        env:
+          DATABASE_URL: postgresql+asyncpg://crm:crm@localhost:5432/crm_test
+          TEST_DATABASE_URL: postgresql+asyncpg://crm:crm@localhost:5432/crm_test
+        run: pytest -q

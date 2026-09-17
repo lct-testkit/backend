@@ -4,7 +4,11 @@ version = "0.1.0"
 description = "CRM ИТ Школы Ростелекома — бэкенд (модульный монолит)"
 requires-python = ">=3.12,<3.15"
 dependencies = [
-    "fastapi==0.115.6",
+    # Trivy: CVE-2025-62727/CVE-2026-48818/CVE-2026-54283 в starlette
+    # (транзитивная зависимость fastapi). 0.115.6 ограничивает starlette
+    # <0.51.0 — фикс только в 1.x, поэтому апгрейд starlette требует
+    # апгрейда самого fastapi.
+    "fastapi==0.141.1",
     "uvicorn[standard]==0.34.0",
     # pydantic 2.10.4 pins pydantic-core 2.27.2, которая не публикует колёса
     # для CPython 3.14 (PyO3 в этой версии не знает о нём) — сборка из
@@ -21,11 +25,13 @@ dependencies = [
     "alembic==1.14.0",
     "redis==5.2.1",
     "httpx==0.28.1",
-    "pyjwt[crypto]==2.10.1",
+    # Trivy: CVE-2026-48526 (обход аутентификации через подделанный JWT).
+    "pyjwt[crypto]==2.13.0",
     "structlog==24.4.0",
     "prometheus-client==0.21.1",
     "arq==0.26.3",
-    "python-multipart==0.0.20",
+    # Trivy: CVE-2026-24486/CVE-2026-42561/CVE-2026-53539.
+    "python-multipart==0.0.30",
     "swagger-ui-bundle==1.1.0",
     # Presigned PUT/GET к SeaweedFS (раздел 9): boto3/botocore чистый Python,
     # версии CPython их не касаются.
@@ -36,6 +42,10 @@ dependencies = [
 dev = [
     "pytest==8.3.4",
     "pytest-asyncio==0.25.2",
+    # tests/test_api_smoke.py подменяет Redis: pytest.importorskip("fakeredis")
+    # молча пропускал весь модуль без этой зависимости — сквозные тесты
+    # никогда реально не запускались.
+    "fakeredis==2.38.0",
     "ruff==0.8.6",
 ]
 
