@@ -28,6 +28,7 @@ from app.modules.admin.router import router as admin_router
 from app.modules.identity.router_admin import router as admin_users_router
 from app.modules.identity.router_auth import router as auth_router
 from app.modules.identity.router_me import router as me_router
+from app.modules.workflow.router import router as workflow_router
 
 logger = structlog.get_logger(__name__)
 
@@ -129,6 +130,7 @@ def create_app() -> FastAPI:
     app.include_router(me_router, prefix=settings.api_prefix)
     app.include_router(admin_users_router, prefix=settings.api_prefix)
     app.include_router(admin_router, prefix=settings.api_prefix)
+    app.include_router(workflow_router, prefix=settings.api_prefix)
 
     return app
 

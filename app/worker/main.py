@@ -22,6 +22,7 @@ from app.core.logging import configure_logging
 from app.core.metrics import background_tasks_total
 from app.core.redis_client import close_redis
 from app.modules.admin.models import IdempotencyKey
+from app.modules.workflow.tasks import sweep_status_mapping_jobs
 
 logger = structlog.get_logger(__name__)
 
@@ -79,12 +80,21 @@ def _redis_settings() -> RedisSettings:
 class WorkerSettings:
     """Загружается командой `arq app.worker.main.WorkerSettings`."""
 
-    functions = [ensure_audit_partitions, purge_expired_idempotency_keys]
+    functions = [
+        ensure_audit_partitions,
+        purge_expired_idempotency_keys,
+        sweep_status_mapping_jobs,
+    ]
     cron_jobs = [
         # Раз в сутки: партиции аудита на будущее.
         cron(ensure_audit_partitions, hour=3, minute=0),
         # Раз в час: чистка просроченных идемпотентных ключей.
         cron(purge_expired_idempotency_keys, minute=15),
+        # Раз в минуту: продолжение переноса сделок при архивировании статуса
+        # воронки (раздел 6.5). Задач обычно ноль — партиция уникального
+        # индекса `uq_status_mapping_jobs_active` держит не больше одной
+        # незавершённой задачи на статус.
+        cron(sweep_status_mapping_jobs, minute=set(range(60))),
     ]
     on_startup = startup
     on_shutdown = shutdown

@@ -48,12 +48,18 @@ case "${MODE}" in
   worker)
     exec arq app.worker.main.WorkerSettings
     ;;
+  seed)
+    # Демо-воронки b2b_university_v1 и b2c_individual_v1 (раздел 7).
+    # Идемпотентно: повторный запуск на заполненной базе ничего не меняет.
+    echo "заполнение демо-воронок..."
+    exec python -m app.modules.workflow.seed
+    ;;
   shell)
     exec python
     ;;
   *)
     echo "неизвестный режим: ${MODE}" >&2
-    echo "доступно: api | worker | migrate | shell" >&2
+    echo "доступно: api | worker | migrate | seed | shell" >&2
     exit 1
     ;;
 esac

@@ -2,7 +2,7 @@
 name = "rtk-crm-api"
 version = "0.1.0"
 description = "CRM ИТ Школы Ростелекома — бэкенд (модульный монолит)"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12,<3.15"
 dependencies = [
     "fastapi==0.115.6",
     "uvicorn[standard]==0.34.0",

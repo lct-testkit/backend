@@ -31,6 +31,15 @@ from app.modules.identity.models import (
     UserInvite,
 )
 
+# --- workflow (раздел 5.4) ---
+from app.modules.workflow.models import (
+    SlaRule,
+    StatusMappingJob,
+    Workflow,
+    WorkflowStatus,
+    WorkflowTransition,
+)
+
 __all__ = [
     "AdminApproval",
     "AuditLog",
@@ -40,11 +49,16 @@ __all__ = [
     "FeatureFlag",
     "IdempotencyKey",
     "SecurityEvent",
+    "SlaRule",
+    "StatusMappingJob",
     "SystemSetting",
     "Team",
     "User",
     "UserDelegation",
     "UserInvite",
+    "Workflow",
+    "WorkflowStatus",
+    "WorkflowTransition",
 ]
 
 target_metadata = Base.metadata

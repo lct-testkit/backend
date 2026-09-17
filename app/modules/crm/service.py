@@ -1,13 +1,15 @@
-"""Сервисный интерфейс CRM-домена для администрирования пользователей.
+"""Сервисный интерфейс CRM-домена для identity и workflow.
 
 Мастер передачи дел (new_spec §4.7) и проверка блокеров обезличивания
 (§4.8.3) обязаны знать, что именно держит пользователь: сделки, задачи,
-импорты, отчёты. Эти сущности живут в модулях crm/reporting и появятся в
-своих спринтах, поэтому identity обращается к ним только через контракт.
+импорты, отчёты. Конструктор воронок (раздел 6.5) обязан знать, сколько
+живых сделок стоит в статусе, который администратор хочет архивировать.
+Эти сущности живут в модуле crm и появятся в своём спринте, поэтому
+обращение к ним идёт только через контракт.
 
 Заглушка возвращает пустую нагрузку. Важно, что она возвращает именно
-`supported=False`: мастер тогда честно пишет «модуль сделок ещё не
-подключён», а не делает вид, что передавать нечего.
+`supported=False`: мастер и предпросмотр архивирования тогда честно пишут
+«модуль сделок ещё не подключён», а не делают вид, что переносить нечего.
 """
 
 from __future__ import annotations
@@ -89,3 +91,83 @@ def register_ownership_service(service: OwnershipService) -> None:
 
 def get_ownership_service() -> OwnershipService:
     return _service
+
+
+@dataclass(slots=True)
+class StatusWorkload:
+    """Что стоит в статусе воронки на момент архивирования (раздел 6.5).
+
+    `problem_deals` — сделки, которым не хватает обязательных полей целевого
+    статуса: мастер сопоставления обязан показать их отдельно, а не только
+    общее число, иначе администратор не поймёт, что чинить руками.
+    """
+
+    supported: bool = False
+    active_count: int = 0
+    problem_deals: list[dict[str, Any]] = field(default_factory=list)
+    sla_affected: int = 0
+
+
+@dataclass(slots=True)
+class MappingBatchResult:
+    """Итог одной партии переноса сделок в `status_mapping_jobs`."""
+
+    processed: int = 0
+    failed: int = 0
+    has_more: bool = False
+
+
+@runtime_checkable
+class DealStatusService(Protocol):
+    """Контракт между конструктором воронок и сделками (появятся в спринте 3)."""
+
+    async def status_workload(
+        self, session: AsyncSession, status_id: uuid.UUID
+    ) -> StatusWorkload: ...
+
+    async def migrate_batch(
+        self,
+        session: AsyncSession,
+        *,
+        from_status_id: uuid.UUID,
+        target_status_id: uuid.UUID,
+        fallback_status_id: uuid.UUID | None,
+        sla_mode: str,
+        batch_size: int,
+    ) -> MappingBatchResult:
+        """Переносит одну партию сделок из статуса.
+
+        Возвращает `has_more=True`, пока в статусе остаются необработанные
+        сделки — вызывающий код (фоновая задача) повторяет вызов батчами.
+        """
+
+
+class NullDealStatusService:
+    async def status_workload(
+        self, session: AsyncSession, status_id: uuid.UUID
+    ) -> StatusWorkload:
+        return StatusWorkload(supported=False)
+
+    async def migrate_batch(
+        self,
+        session: AsyncSession,
+        *,
+        from_status_id: uuid.UUID,
+        target_status_id: uuid.UUID,
+        fallback_status_id: uuid.UUID | None,
+        sla_mode: str,
+        batch_size: int,
+    ) -> MappingBatchResult:
+        return MappingBatchResult(has_more=False)
+
+
+_deal_status_service: DealStatusService = NullDealStatusService()
+
+
+def register_deal_status_service(service: DealStatusService) -> None:
+    global _deal_status_service
+    _deal_status_service = service
+
+
+def get_deal_status_service() -> DealStatusService:
+    return _deal_status_service
