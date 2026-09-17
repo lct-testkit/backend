@@ -39,6 +39,15 @@ class AuditAction(StrEnum):
     DEAL_CLOSED = "DEAL_CLOSED"
     DEAL_REASSIGNED_BULK = "DEAL_REASSIGNED_BULK"
 
+    # Раздел 18 перечисляет минимум и не называет задачи отдельно, но
+    # `tasks` — такая же изменяемая сущность со своими ручками (раздел 6.6),
+    # и требование «100% изменяющих данные действий — в аудите» (часть 0,
+    # критерий 2) распространяется и на неё. Тот же принцип, что уже дал
+    # `USER_UPDATED` сверх минимума.
+    TASK_CREATED = "TASK_CREATED"
+    TASK_UPDATED = "TASK_UPDATED"
+    TASK_COMPLETED = "TASK_COMPLETED"
+
     # --- Комментарии и файлы ---
     COMMENT_CREATED = "COMMENT_CREATED"
     COMMENT_UPDATED = "COMMENT_UPDATED"

@@ -20,6 +20,18 @@ from app.modules.admin.models import (
 # --- audit (раздел 5.10) ---
 from app.modules.audit.models import AuditLog
 
+# --- сделки (раздел 5.5) ---
+from app.modules.crm.models import (
+    Deal,
+    DealComment,
+    DealCommentRevision,
+    DealEvent,
+    DealParticipant,
+    DealProduct,
+    DealStatusHistory,
+    Task,
+)
+
 # --- identity (раздел 5.1) ---
 from app.modules.identity.models import (
     Consent,
@@ -46,12 +58,20 @@ __all__ = [
     "Base",
     "Consent",
     "DataErasureRequest",
+    "Deal",
+    "DealComment",
+    "DealCommentRevision",
+    "DealEvent",
+    "DealParticipant",
+    "DealProduct",
+    "DealStatusHistory",
     "FeatureFlag",
     "IdempotencyKey",
     "SecurityEvent",
     "SlaRule",
     "StatusMappingJob",
     "SystemSetting",
+    "Task",
     "Team",
     "User",
     "UserDelegation",

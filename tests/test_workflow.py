@@ -288,10 +288,19 @@ class TestSeedGraphs:
         ]
         return statuses, transitions
 
-    def test_b2b_seed_has_fourteen_intermediate_steps(self) -> None:
+    def test_b2b_seed_has_fourteen_pipeline_steps(self) -> None:
+        # new_spec §1 считает 14 шагов пайплайна, но ровно один из них обязан
+        # быть типа `initial` — иначе граф не проходит валидацию (раздел 4.11:
+        # «ровно один статус типа initial»). Поэтому 14 = 1 initial + 13
+        # intermediate, а не 14 статусов типа intermediate.
         spec = _b2b_spec()
-        intermediate = [s for s in spec.statuses if s.type == StatusType.INTERMEDIATE.value]
-        assert len(intermediate) == 14
+        pipeline = [
+            s
+            for s in spec.statuses
+            if s.type in {StatusType.INITIAL.value, StatusType.INTERMEDIATE.value}
+        ]
+        assert len(pipeline) == 14
+        assert sum(1 for s in pipeline if s.type == StatusType.INITIAL.value) == 1
 
     def test_b2b_seed_passes_validation_cleanly(self) -> None:
         statuses, transitions = self._build(_b2b_spec())
@@ -299,10 +308,15 @@ class TestSeedGraphs:
         assert errors == []
         assert warnings == []
 
-    def test_b2c_seed_has_six_intermediate_steps(self) -> None:
+    def test_b2c_seed_has_six_pipeline_steps(self) -> None:
         spec = _b2c_spec()
-        intermediate = [s for s in spec.statuses if s.type == StatusType.INTERMEDIATE.value]
-        assert len(intermediate) == 6
+        pipeline = [
+            s
+            for s in spec.statuses
+            if s.type in {StatusType.INITIAL.value, StatusType.INTERMEDIATE.value}
+        ]
+        assert len(pipeline) == 6
+        assert sum(1 for s in pipeline if s.type == StatusType.INITIAL.value) == 1
 
     def test_b2c_seed_passes_validation_cleanly(self) -> None:
         statuses, transitions = self._build(_b2c_spec())

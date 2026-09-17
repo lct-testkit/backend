@@ -35,11 +35,10 @@ from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError, ErrorCode, FieldError, NotFoundError, ValidationError
-from app.core.redis_client import get_redis, key_workflow_graph
+from app.core.redis_client import TTL_WORKFLOW_GRAPH, get_redis, key_workflow_graph
 from app.core.security import Principal
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
-from app.modules.crm.service import get_deal_status_service
 from app.modules.workflow import dsl
 from app.modules.workflow.models import (
     TERMINAL_TYPES,
@@ -77,6 +76,46 @@ async def invalidate_workflow_cache(workflow_id: uuid.UUID) -> None:
         await get_redis().delete(key_workflow_graph(workflow_id))
     except Exception:  # noqa: BLE001 — кэш не источник истины
         pass
+
+
+async def get_cached_published_graph(workflow: Workflow) -> dict[str, Any]:
+    """Снимок опубликованного графа для перехода по статусу (new_spec §4.9).
+
+    Сделки живут по `published_graph` — снимку на момент публикации, а не по
+    живым таблицам `workflow_statuses`/`workflow_transitions`: черновая правка
+    после публикации не должна немедленно менять правила для сделок, уже
+    идущих по воронке (см. docstring `app/modules/workflow/models.py`).
+    Поэтому переход читает исключительно эту JSON-структуру: `id`,
+    `from_status_id`, `to_status_id`, `conditions`, `actions`, `allowed_roles`
+    в ней — те же значения, что были в живых таблицах на момент публикации.
+
+    Читает `cache:wf:{id}` (раздел 16), при промахе — `workflow.published_graph`
+    и заполняет кэш. Публикация инвалидирует ключ явно (`invalidate_workflow_cache`).
+    """
+    if workflow.state != WorkflowState.PUBLISHED.value or workflow.published_graph is None:
+        raise AppError(
+            ErrorCode.VALIDATION,
+            "Воронка не опубликована: переходы недоступны",
+            extra={"workflow_id": str(workflow.id)},
+        )
+
+    try:
+        cached = await get_redis().get(key_workflow_graph(workflow.id))
+        if cached:
+            return json.loads(cached)
+    except Exception:  # noqa: BLE001 — кэш не источник истины
+        pass
+
+    graph = workflow.published_graph
+    try:
+        await get_redis().setex(
+            key_workflow_graph(workflow.id),
+            TTL_WORKFLOW_GRAPH,
+            json.dumps(graph, default=str),
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return graph
 
 
 class WorkflowService:
@@ -437,6 +476,14 @@ class WorkflowService:
     async def status_impact(
         self, workflow: Workflow, status: WorkflowStatus
     ) -> tuple[Any, list[WorkflowStatus]]:
+        # Импорт отложен: с спринта 3 `crm.service` сам импортирует
+        # `get_cached_published_graph` из этого модуля (переход по статусу
+        # работает со снимком графа), а этот модуль — `get_deal_status_service`
+        # из `crm.service`. Импорт на уровне модуля с обеих сторон был бы
+        # циклическим; вызов внутри метода срабатывает уже после того, как оба
+        # модуля полностью загружены.
+        from app.modules.crm.service import get_deal_status_service
+
         workload = await get_deal_status_service().status_workload(self._session, status.id)
         candidates = [
             row
@@ -489,6 +536,8 @@ class WorkflowService:
                     "Резервный статус архивирован",
                     [FieldError(field="fallback_status_id", reason="статус недоступен")],
                 )
+
+        from app.modules.crm.service import get_deal_status_service  # см. status_impact()
 
         deal_service = get_deal_status_service()
         workload = await deal_service.status_workload(self._session, status.id)

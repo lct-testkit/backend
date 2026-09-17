@@ -130,7 +130,7 @@ def _linear_funnel(
     ]
 
     transitions: list[TransitionSpec] = []
-    for index, (code, name) in enumerate(steps):
+    for index, (code, _name) in enumerate(steps):
         if index + 1 < len(steps):
             next_code, next_name = steps[index + 1]
             transitions.append(

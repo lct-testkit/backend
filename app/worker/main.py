@@ -22,6 +22,7 @@ from app.core.logging import configure_logging
 from app.core.metrics import background_tasks_total
 from app.core.redis_client import close_redis
 from app.modules.admin.models import IdempotencyKey
+from app.modules.crm.tasks import sweep_sla_breaches
 from app.modules.workflow.tasks import sweep_status_mapping_jobs
 
 logger = structlog.get_logger(__name__)
@@ -84,6 +85,7 @@ class WorkerSettings:
         ensure_audit_partitions,
         purge_expired_idempotency_keys,
         sweep_status_mapping_jobs,
+        sweep_sla_breaches,
     ]
     cron_jobs = [
         # Раз в сутки: партиции аудита на будущее.
@@ -95,6 +97,8 @@ class WorkerSettings:
         # индекса `uq_status_mapping_jobs_active` держит не больше одной
         # незавершённой задачи на статус.
         cron(sweep_status_mapping_jobs, minute=set(range(60))),
+        # Раз в 15 минут: эскалация SLA (new_spec §4.10).
+        cron(sweep_sla_breaches, minute={0, 15, 30, 45}),
     ]
     on_startup = startup
     on_shutdown = shutdown

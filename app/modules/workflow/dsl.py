@@ -412,6 +412,25 @@ def _non_empty_str(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def flatten_leaves(node: Any) -> list[Mapping[str, Any]]:
+    """Разворачивает дерево условий в плоский список листьев для чек-листа
+    доступных переходов (раздел 6.6: «список условий с флагом satisfied»).
+
+    `any`-ветки тоже разворачиваются целиком: цель — показать пользователю,
+    что вообще проверяется, а не воспроизвести булеву семантику дерева —
+    итоговое `ok` перехода по-прежнему считает `evaluate()` на полном узле.
+    """
+    if node in (None, {}) or not isinstance(node, Mapping):
+        return []
+    if "all" in node or "any" in node:
+        leaves: list[Mapping[str, Any]] = []
+        for group in ("all", "any"):
+            for branch in node.get(group, ()):
+                leaves.extend(flatten_leaves(branch))
+        return leaves
+    return [node]
+
+
 def signature_actions(actions: Any) -> list[Mapping[str, Any]]:
     """Действия `request_signature` перехода — нужны валидатору графа."""
     if not isinstance(actions, Sequence) or isinstance(actions, str | bytes):

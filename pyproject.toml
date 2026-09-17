@@ -6,12 +6,18 @@ requires-python = ">=3.12,<3.15"
 dependencies = [
     "fastapi==0.115.6",
     "uvicorn[standard]==0.34.0",
-    "pydantic==2.10.4",
+    # pydantic 2.10.4 pins pydantic-core 2.27.2, которая не публикует колёса
+    # для CPython 3.14 (PyO3 в этой версии не знает о нём) — сборка из
+    # исходников падает на `maturin`. 2.13.5 подтянет pydantic-core 2.46.5,
+    # у которой колёса под 3.14 уже есть.
+    "pydantic==2.13.5",
     "pydantic-settings==2.7.1",
     # EmailStr в схемах администрирования пользователей.
     "email-validator==2.2.0",
-    "sqlalchemy[asyncio]==2.0.36",
-    "asyncpg==0.30.0",
+    # Аналогично pydantic: 2.0.36 не публикует колёса под 3.14, 2.0.54 — публикует.
+    "sqlalchemy[asyncio]==2.0.54",
+    # 0.30.0 не публикует колёса под 3.14, 0.31.0 — публикует.
+    "asyncpg==0.31.0",
     "alembic==1.14.0",
     "redis==5.2.1",
     "httpx==0.28.1",
