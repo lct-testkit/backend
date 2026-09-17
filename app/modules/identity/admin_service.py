@@ -445,6 +445,17 @@ class AdminUserService:
                 ErrorCode.VALIDATION,
                 "Учётная запись уволенного или обезличенного пользователя не восстанавливается",
             )
+        if updates.get("status") and user.status == UserStatus.BLOCKED.value:
+            # new_spec §4.5: разблокировка — не правка поля, а процедура со
+            # своими последствиями (Keycloak enabled=true, снятие
+            # owner_unavailable у сделок, уведомление, USER_UNBLOCKED вместо
+            # USER_UPDATED). Без этой проверки PATCH со `status: "active"`
+            # молча переводил бы локальную запись в active, оставляя учётку
+            # выключенной в Keycloak и сделки — помеченными недоступными.
+            raise AppError(
+                ErrorCode.VALIDATION,
+                "Разблокировать можно только через POST /admin/users/{id}/unblock",
+            )
 
         target_role = new_role or user.role
         target_team = updates.get("team_id", user.team_id)

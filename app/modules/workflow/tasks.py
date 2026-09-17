@@ -31,8 +31,8 @@ from app.core.metrics import background_tasks_total
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
 from app.modules.crm.service import get_deal_status_service
-from app.modules.workflow.models import MappingJobStatus, StatusMappingJob, WorkflowStatus
-from app.modules.workflow.service import MAPPING_BATCH_SIZE, invalidate_workflow_cache
+from app.modules.workflow.models import MappingJobStatus, StatusMappingJob, Workflow, WorkflowStatus
+from app.modules.workflow.service import MAPPING_BATCH_SIZE, WorkflowService
 
 logger = structlog.get_logger(__name__)
 
@@ -65,7 +65,22 @@ async def _process_one_batch(session: AsyncSession, job: StatusMappingJob) -> No
         status.is_archived = True
         status.archived_at = job.finished_at
         status.replaced_by_status_id = target_status_id
-        await invalidate_workflow_cache(status.workflow_id)
+        await session.flush()
+
+        # Не просто `invalidate_workflow_cache`: без пересборки снимка
+        # следующее чтение просто заново прогрело бы кэш тем же устаревшим
+        # `published_graph`, в котором архивируемый статус всё ещё жив для
+        # переходов — см. docstring `WorkflowService.republish_after_archive`.
+        workflow = await session.get(Workflow, status.workflow_id)
+        if workflow is not None:
+            await WorkflowService(session).republish_after_archive(workflow)
+
+        await AuditService(session).record(
+            AuditAction.STATUS_ARCHIVED,
+            entity_type="workflow_status",
+            entity_id=status.id,
+            changes={"replaced_by": {"old": None, "new": str(target_status_id)}},
+        )
 
     await AuditService(session).record(
         AuditAction.STATUS_MAPPING_COMPLETED,

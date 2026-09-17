@@ -20,6 +20,20 @@ from app.modules.admin.models import (
 # --- audit (раздел 5.10) ---
 from app.modules.audit.models import AuditLog
 
+# --- каталог: организации, контакты, справочники (раздел 5.2/5.3) ---
+from app.modules.catalog.models import (
+    Contact,
+    ContactChannel,
+    CustomFieldDef,
+    Direction,
+    Holiday,
+    LossReason,
+    Organization,
+    OrganizationBranch,
+    Product,
+    Region,
+)
+
 # --- сделки (раздел 5.5) ---
 from app.modules.crm.models import (
     Deal,
@@ -31,6 +45,9 @@ from app.modules.crm.models import (
     DealStatusHistory,
     Task,
 )
+
+# --- файлы и вложения (раздел 5.6) ---
+from app.modules.files.models import Attachment, File
 
 # --- identity (раздел 5.1) ---
 from app.modules.identity.models import (
@@ -54,9 +71,13 @@ from app.modules.workflow.models import (
 
 __all__ = [
     "AdminApproval",
+    "Attachment",
     "AuditLog",
     "Base",
     "Consent",
+    "Contact",
+    "ContactChannel",
+    "CustomFieldDef",
     "DataErasureRequest",
     "Deal",
     "DealComment",
@@ -65,8 +86,16 @@ __all__ = [
     "DealParticipant",
     "DealProduct",
     "DealStatusHistory",
+    "Direction",
     "FeatureFlag",
+    "File",
+    "Holiday",
     "IdempotencyKey",
+    "LossReason",
+    "Organization",
+    "OrganizationBranch",
+    "Product",
+    "Region",
     "SecurityEvent",
     "SlaRule",
     "StatusMappingJob",

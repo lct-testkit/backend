@@ -577,6 +577,13 @@ class WorkflowService:
             job.report = {"processed": 0, "failed": 0, "supported": workload.supported}
             self._archive_status_row(status, target, now)
             await self._session.flush()
+            await self.republish_after_archive(workflow)
+            await self._audit.record(
+                AuditAction.STATUS_ARCHIVED,
+                entity_type="workflow_status",
+                entity_id=status.id,
+                changes={"replaced_by": {"old": None, "new": str(target.id)}},
+            )
             await self._complete_mapping_audit(job)
             return status, job
 
@@ -598,6 +605,14 @@ class WorkflowService:
             job.finished_at = dt.datetime.now(dt.UTC)
             job.report = {"processed": job.processed_count, "failed": job.failed_count}
             self._archive_status_row(status, target, job.finished_at)
+            await self._session.flush()
+            await self.republish_after_archive(workflow)
+            await self._audit.record(
+                AuditAction.STATUS_ARCHIVED,
+                entity_type="workflow_status",
+                entity_id=status.id,
+                changes={"replaced_by": {"old": None, "new": str(target.id)}},
+            )
             await self._complete_mapping_audit(job)
         # Иначе задача остаётся `running`: следующие партии докручивает
         # периодический воркер (`app/modules/workflow/tasks.py`), а не эта
@@ -612,6 +627,38 @@ class WorkflowService:
         status.is_archived = True
         status.archived_at = when
         status.replaced_by_status_id = target.id
+
+    async def republish_after_archive(self, workflow: Workflow) -> None:
+        """Пересобирает `published_graph`/`graph_hash` после того, как статус
+        реально архивирован (обе точки завершения — синхронная в этом же
+        методе и асинхронная докрутка в `workflow.tasks._process_one_batch`
+        — обязаны звать это).
+
+        Раньше `archive_status` только выставлял `is_archived = true` на
+        живой строке и звал `invalidate_workflow_cache`, но переходы по
+        сделкам работают исключительно со снимком `published_graph`
+        (`get_cached_published_graph`) — сброс кэша без пересборки снимка
+        означал, что следующее чтение просто заново прогревало кэш ТЕМ ЖЕ
+        устаревшим снимком с архивным статусом внутри. Архивный статус
+        оставался живым для переходов сколь угодно долго — раздел 4.11
+        «запрет удаления без миграции» на практике не работал. Полная
+        `_validate_graph_data` здесь намеренно не перезапускается: граф уже
+        прошёл её на публикации, а архивирование — не повторная ручная
+        публикация человеком (не трогаем `published_at`/`published_by`,
+        `workflow.version` тоже не бампаем второй раз — это уже сделал
+        вызывающий код).
+        """
+        statuses = list((await self._load_statuses(workflow.id)).values())
+        transitions = await self._load_transitions(workflow.id)
+        sla_rules = await self._load_sla_rules(workflow.id)
+        snapshot = _build_snapshot(workflow, statuses, transitions, sla_rules)
+        digest = hashlib.sha256(
+            json.dumps(snapshot, sort_keys=True, separators=(",", ":"), default=str).encode()
+        ).hexdigest()
+        workflow.published_graph = snapshot
+        workflow.graph_hash = digest
+        await self._session.flush()
+        await invalidate_workflow_cache(workflow.id)
 
     async def _complete_mapping_audit(self, job: StatusMappingJob) -> None:
         await self._audit.record(

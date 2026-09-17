@@ -232,6 +232,29 @@ class BulkReassignResponse(BaseModel):
     reassigned_count: int
 
 
+# --- Участники -----------------------------------------------------------
+
+
+class ParticipantAddRequest(BaseModel):
+    user_id: uuid.UUID
+    role_in_deal: Literal["watcher", "co_owner", "lawyer", "methodist"]
+
+
+class ParticipantOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    deal_id: uuid.UUID
+    user_id: uuid.UUID
+    role_in_deal: str
+    added_by: uuid.UUID | None = None
+    added_at: dt.datetime
+
+
+class ParticipantListResponse(BaseModel):
+    items: list[ParticipantOut]
+
+
 # --- Комментарии -------------------------------------------------------------
 
 

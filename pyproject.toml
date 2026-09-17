@@ -27,6 +27,9 @@ dependencies = [
     "arq==0.26.3",
     "python-multipart==0.0.20",
     "swagger-ui-bundle==1.1.0",
+    # Presigned PUT/GET к SeaweedFS (раздел 9): boto3/botocore чистый Python,
+    # версии CPython их не касаются.
+    "boto3==1.43.96",
 ]
 
 [project.optional-dependencies]

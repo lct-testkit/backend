@@ -25,7 +25,18 @@ from app.core.redis_client import close_redis
 from app.core.security import jwks_cache
 from app.middleware.request_context import RequestContextMiddleware
 from app.modules.admin.router import router as admin_router
+from app.modules.catalog.router import (
+    contacts_router,
+    custom_field_defs_router,
+    directions_router,
+    holidays_router,
+    loss_reasons_router,
+    organizations_router,
+    products_router,
+    regions_router,
+)
 from app.modules.crm.router import comments_router, deals_router, tasks_router
+from app.modules.files.router import attachments_router, files_router
 from app.modules.identity.router_admin import router as admin_users_router
 from app.modules.identity.router_auth import router as auth_router
 from app.modules.identity.router_me import router as me_router
@@ -135,6 +146,16 @@ def create_app() -> FastAPI:
     app.include_router(deals_router, prefix=settings.api_prefix)
     app.include_router(comments_router, prefix=settings.api_prefix)
     app.include_router(tasks_router, prefix=settings.api_prefix)
+    app.include_router(organizations_router, prefix=settings.api_prefix)
+    app.include_router(contacts_router, prefix=settings.api_prefix)
+    app.include_router(products_router, prefix=settings.api_prefix)
+    app.include_router(directions_router, prefix=settings.api_prefix)
+    app.include_router(loss_reasons_router, prefix=settings.api_prefix)
+    app.include_router(holidays_router, prefix=settings.api_prefix)
+    app.include_router(custom_field_defs_router, prefix=settings.api_prefix)
+    app.include_router(regions_router, prefix=settings.api_prefix)
+    app.include_router(files_router, prefix=settings.api_prefix)
+    app.include_router(attachments_router, prefix=settings.api_prefix)
 
     return app
 

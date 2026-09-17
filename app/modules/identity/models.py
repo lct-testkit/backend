@@ -22,11 +22,18 @@ from sqlalchemy import (
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import INET, JSONB
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base, SoftDeleteMixin, TimestampMixin, UuidPkMixin, VersionMixin
+from app.db.base import (
+    Base,
+    IpAddressType,
+    SoftDeleteMixin,
+    TimestampMixin,
+    UuidPkMixin,
+    VersionMixin,
+)
 
 
 class Role(StrEnum):
@@ -274,7 +281,7 @@ class Consent(UuidPkMixin, Base):
         DateTime(timezone=True), nullable=True
     )
     revoked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    ip: Mapped[str | None] = mapped_column(INET, nullable=True)
+    ip: Mapped[str | None] = mapped_column(IpAddressType(), nullable=True)
     user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Заполняется, если согласие подписано ПЭП.
     signature_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
@@ -294,7 +301,7 @@ class SecurityEvent(UuidPkMixin, Base):
     user_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     event_type: Mapped[str] = mapped_column(String(48), nullable=False)
     severity: Mapped[str] = mapped_column(String(16), nullable=False, server_default="info")
-    ip: Mapped[str | None] = mapped_column(INET, nullable=True)
+    ip: Mapped[str | None] = mapped_column(IpAddressType(), nullable=True)
     user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
     details: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(

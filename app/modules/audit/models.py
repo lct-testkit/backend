@@ -14,12 +14,12 @@ from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import DateTime, Index, String, Text, func
-from sqlalchemy.dialects.postgresql import INET, JSONB
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.ids import uuid7
-from app.db.base import Base
+from app.db.base import Base, IpAddressType
 
 
 class AuditResult(StrEnum):
@@ -63,7 +63,7 @@ class AuditLog(Base):
     changes: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     result: Mapped[str] = mapped_column(String(16), nullable=False)
 
-    ip: Mapped[str | None] = mapped_column(INET, nullable=True)
+    ip: Mapped[str | None] = mapped_column(IpAddressType(), nullable=True)
     user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
     request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 

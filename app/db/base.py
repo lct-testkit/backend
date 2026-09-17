@@ -12,12 +12,34 @@ import uuid
 from decimal import Decimal
 from typing import Annotated, Any
 
-from sqlalchemy import BigInteger, DateTime, MetaData, Numeric, String, func, text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import BigInteger, DateTime, MetaData, Numeric, String, TypeDecorator, func, text
+from sqlalchemy.dialects.postgresql import INET, JSONB
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.core.ids import uuid7
+
+
+class IpAddressType(TypeDecorator):
+    """`INET` на стороне Postgres, обычная строка на стороне Python.
+
+    `asyncpg` (в отличие от `psycopg2`) декодирует `inet` в
+    `ipaddress.IPv4Address`/`IPv6Address`, а не `str` — Pydantic-схемы вида
+    `ip: str | None` (аудит, `security_events`, `consents`) падали с
+    `Input should be a valid string` на первой же записи с непустым IP.
+    Один тип-обёртка чинит это для всех колонок сразу, а не патчит каждую
+    выходную схему по отдельности.
+    """
+
+    impl = INET
+    cache_ok = True
+
+    def process_bind_param(self, value: object, dialect: object) -> str | None:
+        return str(value) if value is not None else None
+
+    def process_result_value(self, value: object, dialect: object) -> str | None:
+        return str(value) if value is not None else None
+
 
 # Явные имена ограничений: иначе Alembic генерирует нестабильные автогенераты.
 NAMING_CONVENTION = {

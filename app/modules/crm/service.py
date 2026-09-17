@@ -45,10 +45,17 @@ from app.core.errors import (
     VersionConflictError,
 )
 from app.core.permissions import DealScope, deal_scope_for
-from app.core.redis_client import RECENT_MAX_ITEMS, get_redis, key_recent
+from app.core.redis_client import (
+    RECENT_MAX_ITEMS,
+    TTL_DEAL_CARD,
+    get_redis,
+    key_deal_card,
+    key_recent,
+)
 from app.core.security import Principal
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
+from app.modules.catalog.models import Contact, LossReason, Organization, Product
 from app.modules.crm.models import (
     OPEN_TASK_STATUSES,
     Deal,
@@ -65,7 +72,7 @@ from app.modules.crm.models import (
     Task,
     TaskStatus,
 )
-from app.modules.identity.models import Team, User
+from app.modules.identity.models import Role, Team, User
 from app.modules.identity.service import IdentityService
 from app.modules.integration.service import get_outbox_service
 from app.modules.notification.service import NotificationPriority, get_notification_service
@@ -251,12 +258,33 @@ class RealOwnershipService:
             .scalars()
             .all()
         )
+        departing = await session.get(User, user_id)
+        successor = await session.get(User, successor_id)
+        departing_name = departing.effective_name if departing else str(user_id)
+        successor_name = successor.effective_name if successor else str(successor_id)
+
         changed_ids: list[uuid.UUID] = []
         for deal in deals:
             if await _reassign_owner(
                 session, deal, successor_id, reason=reason, actor_id=user_id
             ):
                 changed_ids.append(deal.id)
+                # new_spec §4.7 шаг 4: «в каждую сделку добавляется системный
+                # комментарий «Ответственный изменён: Петров → Иванов
+                # (причина: увольнение)»» — раньше это писал только
+                # одиночный `/reassign`, массовая передача при увольнении
+                # ограничивалась записью `DealEvent` без текста для истории.
+                session.add(
+                    DealComment(
+                        deal_id=deal.id,
+                        author_id=None,
+                        body=(
+                            f"Ответственный изменён: {departing_name} → "
+                            f"{successor_name} (причина: {reason})"
+                        ),
+                        is_system=True,
+                    )
+                )
 
         open_tasks = (
             (
@@ -705,6 +733,31 @@ async def touch_recent(
         pass
 
 
+async def get_cached_deal_card(deal_id: uuid.UUID, version: int) -> dict[str, Any] | None:
+    """`cache:deal:{id}:v{version}` (раздел 3.4/16). Версионный ключ вместо
+    инвалидации по событию: любое изменение сделки бампает `version`, старый
+    ключ просто осиротевает — ничего явно чистить не нужно."""
+    try:
+        raw = await get_redis().get(key_deal_card(deal_id, version))
+    except Exception:  # noqa: BLE001 — кэш не источник истины
+        return None
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return None
+
+
+async def set_cached_deal_card(deal_id: uuid.UUID, version: int, payload: dict[str, Any]) -> None:
+    try:
+        await get_redis().setex(
+            key_deal_card(deal_id, version), TTL_DEAL_CARD, json.dumps(payload, default=str)
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("deal_card_cache_write_failed")
+
+
 # =============================================================================
 # Фильтры списков
 # =============================================================================
@@ -719,6 +772,8 @@ class DealFilters:
     contact_id: uuid.UUID | None = None
     owner_id: uuid.UUID | None = None
     product_id: uuid.UUID | None = None
+    direction_id: uuid.UUID | None = None
+    region_id: uuid.UUID | None = None
     priority: str | None = None
     sla_state: str | None = None
     created_from: dt.datetime | None = None
@@ -830,6 +885,22 @@ class DealService:
                 .where(DealProduct.deal_id == Deal.id, DealProduct.product_id == filters.product_id)
                 .exists()
             )
+        if filters.direction_id:
+            stmt = stmt.where(
+                select(DealProduct.id)
+                .join(Product, Product.id == DealProduct.product_id)
+                .where(DealProduct.deal_id == Deal.id, Product.direction_id == filters.direction_id)
+                .exists()
+            )
+        if filters.region_id:
+            stmt = stmt.where(
+                select(Organization.id)
+                .where(
+                    Organization.id == Deal.organization_id,
+                    Organization.region_id == filters.region_id,
+                )
+                .exists()
+            )
         if filters.q:
             pattern = f"%{filters.q.strip()}%"
             stmt = stmt.where(Deal.title.ilike(pattern) | Deal.number.ilike(pattern))
@@ -887,6 +958,16 @@ class DealService:
         year = dt.datetime.now(dt.UTC).year
         return f"D-{year}-{int(seq):06d}"
 
+    async def _ensure_ref_exists(self, model: type[Any], ref_id: Any, label: str) -> None:
+        """Раздел 21 DoD: ошибка по каталогу, а не голое `IntegrityError` от
+        FK-ограничения, которое добавила миграция 0005 поверх колонок,
+        оставшихся «голым» UUID со спринта 3 (см. `crm.models`)."""
+        if ref_id is None:
+            return
+        found = await self._session.get(model, ref_id)
+        if found is None or getattr(found, "deleted_at", None) is not None:
+            raise NotFoundError(label, ref_id)
+
     async def create(self, principal: Principal, payload: Any) -> Deal:
         workflow = await self._resolve_workflow(payload.deal_type, payload.workflow_id)
         graph = await get_cached_published_graph(workflow)
@@ -895,6 +976,28 @@ class DealService:
         )
         if initial is None:
             raise AppError(ErrorCode.VALIDATION, "У воронки нет начального статуса")
+
+        await self._ensure_ref_exists(Organization, payload.organization_id, "Организация")
+        await self._ensure_ref_exists(Contact, payload.contact_id, "Контакт")
+        for item in payload.products:
+            await self._ensure_ref_exists(Product, item.product_id, "Продукт")
+
+        if principal.role == Role.INTEGRATION.value and (
+            not payload.source or not payload.external_ids
+        ):
+            # Раздел 6.6: «если сделка создаётся интеграцией, источник и
+            # внешние идентификаторы обязательны» — без них дедупликация и
+            # обратная трассировка к системе-источнику (CMS/LMS/Bitrix)
+            # ломаются на первом же повторе вебхука.
+            raise ValidationError(
+                "Для сделки, создаваемой интеграцией, обязательны source и external_ids",
+                [
+                    FieldError(field="source", reason="обязателен для источника INTEGRATION"),
+                    FieldError(
+                        field="external_ids", reason="обязателен для источника INTEGRATION"
+                    ),
+                ],
+            )
 
         number = await self._next_number()
         now = dt.datetime.now(dt.UTC)
@@ -987,6 +1090,11 @@ class DealService:
                     changes["custom_fields"] = {"old": deal.custom_fields, "new": merged}
                     deal.custom_fields = merged
 
+        if "organization_id" in data and data["organization_id"] is not None:
+            await self._ensure_ref_exists(Organization, data["organization_id"], "Организация")
+        if "contact_id" in data and data["contact_id"] is not None:
+            await self._ensure_ref_exists(Contact, data["contact_id"], "Контакт")
+
         for key, value in data.items():
             if key not in _PATCHABLE_FIELDS:
                 continue
@@ -1055,7 +1163,7 @@ class DealService:
             )
         return results
 
-    def _apply_transition_field(self, deal: Deal, key: str, value: Any) -> None:
+    async def _apply_transition_field(self, deal: Deal, key: str, value: Any) -> None:
         if key.startswith("custom_fields."):
             sub = key.removeprefix("custom_fields.")
             deal.custom_fields = {**deal.custom_fields, sub: value}
@@ -1068,6 +1176,7 @@ class DealService:
         if value is not None:
             if key == "loss_reason_id":
                 value = uuid.UUID(str(value))
+                await self._ensure_ref_exists(LossReason, value, "Причина отказа")
             elif key == "expected_close_date" and isinstance(value, str):
                 value = dt.date.fromisoformat(value)
             elif key == "amount":
@@ -1121,7 +1230,7 @@ class DealService:
             )
 
         for key, value in (fields or {}).items():
-            self._apply_transition_field(deal, key, value)
+            await self._apply_transition_field(deal, key, value)
 
         context = await build_deal_context(self._session, deal)
         evaluation = dsl.evaluate(transition["conditions"], context)
@@ -1454,6 +1563,83 @@ class DealService:
             .where(DealComment.deal_id == deal_id, DealComment.deleted_at.is_(None))
         )
         return int(open_tasks or 0), int(comments or 0)
+
+
+# =============================================================================
+# Участники (раздел 5.5): даёт видимость сверх ownership — раздел 4, скоуп
+# KAM = «owner_id = me OR участник». До этого сервиса таблица
+# `deal_participants` не имела ни одной ручки записи, из-за чего ветка
+# `exists participant` в `deal_scope_clause` была мертвым кодом: пригласить
+# коллегу в сделку как participant было физически нечем.
+# =============================================================================
+
+
+class ParticipantService:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self._audit = AuditService(session)
+
+    async def list(self, deal_id: uuid.UUID) -> list[DealParticipant]:
+        rows = (
+            await self._session.execute(
+                select(DealParticipant)
+                .where(DealParticipant.deal_id == deal_id)
+                .order_by(DealParticipant.added_at)
+            )
+        ).scalars().all()
+        return list(rows)
+
+    async def add(
+        self, deal: Deal, principal: Principal, *, user_id: uuid.UUID, role_in_deal: str
+    ) -> DealParticipant:
+        user = await self._session.get(User, user_id)
+        if user is None:
+            raise NotFoundError("Пользователь", user_id)
+
+        existing = await self._session.scalar(
+            select(DealParticipant).where(
+                DealParticipant.deal_id == deal.id,
+                DealParticipant.user_id == user_id,
+                DealParticipant.role_in_deal == role_in_deal,
+            )
+        )
+        if existing is not None:
+            return existing
+
+        participant = DealParticipant(
+            deal_id=deal.id, user_id=user_id, role_in_deal=role_in_deal, added_by=principal.user_id
+        )
+        self._session.add(participant)
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.PARTICIPANT_ADDED,
+            entity_type="deal",
+            entity_id=deal.id,
+            changes={
+                "user_id": {"old": None, "new": str(user_id)},
+                "role_in_deal": {"old": None, "new": role_in_deal},
+            },
+        )
+        return participant
+
+    async def get_or_404(self, participant_id: uuid.UUID) -> DealParticipant:
+        participant = await self._session.get(DealParticipant, participant_id)
+        if participant is None:
+            raise NotFoundError("Участник сделки", participant_id)
+        return participant
+
+    async def remove(self, participant: DealParticipant) -> None:
+        await self._session.delete(participant)
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.PARTICIPANT_REMOVED,
+            entity_type="deal",
+            entity_id=participant.deal_id,
+            changes={
+                "user_id": {"old": str(participant.user_id), "new": None},
+                "role_in_deal": {"old": participant.role_in_deal, "new": None},
+            },
+        )
 
 
 # =============================================================================

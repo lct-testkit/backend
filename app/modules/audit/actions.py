@@ -38,6 +38,8 @@ class AuditAction(StrEnum):
     DEAL_OWNER_CHANGED = "DEAL_OWNER_CHANGED"
     DEAL_CLOSED = "DEAL_CLOSED"
     DEAL_REASSIGNED_BULK = "DEAL_REASSIGNED_BULK"
+    PARTICIPANT_ADDED = "PARTICIPANT_ADDED"
+    PARTICIPANT_REMOVED = "PARTICIPANT_REMOVED"
 
     # Раздел 18 перечисляет минимум и не называет задачи отдельно, но
     # `tasks` — такая же изменяемая сущность со своими ручками (раздел 6.6),
@@ -82,6 +84,25 @@ class AuditAction(StrEnum):
     ORG_REGISTRY_IMPORTED = "ORG_REGISTRY_IMPORTED"
     ORG_DRIFT_APPLIED = "ORG_DRIFT_APPLIED"
     ORG_LIQUIDATION_DETECTED = "ORG_LIQUIDATION_DETECTED"
+
+    # --- Контакты и остальной каталог (раздел 5.2/5.3) ---
+    # Раздел 18 перечисляет минимум и не называет контакты/справочники
+    # отдельно, но тот же принцип, что уже дал `TASK_CREATED` в спринте 3:
+    # «100% изменяющих данные действий — в аудите» (часть 0, критерий 2)
+    # распространяется на любую изменяемую сущность, не только на явно
+    # перечисленные в разделе 18.
+    CONTACT_CREATED = "CONTACT_CREATED"
+    CONTACT_UPDATED = "CONTACT_UPDATED"
+    PRODUCT_CREATED = "PRODUCT_CREATED"
+    PRODUCT_UPDATED = "PRODUCT_UPDATED"
+    DIRECTION_CREATED = "DIRECTION_CREATED"
+    DIRECTION_UPDATED = "DIRECTION_UPDATED"
+    LOSS_REASON_CREATED = "LOSS_REASON_CREATED"
+    LOSS_REASON_UPDATED = "LOSS_REASON_UPDATED"
+    HOLIDAY_CREATED = "HOLIDAY_CREATED"
+    HOLIDAY_UPDATED = "HOLIDAY_UPDATED"
+    CUSTOM_FIELD_DEF_CREATED = "CUSTOM_FIELD_DEF_CREATED"
+    CUSTOM_FIELD_DEF_UPDATED = "CUSTOM_FIELD_DEF_UPDATED"
 
     # --- ПЭП ---
     SIGNATURE_DOCUMENT_CREATED = "SIGNATURE_DOCUMENT_CREATED"

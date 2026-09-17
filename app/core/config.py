@@ -58,7 +58,16 @@ class Settings(BaseSettings):
 
     # --- S3 / SeaweedFS --------------------------------------------------
     # MinIO использовать запрещено: раздел «Стек» спецификации.
+    # `s3_endpoint_url` — адрес внутри docker-сети (`http://seaweedfs:8333`),
+    # им пользуются только серверные вызовы (ensure_bucket, скачивание
+    # объекта для подсчёта sha256 при commit). Presigned PUT/GET-ссылки
+    # получает браузер клиента — ему нужен адрес, реально достижимый снаружи
+    # контура, единая точка входа которого — Caddy на 443/8443 (раздел 2.2:
+    # «наружу опубликован только 443»). Тот же приём, что уже применён к
+    # Keycloak (`keycloak_url` публичный, `keycloak_internal_url`
+    # внутренний) — здесь просто наоборот, что помечено обязательным полем.
     s3_endpoint_url: str
+    s3_public_endpoint_url: str | None = None
     s3_access_key: SecretStr
     s3_secret_key: SecretStr
     s3_region: str = "us-east-1"
@@ -165,6 +174,15 @@ class Settings(BaseSettings):
     @property
     def is_prod(self) -> bool:
         return self.app_profile == "prod"
+
+    @property
+    def s3_public_endpoint(self) -> str:
+        """Адрес для presigned-ссылок, отдаваемых браузеру. Если публичный
+        адрес не задан отдельно (локальные тесты, окружения с одним
+        плоским адресом), используется `s3_endpoint_url` как есть — тогда
+        presigned-ссылки будут работать только внутри той же сети, что и
+        раньше, без изменения поведения для таких сред."""
+        return self.s3_public_endpoint_url or self.s3_endpoint_url
 
     @property
     def allowed_extensions(self) -> frozenset[str]:

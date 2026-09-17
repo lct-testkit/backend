@@ -93,13 +93,17 @@ _KAM: frozenset[Permission] = frozenset(
     }
 )
 
-# HEAD — руководитель: всё как у KAM, плюс команда и переназначение.
+# HEAD — руководитель: всё как у KAM, плюс команда, переназначение и импорт
+# каталогов (раздел 5: матрица прав отдаёт «Импорт каталогов» HEAD и ADMIN,
+# не KAM).
 _HEAD: frozenset[Permission] = _KAM | {
     Permission.DEAL_REASSIGN,
     Permission.DEAL_REASSIGN_BULK,
     Permission.AUDIT_READ,
     Permission.SIGNATURE_VOID,
     Permission.FILE_DELETE,
+    Permission.IMPORT_RUN,
+    Permission.IMPORT_ROLLBACK,
 }
 
 # AUDITOR — только журнал. Доступа к сделкам и ПДн по умолчанию нет.
@@ -107,11 +111,15 @@ _AUDITOR: frozenset[Permission] = frozenset(
     {Permission.AUDIT_READ, Permission.AUDIT_EXPORT}
 )
 
-# INTEGRATION — сервисная учётка, интерфейсного доступа нет.
+# INTEGRATION — сервисная учётка. new_spec часть 5, матрица прав: переход по
+# статусу для INTEGRATION отмечен «✔ (огранич.)» — входящий лид создаёт
+# сделку и должен уметь провести её по автоматическим переходам (например,
+# зачисление в LMS по данным вебхука), не только создать саму запись.
 _INTEGRATION: frozenset[Permission] = frozenset(
     {
         Permission.INTEGRATION_INGEST,
         Permission.DEAL_CREATE,
+        Permission.DEAL_TRANSITION,
         Permission.CONTACT_WRITE,
         Permission.ORG_READ,
     }

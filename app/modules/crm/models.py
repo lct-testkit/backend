@@ -1,14 +1,11 @@
 """Модели домена сделок (раздел 5.5, new_spec §4.9).
 
-Три поля сознательно хранятся как «голый» `UUID` без `ForeignKey`:
 `Deal.organization_id`, `Deal.contact_id`, `Deal.loss_reason_id` и
-`DealProduct.product_id`. Каталог организаций, контактов, причин отказа и
-продуктов — это раздел 5.2/5.3, который появится в своём спринте (раздел 20,
-«Спринт 4 — каталоги»). Здесь тот же приём, что и в `app/modules/crm/service.py`
-для сделок относительно воронок в спринте 2: сделки не могут ждать каталог,
-поэтому ссылки логические, а внешний ключ добавится миграцией спринта 4,
-когда появятся таблицы, на которые можно сослаться. `Deal.active_signature_document_id`
-по той же причине без FK — модуль ПЭП (спринт 8) ещё не существует.
+`DealProduct.product_id` получили настоящий `ForeignKey` в спринте 4, когда
+появился каталог (`app/modules/catalog/models.py`) — миграция
+`0005_catalog_sprint.py` добавляет ограничения поверх уже существующих
+колонок из `0004_deals_sprint.py`. `Deal.active_signature_document_id`
+по-прежнему без FK — модуль ПЭП (спринт 8) ещё не существует.
 
 `deal_status_history` и `deal_events` — журналы, не редактируются: как и
 `audit_log`, они получают `REVOKE UPDATE, DELETE` в миграции (см.
@@ -156,9 +153,12 @@ class Deal(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteMixin, Base):
     status_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("workflow_statuses.id", ondelete="RESTRICT"), nullable=False
     )
-    # Каталог организаций/контактов — спринт 4 (см. docstring модуля).
-    organization_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
-    contact_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    organization_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=True
+    )
+    contact_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("contacts.id", ondelete="RESTRICT"), nullable=True
+    )
 
     owner_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
@@ -186,8 +186,9 @@ class Deal(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteMixin, Base):
     )
 
     priority: Mapped[str] = mapped_column(String(16), nullable=False, server_default="normal")
-    # Каталог причин отказа — спринт 4.
-    loss_reason_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    loss_reason_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("loss_reasons.id", ondelete="RESTRICT"), nullable=True
+    )
     closed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     custom_fields: Mapped[dict[str, Any]] = mapped_column(
@@ -304,7 +305,7 @@ class DealEvent(UuidPkMixin, Base):
 
 
 class DealProduct(UuidPkMixin, TimestampMixin, Base):
-    """Продукты сделки (раздел 5.5). Каталог `products` — спринт 4."""
+    """Продукты сделки (раздел 5.5)."""
 
     __tablename__ = "deal_products"
     __table_args__ = (
@@ -319,7 +320,9 @@ class DealProduct(UuidPkMixin, TimestampMixin, Base):
     deal_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("deals.id", ondelete="CASCADE"), nullable=False
     )
-    product_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    product_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("products.id", ondelete="RESTRICT"), nullable=False
+    )
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     price: Mapped[Money | None] = mapped_column(Numeric(14, 2), nullable=True)
     discount_pct: Mapped[Any] = mapped_column(

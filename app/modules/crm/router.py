@@ -18,13 +18,21 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Query, Request, status
 
-from app.core.deps import DbSession, IdempotencyKeyHeader, IfMatch, Pagination, require_permission
-from app.core.errors import AppError, ErrorCode
+from app.core.deps import (
+    AuditDep,
+    DbSession,
+    IdempotencyKeyHeader,
+    IfMatch,
+    Pagination,
+    require_permission,
+)
+from app.core.errors import AppError, ErrorCode, NotFoundError
 from app.core.idempotency import IdempotencyGuard
 from app.core.pagination import Page, keyset_before
 from app.core.permissions import Permission
 from app.core.redis_client import distributed_lock
 from app.core.security import Principal
+from app.modules.audit.actions import AuditAction
 from app.modules.crm.models import Deal, Task
 from app.modules.crm.schemas import (
     AvailableTransitionOut,
@@ -45,6 +53,9 @@ from app.modules.crm.schemas import (
     DealProductOut,
     DealStatusHistoryOut,
     DealUpdateRequest,
+    ParticipantAddRequest,
+    ParticipantListResponse,
+    ParticipantOut,
     ReassignRequest,
     TaskCreateRequest,
     TaskListResponse,
@@ -58,9 +69,12 @@ from app.modules.crm.service import (
     CommentService,
     DealFilters,
     DealService,
+    ParticipantService,
     TaskFilters,
     TaskService,
     deal_scope_clause,
+    get_cached_deal_card,
+    set_cached_deal_card,
     touch_recent,
 )
 from app.modules.identity.schemas import OperationResult
@@ -105,6 +119,8 @@ async def list_deals(
     contact_id: Annotated[uuid.UUID | None, Query()] = None,
     owner_id: Annotated[uuid.UUID | None, Query()] = None,
     product_id: Annotated[uuid.UUID | None, Query()] = None,
+    direction_id: Annotated[uuid.UUID | None, Query()] = None,
+    region_id: Annotated[uuid.UUID | None, Query()] = None,
     priority: Annotated[str | None, Query()] = None,
     sla_state: Annotated[str | None, Query()] = None,
     created_from: Annotated[dt.datetime | None, Query()] = None,
@@ -121,6 +137,8 @@ async def list_deals(
         contact_id=contact_id,
         owner_id=owner_id,
         product_id=product_id,
+        direction_id=direction_id,
+        region_id=region_id,
         priority=priority,
         sla_state=sla_state,
         created_from=created_from,
@@ -207,24 +225,44 @@ async def bulk_reassign_deals(
     summary="Карточка сделки",
     description=(
         "Сделка, продукты, счётчики открытых задач и комментариев. Чужая сделка "
-        "вне скоупа — 404, не 403 (раздел 3.2). Роль: чтение сделок."
+        "вне скоупа — 404, не 403 (раздел 3.2). Кэшируется по версии сделки "
+        "(`cache:deal:{id}:v{version}`, раздел 3.4/16). Роль: чтение сделок."
     ),
     response_model=DealCardOut,
 )
 async def get_deal(
-    session: DbSession, principal: DealRead, deal_id: Annotated[uuid.UUID, Path()]
+    session: DbSession,
+    principal: DealRead,
+    audit: AuditDep,
+    deal_id: Annotated[uuid.UUID, Path()],
 ) -> DealCardOut:
     service = DealService(session)
+    # Скоуп проверяется здесь всегда, даже на кэш-хит ниже: кэш экономит
+    # только повторные запросы продуктов/счётчиков, не сам контроль доступа.
     deal = await service.get_or_404(deal_id, principal)
+
+    if principal.is_admin:
+        # new_spec §3.2: «каждое чтение карточки админом логируется отдельным
+        # типом события PII_ACCESS» — независимо от того, откуда дальше
+        # берутся данные, кэша или БД.
+        await audit.record(AuditAction.PII_ACCESS, entity_type="deal", entity_id=deal.id)
+
+    await touch_recent(principal.user_id, entity_type="deal", entity_id=deal.id, title=deal.title)
+
+    cached = await get_cached_deal_card(deal.id, deal.version)
+    if cached is not None:
+        return DealCardOut.model_validate(cached)
+
     products = await service.load_products(deal.id)
     open_tasks_count, comments_count = await service.counters(deal.id)
-    await touch_recent(principal.user_id, entity_type="deal", entity_id=deal.id, title=deal.title)
-    return DealCardOut(
+    card = DealCardOut(
         deal=DealOut.model_validate(deal),
         products=[DealProductOut.model_validate(p) for p in products],
         open_tasks_count=open_tasks_count,
         comments_count=comments_count,
     )
+    await set_cached_deal_card(deal.id, deal.version, card.model_dump(mode="json"))
+    return card
 
 
 @deals_router.patch(
@@ -374,6 +412,61 @@ async def reassign_deal(
         deal, principal, owner_id=payload.owner_id, reason=payload.reason, expected_version=if_match
     )
     return DealOut.model_validate(deal)
+
+
+# =============================================================================
+# Участники (раздел 5.5) — даёт видимость сверх ownership для KAM
+# =============================================================================
+
+
+@deals_router.get(
+    "/{deal_id}/participants", summary="Участники сделки", response_model=ParticipantListResponse
+)
+async def list_participants(
+    session: DbSession, principal: DealRead, deal_id: Annotated[uuid.UUID, Path()]
+) -> ParticipantListResponse:
+    deal = await DealService(session).get_or_404(deal_id, principal)
+    rows = await ParticipantService(session).list(deal.id)
+    return ParticipantListResponse(items=[ParticipantOut.model_validate(p) for p in rows])
+
+
+@deals_router.post(
+    "/{deal_id}/participants",
+    summary="Добавить участника",
+    response_model=ParticipantOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_participant(
+    payload: ParticipantAddRequest,
+    session: DbSession,
+    principal: DealUpdatePerm,
+    deal_id: Annotated[uuid.UUID, Path()],
+) -> ParticipantOut:
+    deal = await DealService(session).get_or_404(deal_id, principal)
+    participant = await ParticipantService(session).add(
+        deal, principal, user_id=payload.user_id, role_in_deal=payload.role_in_deal
+    )
+    return ParticipantOut.model_validate(participant)
+
+
+@deals_router.delete(
+    "/{deal_id}/participants/{participant_id}",
+    summary="Удалить участника",
+    response_model=OperationResult,
+)
+async def remove_participant(
+    session: DbSession,
+    principal: DealUpdatePerm,
+    deal_id: Annotated[uuid.UUID, Path()],
+    participant_id: Annotated[uuid.UUID, Path()],
+) -> OperationResult:
+    await DealService(session).get_or_404(deal_id, principal)
+    service = ParticipantService(session)
+    participant = await service.get_or_404(participant_id)
+    if participant.deal_id != deal_id:
+        raise NotFoundError("Участник сделки", participant_id)
+    await service.remove(participant)
+    return OperationResult(ok=True, detail="Участник удалён")
 
 
 @deals_router.get(
