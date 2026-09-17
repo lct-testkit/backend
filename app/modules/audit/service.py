@@ -11,13 +11,15 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 import structlog
-from sqlalchemy import select, text
+from sqlalchemy import Select, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.context import get_actor, get_client, get_request_id
@@ -32,6 +34,22 @@ logger = structlog.get_logger(__name__)
 _AUDIT_CHAIN_LOCK_ID = 0x4352_4D41  # "CRMA"
 
 GENESIS_HASH = "0" * 64
+
+
+@dataclass(slots=True)
+class AuditFilters:
+    """Фильтры выборки журнала (раздел 6.12)."""
+
+    actor_id: uuid.UUID | None = None
+    action: str | None = None
+    entity_type: str | None = None
+    entity_id: uuid.UUID | None = None
+    result: str | None = None
+    request_id: str | None = None
+    date_from: dt.datetime | None = None
+    date_to: dt.datetime | None = None
+    # Скоуп: None — без ограничения, [] — пустой доступ.
+    actor_ids: list[uuid.UUID] | None = None
 
 
 def compute_hash(
@@ -86,7 +104,14 @@ class AuditService:
         self._session = session
 
     async def _chain_head(self) -> str | None:
-        # Лок транзакционный: освободится вместе с коммитом или откатом.
+        """Берёт голову цепочки под advisory-локом.
+
+        Лок транзакционный: освободится вместе с коммитом или откатом.
+        Важно: вложенная транзакция, которая берёт этот же лок, пока его
+        держит транзакция того же запроса, даёт взаимную блокировку. Поэтому
+        записи, не принадлежащие транзакции запроса, откладываются до её
+        завершения (`defer_audit`), а не пишутся «рядом».
+        """
         await self._session.execute(
             text("SELECT pg_advisory_xact_lock(:lock_id)"),
             {"lock_id": _AUDIT_CHAIN_LOCK_ID},
@@ -176,6 +201,34 @@ class AuditService:
             result=AuditResult.DENIED,
         )
 
+    def query(self, filters: AuditFilters) -> Select[tuple[AuditLog]]:
+        """Выборка журнала с фильтрами раздела 6.12.
+
+        Скоуп применяется вызывающей стороной через `actor_ids`: аудитор и
+        администратор видят всё, руководитель — только свою команду.
+        """
+        stmt = select(AuditLog)
+        if filters.actor_ids is not None:
+            # Пустой список означает пустой скоуп, а не «без фильтра».
+            stmt = stmt.where(AuditLog.actor_id.in_(filters.actor_ids))
+        if filters.actor_id:
+            stmt = stmt.where(AuditLog.actor_id == filters.actor_id)
+        if filters.action:
+            stmt = stmt.where(AuditLog.action == filters.action)
+        if filters.entity_type:
+            stmt = stmt.where(AuditLog.entity_type == filters.entity_type)
+        if filters.entity_id:
+            stmt = stmt.where(AuditLog.entity_id == filters.entity_id)
+        if filters.result:
+            stmt = stmt.where(AuditLog.result == filters.result)
+        if filters.request_id:
+            stmt = stmt.where(AuditLog.request_id == filters.request_id)
+        if filters.date_from:
+            stmt = stmt.where(AuditLog.created_at >= filters.date_from)
+        if filters.date_to:
+            stmt = stmt.where(AuditLog.created_at < filters.date_to)
+        return stmt
+
     async def verify_chain(self, *, limit: int = 1000) -> dict[str, Any]:
         """Проверяет целостность хвоста цепочки. Используется админкой и тестами."""
         rows = (
@@ -225,6 +278,11 @@ async def record_out_of_band(
     доступе завершается исключением, и эта транзакция откатывается — вместе с
     записью аудита. Поэтому такие события фиксируются отдельно, чтобы
     требование «отказы в доступе также записываются» реально выполнялось.
+
+    Вызывать можно только там, где нет открытой транзакции запроса: иначе
+    advisory-лок цепочки даёт взаимную блокировку. Штатное применение —
+    фоновые задачи и CLI. Внутри запроса для отказов используется
+    `record_denied_and_commit`.
     """
     from app.core.db import session_scope
 
@@ -240,3 +298,38 @@ async def record_out_of_band(
     except Exception:  # noqa: BLE001
         # Невозможность записать отказ не должна подменять исходную ошибку прав.
         logger.exception("audit_out_of_band_failed", action=str(action))
+
+
+async def record_denied_and_commit(
+    session: AsyncSession,
+    action: AuditAction | str,
+    *,
+    entity_type: str | None = None,
+    entity_id: uuid.UUID | None = None,
+    changes: dict[str, Any] | None = None,
+) -> None:
+    """Пишет отказ в доступе и сразу фиксирует его.
+
+    Отказ завершается исключением, а оно откатывает транзакцию запроса —
+    вместе с записью аудита. Писать «рядом», второй транзакцией, нельзя:
+    она встала бы в очередь за advisory-локом цепочки, который держит
+    первая, и запрос завис бы до таймаута.
+
+    Поэтому запись фиксируется в той же транзакции немедленным коммитом.
+    Это безопасно: проверка прав выполняется до любых бизнес-изменений, так
+    что фиксируется только аутентификация и сам отказ. Лок освобождается
+    вместе с коммитом.
+    """
+    try:
+        await AuditService(session).record(
+            action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            changes=changes,
+            result=AuditResult.DENIED,
+        )
+        await session.commit()
+    except Exception:  # noqa: BLE001
+        # Невозможность записать отказ не должна подменять исходную ошибку прав.
+        logger.exception("audit_denied_record_failed", action=str(action))
+        await session.rollback()

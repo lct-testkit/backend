@@ -35,6 +35,9 @@ class AuditLog(Base):
         Index("ix_audit_log_entity", "entity_type", "entity_id", "created_at"),
         Index("ix_audit_log_action_created", "action", "created_at"),
         Index("ix_audit_log_request_id", "request_id"),
+        # Отдельный индекс по времени: выборка журнала за период идёт без
+        # других фильтров чаще всего.
+        Index("ix_audit_log_created_at", "created_at"),
         # Партиционирование по месяцам объявляется в миграции.
         {"postgresql_partition_by": "RANGE (created_at)"},
     )

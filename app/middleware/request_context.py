@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import ipaddress
+import re
 import time
 
 import structlog
@@ -36,20 +38,60 @@ from app.core.problem import (
 logger = structlog.get_logger(__name__)
 
 FORWARDED_FOR_HEADER = "X-Forwarded-For"
+REAL_IP_HEADER = "X-Real-Ip"
 
 # Шумные технические маршруты не пишем в лог доступа.
 _QUIET_PATHS = frozenset({"/health/live", "/health/ready", "/metrics"})
 
+# request_id попадает в логи и аудит, поэтому принимаем только безопасный
+# набор символов и разумную длину: иначе клиент засоряет журнал.
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{8,64}$")
+
+
+def _normalize_ip(value: str | None) -> str | None:
+    """Приводит адрес к валидному IP или возвращает None.
+
+    Поля `ip` в `audit_log`, `consents` и `security_events` имеют тип `inet`:
+    любое непарсящееся значение — это ошибка вставки и 500 на ровном месте.
+    Прокси может прислать адрес с портом, IPv6 в скобках или вовсе имя хоста,
+    поэтому значение нормализуется здесь, а не в каждом сервисе.
+    """
+    if not value:
+        return None
+    candidate = value.strip()
+    if candidate.startswith("[") and "]" in candidate:
+        # IPv6 с портом: [::1]:8080
+        candidate = candidate[1 : candidate.index("]")]
+    elif candidate.count(":") == 1:
+        # IPv4 с портом: 10.0.0.1:54321
+        candidate = candidate.split(":", 1)[0]
+    try:
+        return str(ipaddress.ip_address(candidate))
+    except ValueError:
+        return None
+
 
 def _client_ip(request: Request) -> str | None:
+    """Адрес клиента строго от доверенного прокси.
+
+    `X-Forwarded-For` клиент подделывает свободно: Caddy к нему дописывает
+    реальный адрес, а не заменяет, поэтому первый элемент цепочки — это то,
+    что прислал сам клиент. В аудите и `security_events` такой адрес хуже,
+    чем его отсутствие. Доверяем `X-Real-IP`, который Caddy проставляет сам
+    (`header_up X-Real-IP {remote_host}`), и последнему элементу XFF как
+    запасному варианту — его дописал ближайший прокси.
+    """
+    real_ip = _normalize_ip(request.headers.get(REAL_IP_HEADER))
+    if real_ip:
+        return real_ip
     forwarded = request.headers.get(FORWARDED_FOR_HEADER)
     if forwarded:
-        # Caddy добавляет цепочку: первый адрес — исходный клиент.
-        return forwarded.split(",")[0].strip()
-    real_ip = request.headers.get("X-Real-Ip")
-    if real_ip:
-        return real_ip.strip()
-    return request.client.host if request.client else None
+        parts = [part.strip() for part in forwarded.split(",") if part.strip()]
+        if parts:
+            candidate = _normalize_ip(parts[-1])
+            if candidate:
+                return candidate
+    return _normalize_ip(request.client.host if request.client else None)
 
 
 def _route_template(request: Request) -> str:
@@ -66,7 +108,10 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
-        request_id = request.headers.get(REQUEST_ID_HEADER) or new_request_id()
+        incoming_id = request.headers.get(REQUEST_ID_HEADER)
+        request_id = (
+            incoming_id if incoming_id and _REQUEST_ID_RE.match(incoming_id) else new_request_id()
+        )
         set_request_id(request_id)
         # Дубль в scope переживает сброс contextvars в finally: обработчик
         # необработанных исключений сработает уже после него.

@@ -56,3 +56,30 @@ class AuditChainReport(BaseModel):
     checked: int
     ok: bool
     problems: list[str]
+
+
+class AuditEntryOut(BaseModel):
+    """Запись журнала. `changes` уже маскированы на записи (раздел 1)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    created_at: dt.datetime
+    actor_id: uuid.UUID | None = None
+    actor_role: str | None = None
+    impersonated_by: uuid.UUID | None = None
+    action: str
+    entity_type: str | None = None
+    entity_id: uuid.UUID | None = None
+    changes: dict[str, Any] | None = None
+    result: str
+    ip: str | None = None
+    user_agent: str | None = None
+    request_id: str | None = None
+    prev_hash: str | None = None
+    hash: str
+
+
+class AuditListResponse(BaseModel):
+    items: list[AuditEntryOut]
+    next_cursor: str | None = None

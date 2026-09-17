@@ -40,6 +40,18 @@ def request_hash(method: str, path: str, body: bytes) -> str:
     return digest.hexdigest()
 
 
+def scoped_key(key: str, actor_id: uuid.UUID | None) -> str:
+    """Ключ идемпотентности всегда живёт внутри своего актора.
+
+    Без этого угаданный или подсмотренный `Idempotency-Key` возвращал бы
+    чужое сохранённое тело ответа — прямая утечка данных между
+    пользователями. Для анонимных вызовов (входящие вебхуки) скоупом
+    выступает источник интеграции, который передаётся как `actor_id`.
+    """
+    prefix = str(actor_id) if actor_id else "anonymous"
+    return f"{prefix}:{key}"
+
+
 @dataclass(slots=True)
 class StoredResponse:
     status: int
@@ -47,14 +59,21 @@ class StoredResponse:
 
 
 class IdempotencyGuard:
-    """Проверяет ключ до выполнения операции и сохраняет ответ после."""
+    """Проверяет ключ до выполнения операции и сохраняет ответ после.
 
-    def __init__(self, session: AsyncSession) -> None:
+    Ключ хранится вместе с идентификатором актора: повтор чужим
+    пользователем с тем же значением заголовка не должен ни возвращать
+    сохранённый ответ, ни блокировать операцию.
+    """
+
+    def __init__(self, session: AsyncSession, *, actor_id: uuid.UUID | None = None) -> None:
         self._session = session
+        self._actor_id = actor_id
 
     async def lookup(
         self, *, key: str, method: str, path: str, body: bytes
     ) -> StoredResponse | None:
+        key = scoped_key(key, self._actor_id)
         digest = request_hash(method, path, body)
 
         cached = await self._lookup_redis(key)
@@ -110,17 +129,11 @@ class IdempotencyGuard:
         except ValueError:
             return None
 
-    async def reserve(
-        self,
-        *,
-        key: str,
-        method: str,
-        path: str,
-        body: bytes,
-        actor_id: uuid.UUID | None,
-    ) -> None:
+    async def reserve(self, *, key: str, method: str, path: str, body: bytes) -> None:
         """Занимает ключ до выполнения операции, чтобы параллельный повтор не прошёл."""
         settings = get_settings()
+        actor_id = self._actor_id
+        key = scoped_key(key, actor_id)
         digest = request_hash(method, path, body)
         expires_at = dt.datetime.now(dt.UTC) + dt.timedelta(
             seconds=settings.idempotency_ttl_seconds
@@ -152,6 +165,7 @@ class IdempotencyGuard:
     async def store(
         self, *, key: str, status: int, body: dict[str, Any] | None
     ) -> None:
+        key = scoped_key(key, self._actor_id)
         record = (
             await self._session.execute(
                 select(IdempotencyKey).where(IdempotencyKey.key == key)

@@ -56,6 +56,7 @@ _PUBLIC_PATH_PREFIXES = (
     "/api/auth/login",
     "/api/auth/callback",
     "/api/auth/backchannel-logout",
+    "/api/auth/invite/",
 )
 
 
@@ -113,10 +114,11 @@ def _install_bearer_auth(app: FastAPI) -> None:
 
 
 def attach_docs(app: FastAPI, settings: Settings) -> None:
+    # Схема описывает схему авторизации всегда, даже когда UI закрыт.
+    if settings.expose_openapi:
+        _install_bearer_auth(app)
     if not settings.expose_docs:
         return
-
-    _install_bearer_auth(app)
 
     app.mount(
         "/static/swagger",

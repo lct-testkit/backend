@@ -11,31 +11,38 @@ import base64
 import hashlib
 import json
 import secrets
+import uuid
 from typing import Annotated
 
 import structlog
-from fastapi import APIRouter, Query, Request, Response, status
+from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
+from sqlalchemy import select
 
+from app.core.cache import invalidate_principal
 from app.core.config import get_settings
 from app.core.context import ActorContext, get_client, set_actor
+from app.core.csrf import clear_csrf_cookie, new_csrf_token, set_csrf_cookie
 from app.core.deps import DbSession
 from app.core.errors import AppError, ErrorCode, UnauthenticatedError
-from app.core.permissions import scopes_for
+from app.core.masking import mask_email
+from app.core.rate_limit import enforce as rate_limit
 from app.core.redis_client import require_redis
-from app.core.security import decode_access_token, decode_logout_token
+from app.core.security import decode_access_token, decode_id_token, decode_logout_token
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
 from app.modules.identity.keycloak import keycloak_client
+from app.modules.identity.models import User, UserInvite
+from app.modules.identity.router_me import build_me
 from app.modules.identity.schemas import (
     AuthCallbackRequest,
     AuthCallbackResponse,
     BackchannelLogoutRequest,
+    InviteCheckResponse,
     LogoutRequest,
-    MeResponse,
     OperationResult,
 )
-from app.modules.identity.service import IdentityService
+from app.modules.identity.service import IdentityService, hash_token
 from app.modules.identity.session_store import session_store
 
 logger = structlog.get_logger(__name__)
@@ -81,27 +88,6 @@ def _set_session_cookie(response: Response, sid: str) -> None:
 def _clear_session_cookie(response: Response) -> None:
     settings = get_settings()
     response.delete_cookie(key=settings.session_cookie_name, path="/")
-
-
-async def _build_me(identity: IdentityService, user, *, consent_required: bool) -> MeResponse:
-    return MeResponse(
-        id=user.id,
-        full_name=user.full_name,
-        display_name=user.display_name,
-        email=user.email,
-        role=user.role,
-        team_id=user.team_id,
-        manager_id=user.manager_id,
-        status=user.status,
-        locale=user.locale,
-        timezone=user.timezone,
-        consent_version=user.consent_version,
-        consent_required=consent_required,
-        scopes=scopes_for(user.role),
-        teams=[user.team_id] if user.team_id else [],
-        perm_epoch=user.perm_epoch,
-        last_login_at=user.last_login_at,
-    )
 
 
 @router.get(
@@ -157,19 +143,33 @@ async def _complete_login(
     raw_state = await redis.getdel(_state_key(state))
     stored_state = json.loads(raw_state) if raw_state else None
 
-    if stored_state is None and code_verifier is None:
-        # State не найден и BFF не передал верификатор — поток не подтверждается.
+    if stored_state is None:
+        # `state` обязателен всегда. Раньше его отсутствие прощалось, если
+        # клиент сам прислал `code_verifier`, — и это был готовый login-CSRF:
+        # жертву можно было посадить в чужую сессию, подсунув свой код.
         raise AppError(ErrorCode.UNAUTHENTICATED, "Некорректный или истёкший state")
 
-    verifier = code_verifier or (stored_state or {}).get("code_verifier")
+    # Верификатор из Redis — источник истины; параметр принимается только
+    # если BFF хранит его у себя и в Redis его нет.
+    verifier = stored_state.get("code_verifier") or code_verifier
     resolved_redirect = (
-        redirect_uri or (stored_state or {}).get("redirect_uri") or _default_redirect_uri()
+        stored_state.get("redirect_uri") or redirect_uri or _default_redirect_uri()
     )
 
     tokens = await keycloak_client.exchange_code(
         code=code, redirect_uri=resolved_redirect, code_verifier=verifier
     )
+
+    # id_token проверяется полностью: подпись, iss, aud, exp и nonce. Без
+    # сверки nonce ответ авторизации можно переиграть (new_spec §3.1 п.4).
+    if not tokens.id_token:
+        raise AppError(ErrorCode.UNAUTHENTICATED, "Keycloak не вернул id_token")
+    id_claims = await decode_id_token(tokens.id_token, nonce=stored_state.get("nonce"))
+
     claims = await decode_access_token(tokens.access_token)
+    if id_claims.get("sub") != claims.subject:
+        # Токены обязаны описывать одного субъекта.
+        raise AppError(ErrorCode.UNAUTHENTICATED, "id_token и access_token выданы разным субъектам")
 
     identity = IdentityService(session)
     audit = AuditService(session)
@@ -200,13 +200,16 @@ async def _complete_login(
         changes={"method": {"old": None, "new": "oidc"}},
     )
 
-    consent_required = identity.consent_required(user)
+    me = await build_me(session, user)
     payload = AuthCallbackResponse(
-        user=await _build_me(identity, user, consent_required=consent_required),
-        consent_required=consent_required,
+        user=me,
+        consent_required=me.consent_required,
         session_expires_in=get_settings().session_ttl,
+        # Вторая половина double-submit: фронтенд обязан вернуть это значение
+        # заголовком на каждом мутирующем запросе.
+        csrf_token=new_csrf_token(),
     )
-    return payload, stored_session.sid, (stored_state or {}).get("next")
+    return payload, stored_session.sid, stored_state.get("next")
 
 
 @router.post(
@@ -230,6 +233,7 @@ async def callback(
         redirect_uri=payload.redirect_uri,
     )
     _set_session_cookie(response, sid)
+    set_csrf_cookie(response, result.csrf_token)
     return result
 
 
@@ -247,12 +251,13 @@ async def callback_redirect(
     code: Annotated[str, Query()],
     state: Annotated[str, Query()],
 ) -> RedirectResponse:
-    _, sid, next_url = await _complete_login(
+    result, sid, next_url = await _complete_login(
         session=session, code=code, state=state, code_verifier=None, redirect_uri=None
     )
     target = next_url or get_settings().base_url
     redirect = RedirectResponse(target, status_code=status.HTTP_303_SEE_OTHER)
     _set_session_cookie(redirect, sid)
+    set_csrf_cookie(redirect, result.csrf_token)
     return redirect
 
 
@@ -276,23 +281,79 @@ async def logout(
     if not sid:
         # Идемпотентно: выход без сессии не является ошибкой.
         _clear_session_cookie(response)
+        clear_csrf_cookie(response)
         return OperationResult(ok=True, detail="Активная сессия не найдена")
 
     stored = await session_store.delete(sid)
     _clear_session_cookie(response)
+    clear_csrf_cookie(response)
 
     if stored:
-        set_actor(ActorContext(user_id=None, role=None, session_id=sid))
+        set_actor(
+            ActorContext(user_id=uuid.UUID(stored.user_id), role=None, session_id=sid)
+        )
         if not payload.local_only and stored.refresh_token:
             await keycloak_client.logout(stored.refresh_token)
+        # Раздел 16: кэш прав сбрасывается в том числе при выходе.
+        await invalidate_principal(stored.user_id, keycloak_id=stored.keycloak_id)
         audit = AuditService(session)
         await audit.record(
             AuditAction.LOGOUT,
             entity_type="user",
-            entity_id=None,
+            entity_id=uuid.UUID(stored.user_id),
             changes={"local_only": {"old": None, "new": payload.local_only}},
         )
     return OperationResult(ok=True, detail="Сессия завершена")
+
+
+@router.get(
+    "/invite/{token}",
+    summary="Проверить приглашение",
+    description=(
+        "Проверяет одноразовую ссылку приглашения: в базе хранится только её "
+        "sha256. Возвращает адрес входа и маскированный email. Ограничение "
+        "частоты — защита от перебора токенов. Роль: доступно без аутентификации."
+    ),
+    response_model=InviteCheckResponse,
+)
+async def check_invite(
+    session: DbSession,
+    request: Request,
+    token: Annotated[str, Path(min_length=16, max_length=128)],
+) -> InviteCheckResponse:
+    client = get_client()
+    await rate_limit(
+        client.ip or "unknown",
+        "invite:check",
+        limit=20,
+        window_seconds=3600,
+        detail="Слишком много попыток проверки приглашения",
+    )
+
+    invite = (
+        await session.execute(
+            select(UserInvite).where(UserInvite.token_hash == hash_token(token))
+        )
+    ).scalar_one_or_none()
+    if invite is None or not invite.is_active:
+        # Единый ответ: ручка не подсказывает, существовал ли токен вообще.
+        raise AppError(
+            ErrorCode.NOT_FOUND, "Приглашение не найдено или срок его действия истёк"
+        )
+
+    user = (
+        await session.execute(select(User).where(User.id == invite.user_id))
+    ).scalar_one_or_none()
+    if user is None or user.deleted_at is not None:
+        raise AppError(ErrorCode.NOT_FOUND, "Приглашение недействительно")
+
+    return InviteCheckResponse(
+        valid=True,
+        email_masked=mask_email(user.email),
+        full_name=user.full_name,
+        expires_at=invite.expires_at,
+        login_url=f"{get_settings().base_url.rstrip('/')}/api/auth/login",
+    )
 
 
 @router.post(

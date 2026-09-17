@@ -196,6 +196,140 @@ class KeycloakClient:
         response.raise_for_status()
         return response.json()
 
+    async def find_by_email(self, email: str) -> dict[str, Any] | None:
+        response = await self.admin_request(
+            "GET", "/users", params={"email": email, "exact": "true"}
+        )
+        response.raise_for_status()
+        found = response.json()
+        return found[0] if found else None
+
+    async def create_user(
+        self,
+        *,
+        email: str,
+        full_name: str,
+        required_actions: list[str],
+        attributes: dict[str, Any] | None = None,
+        enabled: bool = True,
+    ) -> str:
+        """Создаёт пользователя и возвращает его `sub`.
+
+        new_spec §4.1: без пароля, `emailVerified=false`, с обязательными
+        действиями. Порядок «сначала IdP, потом локальная запись» обязателен:
+        при недоступном Keycloak локальной записи-сироты не остаётся.
+        """
+        first_name, _, last_name = full_name.partition(" ")
+        payload: dict[str, Any] = {
+            "username": email,
+            "email": email,
+            "firstName": first_name or full_name,
+            "lastName": last_name or "",
+            "enabled": enabled,
+            "emailVerified": False,
+            "requiredActions": required_actions,
+        }
+        if attributes:
+            payload["attributes"] = {k: [str(v)] for k, v in attributes.items()}
+
+        response = await self.admin_request("POST", "/users", json_body=payload)
+        if response.status_code == 409:
+            raise AppError(
+                ErrorCode.DUPLICATE,
+                "Учётная запись с таким email уже существует в Keycloak",
+                extra={"email": email},
+            )
+        if response.status_code not in (201, 204):
+            logger.warning("keycloak_create_user_failed", status=response.status_code)
+            raise AppError(
+                ErrorCode.DEPENDENCY_UNAVAILABLE, "Не удалось создать пользователя в Keycloak"
+            )
+
+        location = response.headers.get("Location", "")
+        keycloak_id = location.rstrip("/").rsplit("/", 1)[-1]
+        if not keycloak_id:
+            created = await self.find_by_email(email)
+            if not created:
+                raise AppError(
+                    ErrorCode.DEPENDENCY_UNAVAILABLE,
+                    "Keycloak не вернул идентификатор созданного пользователя",
+                )
+            keycloak_id = created["id"]
+        return keycloak_id
+
+    async def delete_user(self, keycloak_id: str) -> None:
+        """Компенсация SAGA при откате создания и физическое удаление
+        учётки при обезличивании (new_spec §4.8.2, режим B)."""
+        response = await self.admin_request("DELETE", f"/users/{keycloak_id}")
+        if response.status_code not in (204, 404):
+            response.raise_for_status()
+
+    async def update_user(self, keycloak_id: str, payload: dict[str, Any]) -> None:
+        response = await self.admin_request("PUT", f"/users/{keycloak_id}", json_body=payload)
+        response.raise_for_status()
+
+    async def set_required_actions(self, keycloak_id: str, actions: list[str]) -> None:
+        await self.update_user(keycloak_id, {"requiredActions": actions})
+
+    async def set_attribute(self, keycloak_id: str, key: str, value: Any) -> None:
+        """Обновляет один атрибут, сохраняя остальные.
+
+        `perm_epoch` попадает в токен через протокол-мэппер, поэтому его
+        значение обязано жить в Keycloak, а не только в нашей БД.
+        """
+        user = await self.get_user(keycloak_id)
+        attributes = dict((user or {}).get("attributes") or {})
+        attributes[key] = [str(value)]
+        await self.update_user(keycloak_id, {"attributes": attributes})
+
+    async def get_realm_role(self, name: str) -> dict[str, Any]:
+        response = await self.admin_request("GET", f"/roles/{name}")
+        response.raise_for_status()
+        return response.json()
+
+    async def get_user_realm_roles(self, keycloak_id: str) -> list[dict[str, Any]]:
+        response = await self.admin_request("GET", f"/users/{keycloak_id}/role-mappings/realm")
+        response.raise_for_status()
+        return response.json()
+
+    async def set_realm_role(self, keycloak_id: str, *, role: str, known_roles: list[str]) -> None:
+        """Приводит набор ролей CRM к одной. Чужие роли realm'а не трогаем."""
+        current = await self.get_user_realm_roles(keycloak_id)
+        to_remove = [r for r in current if r["name"] in known_roles and r["name"] != role]
+        if to_remove:
+            response = await self.admin_request(
+                "DELETE", f"/users/{keycloak_id}/role-mappings/realm", json_body=to_remove
+            )
+            response.raise_for_status()
+        if not any(r["name"] == role for r in current):
+            target = await self.get_realm_role(role)
+            response = await self.admin_request(
+                "POST",
+                f"/users/{keycloak_id}/role-mappings/realm",
+                json_body=[{"id": target["id"], "name": target["name"]}],
+            )
+            response.raise_for_status()
+
+    async def execute_actions_email(
+        self, keycloak_id: str, actions: list[str], *, lifespan_seconds: int
+    ) -> bool:
+        """Просит Keycloak отправить письмо с одноразовой ссылкой.
+
+        В закрытом контуре SMTP может быть не настроен — тогда Keycloak
+        отвечает ошибкой, и мы честно возвращаем False: приглашение уйдёт
+        администратору ссылкой в ответе API, а не молча потеряется.
+        """
+        response = await self.admin_request(
+            "PUT",
+            f"/users/{keycloak_id}/execute-actions-email",
+            json_body=actions,
+            params={"lifespan": lifespan_seconds},
+        )
+        if response.status_code in (200, 204):
+            return True
+        logger.info("keycloak_actions_email_unavailable", status=response.status_code)
+        return False
+
     async def set_enabled(self, keycloak_id: str, *, enabled: bool) -> None:
         response = await self.admin_request(
             "PUT", f"/users/{keycloak_id}", json_body={"enabled": enabled}

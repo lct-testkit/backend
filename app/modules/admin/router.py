@@ -6,19 +6,23 @@
 
 from __future__ import annotations
 
+import datetime as dt
+import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Path, Query
+from fastapi import APIRouter, Depends, Path, Query, Response
 from sqlalchemy import select
 
 from app.core.deps import AuditDep, DbSession, Pagination, require_permission
 from app.core.errors import NotFoundError
-from app.core.pagination import Page
+from app.core.pagination import Page, keyset_before
 from app.core.permissions import Permission
 from app.core.security import Principal
 from app.modules.admin.models import FeatureFlag, SystemSetting
 from app.modules.admin.schemas import (
     AuditChainReport,
+    AuditEntryOut,
+    AuditListResponse,
     FeatureFlagListResponse,
     FeatureFlagOut,
     FeatureFlagPatch,
@@ -27,7 +31,10 @@ from app.modules.admin.schemas import (
     SystemSettingPut,
 )
 from app.modules.audit.actions import AuditAction
-from app.modules.audit.service import AuditService, diff_changes
+from app.modules.audit.models import AuditLog
+from app.modules.audit.service import AuditFilters, AuditService, diff_changes
+from app.modules.identity.models import Role, SecurityEventType, Severity
+from app.modules.identity.service import IdentityService
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -50,9 +57,7 @@ async def list_feature_flags(
     cursor = page.decoded_cursor
     if cursor:
         # Курсор по паре (created_at, id): OFFSET не используется.
-        stmt = stmt.where(
-            (FeatureFlag.created_at, FeatureFlag.id) < (cursor.as_datetime(), cursor.id)
-        )
+        stmt = stmt.where(keyset_before(FeatureFlag.created_at, FeatureFlag.id, cursor))
 
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
     built: Page = Page.build(rows, limit=page.limit, serializer=FeatureFlagOut.model_validate)
@@ -204,6 +209,142 @@ async def put_system_setting(
         updated_by=setting.updated_by,
         updated_at=setting.updated_at,
     )
+
+
+@router.get(
+    "/audit",
+    summary="Журнал аудита",
+    description=(
+        "Фильтры: актор, действие, сущность, результат, период, request_id. "
+        "Курсорная пагинация. ADMIN и AUDITOR видят весь журнал, HEAD — только "
+        "действия своей команды. Роль: ADMIN, AUDITOR, HEAD."
+    ),
+    response_model=AuditListResponse,
+)
+async def list_audit(
+    session: DbSession,
+    page: Pagination,
+    principal: Annotated[Principal, Depends(require_permission(Permission.AUDIT_READ))],
+    actor_id: Annotated[uuid.UUID | None, Query()] = None,
+    action: Annotated[str | None, Query()] = None,
+    entity_type: Annotated[str | None, Query()] = None,
+    entity_id: Annotated[uuid.UUID | None, Query()] = None,
+    result: Annotated[str | None, Query(description="success | denied | error")] = None,
+    request_id: Annotated[str | None, Query()] = None,
+    date_from: Annotated[dt.datetime | None, Query(alias="from")] = None,
+    date_to: Annotated[dt.datetime | None, Query(alias="to")] = None,
+) -> AuditListResponse:
+    filters = AuditFilters(
+        actor_id=actor_id,
+        action=action,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        result=result,
+        request_id=request_id,
+        date_from=date_from,
+        date_to=date_to,
+        actor_ids=await _audit_scope(session, principal),
+    )
+    stmt = (
+        AuditService(session)
+        .query(filters)
+        .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+    )
+    cursor = page.decoded_cursor
+    if cursor:
+        stmt = stmt.where(keyset_before(AuditLog.created_at, AuditLog.id, cursor))
+
+    rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
+    built: Page = Page.build(rows, limit=page.limit, serializer=AuditEntryOut.model_validate)
+    return AuditListResponse(items=built.items, next_cursor=built.next_cursor)
+
+
+@router.get(
+    "/audit/export",
+    summary="Экспорт журнала аудита",
+    description=(
+        "Отдаёт журнал построчным JSON (NDJSON) по тем же фильтрам. Экспорт "
+        "считается массовой выгрузкой: пишется событие безопасности MASS_EXPORT "
+        "и запись аудита. Роль: ADMIN, AUDITOR."
+    ),
+)
+async def export_audit(
+    session: DbSession,
+    audit: AuditDep,
+    principal: Annotated[Principal, Depends(require_permission(Permission.AUDIT_EXPORT))],
+    action: Annotated[str | None, Query()] = None,
+    entity_type: Annotated[str | None, Query()] = None,
+    result: Annotated[str | None, Query()] = None,
+    date_from: Annotated[dt.datetime | None, Query(alias="from")] = None,
+    date_to: Annotated[dt.datetime | None, Query(alias="to")] = None,
+    limit: Annotated[int, Query(ge=1, le=100_000)] = 10_000,
+) -> Response:
+    filters = AuditFilters(
+        action=action,
+        entity_type=entity_type,
+        result=result,
+        date_from=date_from,
+        date_to=date_to,
+        actor_ids=await _audit_scope(session, principal),
+    )
+    stmt = (
+        AuditService(session)
+        .query(filters)
+        .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+        .limit(limit)
+    )
+    rows = list((await session.execute(stmt)).scalars().all())
+
+    # Выгрузка журнала — событие безопасности само по себе (раздел 18).
+    await IdentityService(session).record_security_event(
+        SecurityEventType.MASS_EXPORT,
+        user_id=principal.user_id,
+        severity=Severity.WARNING,
+        details={"kind": "audit_export", "rows": len(rows)},
+    )
+    await audit.record(
+        AuditAction.AUDIT_EXPORTED,
+        entity_type="audit_log",
+        entity_id=None,
+        changes={
+            "rows": {"old": None, "new": len(rows)},
+            "filters": {
+                "old": None,
+                "new": {
+                    "action": action,
+                    "entity_type": entity_type,
+                    "result": result,
+                    "from": date_from.isoformat() if date_from else None,
+                    "to": date_to.isoformat() if date_to else None,
+                },
+            },
+        },
+    )
+
+    body = "\n".join(
+        AuditEntryOut.model_validate(row).model_dump_json() for row in rows
+    )
+    return Response(
+        content=body,
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": 'attachment; filename="audit-export.ndjson"'},
+    )
+
+
+async def _audit_scope(session: DbSession, principal: Principal) -> list[uuid.UUID] | None:
+    """Скоуп журнала по роли (матрица прав, часть 5 new_spec).
+
+    ADMIN и AUDITOR видят всё. HEAD — только действия своей команды, включая
+    собственные: иначе руководитель читал бы журнал всей организации.
+    """
+    if principal.role in (Role.ADMIN.value, Role.AUDITOR.value):
+        return None
+    if principal.role == Role.HEAD.value:
+        if principal.team_id is None:
+            return [principal.user_id]
+        members = await IdentityService(session).team_member_ids(principal.team_id)
+        return sorted({*members, principal.user_id})
+    return [principal.user_id]
 
 
 @router.get(

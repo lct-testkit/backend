@@ -70,10 +70,23 @@ class Settings(BaseSettings):
 
     # --- Сессии и токены -------------------------------------------------
     session_ttl: int = 43200
-    session_idle_timeout: int = 3600
+    # new_spec §3.1: idle-таймаут 30 минут. Сессия без активности умирает
+    # раньше абсолютного TTL.
+    session_idle_timeout: int = 1800
     session_cookie_name: str = "crm_sid"
     access_token_ttl: int = 300
-    refresh_token_ttl: int = 1800
+    refresh_token_ttl: int = 28800
+    # За сколько секунд до истечения access-токена обновлять его по refresh.
+    access_token_refresh_leeway: int = 30
+    # Сессионная cookie защищена SameSite=Lax, но мутирующие методы
+    # дополнительно требуют double-submit токен (new_spec §3.1 п.5).
+    csrf_cookie_name: str = "crm_csrf"
+    csrf_header_name: str = "X-CSRF-Token"
+    csrf_enabled: bool = True
+    # Прямая аутентификация по `Authorization: Bearer` в обход серверной
+    # сессии. Нужна Swagger UI и сервисным учёткам; в prod по умолчанию
+    # разрешена только роли INTEGRATION (см. `bearer_auth_mode`).
+    allow_bearer_auth: bool = True
 
     # --- Файлы -----------------------------------------------------------
     files_max_size_bytes: int = 52428800
@@ -114,13 +127,33 @@ class Settings(BaseSettings):
     llm_model: str | None = None
     llm_timeout_seconds: int = 30
 
+    # --- Администрирование пользователей (раздел 6.2, new_spec §4.1–4.8) --
+    # Приглашение: одноразовая ссылка, в базе только sha256 токена.
+    invite_ttl_hours: int = 72
+    invite_resend_interval_seconds: int = 300
+    invite_resend_per_day: int = 5
+    # Добровольная смена пароля: 5 неудачных попыток → блокировка формы.
+    password_change_max_attempts: int = 5
+    password_change_lock_seconds: int = 900
+    # Grace period режима A перед обезличиванием (new_spec §4.8.2).
+    erasure_grace_days: int = 30
+    # Срок исполнения запроса субъекта ПДн по ст. 21 152-ФЗ.
+    erasure_subject_deadline_days: int = 30
+    # Подтверждение второго администратора живёт ограниченное время.
+    admin_approval_ttl_seconds: int = 86400
+
     # --- Прочее ----------------------------------------------------------
     log_level: str = "INFO"
     log_json: bool = True
     idempotency_ttl_seconds: int = 86400
     pagination_max_limit: int = 100
+    # Версия политики по умолчанию. Действующая версия публикуется через
+    # system_settings `pdn_policy` и перекрывает это значение.
     consent_policy_version: str = "1.0"
+    consent_policy_text_hash: str | None = None
     docs_enabled: bool = True
+    # OpenAPI-схема нужна фронтенду и в prod; закрывается только UI.
+    openapi_enabled: bool = True
 
     @field_validator("database_url", "kc_database_url", mode="after")
     @classmethod
@@ -178,10 +211,28 @@ class Settings(BaseSettings):
     def keycloak_logout_url(self) -> str:
         return f"{self._keycloak_internal_realm}/protocol/openid-connect/logout"
 
-    # Swagger в prod закрыт, если не включён явно.
+    # Swagger UI в prod закрыт, если не включён явно.
     @property
     def expose_docs(self) -> bool:
         return self.docs_enabled and not self.is_prod
+
+    @property
+    def expose_openapi(self) -> bool:
+        """Схема публикуется всегда: на неё опирается контракт с фронтендом
+        (раздел 21, Definition of Done). Закрывается только интерактивный UI."""
+        return self.openapi_enabled
+
+    @property
+    def bearer_auth_mode(self) -> Literal["all", "integration_only", "off"]:
+        """Кому разрешён вход по `Authorization: Bearer` без серверной сессии.
+
+        В prod браузерный трафик обязан ходить через BFF-сессию, иначе
+        обходится весь контур из new_spec §3.1: токен в JS-контексте,
+        отсутствие CSRF-защиты и невозможность завершить сессию.
+        """
+        if not self.allow_bearer_auth:
+            return "off"
+        return "integration_only" if self.is_prod else "all"
 
 
 @lru_cache(maxsize=1)

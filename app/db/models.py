@@ -10,7 +10,12 @@ from __future__ import annotations
 from app.db.base import Base
 
 # --- admin: системные таблицы (раздел 5.10) ---
-from app.modules.admin.models import FeatureFlag, IdempotencyKey, SystemSetting
+from app.modules.admin.models import (
+    AdminApproval,
+    FeatureFlag,
+    IdempotencyKey,
+    SystemSetting,
+)
 
 # --- audit (раздел 5.10) ---
 from app.modules.audit.models import AuditLog
@@ -23,9 +28,11 @@ from app.modules.identity.models import (
     Team,
     User,
     UserDelegation,
+    UserInvite,
 )
 
 __all__ = [
+    "AdminApproval",
     "AuditLog",
     "Base",
     "Consent",
@@ -37,6 +44,7 @@ __all__ = [
     "Team",
     "User",
     "UserDelegation",
+    "UserInvite",
 ]
 
 target_metadata = Base.metadata

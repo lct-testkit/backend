@@ -10,20 +10,19 @@
   "verifyEmail": false,
   "defaultLocale": "ru",
   "internationalizationEnabled": true,
-  "supportedLocales": ["ru", "en"],
-
+  "supportedLocales": [
+    "ru",
+    "en"
+  ],
   "accessTokenLifespan": 300,
   "ssoSessionIdleTimeout": 3600,
   "ssoSessionMaxLifespan": 43200,
-
   "bruteForceProtected": true,
   "permanentLockout": false,
   "maxFailureWaitSeconds": 900,
   "waitIncrementSeconds": 60,
   "failureFactor": 5,
-
-  "passwordPolicy": "length(12) and upperCase(1) and lowerCase(1) and digits(1) and notUsername(undefined)",
-
+  "passwordPolicy": "length(12) and upperCase(1) and lowerCase(1) and digits(1) and notUsername(undefined) and notEmail(undefined) and passwordHistory(5)",
   "roles": {
     "realm": [
       {
@@ -48,7 +47,6 @@
       }
     ]
   },
-
   "clients": [
     {
       "clientId": "crm-bff",
@@ -69,7 +67,11 @@
         "https://localhost:8443/*",
         "http://localhost:5173/*"
       ],
-      "webOrigins": ["http://localhost:8080", "https://localhost:8443", "http://localhost:5173"],
+      "webOrigins": [
+        "http://localhost:8080",
+        "https://localhost:8443",
+        "http://localhost:5173"
+      ],
       "attributes": {
         "pkce.code.challenge.method": "S256",
         "backchannel.logout.session.required": "true",
@@ -101,10 +103,34 @@
             "id.token.claim": "false",
             "userinfo.token.claim": "true"
           }
+        },
+        {
+          "name": "perm-epoch",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "perm_epoch",
+            "claim.name": "perm_epoch",
+            "jsonType.label": "int",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false"
+          }
         }
       ],
-      "defaultClientScopes": ["basic", "web-origins", "acr", "profile", "roles", "email"],
-      "optionalClientScopes": ["address", "phone", "offline_access"]
+      "defaultClientScopes": [
+        "basic",
+        "web-origins",
+        "acr",
+        "profile",
+        "roles",
+        "email"
+      ],
+      "optionalClientScopes": [
+        "address",
+        "phone",
+        "offline_access"
+      ]
     },
     {
       "clientId": "crm-admin",
@@ -119,11 +145,13 @@
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": true,
-      "defaultClientScopes": ["basic", "roles"],
+      "defaultClientScopes": [
+        "basic",
+        "roles"
+      ],
       "optionalClientScopes": []
     }
   ],
-
   "users": [
     {
       "username": "service-account-crm-admin",
@@ -134,8 +162,8 @@
           "manage-users",
           "view-users",
           "query-users",
-          "manage-realm",
-          "view-realm"
+          "view-realm",
+          "manage-realm"
         ]
       }
     },
@@ -154,7 +182,9 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["ADMIN"]
+      "realmRoles": [
+        "ADMIN"
+      ]
     },
     {
       "username": "head.petrov",
@@ -171,7 +201,9 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["HEAD"]
+      "realmRoles": [
+        "HEAD"
+      ]
     },
     {
       "username": "kam.ivanov",
@@ -188,7 +220,9 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["KAM"]
+      "realmRoles": [
+        "KAM"
+      ]
     },
     {
       "username": "auditor.smirnov",
@@ -205,7 +239,9 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["AUDITOR"]
+      "realmRoles": [
+        "AUDITOR"
+      ]
     }
   ]
 }

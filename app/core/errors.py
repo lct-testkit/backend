@@ -23,6 +23,11 @@ class ErrorCode(StrEnum):
     TOKEN_STALE = "CRM-1103"
     USER_BLOCKED = "CRM-1104"
     CONSENT_REQUIRED = "CRM-1105"
+    # Расширение каталога: new_spec §4.4 «Ситуация B» требует отклонять
+    # бизнес-запросы, пока не выполнено обязательное действие смены пароля.
+    PASSWORD_CHANGE_REQUIRED = "CRM-1106"
+    # Двойная отправка формы без CSRF-токена (new_spec §3.1 п.5).
+    CSRF_FAILED = "CRM-1107"
 
     # --- Воронка и переходы ---
     TRANSITION_CONDITIONS = "CRM-1201"
@@ -71,6 +76,7 @@ class ErrorCode(StrEnum):
     LAST_ADMIN = "CRM-1903"
 
     # --- Инфраструктура (не из каталога, но 500 должен иметь код) ---
+    RATE_LIMITED = "CRM-8429"
     INTERNAL = "CRM-9000"
     NOT_FOUND = "CRM-9004"
     DEPENDENCY_UNAVAILABLE = "CRM-9503"
@@ -92,6 +98,8 @@ ERROR_CATALOG: dict[ErrorCode, ErrorSpec] = {
     ErrorCode.TOKEN_STALE: ErrorSpec(409, "Токен устарел, требуется обновление"),
     ErrorCode.USER_BLOCKED: ErrorSpec(403, "Пользователь заблокирован или уволен"),
     ErrorCode.CONSENT_REQUIRED: ErrorSpec(403, "Требуется согласие на обработку ПДн"),
+    ErrorCode.PASSWORD_CHANGE_REQUIRED: ErrorSpec(403, "Требуется смена пароля"),
+    ErrorCode.CSRF_FAILED: ErrorSpec(403, "Не пройдена проверка CSRF-токена"),
     ErrorCode.TRANSITION_CONDITIONS: ErrorSpec(422, "Переход недоступен: условия не выполнены"),
     ErrorCode.TRANSITION_FORBIDDEN: ErrorSpec(403, "Переход запрещён ролью или настройками"),
     ErrorCode.DEAL_NOT_ACTIVE: ErrorSpec(409, "Сделка не активна"),
@@ -128,6 +136,7 @@ ERROR_CATALOG: dict[ErrorCode, ErrorSpec] = {
     ErrorCode.LAST_ADMIN: ErrorSpec(
         409, "Нельзя удалить или заблокировать последнего администратора"
     ),
+    ErrorCode.RATE_LIMITED: ErrorSpec(429, "Превышен лимит частоты запросов"),
     ErrorCode.INTERNAL: ErrorSpec(500, "Внутренняя ошибка сервера"),
     ErrorCode.NOT_FOUND: ErrorSpec(404, "Ресурс не найден"),
     ErrorCode.DEPENDENCY_UNAVAILABLE: ErrorSpec(503, "Зависимость недоступна"),

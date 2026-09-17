@@ -8,6 +8,8 @@ dependencies = [
     "uvicorn[standard]==0.34.0",
     "pydantic==2.10.4",
     "pydantic-settings==2.7.1",
+    # EmailStr в схемах администрирования пользователей.
+    "email-validator==2.2.0",
     "sqlalchemy[asyncio]==2.0.36",
     "asyncpg==0.30.0",
     "alembic==1.14.0",

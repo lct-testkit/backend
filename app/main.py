@@ -7,6 +7,7 @@ workflow, catalog, reporting, integration, notification, audit, signing, admin.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -24,10 +25,14 @@ from app.core.redis_client import close_redis
 from app.core.security import jwks_cache
 from app.middleware.request_context import RequestContextMiddleware
 from app.modules.admin.router import router as admin_router
+from app.modules.identity.router_admin import router as admin_users_router
 from app.modules.identity.router_auth import router as auth_router
 from app.modules.identity.router_me import router as me_router
 
 logger = structlog.get_logger(__name__)
+
+# Старт приложения не должен ждать Keycloak дольше этого времени.
+JWKS_WARMUP_TIMEOUT = 5.0
 
 OPENAPI_DESCRIPTION = """
 Бэкенд CRM ИТ Школы Ростелекома.
@@ -57,8 +62,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
 
     # Прогреваем JWKS, чтобы первый запрос не платил за поход в Keycloak.
+    # Жёсткий общий таймаут обязателен: httpx ограничивает соединение, но
+    # разрешение имени уходит в системный резолвер, и при недоступном или
+    # медленном DNS (VPN, закрытый контур с частичной настройкой) старт
+    # приложения зависал бы на минуты вместо секунд.
     try:
-        await jwks_cache.refresh()
+        await asyncio.wait_for(jwks_cache.refresh(), timeout=JWKS_WARMUP_TIMEOUT)
+    except TimeoutError:
+        logger.warning("jwks_warmup_timeout", timeout=JWKS_WARMUP_TIMEOUT)
     except Exception as exc:  # noqa: BLE001
         # Keycloak может подниматься дольше API: не валим старт, /health/ready покажет.
         logger.warning("jwks_warmup_failed", error=type(exc).__name__)
@@ -80,7 +91,9 @@ def create_app() -> FastAPI:
         version=settings.app_version,
         description=OPENAPI_DESCRIPTION,
         lifespan=lifespan,
-        openapi_url=f"{settings.api_prefix}/openapi.json" if settings.expose_docs else None,
+        # Схема нужна фронтенду всегда (DoD раздела 21); в prod закрывается
+        # только интерактивный Swagger UI.
+        openapi_url=f"{settings.api_prefix}/openapi.json" if settings.expose_openapi else None,
         # Стандартный Swagger тянет JS с CDN и содержит инлайн-скрипт —
         # Caddy это блокирует, страница белая. Свой UI подключается ниже.
         docs_url=None,
@@ -114,6 +127,7 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router, prefix=settings.api_prefix)
     app.include_router(me_router, prefix=settings.api_prefix)
+    app.include_router(admin_users_router, prefix=settings.api_prefix)
     app.include_router(admin_router, prefix=settings.api_prefix)
 
     return app

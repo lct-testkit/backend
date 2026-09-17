@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import secrets
+import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -18,10 +19,19 @@ from typing import Any
 import structlog
 
 from app.core.config import get_settings
+from app.core.errors import AppError, UnauthenticatedError
 from app.core.masking import mask_token
-from app.core.redis_client import key_session, key_user_sessions, require_redis
+from app.core.redis_client import (
+    distributed_lock,
+    key_session,
+    key_user_sessions,
+    require_redis,
+)
 
 logger = structlog.get_logger(__name__)
+
+# Как часто реально писать `last_seen_at` в Redis.
+_TOUCH_THROTTLE_SECONDS = 60
 
 
 def new_session_id() -> str:
@@ -107,25 +117,93 @@ class SessionStore:
         return session
 
     async def get(self, sid: str) -> SessionData | None:
+        """Возвращает сессию, если она жива и не простаивала дольше лимита.
+
+        Абсолютный TTL держит Redis, а idle-таймаут (new_spec §3.1) —
+        проверка `last_seen_at`: без неё забытая открытой вкладка остаётся
+        валидным доступом все 12 часов.
+        """
         redis = await require_redis()
         raw = await redis.get(key_session(sid))
         if not raw:
             return None
         try:
-            return SessionData(**json.loads(raw))
+            session = SessionData(**json.loads(raw))
         except (TypeError, ValueError):
             # Формат сессии изменился между версиями — считаем её невалидной.
             await redis.delete(key_session(sid))
             return None
 
+        if self._is_idle_expired(session):
+            logger.info("session_idle_expired", **session.log_view())
+            # Именно `_purge`, а не `delete`: `delete` читает сессию через
+            # `get`, и пара вызвала бы друг друга бесконечно.
+            await self._purge(session)
+            return None
+        return session
+
+    async def _purge(self, session: SessionData) -> None:
+        """Удаляет уже прочитанную сессию вместе с записью в индексе."""
+        redis = await require_redis()
+        pipe = redis.pipeline()
+        pipe.delete(key_session(session.sid))
+        pipe.srem(key_user_sessions(session.user_id), session.sid)
+        await pipe.execute()
+
+    @staticmethod
+    def _is_idle_expired(session: SessionData) -> bool:
+        idle_limit = get_settings().session_idle_timeout
+        if idle_limit <= 0 or not session.last_seen_at:
+            return False
+        try:
+            last_seen = dt.datetime.fromisoformat(session.last_seen_at)
+        except ValueError:
+            return False
+        if last_seen.tzinfo is None:
+            last_seen = last_seen.replace(tzinfo=dt.UTC)
+        return (dt.datetime.now(dt.UTC) - last_seen).total_seconds() > idle_limit
+
     async def touch(self, session: SessionData) -> None:
-        """Обновляет last_seen_at и продлевает TTL простоя."""
+        """Обновляет `last_seen_at` и продлевает TTL.
+
+        Запись в Redis на каждый запрос — лишний round-trip, поэтому
+        обновляем не чаще, чем раз в `_TOUCH_THROTTLE_SECONDS`; на точность
+        idle-таймаута это влияет в пределах той же минуты.
+        """
+        now = dt.datetime.now(dt.UTC)
+        if session.last_seen_at:
+            try:
+                last_seen = dt.datetime.fromisoformat(session.last_seen_at)
+                if last_seen.tzinfo is None:
+                    last_seen = last_seen.replace(tzinfo=dt.UTC)
+                if (now - last_seen).total_seconds() < _TOUCH_THROTTLE_SECONDS:
+                    return
+            except ValueError:
+                pass
+        session.last_seen_at = now.isoformat()
+        await self.update(session)
+
+    async def rotate_sid(self, session: SessionData) -> SessionData:
+        """Переиздаёт сессию с новым `sid` — защита от session fixation.
+
+        Вызывается после смены пароля (new_spec §4.4, последствие 2).
+        """
         settings = get_settings()
         redis = await require_redis()
+        old_sid = session.sid
+        session.sid = new_session_id()
         session.last_seen_at = dt.datetime.now(dt.UTC).isoformat()
-        await redis.setex(
-            key_session(session.sid), settings.session_ttl, json.dumps(asdict(session))
-        )
+
+        pipe = redis.pipeline()
+        pipe.setex(key_session(session.sid), settings.session_ttl, json.dumps(asdict(session)))
+        pipe.sadd(key_user_sessions(session.user_id), session.sid)
+        pipe.expire(key_user_sessions(session.user_id), settings.session_ttl)
+        pipe.delete(key_session(old_sid))
+        pipe.srem(key_user_sessions(session.user_id), old_sid)
+        await pipe.execute()
+
+        logger.info("session_rotated", **session.log_view())
+        return session
 
     async def update(self, session: SessionData) -> None:
         settings = get_settings()
@@ -135,15 +213,15 @@ class SessionStore:
         )
 
     async def delete(self, sid: str) -> SessionData | None:
-        redis = await require_redis()
         session = await self.get(sid)
-        pipe = redis.pipeline()
-        pipe.delete(key_session(sid))
-        if session:
-            pipe.srem(key_user_sessions(session.user_id), sid)
-        await pipe.execute()
-        if session:
-            logger.info("session_deleted", **session.log_view())
+        if session is None:
+            # Сессии нет или она уже погашена по простою внутри `get`;
+            # ключ всё равно удаляем — вдруг он битый и не разобрался.
+            redis = await require_redis()
+            await redis.delete(key_session(sid))
+            return None
+        await self._purge(session)
+        logger.info("session_deleted", **session.log_view())
         return session
 
     async def list_for_user(self, user_id: uuid.UUID | str) -> list[SessionData]:
@@ -191,6 +269,71 @@ class SessionStore:
                 await self.delete(session.sid)
                 removed += 1
         return removed
+
+
+async def ensure_fresh_access_token(session: SessionData) -> str:
+    """Возвращает живой access-токен сессии, обновляя его при необходимости.
+
+    Время жизни access-токена — 5 минут, серверной сессии — до 12 часов
+    (new_spec §3.1). Без обновления по refresh пользователь получал бы 401
+    через пять минут после входа, хотя сессия жива.
+
+    Обновление идёт под коротким локом: Keycloak ротирует refresh-токен, и
+    две параллельные попытки обновления убили бы сессию срабатыванием
+    reuse-detection.
+    """
+    from app.modules.identity.keycloak import keycloak_client
+
+    if not _needs_refresh(session):
+        return session.access_token
+    if not session.refresh_token:
+        # Сессия без refresh-токена (например, создана сервисным вызовом):
+        # продлить нечего, пусть истекает честно.
+        return session.access_token
+
+    async with distributed_lock(f"session:{session.sid}:refresh", ttl=15) as acquired:
+        if not acquired:
+            return session.access_token
+
+        # Победитель гонки уже мог обновить токен, пока мы ждали лок.
+        current = await session_store.get(session.sid)
+        if current is None:
+            raise UnauthenticatedError("Сессия истекла или была завершена")
+        if not _needs_refresh(current):
+            session.access_token = current.access_token
+            session.refresh_token = current.refresh_token
+            session.access_expires_at = current.access_expires_at
+            return current.access_token
+
+        try:
+            tokens = await keycloak_client.refresh(current.refresh_token or "")
+        except AppError:
+            # Refresh отозван или просрочен: сессия больше не действительна.
+            logger.info("session_refresh_failed", **current.log_view())
+            await session_store.delete(current.sid)
+            raise UnauthenticatedError(
+                "Сессия истекла: требуется повторный вход"
+            ) from None
+
+        current.access_token = tokens.access_token
+        current.refresh_token = tokens.refresh_token or current.refresh_token
+        current.id_token = tokens.id_token or current.id_token
+        current.access_expires_at = tokens.access_expires_at
+        current.last_seen_at = dt.datetime.now(dt.UTC).isoformat()
+        await session_store.update(current)
+
+        session.access_token = current.access_token
+        session.refresh_token = current.refresh_token
+        session.access_expires_at = current.access_expires_at
+        logger.info("session_token_refreshed", **current.log_view())
+        return current.access_token
+
+
+def _needs_refresh(session: SessionData) -> bool:
+    if session.access_expires_at is None:
+        return False
+    leeway = get_settings().access_token_refresh_leeway
+    return time.time() >= (session.access_expires_at - leeway)
 
 
 def _device_from_user_agent(user_agent: str | None) -> str | None:

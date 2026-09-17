@@ -8,6 +8,7 @@ TTL задаётся KEYCLOAK_JWKS_TTL. При неизвестном `kid` кэ
 
 from __future__ import annotations
 
+import hmac
 import json
 import time
 import uuid
@@ -217,6 +218,53 @@ async def decode_access_token(token: str) -> TokenClaims:
     )
 
 
+async def decode_id_token(token: str, *, nonce: str | None) -> dict[str, Any]:
+    """Валидирует `id_token`: подпись, `iss`, `aud`, `nonce`, `exp`.
+
+    Раздел «Аутентификация» спецификации и new_spec §3.1 п.4 требуют именно
+    полного набора проверок. Без сверки `nonce` авторизационный ответ можно
+    переиграть: код, полученный в чужом потоке, подставляется в наш callback.
+    """
+    settings = get_settings()
+
+    try:
+        header = jwt.get_unverified_header(token)
+    except jwt.PyJWTError as exc:
+        raise UnauthenticatedError("id_token повреждён") from exc
+
+    kid = header.get("kid")
+    if not kid:
+        raise UnauthenticatedError("В заголовке id_token отсутствует kid")
+    if header.get("alg") not in ALLOWED_ALGORITHMS:
+        raise UnauthenticatedError("Недопустимый алгоритм подписи id_token")
+
+    signing_key = await jwks_cache.get_key(kid)
+
+    try:
+        claims = jwt.decode(
+            token,
+            signing_key.key,  # type: ignore[arg-type]
+            algorithms=list(ALLOWED_ALGORITHMS),
+            issuer=settings.keycloak_issuer,
+            # `aud` id_token'а — всегда client_id, независимо от настройки
+            # audience-мэппера для access-токена.
+            audience=settings.keycloak_client_id,
+            options={"verify_aud": True, "require": ["exp", "iat", "iss", "aud", "sub"]},
+            leeway=30,
+        )
+    except jwt.PyJWTError as exc:
+        logger.warning("id_token_rejected", error_type=type(exc).__name__)
+        raise UnauthenticatedError("id_token не принят") from exc
+
+    if nonce is not None:
+        token_nonce = claims.get("nonce")
+        # hmac.compare_digest: nonce — одноразовый секрет потока.
+        if not token_nonce or not hmac.compare_digest(str(token_nonce), nonce):
+            raise UnauthenticatedError("nonce в id_token не совпадает с ожидаемым")
+
+    return claims
+
+
 async def decode_logout_token(token: str) -> dict[str, Any]:
     """Backchannel logout: у токена своё назначение, aud и events."""
     settings = get_settings()
@@ -255,9 +303,11 @@ class Principal:
     email: str | None
     full_name: str
     team_id: uuid.UUID | None
+    manager_id: uuid.UUID | None
     perm_epoch: int
     session_id: str | None
-    consent_required: bool
+    consent_version: str | None
+    must_change_password: bool
     claims: TokenClaims
 
     @property

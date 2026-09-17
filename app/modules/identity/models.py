@@ -98,9 +98,11 @@ class User(UuidPkMixin, TimestampMixin, SoftDeleteMixin, VersionMixin, Base):
     __table_args__ = (
         # Уникальность только среди живых записей: soft delete не должен
         # блокировать повторное создание пользователя с тем же email.
+        # Сравнение регистронезависимое — «Ivanov@rt.ru» и «ivanov@rt.ru»
+        # это один человек.
         Index(
-            "uq_users_email_active",
-            "email",
+            "uq_users_email_lower_active",
+            text("lower(email)"),
             unique=True,
             postgresql_where=text("deleted_at IS NULL AND email IS NOT NULL"),
         ),
@@ -111,6 +113,14 @@ class User(UuidPkMixin, TimestampMixin, SoftDeleteMixin, VersionMixin, Base):
             postgresql_where=text("deleted_at IS NULL AND keycloak_id IS NOT NULL"),
         ),
         Index("ix_users_team_role", "team_id", "role"),
+        Index("ix_users_status", "status", postgresql_where=text("deleted_at IS NULL")),
+        # Поиск по ФИО в админке — по триграммам, а не LIKE '%…%' по таблице.
+        Index(
+            "ix_users_full_name_trgm",
+            "full_name",
+            postgresql_using="gin",
+            postgresql_ops={"full_name": "gin_trgm_ops"},
+        ),
         CheckConstraint(
             "role IN ('KAM','HEAD','ADMIN','AUDITOR','INTEGRATION')",
             name="users_role_valid",
@@ -151,6 +161,13 @@ class User(UuidPkMixin, TimestampMixin, SoftDeleteMixin, VersionMixin, Base):
 
     password_changed_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    # Невыполненное обязательное действие Keycloak `UPDATE_PASSWORD`
+    # (new_spec §4.4, ситуация B). Access-токен его не содержит, поэтому
+    # признак держим локально: API обязан отвергать бизнес-запросы, пока
+    # пароль не сменён, иначе действие обходится прямым вызовом API.
+    must_change_password: Mapped[bool] = mapped_column(
+        nullable=False, server_default=text("false")
     )
     last_login_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -202,6 +219,41 @@ class UserDelegation(UuidPkMixin, Base):
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False
     )
+
+
+class UserInvite(UuidPkMixin, Base):
+    """Одноразовое приглашение (new_spec §4.1, шаг 4).
+
+    В закрытом контуре SMTP может отсутствовать, поэтому ссылка отдаётся
+    администратору в ответе на создание. В базе хранится только sha256
+    токена: утечка дампа не должна давать возможность войти.
+    """
+
+    __tablename__ = "user_invites"
+    __table_args__ = (
+        Index("ix_user_invites_user_active", "user_id", "expires_at"),
+        Index("uq_user_invites_token_hash", "token_hash", unique=True),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), nullable=False
+    )
+
+    @property
+    def is_active(self) -> bool:
+        return (
+            self.used_at is None
+            and self.revoked_at is None
+            and self.expires_at > dt.datetime.now(dt.UTC)
+        )
 
 
 class Consent(UuidPkMixin, Base):

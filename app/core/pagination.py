@@ -16,6 +16,8 @@ import uuid
 from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, Field
+from sqlalchemy import DateTime, literal
+from sqlalchemy import tuple_ as sa_tuple
 
 from app.core.errors import ErrorCode, FieldError, ValidationError
 
@@ -106,6 +108,41 @@ class Page(BaseModel, Generic[T]):
 
         items = [serializer(row) for row in visible] if callable(serializer) else visible
         return cls(items=items, next_cursor=next_cursor)
+
+
+def keyset_before(sort_column: Any, id_column: Any, cursor: Cursor) -> Any:
+    """Условие «строго раньше курсора» для сортировки по убыванию.
+
+    Питоновское `(a, b) < (x, y)` для колонок SQLAlchemy **не** даёт
+    row-comparison: кортежи сравниваются поэлементно и в SQL уходит только
+    первое сравнение, а `id` как tie-breaker молча теряется. Строки с
+    одинаковым значением сортировки тогда дублируются или пропадают между
+    страницами. Поэтому здесь явный `tuple_`, который транслируется в
+    `(sort, id) < (:sort, :id)`.
+    """
+    return sa_tuple(sort_column, id_column) < sa_tuple(
+        _bind(cursor, sort_column), literal(cursor.id, id_column.type)
+    )
+
+
+def keyset_after(sort_column: Any, id_column: Any, cursor: Cursor) -> Any:
+    """То же для сортировки по возрастанию."""
+    return sa_tuple(sort_column, id_column) > sa_tuple(
+        _bind(cursor, sort_column), literal(cursor.id, id_column.type)
+    )
+
+
+def _bind(cursor: Cursor, sort_column: Any) -> Any:
+    """Приводит значение курсора к типу колонки сортировки.
+
+    Курсор едет в base64-JSON, поэтому `created_at` возвращается строкой —
+    без явного приведения PostgreSQL сравнивал бы timestamptz с text.
+    """
+    column_type = getattr(sort_column, "type", None)
+    value = cursor.value
+    if isinstance(column_type, DateTime) and not isinstance(value, dt.datetime):
+        value = cursor.as_datetime()
+    return literal(value, column_type)
 
 
 def enforce_limit(limit: int) -> int:
