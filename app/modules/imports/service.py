@@ -28,7 +28,12 @@ from app.core.config import get_settings
 from app.core.errors import AppError, ErrorCode, NotFoundError
 from app.core.ids import uuid7
 from app.core.security import Principal
-from app.core.storage import download_object_bytes, ensure_bucket, upload_object_bytes
+from app.core.storage import (
+    download_object_bytes,
+    ensure_bucket,
+    inspect_object,
+    upload_object_bytes,
+)
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
 from app.modules.catalog.models import Direction, Organization, Product, Region
@@ -133,6 +138,24 @@ class ImportService:
 
     async def _load_table(self, job: ImportJob) -> ParsedTable:
         file = await self._get_ready_file(job.file_id)
+
+        # Раздел 4.12/3.7: лимит размера файла импорта нигде не проверялся
+        # до разбора — `download_object_bytes` тянет объект целиком в память
+        # одним куском, а лимит строк (`dry_run`) в принципе не может
+        # сработать раньше, чем файл уже полностью скачан и распарсен.
+        # `inspect_object` — тот же приём, что уже использует
+        # `files.service.commit`: читает объект потоково, не материализуя
+        # его целиком, только чтобы узнать реальный размер и сходу отсеять
+        # то, что заведомо превышает лимит.
+        settings = get_settings()
+        inspection = await inspect_object(bucket=file.bucket, key=file.storage_key)
+        if inspection.size_bytes > settings.import_max_file_size_bytes:
+            raise AppError(
+                ErrorCode.IMPORT_BAD_FORMAT,
+                "Файл превышает допустимый размер импорта: "
+                f"{inspection.size_bytes} > {settings.import_max_file_size_bytes}",
+            )
+
         content = await download_object_bytes(bucket=file.bucket, key=file.storage_key)
         return parse_table(content, source_format=job.source_format)
 

@@ -62,6 +62,10 @@ TPL_ACCOUNT_UNBLOCKED = "USER_ACCOUNT_UNBLOCKED"
 TPL_ROLE_CHANGED = "USER_ROLE_CHANGED"
 TPL_OFFBOARD_SUCCESSOR = "USER_OFFBOARD_SUCCESSOR"
 TPL_ERASURE_BLOCKED = "ERASURE_REQUEST_BLOCKED"
+# Спринт 10: исполнение запроса на удаление/обезличивание (new_spec §4.8.4
+# шаг 7) — уведомляется инициатор запроса, а не сам субъект (для режима B
+# уже некому: e-mail затёрт до того, как уведомление успело бы уйти).
+TPL_ERASURE_COMPLETED = "ERASURE_COMPLETED"
 
 # Только `blocked` — дословно spec.txt §4.5: «Уведомления, адресованные
 # заблокированному, не доставляются ему, а эскалируются руководителю».

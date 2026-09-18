@@ -1095,6 +1095,19 @@ class SignatureRequestService:
             raise AppError(ErrorCode.SIGNATURE_OTP_INVALID, "Срок действия кода истёк")
         if not bcrypt.checkpw(otp_code.encode(), otp.code_hash.encode()):
             await self._fail_otp(request, otp)
+            # `core.db.get_db_session` откатывает ВСЮ транзакцию на любом
+            # исключении (раздел 1) — правильно для сбоев, но `raise` ниже
+            # штатный исход (неверный код), а не сбой. Без явного commit
+            # здесь `otp.attempts`/`request.status=locked`/аудит
+            # откатывались бы вместе с ответом: счётчик попыток на каждый
+            # неверный код возвращался бы к последнему закоммиченному
+            # значению (0), и лимит в `max_attempts` (dop.md §10.4 п.12)
+            # был бы физически недостижим — неограниченный перебор кода, а
+            # не просто потеря записи аудита. Тот же приём, что уже закрыл
+            # этот пробел в `integration.cms`/`public_router`
+            # (sprint9-integration-implementation.md, где он же был впервые
+            # замечен здесь и сознательно оставлен не исправленным).
+            await self._session.commit()
             raise AppError(ErrorCode.SIGNATURE_OTP_INVALID, "Код подтверждения неверен")
         otp.consumed_at = dt.datetime.now(dt.UTC)
         await self._session.flush()
@@ -1139,6 +1152,16 @@ class SignatureRequestService:
                 result=AuditResult.ERROR,
                 changes={"reason": {"old": None, "new": "hash_mismatch_detected"}},
             )
+            # `core.db.get_db_session` откатывает ВСЮ транзакцию на любом
+            # исключении — без явного commit здесь `VOID`/аудит откатывались
+            # бы вместе с ответом 409: подмена документа между отправкой и
+            # подписанием (dop.md §10.4 п.14, «инцидент безопасности») не
+            # оставляла бы следа, а следующая попытка `sign()` на том же
+            # запросе видела бы его всё ещё в `SENT`/`VIEWED` вместо `void` —
+            # тот же приём, что уже закрыл этот пробел в
+            # `integration.cms`/`public_router`
+            # (sprint9-integration-implementation.md).
+            await self._session.commit()
             raise AppError(
                 ErrorCode.DOCUMENT_HASH_MISMATCH,
                 "Документ изменился после отправки на подпись — подпись не поставлена",
@@ -1589,6 +1612,17 @@ class SigningService(Protocol):
 
     async def count_signatures(self, session: AsyncSession, user_id: uuid.UUID) -> int: ...
 
+    async def count_signatures_for_contact(
+        self, session: AsyncSession, contact_id: uuid.UUID
+    ) -> int:
+        """Тот же блокер dop §10.7 (`has_signatures`), но для внешнего
+
+        подписанта контура B (`signer_contact_id`) — представителя вуза или
+        B2C-физлица. Без него запрос на удаление контакта не видел бы
+        подписи вообще: `count_signatures` смотрит только `signer_user_id`.
+        """
+        ...
+
     async def count_pending_requests(self, session: AsyncSession, user_id: uuid.UUID) -> int: ...
 
     async def reassign_pending(
@@ -1649,6 +1683,15 @@ class RealSigningService:
 
     async def count_signatures(self, session: AsyncSession, user_id: uuid.UUID) -> int:
         subq = select(SignatureRequest.id).where(SignatureRequest.signer_user_id == user_id)
+        count = await session.scalar(
+            select(func.count()).select_from(Signature).where(Signature.request_id.in_(subq))
+        )
+        return int(count or 0)
+
+    async def count_signatures_for_contact(
+        self, session: AsyncSession, contact_id: uuid.UUID
+    ) -> int:
+        subq = select(SignatureRequest.id).where(SignatureRequest.signer_contact_id == contact_id)
         count = await session.scalar(
             select(func.count()).select_from(Signature).where(Signature.request_id.in_(subq))
         )

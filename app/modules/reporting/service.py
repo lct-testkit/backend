@@ -58,6 +58,34 @@ from app.modules.reporting.rendering import CONTENT_TYPES, render_report
 #: Раздел 4.13: «< 1 000 строк, < 2 с» — граница между sync- и async-путём.
 SYNC_ROW_THRESHOLD = 1000
 
+# new_spec §4.13: «каждая генерация — событие REPORT_EXPORTED в аудите с
+# указанием количества строк и категорий данных» — `row_count` уже писался,
+# категории — нет. `report_templates` не хранит состав колонок структурно
+# (`query_def` — просто `{"kind": ...}`, см. `reporting.seed`), поэтому
+# источник здесь — то же прочтение восьми шаблонов, что и их описания в
+# `reporting.seed`: пять агрегатных отчётов (воронка/регионы/причины/SLA/
+# динамика) не содержат ФИО ни в одной строке, `kam_summary` — сводка по
+# именованным сотрудникам, `stuck_deals` — «листинг, не агрегат» с
+# ответственным по каждой сделке, `learning_progress` — прогресс именованных
+# учащихся. Код отчёта, которого нет в словаре, трактуется как содержащий
+# ПДн (безопасный отказ, а не молчаливое «пусто»).
+REPORT_DATA_CATEGORIES: dict[str, list[str]] = {
+    "deal_funnel": [],
+    "region_summary": [],
+    "loss_reasons": [],
+    "sla_compliance": [],
+    "monthly_dynamics": [],
+    "kam_summary": ["ФИО сотрудников (КАМ)"],
+    "stuck_deals": ["ФИО сотрудников (владелец сделки)"],
+    "learning_progress": ["ФИО контактов/учащихся", "прогресс обучения"],
+}
+
+
+def _report_data_categories(template_code: str) -> list[str]:
+    return REPORT_DATA_CATEGORIES.get(
+        template_code, ["не классифицировано — считать содержащим ПДн"]
+    )
+
 
 class ReportTemplateService:
     def __init__(self, session: AsyncSession) -> None:
@@ -231,6 +259,10 @@ class ReportJobService:
                 "template_code": {"old": None, "new": job.template_code},
                 "format": {"old": None, "new": job.format},
                 "row_count": {"old": None, "new": job.row_count},
+                "data_categories": {
+                    "old": None,
+                    "new": _report_data_categories(job.template_code),
+                },
             },
         )
 

@@ -57,6 +57,11 @@ class AuditAction(StrEnum):
     FILE_UPLOAD_INTENT = "FILE_UPLOAD_INTENT"
     FILE_COMMITTED = "FILE_COMMITTED"
     FILE_INFECTED = "FILE_INFECTED"
+    # Раздел 3.7: превышение лимита размера, обнаруженное постфактум по
+    # факту в S3, — не то же самое событие, что несовпадение magic
+    # bytes/хэша (FILE_INFECTED). Разные причины отклонения полезно
+    # различать в журнале, а не сваливать в одну корзину.
+    FILE_TOO_LARGE = "FILE_TOO_LARGE"
     FILE_DOWNLOADED = "FILE_DOWNLOADED"
     FILE_DELETED = "FILE_DELETED"
     ATTACHMENT_CREATED = "ATTACHMENT_CREATED"
@@ -145,6 +150,12 @@ class AuditAction(StrEnum):
     ERASURE_REQUEST_BLOCKED = "ERASURE_REQUEST_BLOCKED"
     ERASURE_REQUEST_APPROVED = "ERASURE_REQUEST_APPROVED"
     ERASURE_REQUEST_REJECTED = "ERASURE_REQUEST_REJECTED"
+    # Восстановление в период отсрочки (new_spec §4.8.4 шаг 4, кнопка
+    # «Восстановить») — отдельное от ERASURE_REQUEST_REJECTED действие: одно
+    # значит «отказано по существу», другое — «передумали, пока не поздно».
+    # В отчёте по 152-ФЗ это разные события, даже если оба переводят запрос
+    # в терминальный статус `rejected`.
+    ERASURE_REQUEST_RESTORED = "ERASURE_REQUEST_RESTORED"
     ERASURE_EXECUTED = "ERASURE_EXECUTED"
     PII_ACCESS = "PII_ACCESS"
     PII_REVEALED = "PII_REVEALED"

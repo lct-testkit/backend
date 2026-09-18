@@ -277,6 +277,15 @@ async def change_password(
             severity=Severity.WARNING,
             details={"context": "password_change", "reason": "current_password_invalid"},
         )
+        # `core.db.get_db_session` откатывает ВСЮ транзакцию на любом
+        # исключении — без явного commit здесь `SecurityEvent` откатывался
+        # бы вместе с ответом: неверный текущий пароль не оставлял бы следа.
+        # Тот же приём, что уже закрыл этот пробел в
+        # `identity.admin_service.ApprovalService.require`/`signing.service.
+        # _fail_otp`/`identity.service`'s «нет роли CRM» (см. эти файлы) —
+        # перебор самого поля здесь отдельно ограничен `rate_limit(...)`
+        # выше, поэтому это только потеря телеметрии, не обход защиты.
+        await session.commit()
         # Значение пароля никуда не попадает — только факт неудачи.
         raise AppError(ErrorCode.VALIDATION, "Текущий пароль неверен") from None
 

@@ -10,7 +10,17 @@ name: rtk-crm
 
 x-api-env: &api-env
   APP_PROFILE: ${APP_PROFILE:-demo}
-  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-crm}:${POSTGRES_PASSWORD:-crm}@postgres:5432/${POSTGRES_DB:-crm}
+  # Роль crm_app: только SELECT/INSERT на audit_log, без UPDATE/DELETE
+  # (new_spec §3.3, GRANT-уровень) — не суперпользователь кластера crm/
+  # POSTGRES_USER. Сервис `migrate` ниже переопределяет этот DATABASE_URL
+  # обратно на суперпользователя: миграциям нужен DDL (CREATE ROLE/TABLE/
+  # FUNCTION, GRANT), которого у crm_app сознательно нет.
+  DATABASE_URL: postgresql+asyncpg://crm_app:${CRM_APP_PASSWORD:-crm_app}@postgres:5432/${POSTGRES_DB:-crm}
+  # Читает `migrations/versions/0012_audit_role_hardening.py` (переиздаёт
+  # `ALTER ROLE crm_app ... PASSWORD`), а также любой процесс, который
+  # инстанцирует Settings — поле обязательное, значит нужно всем сервисам,
+  # даже тем, что сам пароль не используют (он уже встроен в DATABASE_URL).
+  CRM_APP_PASSWORD: ${CRM_APP_PASSWORD:-crm_app}
   KC_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-crm}:${POSTGRES_PASSWORD:-crm}@postgres:5432/keycloak
   REDIS_URL: redis://redis:6379/0
   BASE_URL: ${BASE_URL:-http://localhost:8080}
@@ -193,6 +203,10 @@ services:
     command: ["migrate"]
     environment:
       <<: *api-env
+      # DDL (CREATE ROLE/TABLE/FUNCTION, GRANT) требует суперпользователя —
+      # crm_app сознательно лишена этих прав той же миграцией, которая её
+      # заводит (0002_identity_sprint, ужесточена в 0012_audit_role_hardening).
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-crm}:${POSTGRES_PASSWORD:-crm}@postgres:5432/${POSTGRES_DB:-crm}
       WAIT_FOR_POSTGRES: postgres:5432
     depends_on:
       postgres:

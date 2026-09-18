@@ -129,6 +129,16 @@ class IdentityService:
                 severity=Severity.WARNING,
                 details={"reason": "no_crm_role", "subject": claims.subject},
             )
+            # `core.db.get_db_session` откатывает ВСЮ транзакцию на любом
+            # исключении — без явного commit здесь `SecurityEvent` откатился
+            # бы вместе с ответом 403: попытка входа без роли CRM (в том
+            # числе разведка доступа) не оставляла бы следа, прямое
+            # нарушение раздела 3.3 («Отказы в доступе логируются тоже»).
+            # Тот же приём, что уже закрыл этот пробел в
+            # `integration.cms`/`public_router`
+            # (sprint9-integration-implementation.md, где этот случай был
+            # впервые замечен и сознательно оставлен не исправленным).
+            await self._session.commit()
             raise AppError(
                 ErrorCode.FORBIDDEN,
                 "Учётная запись не заведена в CRM: обратитесь к администратору",

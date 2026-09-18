@@ -340,6 +340,66 @@ def get_ownership_service() -> OwnershipService:
     return _ownership_service
 
 
+async def count_active_deals_for_contact(session: AsyncSession, contact_id: uuid.UUID) -> int:
+    """Для блокера удаления контакта (new_spec §4.8.5): «действующий договор»
+
+    Тот же критерий «активная», что `RealOwnershipService.collect_workload`
+    использует для владельца — `closed_at IS NULL`, а не конкретный список
+    статусов: набор нетерминальных статусов задаётся воркфлоу и меняется
+    администратором, а `closed_at` проставляется независимо от того, какой
+    именно статус довёл сделку до `won`/`lost` (раздел 4.9).
+    """
+    count = await session.scalar(
+        select(func.count())
+        .select_from(Deal)
+        .where(Deal.contact_id == contact_id, Deal.deleted_at.is_(None), Deal.closed_at.is_(None))
+    )
+    return int(count or 0)
+
+
+async def count_all_deals_for_contact(session: AsyncSession, contact_id: uuid.UUID) -> int:
+    """Для режима «жёсткое удаление» (new_spec §4.8.2, режим C): разрешён,
+
+    только если у сущности нет вообще ни одной зависимой записи — в отличие
+    от блокера обычного удаления, здесь считаются и завершённые сделки тоже
+    (`deals.contact_id` не имеет `ON DELETE CASCADE`, значит хоть одна такая
+    запись делает жёсткое удаление невозможным, а не просто нежелательным).
+    """
+    count = await session.scalar(
+        select(func.count()).select_from(Deal).where(Deal.contact_id == contact_id)
+    )
+    return int(count or 0)
+
+
+async def count_active_deals_for_organization(
+    session: AsyncSession, organization_id: uuid.UUID
+) -> int:
+    """Тот же блокер, что `count_active_deals_for_contact`, для организации
+
+    (dop.md §11.8: ИП — субъект удаления/обезличивания наравне с контактом).
+    """
+    count = await session.scalar(
+        select(func.count())
+        .select_from(Deal)
+        .where(
+            Deal.organization_id == organization_id,
+            Deal.deleted_at.is_(None),
+            Deal.closed_at.is_(None),
+        )
+    )
+    return int(count or 0)
+
+
+async def count_all_deals_for_organization(
+    session: AsyncSession, organization_id: uuid.UUID
+) -> int:
+    """Тот же принцип, что `count_all_deals_for_contact`, для организации."""
+    count = await session.scalar(
+        select(func.count()).select_from(Deal).where(Deal.organization_id == organization_id)
+    )
+    return int(count or 0)
+
+
 # =============================================================================
 # Контракт для workflow: архивирование статуса с переносом сделок (раздел 6.5)
 # =============================================================================

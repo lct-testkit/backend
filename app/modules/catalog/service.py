@@ -415,10 +415,24 @@ class OrganizationService:
         return organization
 
     async def apply_drift(
-        self, organization: Organization, principal: Principal, *, fields: list[str]
+        self,
+        organization: Organization,
+        principal: Principal,
+        *,
+        fields: list[str],
+        expected_version: int,
     ) -> Organization:
         """Раздел 6: принять расхождения реквизитов, найденные при сверке с
-        ЕГРЮЛ (`requisites_drift`, заполняется задачей спринта 5)."""
+        ЕГРЮЛ (`requisites_drift`, заполняется задачей спринта 5).
+
+        `expected_version` — та же оптимистичная блокировка, что и у
+        `update()` выше: без неё КАМ, правящий карточку организации, мог бы
+        молча потерять свою правку, если в этот момент HEAD принимает баннер
+        расхождений по тому же полю (раздел 3.5).
+        """
+        if organization.version != expected_version:
+            raise VersionConflictError(organization.version, {"name": organization.name})
+
         drift = organization.requisites_drift or {}
         if not drift:
             raise AppError(ErrorCode.VALIDATION, "Нет расхождений для применения")
@@ -459,6 +473,85 @@ class OrganizationService:
                 entity_id=organization.id,
             )
         return organization
+
+    async def reveal(self, organization: Organization) -> None:
+        """dop.md §11.8: телефон/email ИП маскированы по умолчанию
+
+        (`OrganizationOut.from_model`) — тот же приём и то же событие
+        аудита, что `ContactService.reveal`."""
+        await self._audit.record(
+            AuditAction.PII_REVEALED,
+            entity_type="organization",
+            entity_id=organization.id,
+            changes={},
+        )
+
+    # --- 152-ФЗ: удаление/обезличивание ИП (dop.md §11.8) ------------------
+
+    def _ensure_erasure_applicable(self, organization: Organization) -> None:
+        if organization.org_type != "individual_entrepreneur":
+            # Сведения о юрлице персональными данными не являются (dop.md
+            # §11.8) — для вуза/компании «удаление» просто не тот сценарий:
+            # обычное `DELETE`/архивирование организации, не 152-ФЗ-процедура.
+            raise AppError(
+                ErrorCode.VALIDATION,
+                "Удаление/обезличивание по 152-ФЗ применимо только к "
+                "организациям типа individual_entrepreneur",
+                extra={"org_type": organization.org_type},
+            )
+
+    async def collect_erasure_blockers(self, organization: Organization) -> list[dict[str, Any]]:
+        """Тот же принцип, что `ContactService.collect_erasure_blockers`:
+
+        действующий договор блокирует, подписей как отдельного субъекта у
+        организации нет (подписант — всегда конкретный `contact`/`user`, см.
+        dop.md §10.9 `signer_contact_id`/`signer_user_id`, не `organization`).
+        """
+        self._ensure_erasure_applicable(organization)
+        from app.modules.crm.service import count_active_deals_for_organization
+
+        blockers: list[dict[str, Any]] = []
+        active_deals = await count_active_deals_for_organization(self._session, organization.id)
+        if active_deals:
+            blockers.append(
+                {
+                    "code": "active_contract",
+                    "detail": (
+                        "Организация связана с действующим договором: обработка ПДн "
+                        "остаётся законной до его окончания"
+                    ),
+                    "count": active_deals,
+                    "legal_basis": "ст. 6 ч. 1 п. 5 152-ФЗ",
+                }
+            )
+        return blockers
+
+    async def anonymize(self, organization: Organization) -> None:
+        """Режим B: те же поля, что dop.md §11.8 называет ПДн ИП (ФИО = имя
+
+        карточки, адрес регистрации), плюс контакты. `inn`/`kpp`/`ogrn`
+        сознательно не трогаются — это регистрационные номера, а не сами
+        персональные данные, и они нужны, чтобы отличить одну обезличенную
+        запись от другой в истории сделок."""
+        self._ensure_erasure_applicable(organization)
+        short_id = str(organization.id)[:8]
+        organization.name = f"ИП #{short_id}"
+        organization.short_name = None
+        organization.legal_address = None
+        organization.actual_address = None
+        organization.main_phone = None
+        organization.main_email = None
+        organization.version += 1
+        await self._session.flush()
+
+    async def hard_delete_eligible(self, organization: Organization) -> bool:
+        """Режим C (new_spec §4.8.2): только если организация не встречается
+
+        вообще ни в одной сделке, включая завершённые."""
+        self._ensure_erasure_applicable(organization)
+        from app.modules.crm.service import count_all_deals_for_organization
+
+        return await count_all_deals_for_organization(self._session, organization.id) == 0
 
 
 # =============================================================================
@@ -556,6 +649,90 @@ class ContactService:
             },
         )
         return contact
+
+    # --- 152-ФЗ: удаление/обезличивание (new_spec §4.8.5) -----------------
+
+    async def collect_erasure_blockers(self, contact: Contact) -> list[dict[str, Any]]:
+        """Блокеры для контакта — тот же принцип, что `AdminUserService.
+
+        collect_erasure_blockers` для сотрудника (`app/modules/identity/
+        admin_service.py`), но с блокерами, специфичными для субъекта B2C/
+        представителя вуза: действующий договор вместо активных сделок
+        сотрудника, подпись контура B вместо подписи контура A.
+        """
+        from app.modules.crm.service import count_active_deals_for_contact
+        from app.modules.signing.service import get_signing_service
+
+        blockers: list[dict[str, Any]] = []
+
+        active_deals = await count_active_deals_for_contact(self._session, contact.id)
+        if active_deals:
+            blockers.append(
+                {
+                    "code": "active_contract",
+                    "detail": (
+                        "Контакт связан с действующим договором: обработка ПДн остаётся "
+                        "законной до его окончания"
+                    ),
+                    "count": active_deals,
+                    "legal_basis": "ст. 6 ч. 1 п. 5 152-ФЗ",
+                }
+            )
+
+        signatures = await get_signing_service().count_signatures_for_contact(
+            self._session, contact.id
+        )
+        if signatures:
+            # dop §10.7: правило одинаково для обоих контуров подписания —
+            # подпись без идентификации подписанта теряет юридическую силу.
+            blockers.append(
+                {
+                    "code": "has_signatures",
+                    "detail": (
+                        "Подписи не обезличиваются: подпись без идентификации подписанта "
+                        "теряет юридическую силу"
+                    ),
+                    "count": signatures,
+                    "legal_basis": "ст. 6 ч. 1 п. 5 и п. 7 152-ФЗ",
+                }
+            )
+
+        if contact.is_anonymized:
+            blockers.append(
+                {"code": "already_anonymized", "detail": "Контакт уже обезличен", "count": 1}
+            )
+        return blockers
+
+    async def anonymize(self, contact: Contact) -> None:
+        """Режим B (new_spec §4.8.2) для контакта: поля затираются, запись
+
+        остаётся — на неё ссылаются `deals.contact_id`/`deal_comments` и т.д.
+        Повторное появление того же человека после обезличивания — новый
+        контакт, не попытка склейки (new_spec §4.8.5, «это правильное
+        поведение, а не баг»): дедупликации по обезличенным полям здесь
+        сознательно нет.
+        """
+        short_id = str(contact.id)[:8]
+        contact.first_name = f"Контакт #{short_id}"
+        contact.last_name = ""
+        contact.middle_name = None
+        contact.email = None
+        contact.phone = None
+        contact.is_anonymized = True
+        contact.anonymized_at = dt.datetime.now(dt.UTC)
+        await self._session.execute(
+            ContactChannel.__table__.delete().where(ContactChannel.contact_id == contact.id)
+        )
+        await self._session.flush()
+
+    async def hard_delete_eligible(self, contact: Contact) -> bool:
+        """Режим C (new_spec §4.8.2): только если контакт не встречается
+
+        вообще ни в одной сделке, включая завершённые.
+        """
+        from app.modules.crm.service import count_all_deals_for_contact
+
+        return await count_all_deals_for_contact(self._session, contact.id) == 0
 
     _PATCHABLE_FIELDS = frozenset(
         {

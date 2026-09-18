@@ -289,6 +289,65 @@ class ErasureRequestOut(BaseModel):
     grace_until: dt.datetime | None = None
 
 
+class ErasureRequestDetail(BaseModel):
+    """Спринт 10: карточка запроса для `Администрирование → Удаляемые`
+
+    (new_spec §4.8.4 шаг 4) — в отличие от `ErasureRequestOut` (форма ответа
+    на создание), собирается из уже существующей записи, включая поля,
+    появляющиеся только после исполнения (`rejection_reason`/`executed_at`/
+    `act_file_id`). `blockers` в БД хранится как `{mode, comment, items}`
+    (см. `DataErasureRequest.blockers`) — `from_model` разворачивает это в
+    плоский список, а не полагается на `from_attributes` (форма JSONB не
+    совпадает с формой ответа один в один).
+    """
+
+    id: uuid.UUID
+    subject_type: str
+    subject_id: uuid.UUID
+    mode: str | None = None
+    status: str
+    reason: str | None = None
+    legal_basis: str | None = None
+    requested_by: uuid.UUID | None = None
+    requested_at: dt.datetime
+    deadline_at: dt.datetime | None = None
+    grace_until: dt.datetime | None = None
+    blockers: list[ErasureBlocker] = Field(default_factory=list)
+    rejection_reason: str | None = None
+    executed_at: dt.datetime | None = None
+    act_file_id: uuid.UUID | None = None
+
+    @classmethod
+    def from_model(cls, request: Any) -> ErasureRequestDetail:
+        stored = request.blockers or {}
+        return cls(
+            id=request.id,
+            subject_type=request.subject_type,
+            subject_id=request.subject_id,
+            mode=stored.get("mode"),
+            status=request.status,
+            reason=request.reason,
+            legal_basis=request.legal_basis,
+            requested_by=request.requested_by,
+            requested_at=request.requested_at,
+            deadline_at=request.deadline_at,
+            grace_until=request.grace_until,
+            blockers=[ErasureBlocker(**item) for item in stored.get("items", [])],
+            rejection_reason=request.rejection_reason,
+            executed_at=request.executed_at,
+            act_file_id=request.act_file_id,
+        )
+
+
+class ErasureRequestListResponse(BaseModel):
+    items: list[ErasureRequestDetail]
+    next_cursor: str | None = None
+
+
+class ErasureRejectRequest(BaseModel):
+    reason: ReasonStr
+
+
 class TeamOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

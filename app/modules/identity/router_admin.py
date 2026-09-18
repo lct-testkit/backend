@@ -23,18 +23,25 @@ from app.core.rate_limit import enforce as rate_limit
 from app.core.security import Principal
 from app.modules.admin.models import AdminApproval
 from app.modules.audit.actions import AuditAction
+from app.modules.catalog.service import ContactService, OrganizationService
+from app.modules.files.models import File
+from app.modules.files.service import FileService
 from app.modules.identity.admin_service import (
     AdminUserService,
     ApprovalService,
     UserFilters,
 )
-from app.modules.identity.models import Team, User
+from app.modules.identity.erasure_service import ErasureExecutionService
+from app.modules.identity.models import DataErasureRequest, Team, User
 from app.modules.identity.schemas import (
     ApprovalDecision,
     ApprovalListResponse,
     ApprovalOut,
     ErasureBlocker,
+    ErasureRejectRequest,
     ErasureRequestBody,
+    ErasureRequestDetail,
+    ErasureRequestListResponse,
     ErasureRequestOut,
     OffboardPreviewItem,
     OffboardRequest,
@@ -54,6 +61,7 @@ from app.modules.identity.schemas import (
     UserUnblockRequest,
 )
 from app.modules.identity.service import IdentityService
+from app.modules.signing.schemas import DownloadUrlOut
 
 router = APIRouter(prefix="/admin", tags=["admin-users"])
 
@@ -423,6 +431,209 @@ async def create_erasure_request(
         blockers=[ErasureBlocker(**item) for item in blockers],
         grace_until=dt.datetime.now(dt.UTC) + dt.timedelta(days=settings.erasure_grace_days),
     )
+
+
+# --- Спринт 10: жизненный цикл запроса на удаление/обезличивание ----------
+# (new_spec §4.8.4-4.8.5). Создание запроса для сотрудника осталось на
+# `POST /admin/users/{user_id}/erasure-request` выше (спринт 1) — здесь то,
+# чего не хватало: список для экрана «Удаляемые» с отсчётом до `grace_until`,
+# пересчёт блокеров, обоснованный отказ, восстановление в период отсрочки,
+# создание запроса для контакта и ссылка на акт об уничтожении ПДн.
+
+
+@router.get(
+    "/erasure-requests",
+    summary="Запросы на удаление/обезличивание",
+    description=(
+        "Экран «Удаляемые» (new_spec §4.8.4 шаг 4): фильтры по статусу и типу "
+        "субъекта, курсорная пагинация. Роль: ADMIN."
+    ),
+    response_model=ErasureRequestListResponse,
+)
+async def list_erasure_requests(
+    session: DbSession,
+    page: Pagination,
+    _: ErasureManager,
+    erasure_status: Annotated[str | None, Query(alias="status")] = None,
+    subject_type: Annotated[str | None, Query()] = None,
+) -> ErasureRequestListResponse:
+    stmt = select(DataErasureRequest).order_by(
+        DataErasureRequest.created_at.desc(), DataErasureRequest.id.desc()
+    )
+    if erasure_status:
+        stmt = stmt.where(DataErasureRequest.status == erasure_status)
+    if subject_type:
+        stmt = stmt.where(DataErasureRequest.subject_type == subject_type)
+    cursor = page.decoded_cursor
+    if cursor:
+        stmt = stmt.where(
+            keyset_before(DataErasureRequest.created_at, DataErasureRequest.id, cursor)
+        )
+
+    rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
+    built: Page = Page.build(rows, limit=page.limit, serializer=ErasureRequestDetail.from_model)
+    return ErasureRequestListResponse(items=built.items, next_cursor=built.next_cursor)
+
+
+@router.get(
+    "/erasure-requests/{request_id}",
+    summary="Карточка запроса на удаление/обезличивание",
+    response_model=ErasureRequestDetail,
+)
+async def get_erasure_request(
+    session: DbSession,
+    _: ErasureManager,
+    request_id: Annotated[uuid.UUID, Path()],
+) -> ErasureRequestDetail:
+    request = await ErasureExecutionService(session).get_or_404(request_id)
+    return ErasureRequestDetail.from_model(request)
+
+
+@router.post(
+    "/erasure-requests/{request_id}/recheck",
+    summary="Пересчитать блокеры",
+    description=(
+        "У заблокированного запроса пересчитывает блокеры (например, после "
+        "передачи дел): если их больше нет, запрос переходит в отсрочку. "
+        "Роль: ADMIN."
+    ),
+    response_model=ErasureRequestDetail,
+)
+async def recheck_erasure_request(
+    session: DbSession,
+    principal: ErasureManager,
+    request_id: Annotated[uuid.UUID, Path()],
+) -> ErasureRequestDetail:
+    service = ErasureExecutionService(session)
+    request = await service.get_or_404(request_id)
+    await service.recheck(request, principal)
+    return ErasureRequestDetail.from_model(request)
+
+
+@router.post(
+    "/erasure-requests/{request_id}/reject",
+    summary="Отклонить запрос",
+    description=(
+        "Обоснованный отказ (new_spec §4.8.4 шаг 2, §4.8.5 — например, "
+        "действующий договор): терминальный статус, субъект подаёт запрос "
+        "заново при необходимости. Роль: ADMIN."
+    ),
+    response_model=ErasureRequestDetail,
+)
+async def reject_erasure_request(
+    payload: ErasureRejectRequest,
+    session: DbSession,
+    _: ErasureManager,
+    request_id: Annotated[uuid.UUID, Path()],
+) -> ErasureRequestDetail:
+    service = ErasureExecutionService(session)
+    request = await service.get_or_404(request_id)
+    await service.reject(request, reason=payload.reason)
+    return ErasureRequestDetail.from_model(request)
+
+
+@router.post(
+    "/erasure-requests/{request_id}/restore",
+    summary="Восстановить (отменить удаление в период отсрочки)",
+    description=(
+        "Кнопка «Восстановить» (new_spec §4.8.4 шаг 4) — работает только пока "
+        "не истёк `grace_until`. Не снимает блокировку самой учётной записи, "
+        "это отдельное действие (`/unblock`). Роль: ADMIN."
+    ),
+    response_model=ErasureRequestDetail,
+)
+async def restore_erasure_request(
+    session: DbSession,
+    _: ErasureManager,
+    request_id: Annotated[uuid.UUID, Path()],
+) -> ErasureRequestDetail:
+    service = ErasureExecutionService(session)
+    request = await service.get_or_404(request_id)
+    await service.restore(request)
+    return ErasureRequestDetail.from_model(request)
+
+
+@router.get(
+    "/erasure-requests/{request_id}/act",
+    summary="Ссылка на акт об уничтожении ПДн",
+    description="Доступна только после исполнения запроса. Роль: ADMIN.",
+    response_model=DownloadUrlOut,
+)
+async def get_erasure_act(
+    session: DbSession,
+    _: ErasureManager,
+    request_id: Annotated[uuid.UUID, Path()],
+) -> DownloadUrlOut:
+    request = await ErasureExecutionService(session).get_or_404(request_id)
+    if request.act_file_id is None:
+        raise NotFoundError("Акт об уничтожении ПДн", request_id)
+    file = await session.get(File, request.act_file_id)
+    if file is None:
+        raise NotFoundError("Акт об уничтожении ПДн", request_id)
+    url, expires_at = await FileService(session).download_url(file)
+    return DownloadUrlOut(download_url=url, expires_at=expires_at)
+
+
+@router.post(
+    "/contacts/{contact_id}/erasure-request",
+    summary="Запрос на удаление/обезличивание контакта",
+    description=(
+        "new_spec §4.8.5: инициатор — оператор по письменному обращению "
+        "субъекта (форма с сайта → CMS-вебхук — отдельный, не входящий в этот "
+        "спринт путь). Возвращает блокеры сразу, требует подтверждения вторым "
+        "администратором. Роль: ADMIN."
+    ),
+    response_model=ErasureRequestDetail,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_contact_erasure_request(
+    payload: ErasureRequestBody,
+    session: DbSession,
+    principal: ErasureManager,
+    contact_id: Annotated[uuid.UUID, Path()],
+) -> ErasureRequestDetail:
+    contact = await ContactService(session).get_or_404(contact_id, principal)
+    request, _blockers = await ErasureExecutionService(session).create_contact_request(
+        contact=contact,
+        principal=principal,
+        mode=payload.mode,
+        reason=payload.reason,
+        legal_basis=payload.legal_basis,
+        comment=payload.comment,
+        approval_id=payload.approval_id,
+    )
+    return ErasureRequestDetail.from_model(request)
+
+
+@router.post(
+    "/organizations/{organization_id}/erasure-request",
+    summary="Запрос на удаление/обезличивание ИП",
+    description=(
+        "dop.md §11.8: применимо только к организациям с "
+        "org_type='individual_entrepreneur' — данные ИП это ПДн физлица, а "
+        "не сведения о юрлице. Для остальных типов организаций отклоняется "
+        "как неприменимое (CRM-1001). Роль: ADMIN."
+    ),
+    response_model=ErasureRequestDetail,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_organization_erasure_request(
+    payload: ErasureRequestBody,
+    session: DbSession,
+    principal: ErasureManager,
+    organization_id: Annotated[uuid.UUID, Path()],
+) -> ErasureRequestDetail:
+    organization = await OrganizationService(session).get_or_404(organization_id, principal)
+    request, _blockers = await ErasureExecutionService(session).create_organization_request(
+        organization=organization,
+        principal=principal,
+        mode=payload.mode,
+        reason=payload.reason,
+        legal_basis=payload.legal_basis,
+        comment=payload.comment,
+        approval_id=payload.approval_id,
+    )
+    return ErasureRequestDetail.from_model(request)
 
 
 # --- Подтверждения «четырёх глаз» ----------------------------------------

@@ -13,7 +13,7 @@ from __future__ import annotations
 import uuid
 
 from app.core.permissions import Permission, has_permission
-from app.modules.catalog.schemas import ContactOut
+from app.modules.catalog.schemas import ContactOut, OrganizationOut
 from app.modules.catalog.validators import (
     validate_inn,
     validate_kpp,
@@ -43,6 +43,47 @@ class _Contact:
         self.version = 1
         import datetime as dt
 
+        now = dt.datetime.now(dt.UTC)
+        self.created_at = now
+        self.updated_at = now
+        for key, value in overrides.items():
+            setattr(self, key, value)
+
+
+class _Organization:
+    """Минимальный дублёр `Organization` ORM-модели — только поля, которые
+    читает `OrganizationOut.from_model`."""
+
+    def __init__(self, **overrides: object) -> None:
+        import datetime as dt
+
+        self.id = uuid.uuid4()
+        self.name = "ИП Петров Пётр Петрович"
+        self.short_name = None
+        self.org_type = "individual_entrepreneur"
+        self.inn = "500100732259"
+        self.kpp = None
+        self.ogrn = None
+        self.legal_address = "г. Москва, ул. Примерная, д. 1"
+        self.actual_address = None
+        self.region_id = None
+        self.website = None
+        self.main_phone = "+79991234567"
+        self.main_email = "petrov@example.ru"
+        self.students_count = None
+        self.external_ids: dict[str, object] = {}
+        self.owner_id = None
+        self.source = None
+        self.custom_fields: dict[str, object] = {}
+        self.verified_source = None
+        self.verified_at = None
+        self.registry_status = None
+        self.registry_checked_at = None
+        self.requisites_drift = None
+        self.manual_overrides: list[str] = []
+        self.is_accredited = None
+        self.accreditation_until = None
+        self.version = 1
         now = dt.datetime.now(dt.UTC)
         self.created_at = now
         self.updated_at = now
@@ -134,11 +175,39 @@ class TestContactMasking:
         assert out.email is None
 
 
+class TestOrganizationMasking:
+    """dop.md §11.8: данные ИП — ПДн физлица, маскируются как у контакта."""
+
+    def test_individual_entrepreneur_phone_and_email_masked(self) -> None:
+        org = _Organization()
+        out = OrganizationOut.from_model(org)
+        assert out.main_phone == "+7 (9**) ***-**-67"
+        assert out.main_email == "p***@example.ru"
+        # Имя не маскируется — тот же принцип, что у ContactOut
+        # (first_name/last_name видны, маскируются только каналы связи).
+        assert out.name == "ИП Петров Пётр Петрович"
+
+    def test_company_and_university_not_masked(self) -> None:
+        # Сведения о юрлице — не ПДн (dop.md §11.8): маскировать нечего.
+        for org_type in ("company", "university", "college"):
+            org = _Organization(org_type=org_type)
+            out = OrganizationOut.from_model(org)
+            assert out.main_phone == "+79991234567"
+            assert out.main_email == "petrov@example.ru"
+
+    def test_missing_contacts_handled(self) -> None:
+        org = _Organization(main_phone=None, main_email=None)
+        out = OrganizationOut.from_model(org)
+        assert out.main_phone is None
+        assert out.main_email is None
+
+
 class TestCatalogPermissions:
     def test_kam_can_read_and_write_organizations_and_contacts(self) -> None:
         for perm in (
             Permission.ORG_READ,
             Permission.ORG_WRITE,
+            Permission.ORG_REVEAL,
             Permission.CONTACT_READ,
             Permission.CONTACT_WRITE,
             Permission.CONTACT_REVEAL,

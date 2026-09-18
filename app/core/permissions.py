@@ -27,6 +27,11 @@ class Permission(StrEnum):
     # --- Организации и контакты ---
     ORG_READ = "organization:read"
     ORG_WRITE = "organization:write"
+    # dop.md §11.8: данные ИП (ФИО, адрес) — ПДн физлица, хоть и из
+    # общедоступного источника. `OrganizationOut` маскирует телефон/email для
+    # `org_type='individual_entrepreneur'` тем же приёмом, что `ContactOut` —
+    # отдельное право на раскрытие, не совпадающее с `ORG_WRITE`.
+    ORG_REVEAL = "organization:reveal"
     CONTACT_READ = "contact:read"
     CONTACT_WRITE = "contact:write"
     CONTACT_REVEAL = "contact:reveal"
@@ -97,6 +102,7 @@ _KAM: frozenset[Permission] = frozenset(
         Permission.DEAL_TRANSITION,
         Permission.ORG_READ,
         Permission.ORG_WRITE,
+        Permission.ORG_REVEAL,
         Permission.ORG_LOOKUP_USE,
         Permission.CONTACT_READ,
         Permission.CONTACT_WRITE,

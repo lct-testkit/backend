@@ -23,6 +23,7 @@ from app.core.metrics import background_tasks_total
 from app.core.redis_client import close_redis
 from app.modules.admin.models import IdempotencyKey
 from app.modules.crm.tasks import sweep_sla_breaches
+from app.modules.identity.tasks import sweep_erasure_requests
 from app.modules.imports.tasks import sweep_import_jobs
 from app.modules.integration.service import RealOutboxService, register_outbox_service
 from app.modules.integration.tasks import sweep_lms_progress_pull, sweep_outbox_events
@@ -116,6 +117,7 @@ class WorkerSettings:
         refresh_report_materialized_views,
         sweep_outbox_events,
         sweep_lms_progress_pull,
+        sweep_erasure_requests,
     ]
     cron_jobs = [
         # Раз в сутки: партиции аудита на будущее.
@@ -164,6 +166,12 @@ class WorkerSettings:
         cron(sweep_outbox_events, minute=set(range(60))),
         # Раз в 30 минут (раздел 4.14, дословно).
         cron(sweep_lms_progress_pull, minute={0, 30}),
+        # Раз в 15 минут: исполнение удаления/обезличивания по истечении
+        # отсрочки режима A (new_spec §4.8.4 шаг 4-5, 30 дней по умолчанию) —
+        # та же периодичность, что и SLA-скан: отсрочка считается днями, чаще
+        # проверять незачем, реже — заметная задержка исполнения обязательства
+        # по 152-ФЗ.
+        cron(sweep_erasure_requests, minute={0, 15, 30, 45}),
     ]
     on_startup = startup
     on_shutdown = shutdown

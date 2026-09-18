@@ -49,6 +49,7 @@ from app.modules.identity.session_store import session_store
 from app.modules.notification.service import (
     TPL_ACCOUNT_BLOCKED,
     TPL_ACCOUNT_UNBLOCKED,
+    TPL_ERASURE_BLOCKED,
     TPL_OFFBOARD_SUCCESSOR,
     TPL_PASSWORD_RESET,
     TPL_ROLE_CHANGED,
@@ -166,6 +167,19 @@ class ApprovalService:
             entity_id=approval.id,
             changes={"operation": {"old": None, "new": operation}},
         )
+        # `core.db.get_db_session` откатывает ВСЮ транзакцию на любом
+        # исключении (раздел 1, «требование атомарности») — правильно для
+        # обычных ошибок, но `raise` ниже штатный исход («нужен второй
+        # администратор»), а не сбой. Без явного commit здесь `approval`
+        # откатывался бы вместе с ответом: `approval_id`, отданный клиенту,
+        # указывал бы на несуществующую строку, и подтвердить операцию было
+        # бы структурно невозможно ни для одного вызова (включая создание
+        # первого ADMIN и любой запрос на обезличивание) — сам механизм
+        # «четырёх глаз» из CRM-1902 не работал бы ни разу. Тот же пробел уже
+        # был закрыт этим приёмом в `integration.cms`/`public_router`
+        # (sprint9-integration-implementation.md); здесь — тот самый
+        # «пока не исправленный» случай, на который эти комментарии ссылались.
+        await self._session.commit()
         raise AppError(
             ErrorCode.SECOND_ADMIN_REQUIRED,
             "Операция требует подтверждения вторым администратором",
@@ -768,6 +782,17 @@ class AdminUserService:
 
         blockers = await self.collect_erasure_blockers(user)
         status = ErasureStatus.BLOCKED.value if blockers else ErasureStatus.PENDING.value
+        # new_spec §4.8.4 шаг 4: отсрочка режима A начинается сразу, как
+        # только блокеров нет — не при отдельном «подтверждении», которого
+        # раньше не существовало. Раньше это поле вычислялось только в
+        # ответе роутера и никуда не сохранялось: сборщику (`identity.tasks.
+        # sweep_erasure_requests`) было не по чему выбирать просроченные
+        # запросы.
+        grace_until = (
+            None
+            if blockers
+            else dt.datetime.now(dt.UTC) + dt.timedelta(days=settings.erasure_grace_days)
+        )
 
         request = DataErasureRequest(
             subject_type=SubjectType.USER.value,
@@ -779,6 +804,7 @@ class AdminUserService:
             + dt.timedelta(days=settings.erasure_subject_deadline_days),
             status=status,
             blockers={"mode": mode, "comment": comment, "items": blockers},
+            grace_until=grace_until,
         )
         self._session.add(request)
         await self._session.flush()
@@ -800,7 +826,38 @@ class AdminUserService:
                 entity_id=request.id,
                 changes={"blockers": {"old": None, "new": [b["code"] for b in blockers]}},
             )
+            await get_notification_service().notify_user(
+                self._session,
+                recipient_id=principal.user_id,
+                template_code=TPL_ERASURE_BLOCKED,
+                payload={"subject_type": "user", "blockers": [b["code"] for b in blockers]},
+            )
         return request, blockers
+
+    async def hard_delete_eligible(self, user: User) -> bool:
+        """new_spec §4.8.2, режим C: «разрешён только если у сущности нет ни
+
+        одной зависимой записи (проверяется явным подсчётом, а не надеждой
+        на ON DELETE)». `collect_erasure_blockers` уже проверяет активные
+        сделки/задачи/подписи — здесь строже: и завершённые тоже, потому что
+        `ON DELETE RESTRICT` не различает «активная» и «закрытая» запись, и
+        руководство другим пользователем (`users.manager_id`), которое
+        обезличивание не блокирует, а жёсткое удаление — обязано.
+        """
+        from app.modules.crm.models import Deal, DealComment, Task
+        from app.modules.signing.models import SignatureRequest
+
+        checks = (
+            select(Deal.id).where((Deal.owner_id == user.id) | (Deal.created_by == user.id)),
+            select(DealComment.id).where(DealComment.author_id == user.id),
+            select(Task.id).where(Task.assignee_id == user.id),
+            select(SignatureRequest.id).where(SignatureRequest.signer_user_id == user.id),
+            select(User.id).where(User.manager_id == user.id),
+        )
+        for stmt in checks:
+            if (await self._session.scalar(stmt.limit(1))) is not None:
+                return False
+        return True
 
     async def collect_erasure_blockers(self, user: User) -> list[dict[str, Any]]:
         """Блокеры из new_spec §4.8.3 и dop §10.7."""

@@ -96,6 +96,15 @@ class OrganizationUpdateRequest(BaseModel):
 
 
 class OrganizationOut(BaseModel):
+    """Список/карточка по умолчанию: для `org_type='individual_entrepreneur'`
+
+    телефон и email маскированы (dop.md §11.8 — данные ИП это ПДн физлица).
+    Для остальных `org_type` сведения о юрлице не ПДн, маскировать нечего —
+    `from_model` их не трогает. Полные значения ИП — только через
+    `POST /api/organizations/{id}/reveal` (`OrganizationRevealOut`), с
+    отдельной записью аудита `PII_REVEALED`, тем же приёмом что `ContactOut`.
+    """
+
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
@@ -127,6 +136,18 @@ class OrganizationOut(BaseModel):
     version: int
     created_at: dt.datetime
     updated_at: dt.datetime
+
+    @classmethod
+    def from_model(cls, organization: Any) -> OrganizationOut:
+        out = cls.model_validate(organization)
+        if organization.org_type == "individual_entrepreneur":
+            out.main_phone = mask_phone(organization.main_phone)
+            out.main_email = mask_email(organization.main_email)
+        return out
+
+
+class OrganizationRevealOut(OrganizationOut):
+    """Полные, немаскированные данные организации (`reveal`, dop.md §11.8)."""
 
 
 class OrganizationListResponse(BaseModel):

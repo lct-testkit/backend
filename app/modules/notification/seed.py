@@ -88,6 +88,11 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str | None, str]] = [
         "{% if blockers %}: {{ blockers|join(', ') }}{% endif %}.",
     ),
     (
+        "ERASURE_COMPLETED", "in_app", None,
+        "Запрос на удаление/обезличивание исполнен (режим: {{ mode }}). "
+        "Акт об уничтожении ПДн доступен в карточке запроса.",
+    ),
+    (
         "SIGNATURE_REQUESTED", "in_app", None,
         "Вам направлен документ на подпись"
         "{% if template %} (шаблон «{{ template }}»){% endif %}.",

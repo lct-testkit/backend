@@ -52,6 +52,7 @@ from app.modules.catalog.schemas import (
     OrganizationCreateRequest,
     OrganizationListResponse,
     OrganizationOut,
+    OrganizationRevealOut,
     OrganizationUpdateRequest,
     ProductCreateRequest,
     ProductListResponse,
@@ -87,6 +88,7 @@ regions_router = APIRouter(prefix="/regions", tags=["regions"])
 
 OrgRead = Annotated[Principal, Depends(require_permission(Permission.ORG_READ))]
 OrgWrite = Annotated[Principal, Depends(require_permission(Permission.ORG_WRITE))]
+OrgReveal = Annotated[Principal, Depends(require_permission(Permission.ORG_REVEAL))]
 ContactRead = Annotated[Principal, Depends(require_permission(Permission.CONTACT_READ))]
 ContactWrite = Annotated[Principal, Depends(require_permission(Permission.CONTACT_WRITE))]
 ContactReveal = Annotated[Principal, Depends(require_permission(Permission.CONTACT_REVEAL))]
@@ -134,7 +136,7 @@ async def list_organizations(
     if cursor:
         stmt = stmt.where(keyset_before(Organization.created_at, Organization.id, cursor))
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
-    built = Page.build(rows, limit=page.limit, serializer=OrganizationOut.model_validate)
+    built = Page.build(rows, limit=page.limit, serializer=OrganizationOut.from_model)
     return OrganizationListResponse(items=built.items, next_cursor=built.next_cursor)
 
 
@@ -169,7 +171,7 @@ async def create_organization(
         )
 
     organization = await OrganizationService(session).create(principal, payload)
-    result = OrganizationOut.model_validate(organization)
+    result = OrganizationOut.from_model(organization)
 
     if idempotency_key:
         await guard.store(
@@ -225,7 +227,7 @@ async def get_organization(
     session: DbSession, principal: OrgRead, organization_id: Annotated[uuid.UUID, Path()]
 ) -> OrganizationOut:
     organization = await OrganizationService(session).get_or_404(organization_id, principal)
-    return OrganizationOut.model_validate(organization)
+    return OrganizationOut.from_model(organization)
 
 
 @organizations_router.patch(
@@ -241,7 +243,7 @@ async def update_organization(
     service = OrganizationService(session)
     organization = await service.get_or_404(organization_id, principal)
     organization = await service.update(organization, payload, expected_version=if_match)
-    return OrganizationOut.model_validate(organization)
+    return OrganizationOut.from_model(organization)
 
 
 @organizations_router.post(
@@ -257,12 +259,34 @@ async def apply_organization_drift(
     payload: ApplyDriftRequest,
     session: DbSession,
     principal: OrgWrite,
+    if_match: IfMatch,
     organization_id: Annotated[uuid.UUID, Path()],
 ) -> OrganizationOut:
     service = OrganizationService(session)
     organization = await service.get_or_404(organization_id, principal)
-    organization = await service.apply_drift(organization, principal, fields=payload.fields)
-    return OrganizationOut.model_validate(organization)
+    organization = await service.apply_drift(
+        organization, principal, fields=payload.fields, expected_version=if_match
+    )
+    return OrganizationOut.from_model(organization)
+
+
+@organizations_router.post(
+    "/{organization_id}/reveal",
+    summary="Раскрыть полные реквизиты организации",
+    description=(
+        "Для org_type='individual_entrepreneur' — полные телефон/email "
+        "(dop.md §11.8). Для остальных типов маскировать нечего, но ручка "
+        "работает единообразно. Каждый вызов пишет PII_REVEALED."
+    ),
+    response_model=OrganizationRevealOut,
+)
+async def reveal_organization(
+    session: DbSession, principal: OrgReveal, organization_id: Annotated[uuid.UUID, Path()]
+) -> OrganizationRevealOut:
+    service = OrganizationService(session)
+    organization = await service.get_or_404(organization_id, principal)
+    await service.reveal(organization)
+    return OrganizationRevealOut.model_validate(organization)
 
 
 # =============================================================================

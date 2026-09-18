@@ -34,6 +34,12 @@ class Settings(BaseSettings):
 
     # --- Хранилища -------------------------------------------------------
     database_url: str
+    # Только для alembic (`migrations/versions/0012_audit_role_hardening.py`):
+    # пароль, которым миграция переиздаёт `ALTER ROLE crm_app ... PASSWORD`.
+    # api/worker его не читают — их database_url уже содержит пароль внутри
+    # строки подключения (docker-compose.yml даёт сервису `migrate` отдельный
+    # DATABASE_URL суперпользователя, т.к. только он умеет DDL).
+    crm_app_password: SecretStr
     kc_database_url: str | None = None
     redis_url: str
     db_pool_size: int = 10
@@ -172,6 +178,13 @@ class Settings(BaseSettings):
     erasure_grace_days: int = 30
     # Срок исполнения запроса субъекта ПДн по ст. 21 152-ФЗ.
     erasure_subject_deadline_days: int = 30
+    # new_spec §4.8.1: срок именно для запроса на уничтожение ПДн контакта
+    # (ст. 21) короче общего — 7 рабочих дней против 30 календарных для
+    # сотрудника. Считается в календарных днях (не рабочих): точный учёт
+    # производственного календаря уже есть для SLA сделок (`holidays`,
+    # new_spec §4.10) — если здесь понадобится точность день-в-день, это
+    # тот же расчёт, а не отдельная реализация.
+    erasure_contact_deadline_days: int = 7
     # Подтверждение второго администратора живёт ограниченное время.
     admin_approval_ttl_seconds: int = 86400
 

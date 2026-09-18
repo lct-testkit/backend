@@ -55,6 +55,13 @@ class UserStatus(StrEnum):
 class SubjectType(StrEnum):
     USER = "user"
     CONTACT = "contact"
+    # dop.md §11.8: данные ИП (`organizations.org_type='individual_
+    # entrepreneur'`) — ПДн физлица, а не сведения о юрлице, значит подпадают
+    # под тот же режим удаления/обезличивания, что contact (new_spec §4.8).
+    # Компании/вузы этим субъектом никогда не являются — их данные не ПДн, и
+    # `catalog.service.OrganizationService` отказывает в запросе для любого
+    # другого `org_type`.
+    ORGANIZATION = "organization"
 
 
 class SecurityEventType(StrEnum):
@@ -331,7 +338,9 @@ class DataErasureRequest(UuidPkMixin, TimestampMixin, Base):
             "status IN ('pending','blocked','approved','rejected','completed')",
             name="erasure_status_valid",
         ),
-        CheckConstraint("subject_type IN ('user','contact')", name="erasure_subject_valid"),
+        CheckConstraint(
+            "subject_type IN ('user','contact','organization')", name="erasure_subject_valid"
+        ),
         Index("ix_data_erasure_requests_subject", "subject_type", "subject_id"),
     )
 
@@ -349,6 +358,14 @@ class DataErasureRequest(UuidPkMixin, TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="pending")
     rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     blockers: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # Конец отсрочки режима A (new_spec §4.8.4 шаг 4, 30 дней по умолчанию).
+    # Устанавливается, когда блокеров нет (при создании или после `recheck`);
+    # `identity.tasks.sweep_erasure_requests` исполняет запрос, как только
+    # это время наступает, и снимается — не устанавливается заново — при
+    # `restore`, чем «отсрочка» отличается от `rejected` по причине отказа.
+    grace_until: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     executed_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

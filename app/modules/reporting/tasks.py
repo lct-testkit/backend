@@ -150,8 +150,10 @@ async def expire_report_files(ctx: dict[str, Any]) -> dict[str, int]:
 
 async def refresh_report_materialized_views(ctx: dict[str, Any]) -> dict[str, int]:
     async with session_scope() as session:
-        await session.execute(
-            text("REFRESH MATERIALIZED VIEW CONCURRENTLY mv_deal_status_summary")
-        )
+        # REFRESH MATERIALIZED VIEW не грантится — только владельцу или
+        # суперпользователю, а сессия работает под crm_app. Обёртка
+        # `refresh_mv_deal_status_summary()` — SECURITY DEFINER, заведена
+        # миграцией 0013_reporting_mv_refresh_definer.
+        await session.execute(text("SELECT refresh_mv_deal_status_summary()"))
     background_tasks_total.labels(task="refresh_report_materialized_views", result="success").inc()
     return {"refreshed": 1}

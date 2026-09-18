@@ -2,9 +2,11 @@
 
 Полный цикл без прогона байтов через API: `upload_intent` выдаёт presigned
 PUT, клиент грузит объект напрямую в SeaweedFS, `commit` скачивает объект
-обратно (`app.core.storage.inspect_object`), считает `sha256`, сверяет magic
-bytes с заявленным расширением и прогоняет антивирусную проверку —
-только после этого файл становится `ready` и пригоден для вложений.
+обратно (`app.core.storage.inspect_object`), сверяет реальный размер с
+лимитом (`upload_intent` верит `size_bytes` из тела запроса, а не факту),
+считает `sha256`, сверяет magic bytes с заявленным расширением и прогоняет
+антивирусную проверку — только после этого файл становится `ready` и
+пригоден для вложений.
 """
 
 from __future__ import annotations
@@ -248,12 +250,40 @@ class FileService:
                 ErrorCode.VALIDATION, "Объект не найден в хранилище: загрузка не завершена"
             )
 
+        file.sha256 = inspection.sha256
+        file.size_bytes = inspection.size_bytes
+
+        # Раздел 3.7: `upload_intent` сверяет лимит только с `size_bytes` из
+        # тела запроса — значением, которое клиент указывает ДО получения
+        # presigned PUT и может занизить как угодно, а затем закачать в
+        # SeaweedFS сколько угодно байт напрямую, в обход API. Здесь — первый
+        # момент, когда размер известен из факта, а не из заявления.
+        # `deal_scope` (см. `upload_intent`) нигде не сохраняется в записи
+        # `files`, поэтому какой из двух лимитов применялся при выдаче
+        # ссылки, отсюда не видно; берём больший как потолок — меньше него
+        # объект не может оказаться ни при одном сценарии `upload_intent`.
+        settings = get_settings()
+        max_size = max(settings.files_max_size_bytes, settings.deal_files_max_size_bytes)
+        if inspection.size_bytes > max_size:
+            file.status = FileStatus.INFECTED.value
+            file.scan_result = "file_too_large"
+            file.scanned_at = dt.datetime.now(dt.UTC)
+            await delete_object(bucket=file.bucket, key=file.storage_key)
+            await self._session.flush()
+            await self._audit.record(
+                AuditAction.FILE_TOO_LARGE,
+                entity_type="file",
+                entity_id=file.id,
+                changes={
+                    "reason": {"old": None, "new": "file_too_large"},
+                    "limit_bytes": {"old": None, "new": max_size},
+                },
+            )
+            raise AppError(ErrorCode.FILE_TOO_LARGE, "Превышен допустимый размер файла")
+
         extension = _extension(file.original_filename)
         magic_ok = _check_magic_bytes(extension, inspection.magic_bytes)
         hash_ok = expected_sha256 is None or expected_sha256 == inspection.sha256
-
-        file.sha256 = inspection.sha256
-        file.size_bytes = inspection.size_bytes
 
         if not magic_ok or not hash_ok:
             file.status = FileStatus.INFECTED.value

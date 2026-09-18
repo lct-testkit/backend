@@ -8,6 +8,7 @@ URL подключения берётся из настроек приложен
 from __future__ import annotations
 
 import asyncio
+import os
 from logging.config import fileConfig
 
 from alembic import context
@@ -23,7 +24,17 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+# `database_url` — это роль приложения (`crm_app`), у которой сознательно нет
+# DDL-прав (см. 0012_audit_role_hardening). Внутри docker compose сервис
+# `migrate` получает отдельный DATABASE_URL суперпользователя, поэтому там
+# переменная ниже не нужна; она нужна только при локальном запуске `alembic`
+# вне docker compose, где `.env` даёт один `DATABASE_URL` на всё — тот же
+# приём опционального оверрайда, что и `KEYCLOAK_INTERNAL_URL`/
+# `S3_PUBLIC_ENDPOINT_URL`.
+config.set_main_option(
+    "sqlalchemy.url",
+    os.environ.get("MIGRATIONS_DATABASE_URL") or get_settings().database_url,
+)
 
 
 def include_object(obj, name, type_, reflected, compare_to) -> bool:

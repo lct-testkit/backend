@@ -50,6 +50,25 @@ async def _rate_limited(request: Request) -> None:
     )
 
 
+async def _rate_limited_verify(request: Request) -> None:
+    """`/public/verify/{signature_id}` не входит в `public_signing_router`
+
+    (свой `APIRouter`, `public_verify_router`), поэтому оставался вне
+    `_rate_limited` выше и без ограничения вовсе — единственный из пяти
+    публичных маршрутов без сессионной аутентификации. Раскрывает ФИО и дату
+    подписания по значению из пути: без лимита это переборный оракул по
+    `signature_id` на полной скорости клиента. Отдельный бакет ключа (не
+    `public:sign`) — чтение статуса подписи и сам процесс подписания не
+    должны исчерпывать один и тот же счётчик друг у друга.
+    """
+    ip = request.client.host if request.client else "unknown"
+    settings = get_settings()
+    await rate_limit_enforce(
+        ip, "public:verify", limit=settings.public_sign_rate_limit_per_min, window_seconds=60,
+        detail="Слишком много запросов проверки подписи, повторите позже",
+    )
+
+
 @public_signing_router.get(
     "/{token}",
     summary="Страница подписания (внешний подписант)",
@@ -147,6 +166,7 @@ async def public_reject(
         "статус (действительна/отозвана/оспорена) — dop.md §10.5."
     ),
     response_model=VerifyResult,
+    dependencies=[Depends(_rate_limited_verify)],
 )
 async def public_verify(
     session: DbSession,

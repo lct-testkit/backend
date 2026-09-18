@@ -53,6 +53,24 @@ sweep_outbox_events`, `target='bitrix24'`). Направление «Bitrix → 
 «журнал расхождений для ручного разбора»): входящее обновление принимается,
 только если его версия строго новее уже сохранённой; более старая или
 равная — фиксируется в логе и не применяется, вебхук не падает.
+
+Симметрично и для исходящего направления: `push_deal` перед `update_deal`
+сверяет `crm.item.get`'s `updatedTime` с нашим `external_refs.last_synced_at`
+(`_reject_if_bitrix_moved_ahead`). У Bitrix нет счётчика версий, сравнимого
+с нашим `synced_version` (проверено по официальной документации
+`crm.item.get` — только `createdTime`/`updatedTime`/`movedTime`), поэтому
+сравнение идёт по временной метке, а не по выдуманному полю. Без этой
+проверки push вслепую перезаписывал бы правку, сделанную прямо в портале
+между нашими синхронизациями, — ровно тот «конфликт», который раздел 4.14
+называет явно, но который раньше не обнаруживался в эту сторону вообще.
+Отдельного «журнала» под исходящее направление не заводится — конфликт
+поднимается как обычная ошибка доставки и попадает в уже существующий
+retry/backoff/dead-letter цикл outbox (`integration.tasks`), тот же путь
+ручного разбора, что `GET /admin/integrations/outbox-events?status=dead`
+уже даёт для любых недоставленных событий. Компромисс: между нашей
+проверкой и последующим `update_deal` остаётся узкое TOCTOU-окно (Bitrix
+не даёт compare-and-swap/ETag на `crm.item.update`) — честно принятое
+ограничение best-effort last-write-wins, не скрытое.
 """
 
 from __future__ import annotations
@@ -91,14 +109,29 @@ class BitrixClient:
 
     async def _call(self, method: str, body: dict[str, Any]) -> dict[str, Any]:
         path = f"{self._base_url}/{method}.json"
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            response = await client.post(path, json=body)
-            response.raise_for_status()
-            data = response.json()
-            if "error" in data:
-                raise RuntimeError(f"bitrix24 {method} error: {data['error']}: "
-                                    f"{data.get('error_description', '')}")
-            return data
+        try:
+            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                response = await client.post(path, json=body)
+                response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # `raise_for_status()` вшивает `response.url` в текст сообщения —
+            # а URL целиком и есть секрет (докстринг класса выше), поэтому
+            # `str(exc)` сюда не пробрасывается, только статус ответа.
+            raise RuntimeError(
+                f"bitrix24 {method} http error: "
+                f"{exc.response.status_code} {exc.response.reason_phrase}"
+            ) from None
+        except httpx.HTTPError as exc:
+            # Остальные httpx-исключения (таймаут, обрыв соединения…) тоже
+            # могут нести URL в тексте — не полагаемся на конкретный формат,
+            # сообщаем только тип ошибки.
+            raise RuntimeError(f"bitrix24 {method} request failed: {type(exc).__name__}") from None
+
+        data = response.json()
+        if "error" in data:
+            raise RuntimeError(f"bitrix24 {method} error: {data['error']}: "
+                                f"{data.get('error_description', '')}")
+        return data
 
     async def add_deal(self, fields: dict[str, Any]) -> dict[str, Any]:
         return await self._call(
@@ -109,6 +142,15 @@ class BitrixClient:
         return await self._call(
             "crm.item.update",
             {"entityTypeId": _DEAL_ENTITY_TYPE_ID, "id": bitrix_id, "fields": fields},
+        )
+
+    async def get_deal(self, bitrix_id: str) -> dict[str, Any]:
+        """https://apidocs.bitrix24.com/api-reference/crm/universal/crm-item-get.html
+        — тот же конверт ответа `{"result": {"item": {...}}}`, что и у
+        add/update. Используется только для проверки конфликта перед push
+        (`_reject_if_bitrix_moved_ahead`), не для обычного чтения."""
+        return await self._call(
+            "crm.item.get", {"entityTypeId": _DEAL_ENTITY_TYPE_ID, "id": bitrix_id}
         )
 
 
@@ -129,6 +171,44 @@ def _deal_to_bitrix_fields(deal: Deal) -> dict[str, Any]:
     }
 
 
+def _parse_bitrix_time(raw: str | None) -> dt.datetime | None:
+    if not raw:
+        return None
+    return dt.datetime.fromisoformat(raw)
+
+
+async def _reject_if_bitrix_moved_ahead(client: BitrixClient, ref: ExternalRef) -> None:
+    """Зеркало проверки в `apply_inbound_change`: там входящее обновление
+    отклоняется, если его версия не новее уже сохранённой у нас; здесь —
+    наоборот, исходящий push отклоняется, если сторона Bitrix успела
+    измениться ПОСЛЕ нашей последней синхронизации (см. докстринг модуля).
+
+    `ref.last_synced_at is None` не должно происходить в обычном потоке
+    (push_deal всегда его проставляет), но раз `ExternalRef.last_synced_at`
+    в модели `nullable=True` — трактуем «нет базы для сравнения» как
+    «конфликт доказать нечем», а не падаем."""
+    if ref.last_synced_at is None:
+        return
+    response = await client.get_deal(ref.external_id)
+    bitrix_updated_at = _parse_bitrix_time(response["result"]["item"].get("updatedTime"))
+    if bitrix_updated_at is None:
+        return
+    if bitrix_updated_at > ref.last_synced_at:
+        logger.warning(
+            "bitrix_push_conflict",
+            bitrix_id=ref.external_id,
+            entity_id=str(ref.entity_id),
+            bitrix_updated_at=bitrix_updated_at.isoformat(),
+            local_synced_at=ref.last_synced_at.isoformat(),
+        )
+        raise RuntimeError(
+            f"bitrix push conflict: deal {ref.entity_id} (bitrix_id="
+            f"{ref.external_id}) changed in Bitrix at "
+            f"{bitrix_updated_at.isoformat()}, after our last sync at "
+            f"{ref.last_synced_at.isoformat()} — needs manual review"
+        )
+
+
 async def push_deal(
     session: AsyncSession, client: BitrixClient, *, deal_id: uuid.UUID
 ) -> ExternalRef:
@@ -146,6 +226,9 @@ async def push_deal(
         )
     ).scalar_one_or_none()
 
+    if ref is not None:
+        await _reject_if_bitrix_moved_ahead(client, ref)
+
     fields = _deal_to_bitrix_fields(deal)
     if ref is not None:
         response = await client.update_deal(ref.external_id, fields)
@@ -153,8 +236,13 @@ async def push_deal(
         response = await client.add_deal(fields)
     # Раздел «Response JSON Structure» crm.item.add/update: `result.item.id`,
     # не голый `result`, как у устаревшего `crm.deal.*`.
-    bitrix_id = str(response["result"]["item"]["id"])
-    now = dt.datetime.now(dt.UTC)
+    item = response["result"]["item"]
+    bitrix_id = str(item["id"])
+    # `updatedTime` из ответа Bitrix, а не наши часы — иначе рассинхрон часов
+    # между нашим сервером и порталом дал бы ложные срабатывания
+    # `_reject_if_bitrix_moved_ahead` на следующем push при отсутствии
+    # реальной правки на стороне Bitrix.
+    synced_at = _parse_bitrix_time(item.get("updatedTime")) or dt.datetime.now(dt.UTC)
 
     if ref is None:
         ref = ExternalRef(
@@ -163,13 +251,13 @@ async def push_deal(
             source_code=IntegrationSourceCode.BITRIX24.value,
             external_id=bitrix_id,
             synced_version=1,
-            last_synced_at=now,
+            last_synced_at=synced_at,
             sync_direction=SyncDirection.OUTBOUND.value,
         )
         session.add(ref)
     else:
         ref.synced_version += 1
-        ref.last_synced_at = now
+        ref.last_synced_at = synced_at
         ref.sync_direction = SyncDirection.OUTBOUND.value
     await session.flush()
     return ref

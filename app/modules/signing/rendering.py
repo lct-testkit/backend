@@ -239,3 +239,89 @@ def render_protocol_pdf(
 
     c.save()
     return buffer.getvalue()
+
+
+def render_erasure_act_pdf(
+    *,
+    subject_type: str,
+    subject_display: str,
+    request_id: str,
+    legal_basis: str,
+    executed_at_iso: str,
+    responsible_display: str,
+    categories_erased: list[str],
+    categories_retained: list[dict[str, str]],
+) -> bytes:
+    """Акт об уничтожении ПДн (new_spec §4.8.4 шаг 6, dop.md §10.7).
+
+    Тот же инструмент, что `render_protocol_pdf` (reportlab-канва напрямую,
+    без Jinja2-шаблона): это не документ, который администратор
+    настраивает под свой брендбук, а фиксированная по составу доказательная
+    форма — заказчик обязан предъявить её при проверке Роскомнадзора «как
+    есть». `categories_retained` — не украшение: dop.md §10.7 прямо требует
+    указывать, какие категории данных сохранены и на каком основании
+    (пример: подписи — ст. 6 ч. 1 п. 5, 7 152-ФЗ), иначе акт выглядит как
+    полное уничтожение там, где часть данных законно осталась.
+    """
+    _ensure_canvas_font_registered()
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=(595, 842))  # A4 в pt
+    y = 800
+
+    subject_labels = {
+        "user": "сотрудник",
+        "contact": "контакт",
+        # dop.md §11.8: ИП — субъект удаления наравне с контактом, не
+        # сведения о юрлице, поэтому в акте это отдельная, честная метка,
+        # а не тихо «контакт» по умолчанию.
+        "organization": "индивидуальный предприниматель",
+    }
+    c.setFont(f"{_FONT_FAMILY}-Bold", 14)
+    c.drawString(40, y, "Акт об уничтожении персональных данных")
+    y -= 22
+    c.setFont(_FONT_FAMILY, 10)
+    for label, value in (
+        ("Субъект", f"{subject_display} ({subject_labels.get(subject_type, subject_type)})"),
+        ("Запрос", request_id),
+        ("Правовое основание", legal_basis),
+        ("Дата исполнения", executed_at_iso),
+        ("Ответственный", responsible_display),
+    ):
+        c.drawString(40, y, f"{label}: {value}")
+        y -= 16
+    y -= 10
+
+    def _ensure_space(min_y: int = 100) -> None:
+        nonlocal y
+        if y < min_y:
+            c.showPage()
+            c.setFont(_FONT_FAMILY, 10)
+            y = 800
+
+    c.setFont(f"{_FONT_FAMILY}-Bold", 11)
+    c.drawString(40, y, "Уничтоженные категории данных:")
+    y -= 16
+    c.setFont(_FONT_FAMILY, 9)
+    for category in categories_erased:
+        _ensure_space()
+        c.drawString(52, y, f"— {category}")
+        y -= 13
+    y -= 14
+
+    _ensure_space()
+    c.setFont(f"{_FONT_FAMILY}-Bold", 11)
+    c.drawString(40, y, "Сохранённые категории данных и основание сохранения:")
+    y -= 16
+    c.setFont(_FONT_FAMILY, 9)
+    if categories_retained:
+        for item in categories_retained:
+            _ensure_space()
+            c.drawString(52, y, f"— {item['category']}: {item['legal_basis']}")
+            y -= 13
+    else:
+        _ensure_space()
+        c.drawString(52, y, "— нет: все категории уничтожены полностью")
+        y -= 13
+
+    c.save()
+    return buffer.getvalue()
