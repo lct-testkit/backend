@@ -68,6 +68,10 @@ class SecurityEventType(StrEnum):
     MASS_EXPORT = "MASS_EXPORT"
     SIGNATURE_OTP_FAILED = "SIGNATURE_OTP_FAILED"
     SIGNATURE_KEY_COMPROMISED = "SIGNATURE_KEY_COMPROMISED"
+    # Раздел 4.14: HMAC-подпись входящего вебхука (CMS/LMS/Bitrix) не сошлась —
+    # тот же класс события, что и неверный OTP при подписании, только для
+    # входящей интеграции вместо интерактивного пользователя.
+    INTEGRATION_SIGNATURE_INVALID = "INTEGRATION_SIGNATURE_INVALID"
 
 
 class Severity(StrEnum):

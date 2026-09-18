@@ -39,6 +39,26 @@ x-api-env: &api-env
   SIGNATURE_SERVER_SECRET: ${SIGNATURE_SERVER_SECRET:-change-me-in-prod}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   LOG_JSON: ${LOG_JSON:-true}
+  # Раздел 4.14/7.8: до спринта 9 эти шесть переменных были объявлены в
+  # `Settings`/`.env.example` (часть — ещё в спринте 7), но ни одна не
+  # была прокинута через этот anchor — живая проверка спринта 9 поймала,
+  # что `Settings().bitrix_connector_enabled`/`cms_webhook_secret_ref` и
+  # соседи внутри контейнера всегда были дефолтными (`False`/`None`)
+  # независимо от `.env`, потому что этот whitelist, а не `.env` целиком,
+  # определяет, что реально долетает до процесса.
+  CMS_WEBHOOK_SECRET_REF: ${CMS_WEBHOOK_SECRET_REF:-}
+  LMS_BASE_URL: ${LMS_BASE_URL:-}
+  LMS_AUTH_REF: ${LMS_AUTH_REF:-}
+  BITRIX_CONNECTOR_ENABLED: ${BITRIX_CONNECTOR_ENABLED:-false}
+  BITRIX_WEBHOOK_URL_REF: ${BITRIX_WEBHOOK_URL_REF:-}
+  INTEGRATION_WEBHOOK_RATE_LIMIT_PER_MIN: ${INTEGRATION_WEBHOOK_RATE_LIMIT_PER_MIN:-60}
+  # Значения секретов, на которые ссылаются `credentials_ref`/`*_REF` выше
+  # (раздел 7.8: в БД — только имя переменной, значение — здесь). Набор
+  # фиксированный и пополняется по мере подключения реальных источников —
+  # тот же принцип, что уже применён к `SIGNATURE_SERVER_SECRET`/
+  # `S3_SECRET_KEY` этим же anchor'ом.
+  CMS_WEBHOOK_SECRET: ${CMS_WEBHOOK_SECRET:-}
+  BITRIX_WEBHOOK_URL: ${BITRIX_WEBHOOK_URL:-}
 
 services:
   postgres:

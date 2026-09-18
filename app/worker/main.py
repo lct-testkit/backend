@@ -24,6 +24,8 @@ from app.core.redis_client import close_redis
 from app.modules.admin.models import IdempotencyKey
 from app.modules.crm.tasks import sweep_sla_breaches
 from app.modules.imports.tasks import sweep_import_jobs
+from app.modules.integration.service import RealOutboxService, register_outbox_service
+from app.modules.integration.tasks import sweep_lms_progress_pull, sweep_outbox_events
 from app.modules.notification.service import RealNotificationService, register_notification_service
 from app.modules.notification.tasks import dispatch_pending_notifications
 from app.modules.registry.tasks import sweep_registry_drift, sweep_registry_imports
@@ -79,6 +81,10 @@ async def startup(ctx: dict[str, Any]) -> None:
     # Отдельный процесс от API — регистрация в `app/main.py` сюда не долетает,
     # `_service` в `notification/service.py` живёт per-процесс.
     register_notification_service(RealNotificationService())
+    # То же самое для outbox: доставка (sweep_outbox_events) живёт в этом
+    # процессе, публикация (crm/signing) — в `api`. Оба обязаны
+    # зарегистрировать реализацию независимо.
+    register_outbox_service(RealOutboxService())
 
 
 async def shutdown(ctx: dict[str, Any]) -> None:
@@ -108,6 +114,8 @@ class WorkerSettings:
         sweep_report_jobs,
         expire_report_files,
         refresh_report_materialized_views,
+        sweep_outbox_events,
+        sweep_lms_progress_pull,
     ]
     cron_jobs = [
         # Раз в сутки: партиции аудита на будущее.
@@ -150,6 +158,12 @@ class WorkerSettings:
             refresh_report_materialized_views,
             minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
         ),
+        # Раз в минуту: доставка outbox-событий (раздел 3.6, backoff
+        # 1s/5s/30s/5m/30m/2h — минутный тик приближает «доставить как можно
+        # быстрее» для первой, самой короткой ступени).
+        cron(sweep_outbox_events, minute=set(range(60))),
+        # Раз в 30 минут (раздел 4.14, дословно).
+        cron(sweep_lms_progress_pull, minute={0, 30}),
     ]
     on_startup = startup
     on_shutdown = shutdown

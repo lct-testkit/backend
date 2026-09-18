@@ -76,6 +76,9 @@ class AuditAction(StrEnum):
     REPORT_EXPORTED = "REPORT_EXPORTED"
     REPORT_FAILED = "REPORT_FAILED"
 
+    # --- Интеграции (спринт 9, §4.14/§7.8) ---
+    INTEGRATION_SOURCE_UPDATED = "INTEGRATION_SOURCE_UPDATED"
+
     # --- Отчётность и дашборды (спринт 8, §4.13/§7.9) ---
     DASHBOARD_CREATED = "DASHBOARD_CREATED"
     DASHBOARD_UPDATED = "DASHBOARD_UPDATED"

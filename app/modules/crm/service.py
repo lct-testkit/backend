@@ -1070,6 +1070,21 @@ class DealService:
                 "owner_id": {"old": None, "new": str(deal.owner_id)},
             },
         )
+        # Раздел 4.9 п.6 / раздел 4.14: «создаём сделку у нас — через 3
+        # секунды она в Bitrix» — публикуется безусловно, не только когда
+        # DSL перехода явно просит об этом (в отличие от `_run_actions`'
+        # `integration_event`, который есть только на паре конкретных
+        # переходов воронки). Доставка (не публикация) уже смотрит на
+        # `bitrix_connector_enabled`/`integration_sources.is_active` —
+        # ядро сделок само ничего не решает про Bitrix, только пишет факт.
+        await get_outbox_service().publish(
+            self._session,
+            aggregate_type="deal",
+            aggregate_id=deal.id,
+            event_type="DEAL_CREATED",
+            payload={"title": deal.title, "deal_type": deal.deal_type},
+            target="bitrix24",
+        )
         return deal
 
     # --- Обновление ------------------------------------------------------
@@ -1299,6 +1314,18 @@ class DealService:
                 changes={"status_code": {"old": None, "new": to_status["code"]}},
             )
 
+        # Раздел 4.9 п.6, дословно: «Транзакция: UPDATE deals ... + INSERT
+        # outbox_events» — на КАЖДОМ переходе, не только там, где DSL
+        # объявляет `integration_event` (см. докстринг в `create()` выше).
+        await get_outbox_service().publish(
+            self._session,
+            aggregate_type="deal",
+            aggregate_id=deal.id,
+            event_type="DEAL_STATUS_CHANGED",
+            payload={"status_code": to_status["code"]},
+            target="bitrix24",
+        )
+
         await self._run_actions(deal, transition.get("actions") or [], principal, now)
         return deal
 
@@ -1314,12 +1341,18 @@ class DealService:
             elif kind == dsl.ActionType.NOTIFY.value:
                 await self._run_notify(deal, action, principal)
             elif kind == dsl.ActionType.INTEGRATION_EVENT.value:
+                # Оба посевных использования (`LEARNING_TRANSFER_REQUESTED`,
+                # `LEARNING_ENROLLMENT_SENT`, `workflow.seed`) — про LMS;
+                # раздел 4.14 не описывает DSL-действие для Bitrix — синхронизация
+                # туда идёт из общего события ниже (см. `create`/`transition`),
+                # не из этого действия конструктора.
                 await get_outbox_service().publish(
                     self._session,
                     aggregate_type="deal",
                     aggregate_id=deal.id,
                     event_type=action.get("event_code", "UNKNOWN"),
                     payload=action.get("payload"),
+                    target="lms",
                 )
             elif kind == dsl.ActionType.REQUEST_SIGNATURE.value:
                 await get_signing_service().request_signature_for_deal(

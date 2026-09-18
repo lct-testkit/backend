@@ -141,6 +141,18 @@ class Settings(BaseSettings):
     lms_base_url: str | None = None
     lms_auth_ref: str | None = None
     bitrix_connector_enabled: bool = False
+    # Секрет живёт преимущественно на `integration_sources.credentials_ref`
+    # (раздел 7.8, админ настраивает без деплоя) — это в `.env` только
+    # запасной путь для сред, где сид источника ещё не прогнан
+    # (`integration.tasks._deliver` сначала смотрит в БД). Значение — имя
+    # переменной окружения, которая хранит **весь** секретный префикс
+    # входящего вебхука Bitrix24 целиком (`https://{портал}/rest/{user_id}/
+    # {webhook_code}`, без отдельного токена — см. `integration/bitrix.py`).
+    bitrix_webhook_url_ref: str | None = None
+    # Раздел 4.14 не требует рейт-лимит на вебхуки явно (в отличие от
+    # dop.md §10.11 для /public/sign/*), но это единственные пути без
+    # сессионной аутентификации — тот же принцип защиты по умолчанию.
+    integration_webhook_rate_limit_per_min: int = 60
 
     # --- LLM -------------------------------------------------------------
     llm_enabled: bool = False

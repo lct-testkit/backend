@@ -41,6 +41,9 @@ from app.modules.identity.router_admin import router as admin_users_router
 from app.modules.identity.router_auth import router as auth_router
 from app.modules.identity.router_me import router as me_router
 from app.modules.imports.router import import_jobs_router, import_presets_router
+from app.modules.integration.public_router import integrations_public_router
+from app.modules.integration.router import integration_admin_router
+from app.modules.integration.service import RealOutboxService, register_outbox_service
 from app.modules.notification.router import (
     me_notification_prefs_router,
     notification_templates_admin_router,
@@ -94,6 +97,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # До этого спринта здесь ничего не было, и весь `notify_user` в 7 модулях
     # тихо уходил в логирующую заглушку (см. `notification/service.py`).
     register_notification_service(RealNotificationService())
+    # До этого спринта `get_outbox_service()` (вызывается из `crm.service`/
+    # `signing.service` с первого дня их существования) уходил в
+    # `LoggingOutboxService` — событие терялось в структурном логе, таблицы
+    # `outbox_events` не было вовсе (см. `integration/service.py`).
+    register_outbox_service(RealOutboxService())
 
     # Прогреваем JWKS, чтобы первый запрос не платил за поход в Keycloak.
     # Жёсткий общий таймаут обязателен: httpx ограничивает соединение, но
@@ -192,10 +200,16 @@ def create_app() -> FastAPI:
     app.include_router(reports_router, prefix=settings.api_prefix)
     app.include_router(report_templates_router, prefix=settings.api_prefix)
     app.include_router(dashboards_router, prefix=settings.api_prefix)
+    app.include_router(integration_admin_router, prefix=settings.api_prefix)
     # Публичные ручки подписания/проверки — без сессии и без Idempotency-Key,
     # поэтому отдельный префикс `/public`, а не `/api` (dop.md §10.10).
     app.include_router(public_signing_router, prefix=settings.public_prefix)
     app.include_router(public_verify_router, prefix=settings.public_prefix)
+    # Входящие вебхуки внешних систем — буквальный путь раздела 8
+    # (`/api/v1/integrations/...`), не `/api` (BFF-сессия) и не `/public`
+    # (токен-в-пути): аутентификация HMAC-подписью тела, см. `integration/
+    # public_router.py`.
+    app.include_router(integrations_public_router, prefix="/api")
 
     return app
 
