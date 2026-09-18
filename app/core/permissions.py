@@ -71,6 +71,14 @@ class Permission(StrEnum):
     # сравнение `principal.role`.
     EDM_READ = "edm:read"
 
+    # --- Уведомления ---
+    # `GET /api/notifications`, `.../read` и `/api/me/notification-prefs` не
+    # проверяют отдельное право — это самообслуживание своих же уведомлений,
+    # доступное любой аутентифицированной роли (см. `core.deps.ConsentedUser`).
+    # Права нужны только на административный контур шаблонов (dop.md §13:
+    # «шаблоны администрируются через отдельный административный контур»).
+    NOTIFICATION_TEMPLATE_MANAGE = "notification_template:manage"
+
     # --- Администрирование ---
     USER_READ = "user:read"
     USER_WRITE = "user:write"

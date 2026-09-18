@@ -24,6 +24,8 @@ from app.core.redis_client import close_redis
 from app.modules.admin.models import IdempotencyKey
 from app.modules.crm.tasks import sweep_sla_breaches
 from app.modules.imports.tasks import sweep_import_jobs
+from app.modules.notification.service import RealNotificationService, register_notification_service
+from app.modules.notification.tasks import dispatch_pending_notifications
 from app.modules.registry.tasks import sweep_registry_drift, sweep_registry_imports
 from app.modules.signing.tasks import sweep_signature_deadlines, sweep_signature_otp_cleanup
 from app.modules.workflow.tasks import sweep_status_mapping_jobs
@@ -69,6 +71,9 @@ async def startup(ctx: dict[str, Any]) -> None:
     settings = get_settings()
     configure_logging(level=settings.log_level, json_output=settings.log_json)
     logger.info("worker_starting", profile=settings.app_profile)
+    # Отдельный процесс от API — регистрация в `app/main.py` сюда не долетает,
+    # `_service` в `notification/service.py` живёт per-процесс.
+    register_notification_service(RealNotificationService())
 
 
 async def shutdown(ctx: dict[str, Any]) -> None:
@@ -94,6 +99,7 @@ class WorkerSettings:
         sweep_import_jobs,
         sweep_signature_deadlines,
         sweep_signature_otp_cleanup,
+        dispatch_pending_notifications,
     ]
     cron_jobs = [
         # Раз в сутки: партиции аудита на будущее.
@@ -120,6 +126,9 @@ class WorkerSettings:
         cron(sweep_signature_deadlines, minute={0, 15, 30, 45}),
         # Раз в сутки: чистка OTP-кодов старше 30 дней (`signature.clean_otp`).
         cron(sweep_signature_otp_cleanup, hour=4, minute=45),
+        # Раз в минуту: доставка уведомлений во внешние каналы
+        # (`notifications.dispatch`, spec.txt §6.11/строка 890).
+        cron(dispatch_pending_notifications, minute=set(range(60))),
     ]
     on_startup = startup
     on_shutdown = shutdown

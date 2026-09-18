@@ -132,6 +132,10 @@ class Settings(BaseSettings):
     signature_server_secret: SecretStr
     signature_key_version: int = 1
 
+    # --- Уведомления -------------------------------------------------------
+    notification_dispatch_batch_size: int = 200
+    notification_max_delivery_attempts: int = 5
+
     # --- Интеграции ------------------------------------------------------
     cms_webhook_secret_ref: str | None = None
     lms_base_url: str | None = None

@@ -63,6 +63,14 @@ from app.modules.identity.models import (
 # --- импорт каталогов (раздел 5.10/§4.12, спринт 5) ---
 from app.modules.imports.models import ImportJob, ImportPreset, ImportRowResult
 
+# --- уведомления (раздел 5.7, спринт 7) ---
+from app.modules.notification.models import (
+    Notification,
+    NotificationDelivery,
+    NotificationTemplate,
+    UserNotificationPref,
+)
+
 # --- ЕГРЮЛ и автоподстановка (раздел 5.11, спринт 5) ---
 from app.modules.registry.models import (
     EgrulEntry,
@@ -118,6 +126,9 @@ __all__ = [
     "ImportPreset",
     "ImportRowResult",
     "LossReason",
+    "Notification",
+    "NotificationDelivery",
+    "NotificationTemplate",
     "Organization",
     "OrganizationBranch",
     "OrgLookupLog",
@@ -139,6 +150,7 @@ __all__ = [
     "User",
     "UserDelegation",
     "UserInvite",
+    "UserNotificationPref",
     "Workflow",
     "WorkflowStatus",
     "WorkflowTransition",
