@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Единая точка входа контейнера: api | worker | migrate | shell
+# Единая точка входа контейнера: api | worker | migrate | seed |
+# sms-gateway-mock | shell
 set -euo pipefail
 
 MODE="${1:-api}"
@@ -48,6 +49,15 @@ case "${MODE}" in
   worker)
     exec arq app.worker.main.WorkerSettings
     ;;
+  sms-gateway-mock)
+    # dop.md §13: мок внешнего SMS-провайдера, тот же образ, отдельная
+    # команда (см. комментарий у `migrate`/`seed` ниже по духу).
+    echo "запуск мок-шлюза SMS..."
+    exec uvicorn app.mocks.sms_gateway:app \
+      --host 0.0.0.0 \
+      --port 8090 \
+      --no-access-log
+    ;;
   seed)
     # Демо-воронки b2b_university_v1 и b2c_individual_v1 (раздел 7).
     # Идемпотентно: повторный запуск на заполненной базе ничего не меняет.
@@ -59,7 +69,7 @@ case "${MODE}" in
     ;;
   *)
     echo "неизвестный режим: ${MODE}" >&2
-    echo "доступно: api | worker | migrate | seed | shell" >&2
+    echo "доступно: api | worker | migrate | seed | sms-gateway-mock | shell" >&2
     exit 1
     ;;
 esac

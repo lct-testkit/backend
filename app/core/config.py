@@ -137,6 +137,17 @@ class Settings(BaseSettings):
     signature_otp_max_attempts: int = 3
     signature_server_secret: SecretStr
     signature_key_version: int = 1
+    # dop.md §13 добавляет `ntp`/`sms-gateway-mock` в контейнерную карту
+    # (§2.2) как инфраструктурные сервисы этого же стека, а не опциональную
+    # внешнюю интеграцию (в отличие от `lms_base_url`/`bitrix_*`, у которых
+    # пустой дефолт означает «отключено») — поэтому дефолты здесь сразу
+    # указывают на docker-сеть, как `S3_ENDPOINT_URL` выше.
+    ntp_host: str = "ntp"
+    ntp_port: int = 123
+    ntp_timeout_seconds: float = 2.0
+    # dop.md §10.8: «при рассинхроне > 5 с подписание блокируется».
+    signature_max_clock_drift_ms: int = 5000
+    sms_gateway_url: str = "http://sms-gateway-mock:8090"
 
     # --- Уведомления -------------------------------------------------------
     notification_dispatch_batch_size: int = 200

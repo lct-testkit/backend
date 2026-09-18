@@ -53,6 +53,11 @@ class ErrorCode(StrEnum):
     SIGNATURE_OTP_INVALID = "CRM-1503"
     SIGNATURE_TOKEN_INVALID = "CRM-1504"
     DOCUMENT_NOT_SIGNABLE = "CRM-1505"
+    # dop.md §10.8 «Отсутствует доверенное время»: NTP ответил, но
+    # рассинхрон превышает порог — единственный сценарий, который эта
+    # строка требует блокировать (недоступность самого NTP — не он, см.
+    # `signing/trusted_time.py`).
+    SIGNATURE_TIME_UNTRUSTED = "CRM-1506"
 
     # --- Отчёты ---
     REPORTS_LIMIT_EXCEEDED = "CRM-1601"
@@ -119,6 +124,9 @@ ERROR_CATALOG: dict[ErrorCode, ErrorSpec] = {
     ErrorCode.SIGNATURE_OTP_INVALID: ErrorSpec(422, "Код подтверждения неверен или истёк"),
     ErrorCode.SIGNATURE_TOKEN_INVALID: ErrorSpec(404, "Токен подписи истёк или не найден"),
     ErrorCode.DOCUMENT_NOT_SIGNABLE: ErrorSpec(409, "Документ нельзя подписать"),
+    ErrorCode.SIGNATURE_TIME_UNTRUSTED: ErrorSpec(
+        409, "Рассинхрон доверенного времени превышает допустимый порог"
+    ),
     ErrorCode.REPORTS_LIMIT_EXCEEDED: ErrorSpec(429, "Превышен лимит параллельных отчётов"),
     ErrorCode.REPORT_NOT_READY: ErrorSpec(409, "Отчёт ещё не готов"),
     ErrorCode.REPORT_EXPIRED: ErrorSpec(410, "Срок хранения результата отчёта истёк"),

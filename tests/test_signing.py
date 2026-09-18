@@ -16,14 +16,18 @@ from __future__ import annotations
 
 import hashlib
 import io
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import bcrypt
 import pytest
 from pydantic import ValidationError
 from pypdf import PdfReader
 
+from app.core.errors import AppError, ErrorCode
 from app.core.permissions import Permission, has_permission
 from app.modules.identity.models import Role
+from app.modules.signing import trusted_time
 from app.modules.signing.rendering import (
     RenderError,
     apply_signature_stamp,
@@ -34,6 +38,7 @@ from app.modules.signing.rendering import (
 )
 from app.modules.signing.schemas import SignatureDocumentCreateRequest, SignerSpec
 from app.modules.signing.service import GENESIS_HASH, compute_chain_hash, compute_signature_value
+from app.modules.signing.sms_gateway import send_sms
 
 
 class TestTemplateRendering:
@@ -231,3 +236,93 @@ class TestPermissionMatrix:
         assert has_permission(Role.ADMIN.value, Permission.EDM_ADMIN)
         assert not has_permission(Role.HEAD.value, Permission.EDM_ADMIN)
         assert not has_permission(Role.KAM.value, Permission.EDM_ADMIN)
+
+
+class TestSmsGatewayClient:
+    """dop.md §13: `sms-gateway-mock`. Тот же приём, что
+    `TestBitrixSecretRedaction` в `tests/test_integration.py` — настоящий
+    локальный HTTP-сервер и порт 9 (discard) для мгновенного отказа
+    соединения, а не мок-библиотека (в репозитории такой пока нет)."""
+
+    @staticmethod
+    def _serve(status: int, body: bytes) -> ThreadingHTTPServer:
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802 — имя метода фиксировано http.server
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args: object) -> None:
+                pass  # не шуметь в тестовом выводе
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+
+    async def test_successful_send_returns_gateway_message_id(self) -> None:
+        server = self._serve(200, b'{"id": "msg-123", "status": "queued"}')
+        try:
+            base_url = f"http://127.0.0.1:{server.server_address[1]}"
+            message_id = await send_sms(to="+79991234567", message="123456", base_url=base_url)
+        finally:
+            server.shutdown()
+            server.server_close()
+        assert message_id == "msg-123"
+
+    async def test_connection_failure_degrades_to_none(self) -> None:
+        # Порт 9 (discard) в этом окружении — надёжный «мгновенный отказ
+        # соединения» (см. tests/test_integration.py, tests/test_api_smoke.py).
+        message_id = await send_sms(to="+79991234567", message="123456", base_url="http://127.0.0.1:9")
+        assert message_id is None
+
+    async def test_gateway_error_response_degrades_to_none(self) -> None:
+        server = self._serve(500, b'{"error": "internal"}')
+        try:
+            base_url = f"http://127.0.0.1:{server.server_address[1]}"
+            message_id = await send_sms(to="+79991234567", message="123456", base_url=base_url)
+        finally:
+            server.shutdown()
+            server.server_close()
+        assert message_id is None
+
+
+class TestTrustedTime:
+    """dop.md §10.8/§13: NTP недоступен → честная деградация до
+    `system_clock` (не блокирует подписание); NTP ответил, но измеренный
+    рассинхрон превышает порог → блокирует. Мокается только `_query_
+    offset_seconds` (граница с `ntplib`/сетью) — решение о деградации/блоке
+    вокруг него не мок, тот же принцип, что остальной файл применяет к
+    чистым функциям."""
+
+    async def test_ntp_unreachable_degrades_to_system_clock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(host: str, port: int, timeout: float) -> float:
+            raise OSError("network unreachable")
+
+        monkeypatch.setattr(trusted_time, "_query_offset_seconds", _boom)
+        _, source, drift_ms = await trusted_time.get_trusted_time()
+        assert source == trusted_time.FALLBACK_SOURCE
+        assert drift_ms is None
+
+    async def test_small_drift_is_reported_and_allowed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(trusted_time, "_query_offset_seconds", lambda *a, **kw: 0.5)
+        _, source, drift_ms = await trusted_time.get_trusted_time()
+        assert source == "ntp://ntp"
+        assert drift_ms == 500
+
+    async def test_excessive_drift_blocks_signing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(trusted_time, "_query_offset_seconds", lambda *a, **kw: 10.0)
+        with pytest.raises(AppError) as exc_info:
+            await trusted_time.get_trusted_time()
+        assert exc_info.value.code == ErrorCode.SIGNATURE_TIME_UNTRUSTED
+
+    async def test_negative_drift_also_blocks(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(trusted_time, "_query_offset_seconds", lambda *a, **kw: -8.0)
+        with pytest.raises(AppError) as exc_info:
+            await trusted_time.get_trusted_time()
+        assert exc_info.value.code == ErrorCode.SIGNATURE_TIME_UNTRUSTED

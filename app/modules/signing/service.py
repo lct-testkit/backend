@@ -106,6 +106,8 @@ from app.modules.signing.schemas import (
     SigningPageOut,
     SigningSignerPreview,
 )
+from app.modules.signing.sms_gateway import send_sms
+from app.modules.signing.trusted_time import get_trusted_time
 from app.modules.workflow.models import WorkflowStatus
 
 logger = structlog.get_logger(__name__)
@@ -1018,13 +1020,17 @@ class SignatureRequestService:
         self._session.add(otp)
         await self._session.flush()
 
-        # Реальный SMS/email/Telegram-шлюз не подключён (закрытый контур без
-        # готовой интеграции, dop.md §10.11 упоминает `sms-gateway-mock` как
-        # инфраструктурную задачу, не часть этого сервиса) — честная замена:
-        # маскированная запись в лог, код никогда в него не попадает.
+        # SMS уходит через `sms-gateway-mock` (dop.md §13) — реальная
+        # доставка внутри закрытого контура, не только запись в лог. Email
+        # остаётся честной заглушкой: dop.md §13 называет только
+        # sms-gateway-mock инфраструктурной задачей, mock-провайдера для
+        # почты спецификация не просит, а тянуть его без запроса — за
+        # рамки этой правки. Ни в одной ветке код не попадает в наш лог —
+        # только в тело запроса к шлюзу (не наш audit/notification контур).
+        if channel == "sms":
+            await send_sms(to=destination, message=f"Код подтверждения: {code}")
         logger.info(
-            "signature_otp_dispatch_stub",
-            request_id=str(request.id), channel=channel, sent_to=masked,
+            "signature_otp_dispatch", request_id=str(request.id), channel=channel, sent_to=masked,
         )
 
         await self._audit.record(
@@ -1167,7 +1173,14 @@ class SignatureRequestService:
                 "Документ изменился после отправки на подпись — подпись не поставлена",
             )
 
-        now = dt.datetime.now(dt.UTC)
+        # Реальный NTP-запрос (dop.md §10.8/§13) — до этой точки в `_seal`
+        # ничего не мутировано в текущей транзакции (`otp.consumed_at` в
+        # `sign()` — только `flush`, не `commit`), поэтому если рассинхрон
+        # превышает порог и `get_trusted_time` бросает `AppError`, откат
+        # всей транзакции (включая потребление OTP) — желаемое поведение:
+        # подписант не должен терять попытку кода из-за временной проблемы
+        # с доверенным временем, а не из-за собственной ошибки.
+        now, time_source, drift_ms = await get_trusted_time()
         signer_id = request.signer_user_id or request.signer_contact_id
         nonce = secrets.token_hex(16)
         secret = self._settings.signature_server_secret.get_secret_value()
@@ -1213,11 +1226,7 @@ class SignatureRequestService:
                 ),
                 "signed_at": now.isoformat(),
             },
-            # Внутренний NTP не поднят в этом окружении (dop.md §13 упоминает
-            # его как инфраструктурное дополнение к compose) — честно
-            # отмечаем источник времени как системные часы, а не выдаём
-            # `ntp://...`, которому нечего было бы верифицировать.
-            "time": {"signed_at": now.isoformat(), "source": "system_clock", "drift_ms": None},
+            "time": {"signed_at": now.isoformat(), "source": time_source, "drift_ms": drift_ms},
         }
 
         prev_hash = await self._chain_head()
@@ -1231,7 +1240,8 @@ class SignatureRequestService:
             key_version=self._settings.signature_key_version,
             evidence=evidence,
             signed_at=now,
-            time_source="system_clock",
+            time_source=time_source,
+            time_drift_ms=drift_ms,
             ip=ip,
             user_agent=user_agent,
             prev_hash=prev_hash,

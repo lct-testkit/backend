@@ -47,6 +47,12 @@ x-api-env: &api-env
   S3_ACCESS_KEY: ${S3_ACCESS_KEY:-crm_access}
   S3_SECRET_KEY: ${S3_SECRET_KEY:-crm_secret_key}
   SIGNATURE_SERVER_SECRET: ${SIGNATURE_SERVER_SECRET:-change-me-in-prod}
+  # dop.md §13 добавляет `ntp`/`sms-gateway-mock` в карту контейнеров (§2.2)
+  # как часть этого же стека, а не опциональную внешнюю интеграцию — сетевые
+  # имена зашиты напрямую, тем же приёмом, что S3_ENDPOINT_URL выше
+  # (не `${...}` с пустым дефолтом-«выключено», как у LMS_BASE_URL/Bitrix).
+  NTP_HOST: ntp
+  SMS_GATEWAY_URL: http://sms-gateway-mock:8090
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   LOG_JSON: ${LOG_JSON:-true}
   # Раздел 4.14/7.8: до спринта 9 эти шесть переменных были объявлены в
@@ -150,6 +156,40 @@ services:
       interval: 15s
       timeout: 5s
       retries: 10
+    networks: [crm]
+
+  ntp:
+    # dop.md §13/§10.8: «внутренний NTP обязателен в compose» — доверенное
+    # время подписания сверяется реальным NTP-запросом (`signing.trusted_time`),
+    # а не системными часами контейнера api. chrony внутри образа фолбэчится
+    # на собственные часы (`local stratum 10`), когда внешние NTP-серверы
+    # недостижимы — ожидаемо и корректно для закрытого контура без
+    # интернета: здесь важен сам факт независимого, опрашиваемого по
+    # протоколу источника времени, а не привязка к конкретному эталону
+    # (в проде клиент разворачивает эту роль на реальный NTP предприятия).
+    image: cturra/ntp:latest
+    restart: unless-stopped
+    cap_add:
+      - SYS_TIME
+      - NET_BIND_SERVICE
+    networks: [crm]
+
+  sms-gateway-mock:
+    # dop.md §13: мок внешнего SMS-провайдера для доставки OTP (dop.md
+    # §10.11) в закрытом контуре — `app/mocks/sms_gateway.py`, тот же образ,
+    # что api/worker (см. entrypoint.sh), отдельная команда.
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["sms-gateway-mock"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8090/health/live', timeout=4).status == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     networks: [crm]
 
   keycloak:
