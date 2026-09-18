@@ -27,6 +27,11 @@ from app.modules.imports.tasks import sweep_import_jobs
 from app.modules.notification.service import RealNotificationService, register_notification_service
 from app.modules.notification.tasks import dispatch_pending_notifications
 from app.modules.registry.tasks import sweep_registry_drift, sweep_registry_imports
+from app.modules.reporting.tasks import (
+    expire_report_files,
+    refresh_report_materialized_views,
+    sweep_report_jobs,
+)
 from app.modules.signing.tasks import sweep_signature_deadlines, sweep_signature_otp_cleanup
 from app.modules.workflow.tasks import sweep_status_mapping_jobs
 
@@ -100,6 +105,9 @@ class WorkerSettings:
         sweep_signature_deadlines,
         sweep_signature_otp_cleanup,
         dispatch_pending_notifications,
+        sweep_report_jobs,
+        expire_report_files,
+        refresh_report_materialized_views,
     ]
     cron_jobs = [
         # Раз в сутки: партиции аудита на будущее.
@@ -129,6 +137,19 @@ class WorkerSettings:
         # Раз в минуту: доставка уведомлений во внешние каналы
         # (`notifications.dispatch`, spec.txt §6.11/строка 890).
         cron(dispatch_pending_notifications, minute=set(range(60))),
+        # Раз в минуту: тяжёлые отчёты из очереди (раздел 4.13, семафор —
+        # `reports_max_concurrent`).
+        cron(sweep_report_jobs, minute=set(range(60))),
+        # Раз в сутки: удаление файлов готовых отчётов старше
+        # `reports_retention_days` (раздел 4.13).
+        cron(expire_report_files, hour=5, minute=0),
+        # Раз в 5 минут: обновление материализованного представления для
+        # быстрого (ADMIN-скоуп) пути отчёта «Воронка по статусам»
+        # (раздел 3.4: «Кэш агрегатов в Redis на 5 минут»).
+        cron(
+            refresh_report_materialized_views,
+            minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
+        ),
     ]
     on_startup = startup
     on_shutdown = shutdown

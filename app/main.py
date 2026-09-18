@@ -48,6 +48,7 @@ from app.modules.notification.router import (
 )
 from app.modules.notification.service import RealNotificationService, register_notification_service
 from app.modules.registry.router import org_lookup_router, registry_admin_router
+from app.modules.reporting.router import dashboards_router, report_templates_router, reports_router
 from app.modules.signing.public_router import public_signing_router, public_verify_router
 from app.modules.signing.router import (
     edm_agreements_router,
@@ -188,6 +189,9 @@ def create_app() -> FastAPI:
     app.include_router(notifications_router, prefix=settings.api_prefix)
     app.include_router(me_notification_prefs_router, prefix=settings.api_prefix)
     app.include_router(notification_templates_admin_router, prefix=settings.api_prefix)
+    app.include_router(reports_router, prefix=settings.api_prefix)
+    app.include_router(report_templates_router, prefix=settings.api_prefix)
+    app.include_router(dashboards_router, prefix=settings.api_prefix)
     # Публичные ручки подписания/проверки — без сессии и без Idempotency-Key,
     # поэтому отдельный префикс `/public`, а не `/api` (dop.md §10.10).
     app.include_router(public_signing_router, prefix=settings.public_prefix)

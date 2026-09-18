@@ -79,6 +79,14 @@ from app.modules.registry.models import (
     UniversityRegistry,
 )
 
+# --- отчётность и дашборды (§4.13/§7.9, спринт 8) ---
+from app.modules.reporting.models import (
+    Dashboard,
+    DashboardWidget,
+    ReportJob,
+    ReportTemplate,
+)
+
 # --- ПЭП (раздел 5.12, спринт 6) ---
 from app.modules.signing.models import (
     EdmAgreement,
@@ -107,6 +115,8 @@ __all__ = [
     "Contact",
     "ContactChannel",
     "CustomFieldDef",
+    "Dashboard",
+    "DashboardWidget",
     "DataErasureRequest",
     "Deal",
     "DealComment",
@@ -135,6 +145,8 @@ __all__ = [
     "Product",
     "Region",
     "RegistryVersion",
+    "ReportJob",
+    "ReportTemplate",
     "SecurityEvent",
     "Signature",
     "SignatureDocument",

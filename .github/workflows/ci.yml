@@ -62,6 +62,12 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
+      # Тот же приём, что уже применяет job `test` выше: Settings требует
+      # app_profile/redis_url/keycloak_*/s3_*/signature_server_secret и
+      # т.д. (раздел 17), без .env падает уже на импорте `migrations/env.py`
+      # (get_settings() дёргается до подключения к БД). DATABASE_URL ниже
+      # переопределяет значение из .env.example настоящим адресом сервиса.
+      - run: cp .env.example .env
       - name: Миграции
         env:
           DATABASE_URL: postgresql+asyncpg://crm:crm@localhost:5432/crm_test

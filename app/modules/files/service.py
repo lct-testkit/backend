@@ -117,10 +117,10 @@ async def check_entity_access(
     если эти модули когда-нибудь начнут ссылаться на файлы при импорте.
 
     Для типов сущностей без собственного, реально построенного конвейера
-    (`report`, `erasure_request` — генерация отчётов и исполнение запросов на
-    удаление ещё не реализованы) доступ разрешён только администратору —
-    делегировать скоуп пока некому. `signature_document` (модуль `signing`,
-    спринт 6) уже настоящая делегация, не заглушка.
+    (`erasure_request` — исполнение запросов на удаление ещё не реализовано)
+    доступ разрешён только администратору — делегировать скоуп пока некому.
+    `signature_document` (модуль `signing`, спринт 6) и `report_job` (модуль
+    `reporting`, спринт 8) — уже настоящая делегация, не заглушка.
     """
     if entity_type == "deal":
         from app.modules.crm.service import DealService
@@ -148,6 +148,17 @@ async def check_entity_access(
     if entity_type == "registry_version":
         if not (principal.is_admin or has_permission(principal.role, Permission.REGISTRY_IMPORT)):
             raise ForbiddenError("Файл реестра недоступен")
+        return
+    if entity_type == "report_job":
+        # Раздел 4.13 (спринт 8): отчёт доступен только тому, кто его
+        # запросил, либо администратору. `ReportJobService.ensure_read_access`
+        # уже это реализует — делегируем, тем же приёмом, что и
+        # `signature_document` ниже.
+        from app.modules.reporting.service import ReportJobService
+
+        report_service = ReportJobService(session)
+        job = await report_service.get_or_404(entity_id)
+        report_service.ensure_read_access(job, principal)
         return
     if entity_type == "signature_document":
         # Штамп/протокол/оригинал документа на подпись (dop.md §10.9) —
