@@ -116,9 +116,11 @@ async def check_entity_access(
     `files → crm`/`files → catalog` на уровне модуля рискует зациклиться,
     если эти модули когда-нибудь начнут ссылаться на файлы при импорте.
 
-    Для типов сущностей без собственного модуля (`report`,
-    `erasure_request` — спринты 6/9) доступ разрешён только администратору
-    или тому, кто загрузил файл — делегировать скоуп пока некому.
+    Для типов сущностей без собственного, реально построенного конвейера
+    (`report`, `erasure_request` — генерация отчётов и исполнение запросов на
+    удаление ещё не реализованы) доступ разрешён только администратору —
+    делегировать скоуп пока некому. `signature_document` (модуль `signing`,
+    спринт 6) уже настоящая делегация, не заглушка.
     """
     if entity_type == "deal":
         from app.modules.crm.service import DealService
@@ -146,6 +148,19 @@ async def check_entity_access(
     if entity_type == "registry_version":
         if not (principal.is_admin or has_permission(principal.role, Permission.REGISTRY_IMPORT)):
             raise ForbiddenError("Файл реестра недоступен")
+        return
+    if entity_type == "signature_document":
+        # Штамп/протокол/оригинал документа на подпись (dop.md §10.9) —
+        # доступ по той же сущности, к которой привязан документ (deal и
+        # т.д.), делегируется сервису подписания, а не проверяется здесь
+        # напрямую: этот модуль не знает про `signature_requests`/скоуп КАМа.
+        # `ensure_read_access`, а не `ensure_access`: подписант вправе скачать
+        # то, что сам подписал, даже если сделка вне его скоупа по разделу 3.2.
+        from app.modules.signing.service import SignatureDocumentService
+
+        service = SignatureDocumentService(session)
+        document = await service.get_or_404(entity_id)
+        await service.ensure_read_access(principal, document)
         return
     if not principal.is_admin:
         raise ForbiddenError(

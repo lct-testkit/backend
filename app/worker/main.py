@@ -25,6 +25,7 @@ from app.modules.admin.models import IdempotencyKey
 from app.modules.crm.tasks import sweep_sla_breaches
 from app.modules.imports.tasks import sweep_import_jobs
 from app.modules.registry.tasks import sweep_registry_drift, sweep_registry_imports
+from app.modules.signing.tasks import sweep_signature_deadlines, sweep_signature_otp_cleanup
 from app.modules.workflow.tasks import sweep_status_mapping_jobs
 
 logger = structlog.get_logger(__name__)
@@ -91,6 +92,8 @@ class WorkerSettings:
         sweep_registry_imports,
         sweep_registry_drift,
         sweep_import_jobs,
+        sweep_signature_deadlines,
+        sweep_signature_otp_cleanup,
     ]
     cron_jobs = [
         # Раз в сутки: партиции аудита на будущее.
@@ -112,6 +115,11 @@ class WorkerSettings:
         cron(sweep_registry_drift, hour=4, minute=30),
         # Раз в минуту: батчи применения/отката импорта каталогов (раздел 4.12).
         cron(sweep_import_jobs, minute=set(range(60))),
+        # Раз в 15 минут: просроченные запросы на подпись (spec.txt §15
+        # `signature.expire_deadlines`).
+        cron(sweep_signature_deadlines, minute={0, 15, 30, 45}),
+        # Раз в сутки: чистка OTP-кодов старше 30 дней (`signature.clean_otp`).
+        cron(sweep_signature_otp_cleanup, hour=4, minute=45),
     ]
     on_startup = startup
     on_shutdown = shutdown

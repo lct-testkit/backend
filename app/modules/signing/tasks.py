@@ -1,0 +1,112 @@
+"""Фоновые задачи ПЭП (spec.txt §15: `signature.expire_deadlines`,
+`signature.clean_otp`).
+
+Частичный индекс `ix_signature_documents_status_deadline` (только
+`pending`/`partially_signed`) держит выборку быстрой независимо от общего
+числа документов — тот же приём, что `ix_deals_sla_due_open` в
+`app/modules/crm/tasks.py`.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+from typing import Any
+
+import structlog
+from sqlalchemy import delete, select
+
+from app.core.db import session_scope
+from app.core.metrics import background_tasks_total
+from app.modules.audit.actions import AuditAction
+from app.modules.audit.service import AuditService
+from app.modules.crm.models import Deal
+from app.modules.crm.models import SignatureStatus as DealSignatureStatus
+from app.modules.notification.service import NotificationPriority, get_notification_service
+from app.modules.signing.models import (
+    OPEN_REQUEST_STATUSES,
+    SignatureDocument,
+    SignatureOtpCode,
+    SignatureRequest,
+)
+from app.modules.signing.models import SignatureDocumentStatus as DocStatus
+from app.modules.signing.models import SignatureRequestStatus as ReqStatus
+from app.modules.signing.service import (
+    TPL_SIGNATURE_EXPIRED,
+    _apply_deal_signature_outcome,
+)
+
+logger = structlog.get_logger(__name__)
+
+#: `signature_otp_codes` хранит ретеншен 30 дней (dop.md §10.9) — доказательство
+#: лежит в `signatures.evidence`, сами коды нужны только на срок жизни OTP.
+OTP_RETENTION_DAYS = 30
+
+
+async def sweep_signature_deadlines(ctx: dict[str, Any]) -> dict[str, int]:
+    now = dt.datetime.now(dt.UTC)
+    expired = 0
+
+    async with session_scope() as session:
+        stmt = select(SignatureDocument).where(
+            SignatureDocument.status.in_(
+                [DocStatus.PENDING.value, DocStatus.PARTIALLY_SIGNED.value]
+            ),
+            SignatureDocument.deadline_at.is_not(None),
+            SignatureDocument.deadline_at < now,
+        )
+        documents = list((await session.execute(stmt)).scalars().all())
+
+        for document in documents:
+            document.status = DocStatus.EXPIRED.value
+            requests_stmt = select(SignatureRequest).where(
+                SignatureRequest.document_id == document.id,
+                SignatureRequest.status.in_([s.value for s in OPEN_REQUEST_STATUSES]),
+            )
+            for request in (await session.execute(requests_stmt)).scalars().all():
+                request.status = ReqStatus.EXPIRED.value
+            await session.flush()
+
+            await AuditService(session).record(
+                AuditAction.SIGNATURE_VOID,
+                entity_type="signature_document",
+                entity_id=document.id,
+                changes={
+                    "status": {"old": None, "new": "expired"},
+                    "reason": {"old": None, "new": "deadline"},
+                },
+            )
+            if document.created_by:
+                await get_notification_service().notify_user(
+                    session,
+                    recipient_id=document.created_by,
+                    template_code=TPL_SIGNATURE_EXPIRED,
+                    priority=NotificationPriority.HIGH,
+                    entity_type="signature_document",
+                    entity_id=document.id,
+                )
+            if document.entity_type == "deal":
+                deal = await session.get(Deal, document.entity_id)
+                if deal is not None:
+                    deal.signature_status = DealSignatureStatus.EXPIRED.value
+                    await _apply_deal_signature_outcome(
+                        session, deal, rule=document.on_expired,
+                        note=f"Истёк срок подписания документа «{document.title}»",
+                    )
+            expired += 1
+
+    background_tasks_total.labels(task="sweep_signature_deadlines", result="success").inc()
+    if expired:
+        logger.info("signature_deadlines_swept", expired=expired)
+    return {"expired": expired}
+
+
+async def sweep_signature_otp_cleanup(ctx: dict[str, Any]) -> dict[str, int]:
+    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(days=OTP_RETENTION_DAYS)
+    async with session_scope() as session:
+        result = await session.execute(
+            delete(SignatureOtpCode).where(SignatureOtpCode.created_at < cutoff)
+        )
+    removed = result.rowcount or 0
+    background_tasks_total.labels(task="sweep_signature_otp_cleanup", result="success").inc()
+    logger.info("signature_otp_codes_purged", removed=removed)
+    return {"removed": removed}

@@ -71,6 +71,16 @@ from app.modules.registry.models import (
     UniversityRegistry,
 )
 
+# --- ПЭП (раздел 5.12, спринт 6) ---
+from app.modules.signing.models import (
+    EdmAgreement,
+    Signature,
+    SignatureDocument,
+    SignatureOtpCode,
+    SignatureRequest,
+    SignatureTemplate,
+)
+
 # --- workflow (раздел 5.4) ---
 from app.modules.workflow.models import (
     SlaRule,
@@ -98,6 +108,7 @@ __all__ = [
     "DealProduct",
     "DealStatusHistory",
     "Direction",
+    "EdmAgreement",
     "EgrulEntry",
     "FeatureFlag",
     "File",
@@ -114,6 +125,11 @@ __all__ = [
     "Region",
     "RegistryVersion",
     "SecurityEvent",
+    "Signature",
+    "SignatureDocument",
+    "SignatureOtpCode",
+    "SignatureRequest",
+    "SignatureTemplate",
     "SlaRule",
     "StatusMappingJob",
     "SystemSetting",

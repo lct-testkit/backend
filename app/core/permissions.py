@@ -64,6 +64,12 @@ class Permission(StrEnum):
     SIGNATURE_SIGN = "signature:sign"
     SIGNATURE_VOID = "signature:void"
     EDM_ADMIN = "edm:admin"
+    # dop.md §13 матрица прав: «Управление соглашениями ЭДО» — ADMIN пишет,
+    # AUDITOR только читает (KAM/HEAD — ни то, ни другое). Отдельное право,
+    # а не проверка роли на роутере: раздел 4 требует, чтобы даже первый
+    # уровень проверки (маршрут) шёл через `Permission`, а не через прямое
+    # сравнение `principal.role`.
+    EDM_READ = "edm:read"
 
     # --- Администрирование ---
     USER_READ = "user:read"
@@ -111,9 +117,10 @@ _HEAD: frozenset[Permission] = _KAM | {
     Permission.IMPORT_ROLLBACK,
 }
 
-# AUDITOR — только журнал. Доступа к сделкам и ПДн по умолчанию нет.
+# AUDITOR — только журнал, плюс явное «чтение» соглашений ЭДО из матрицы
+# dop.md §13 (разделение обязанностей: видит, но не управляет).
 _AUDITOR: frozenset[Permission] = frozenset(
-    {Permission.AUDIT_READ, Permission.AUDIT_EXPORT}
+    {Permission.AUDIT_READ, Permission.AUDIT_EXPORT, Permission.EDM_READ}
 )
 
 # INTEGRATION — сервисная учётка. new_spec часть 5, матрица прав: переход по

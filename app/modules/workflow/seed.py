@@ -35,6 +35,7 @@ from app.core.db import session_scope
 from app.core.logging import configure_logging
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
+from app.modules.signing.models import SignatureTemplate
 from app.modules.workflow.models import (
     StatusType,
     Workflow,
@@ -422,8 +423,48 @@ async def seed_workflow(session: AsyncSession, spec: WorkflowSpec) -> Workflow |
     return workflow
 
 
+#: Тело шаблона согласования КП (dop.md §10.4 фаза 1 п.1) — минимальный, но
+#: настоящий Jinja2→HTML документ: рендерится, хэшируется и подписывается по
+#: тому же конвейеру, что и любой другой документ ПЭП.
+_KP_APPROVAL_TEMPLATE = """
+<h1>Коммерческое предложение {{ deal_number }}</h1>
+<p><strong>Организация:</strong> {{ organization_name }}</p>
+<p><strong>Сумма:</strong> {{ amount }} {{ currency }}</p>
+<p><strong>Количество обучающихся:</strong> {{ students_planned }}</p>
+<p><strong>Ответственный со стороны ИТ Школы:</strong> {{ owner_name }}</p>
+<p>Настоящим документом руководитель согласовывает коммерческое предложение
+по сделке {{ deal_number }} для направления на подписание контрагенту.</p>
+<p>Дата формирования: {{ today }}</p>
+"""
+
+
+async def seed_signature_templates(session: AsyncSession) -> None:
+    """Единственный шаблон, на который в этом спринте реально ссылается сид
+    воронки (`kp_approval`, переход `kp_preparation → kp_approval` ниже).
+    Идемпотентно — тем же приёмом, что `seed_workflow`: существующий `code`
+    сид не трогает."""
+    existing = await session.scalar(
+        select(SignatureTemplate.id).where(SignatureTemplate.code == "kp_approval")
+    )
+    if existing is not None:
+        return
+    session.add(
+        SignatureTemplate(
+            code="kp_approval",
+            name="Согласование коммерческого предложения",
+            doc_type="kp",
+            body_template=_KP_APPROVAL_TEMPLATE,
+            required_signer_roles=[{"role": "HEAD"}],
+            default_deadline_days=7,
+        )
+    )
+    await session.flush()
+    logger.info("signature_template_seeded", code="kp_approval")
+
+
 async def seed_default_workflows() -> None:
     async with session_scope() as session:
+        await seed_signature_templates(session)
         await seed_workflow(session, _b2b_spec())
         await seed_workflow(session, _b2c_spec())
 

@@ -5,7 +5,8 @@
 появился каталог (`app/modules/catalog/models.py`) — миграция
 `0005_catalog_sprint.py` добавляет ограничения поверх уже существующих
 колонок из `0004_deals_sprint.py`. `Deal.active_signature_document_id`
-по-прежнему без FK — модуль ПЭП (спринт 8) ещё не существует.
+получил свой FK тем же приёмом в спринте 6 (`0007_signing_sprint.py`), когда
+появился модуль ПЭП (`app/modules/signing/models.py`).
 
 `deal_status_history` и `deal_events` — журналы, не редактируются: как и
 `audit_log`, они получают `REVOKE UPDATE, DELETE` в миграции (см.
@@ -33,7 +34,6 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, Money, SoftDeleteMixin, TimestampMixin, UuidPkMixin, VersionMixin
@@ -202,9 +202,11 @@ class Deal(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteMixin, Base):
     signature_status: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default="none"
     )
-    # Модуль ПЭП — спринт 8.
+    # Модуль ПЭП (спринт 6) — FK на `signature_documents`, а не на живой
+    # `signature_status` guard-условия: документ может быть voided/expired,
+    # пока `signature_status` ещё отражает последнее известное состояние.
     active_signature_document_id: Mapped[uuid.UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), nullable=True
+        ForeignKey("signature_documents.id", ondelete="SET NULL"), nullable=True
     )
 
 

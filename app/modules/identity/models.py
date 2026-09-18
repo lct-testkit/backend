@@ -283,8 +283,13 @@ class Consent(UuidPkMixin, Base):
     revoked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ip: Mapped[str | None] = mapped_column(IpAddressType(), nullable=True)
     user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Заполняется, если согласие подписано ПЭП.
-    signature_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    # Заполняется, если согласие подписано ПЭП. FK — строкой на имя таблицы:
+    # `signatures` живёт в модуле `signing` (спринт 6), кросс-модульный
+    # Python-импорт моделей не нужен, SQLAlchemy резолвит по `Base.metadata`
+    # (тот же приём, что `Deal.organization_id` для `catalog.Organization`).
+    signature_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("signatures.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False
     )
@@ -343,8 +348,15 @@ class DataErasureRequest(UuidPkMixin, TimestampMixin, Base):
     executed_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    # Акт об уничтожении ПДн и его ПЭП хранятся бессрочно.
-    act_file_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    # Акт об уничтожении ПДн и его ПЭП хранятся бессрочно — `RESTRICT`, не
+    # `SET NULL`: ссылка на доказательство уничтожения не должна тихо
+    # обнуляться. `signatures` и так `INSERT`/`SELECT`-only и никогда не
+    # удаляется (см. `app/modules/signing/models.py`), поэтому для
+    # `act_signature_id` это ограничение работает как документация инварианта,
+    # а не как что-то реально способное сработать.
+    act_file_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("files.id", ondelete="RESTRICT"), nullable=True
+    )
     act_signature_id: Mapped[uuid.UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), nullable=True
+        ForeignKey("signatures.id", ondelete="RESTRICT"), nullable=True
     )

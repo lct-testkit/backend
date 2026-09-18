@@ -76,6 +76,7 @@ from app.modules.identity.models import Role, Team, User
 from app.modules.identity.service import IdentityService
 from app.modules.integration.service import get_outbox_service
 from app.modules.notification.service import NotificationPriority, get_notification_service
+from app.modules.signing.service import get_signing_service
 from app.modules.workflow import dsl
 from app.modules.workflow.models import (
     TERMINAL_TYPES,
@@ -1321,12 +1322,8 @@ class DealService:
                     payload=action.get("payload"),
                 )
             elif kind == dsl.ActionType.REQUEST_SIGNATURE.value:
-                # Модуль ПЭП — спринт 8: пока честно логируем, что действие
-                # сработало бы, но подпись не запрашивается.
-                logger.info(
-                    "request_signature_action_stub",
-                    deal_id=str(deal.id),
-                    template=action.get("template"),
+                await get_signing_service().request_signature_for_deal(
+                    self._session, deal=deal, action=action, principal=principal, now=now
                 )
             else:
                 logger.warning("unknown_transition_action", action_type=kind, deal_id=str(deal.id))

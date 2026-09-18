@@ -42,6 +42,14 @@ from app.modules.identity.router_auth import router as auth_router
 from app.modules.identity.router_me import router as me_router
 from app.modules.imports.router import import_jobs_router, import_presets_router
 from app.modules.registry.router import org_lookup_router, registry_admin_router
+from app.modules.signing.public_router import public_signing_router, public_verify_router
+from app.modules.signing.router import (
+    edm_agreements_router,
+    signature_documents_router,
+    signature_requests_router,
+    signature_templates_router,
+    signatures_router,
+)
 from app.modules.workflow.router import router as workflow_router
 
 logger = structlog.get_logger(__name__)
@@ -162,6 +170,15 @@ def create_app() -> FastAPI:
     app.include_router(registry_admin_router, prefix=settings.api_prefix)
     app.include_router(import_jobs_router, prefix=settings.api_prefix)
     app.include_router(import_presets_router, prefix=settings.api_prefix)
+    app.include_router(signature_documents_router, prefix=settings.api_prefix)
+    app.include_router(signature_requests_router, prefix=settings.api_prefix)
+    app.include_router(signature_templates_router, prefix=settings.api_prefix)
+    app.include_router(signatures_router, prefix=settings.api_prefix)
+    app.include_router(edm_agreements_router, prefix=settings.api_prefix)
+    # Публичные ручки подписания/проверки — без сессии и без Idempotency-Key,
+    # поэтому отдельный префикс `/public`, а не `/api` (dop.md §10.10).
+    app.include_router(public_signing_router, prefix=settings.public_prefix)
+    app.include_router(public_verify_router, prefix=settings.public_prefix)
 
     return app
 
