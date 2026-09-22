@@ -343,7 +343,10 @@ services:
   caddy:
     # Единая точка входа и TLS-терминация. Проставляет X-Request-Id,
     # который затем проходит через логи, аудит и тело ошибок.
-    image: caddy:2.8-alpine
+    # 2.11, не 2.8: Trivy (22.09.2026) нашёл 87 CVE в 2.8.4 (5 CRITICAL),
+    # фикс только в линии 2.11.x апстрима — см. frontend/.trivyignore
+    # (тот же образ, там же разбор, что осталось и почему).
+    image: caddy:2.11-alpine
     restart: unless-stopped
     ports:
       - "${HTTP_PORT:-8080}:8080"
