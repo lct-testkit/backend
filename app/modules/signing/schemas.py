@@ -145,6 +145,12 @@ class SignatureRequestOut(BaseModel):
     decided_at: dt.datetime | None
     reject_reason: str | None
     created_at: dt.datetime
+    # Контекст документа для списка «Мне на подпись» (заполняется в `/me/signature-requests`):
+    # без него интерфейсу пришлось бы делать по запросу на каждый документ.
+    document_title: str | None = None
+    deadline_at: dt.datetime | None = None
+    entity_type: str | None = None
+    entity_id: uuid.UUID | None = None
     # Заполняется только в ответе `/send`, который активировал этот запрос
     # (dop.md §10.4 фаза 2 п.6): в БД хранится только sha256 токена, поэтому
     # это единственный момент, когда сырую ссылку вообще можно отдать —

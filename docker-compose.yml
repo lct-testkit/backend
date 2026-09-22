@@ -332,6 +332,15 @@ services:
       # выше и в Caddyfile) — единственное сознательное исключение из
       # «наружу только 443», по той же логике, что и POSTGRES_PORT ниже.
       - "${S3_PROXY_PORT:-8333}:8333"
+    environment:
+      # Origin S3-прокси (тот же адрес, что в presigned-ссылках): попадает в CSP страниц.
+      S3_ORIGIN: ${S3_PUBLIC_ENDPOINT_URL:-http://localhost:8333}
+      # Куда Caddy отдаёт всё, что не /api, /public, /health и не /auth: образ `web` (профиль web)
+      # или, в разработке, Vite на хосте (WEB_UPSTREAM=host.docker.internal:5273).
+      WEB_UPSTREAM: ${WEB_UPSTREAM:-web:3000}
+      CSP_SCRIPT_SRC: ${CSP_SCRIPT_SRC:-'self'}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -347,6 +356,21 @@ services:
     depends_on:
       - api
       - keycloak
+    networks: [crm]
+
+  web:
+    # Веб-клиент: статический SPA (SvelteKit, adapter-static) за тем же Caddy. Собирается из соседнего
+    # репозитория `frontend`; включается профилем: docker compose --profile web up -d --build
+    profiles: ["web"]
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      # demo — экран входа предлагает выбрать демо-учётку; prod — только вход через Keycloak.
+      APP_MODE: ${APP_MODE:-demo}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-crm}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-crm-bff}
     networks: [crm]
 
 volumes:

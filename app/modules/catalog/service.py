@@ -31,6 +31,7 @@ from app.core.errors import (
 from app.core.security import Principal
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
+from app.modules.catalog.drift import drift_new_value
 from app.modules.catalog.models import (
     Contact,
     ContactChannel,
@@ -440,23 +441,30 @@ class OrganizationService:
         keys = fields or list(drift.keys())
         changes: dict[str, dict[str, Any]] = {}
         remaining = dict(drift)
+        resolved: list[str] = []
         for key in keys:
             if key not in drift or not hasattr(organization, key):
                 continue
             old = getattr(organization, key)
-            new = drift[key]
+            new = drift_new_value(drift[key])
             if _json_safe(old) != _json_safe(new):
                 changes[key] = {"old": _json_safe(old), "new": new}
                 setattr(organization, key, new)
+            # поле, которое уже стоит в карточке (сверка сама выставляет
+            # `registry_status`, а расхождение оставляет), тоже принято: баннер
+            # не должен висеть на значении, которое менять нечем
             remaining.pop(key, None)
+            resolved.append(key)
 
-        if not changes:
+        if not resolved:
             raise AppError(ErrorCode.VALIDATION, "Указанные поля не найдены в расхождениях")
 
         organization.requisites_drift = remaining or None
         organization.registry_checked_at = dt.datetime.now(dt.UTC)
         organization.version += 1
         await self._session.flush()
+        if not changes:
+            return organization
         await self._audit.record(
             AuditAction.ORG_DRIFT_APPLIED,
             entity_type="organization",

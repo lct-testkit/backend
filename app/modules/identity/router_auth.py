@@ -33,6 +33,7 @@ from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
 from app.modules.identity.keycloak import keycloak_client
 from app.modules.identity.models import User, UserInvite
+from app.modules.identity.redirects import safe_next_path
 from app.modules.identity.router_me import build_me
 from app.modules.identity.schemas import (
     AuthCallbackRequest,
@@ -116,7 +117,7 @@ async def login(
                 "nonce": nonce,
                 "code_verifier": verifier,
                 "redirect_uri": redirect_uri,
-                "next": next_url,
+                "next": safe_next_path(next_url),
             }
         ),
     )

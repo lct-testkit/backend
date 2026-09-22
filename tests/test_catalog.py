@@ -239,3 +239,26 @@ class TestCatalogPermissions:
         assert not has_permission("KAM", Permission.FILE_DELETE)
         assert has_permission("HEAD", Permission.FILE_DELETE)
         assert has_permission("ADMIN", Permission.FILE_DELETE)
+
+
+class TestDriftNewValue:
+    """`apply_drift` берёт новое значение из расхождения реквизитов.
+
+    Сверка с ЕГРЮЛ пишет `{поле: {"old": …, "new": …}}`. Раньше принятие
+    присваивало колонке весь словарь → `DBAPIError` и 500 на
+    `POST /organizations/{id}/apply-drift` (найдено при ручной проверке UI)."""
+
+    def test_reads_new_out_of_the_registry_form(self) -> None:
+        from app.modules.catalog.drift import drift_new_value
+
+        assert drift_new_value({"old": "г. Казань", "new": "г. Москва"}) == "г. Москва"
+
+    def test_keeps_a_bare_value(self) -> None:
+        from app.modules.catalog.drift import drift_new_value
+
+        assert drift_new_value("г. Москва") == "г. Москва"
+
+    def test_a_dict_without_new_is_left_alone(self) -> None:
+        from app.modules.catalog.drift import drift_new_value
+
+        assert drift_new_value({"old": "x"}) == {"old": "x"}

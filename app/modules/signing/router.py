@@ -11,7 +11,8 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Path, UploadFile, status
+from fastapi import APIRouter, Depends, File, Path, Query, UploadFile, status
+from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.context import get_client
@@ -28,6 +29,7 @@ from app.modules.signing.schemas import (
     EdmAgreementRevokeRequest,
     RejectRequest,
     SignatureDocumentCreateRequest,
+    SignatureDocumentListResponse,
     SignatureDocumentOut,
     SignatureOut,
     SignatureRequestOut,
@@ -38,6 +40,7 @@ from app.modules.signing.schemas import (
     VerifyResult,
     VoidRequest,
 )
+from app.modules.signing.models import SignatureDocument
 from app.modules.signing.service import (
     EdmAgreementService,
     SignatureDocumentService,
@@ -76,6 +79,28 @@ async def create_document(
     document = await service.create(principal, payload)
     requests = await service.list_requests(document.id)
     return _document_out(document, requests)
+
+
+@signature_documents_router.get(
+    "",
+    summary="Документы на подпись по сущности",
+    description=(
+        "История документов сделки: активные, подписанные, аннулированные, просроченные. "
+        "Права — как на саму сделку. Роль: KAM (свои сделки), HEAD, ADMIN."
+    ),
+    response_model=SignatureDocumentListResponse,
+)
+async def list_documents(
+    session: DbSession,
+    principal: Annotated[Principal, Depends(require_permission(Permission.SIGNATURE_CREATE))],
+    entity_type: Annotated[str, Query(max_length=32)],
+    entity_id: Annotated[uuid.UUID, Query()],
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+) -> SignatureDocumentListResponse:
+    service = SignatureDocumentService(session)
+    documents = await service.list_for_entity(principal, entity_type, entity_id, limit)
+    items = [_document_out(d, await service.list_requests(d.id)) for d in documents]
+    return SignatureDocumentListResponse(items=items)
 
 
 @signature_documents_router.get(
@@ -182,7 +207,25 @@ async def my_signature_requests(
     principal: Annotated[Principal, Depends(require_permission(Permission.SIGNATURE_SIGN))],
 ) -> list[SignatureRequestOut]:
     requests = await SignatureRequestService(session).my_requests(principal)
-    return [SignatureRequestOut.model_validate(r) for r in requests]
+    documents: dict[uuid.UUID, SignatureDocument] = {}
+    if requests:
+        found = await session.execute(
+            select(SignatureDocument).where(
+                SignatureDocument.id.in_({r.document_id for r in requests})
+            )
+        )
+        documents = {d.id: d for d in found.scalars().all()}
+    items: list[SignatureRequestOut] = []
+    for request in requests:
+        item = SignatureRequestOut.model_validate(request)
+        document = documents.get(request.document_id)
+        if document is not None:
+            item.document_title = document.title
+            item.deadline_at = document.deadline_at
+            item.entity_type = document.entity_type
+            item.entity_id = document.entity_id
+        items.append(item)
+    return items
 
 
 @signature_requests_router.post(
@@ -355,8 +398,8 @@ def _document_out(
         request_out = SignatureRequestOut.model_validate(request)
         token = revealed_tokens.get(request.id)
         if token:
-            base = f"{settings.base_url.rstrip('/')}{settings.public_prefix}"
-            request_out.sign_url = f"{base}/sign/{token}"
+            # Ссылка ведёт на страницу веб-клиента (SPA `/sign/{token}`), а не на JSON-ручку API.
+            request_out.sign_url = f"{settings.base_url.rstrip('/')}/sign/{token}"
         outs.append(request_out)
     out.requests = outs
     return out

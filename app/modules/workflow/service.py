@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import Select, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError, ErrorCode, FieldError, NotFoundError, ValidationError
@@ -305,8 +306,15 @@ class WorkflowService:
         # такой статус нужно сначала архивировать через мастер сопоставления.
         for sid, row in existing_statuses.items():
             if sid not in kept_ids and not row.is_archived:
-                await self._session.delete(row)
-        await self._session.flush()
+                try:
+                    async with self._session.begin_nested():
+                        await self._session.delete(row)
+                        await self._session.flush()
+                except IntegrityError:
+                    raise ValidationError(
+                        f"Статус «{row.name}» используется в сделках или истории: сначала архивируйте его через мастер сопоставления",
+                        [FieldError(field="statuses", reason=f"статус «{row.name}» нельзя удалить")],
+                    ) from None
 
         def resolve(ref: str, *, where: str) -> uuid.UUID:
             resolved = id_map.get(ref)
@@ -317,12 +325,14 @@ class WorkflowService:
                 )
             return resolved
 
-        existing_transitions = await self._load_transitions(workflow.id)
-        for row in existing_transitions:
+        # Переходы сопоставляются по паре статусов и обновляются на месте: на их id ссылается
+        # история сделок (FK RESTRICT), поэтому «удалить всё и создать заново» падало с 500,
+        # как только хотя бы одна сделка прошла по переходу.
+        reusable: dict[tuple[uuid.UUID, uuid.UUID], WorkflowTransition] = {}
+        for row in await self._load_transitions(workflow.id):
             if row.from_status_id in archived_ids or row.to_status_id in archived_ids:
                 continue  # исторические переходы не редактируются
-            await self._session.delete(row)
-        await self._session.flush()
+            reusable[(row.from_status_id, row.to_status_id)] = row
 
         seen_pairs: set[tuple[uuid.UUID, uuid.UUID]] = set()
         for item in payload.transitions:
@@ -345,19 +355,42 @@ class WorkflowService:
                 )
             seen_pairs.add((from_id, to_id))
 
-            self._session.add(
-                WorkflowTransition(
-                    workflow_id=workflow.id,
-                    from_status_id=from_id,
-                    to_status_id=to_id,
-                    name=item.name,
-                    allowed_roles=item.allowed_roles,
-                    conditions=item.conditions,
-                    actions=item.actions,
-                    requires_comment=item.requires_comment,
-                    sort_order=item.sort_order,
+            row = reusable.pop((from_id, to_id), None)
+            if row is not None:
+                row.name = item.name
+                row.allowed_roles = item.allowed_roles
+                row.conditions = item.conditions
+                row.actions = item.actions
+                row.requires_comment = item.requires_comment
+                row.sort_order = item.sort_order
+            else:
+                self._session.add(
+                    WorkflowTransition(
+                        workflow_id=workflow.id,
+                        from_status_id=from_id,
+                        to_status_id=to_id,
+                        name=item.name,
+                        allowed_roles=item.allowed_roles,
+                        conditions=item.conditions,
+                        actions=item.actions,
+                        requires_comment=item.requires_comment,
+                        sort_order=item.sort_order,
+                    )
                 )
-            )
+
+        # Убранные с холста переходы удаляются; если по ним уже проходили сделки — БД остановит
+        # это внешним ключом, и пользователь получит понятный отказ вместо 500.
+        for row in reusable.values():
+            try:
+                async with self._session.begin_nested():
+                    await self._session.delete(row)
+                    await self._session.flush()
+            except IntegrityError:
+                raise ValidationError(
+                    f"Переход «{row.name}» уже использован в истории сделок и не может быть удалён",
+                    [FieldError(field="transitions", reason=f"переход «{row.name}» использован")],
+                ) from None
+        await self._session.flush()
 
         existing_sla = await self._load_sla_rules(workflow.id)
         for rule in existing_sla:

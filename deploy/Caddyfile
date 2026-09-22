@@ -19,8 +19,12 @@
 
 (common_headers) {
 	header {
-		# Страница подписания рендерит PDF локально, без внешних ресурсов.
-		Content-Security-Policy "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+		# Веб-клиент (SPA) отдаётся с того же origin. Скрипты только со своего origin (сборка выносит
+		# bootstrap SvelteKit в /boot.js), presigned-ссылки SeaweedFS (загрузка, скачивание, PDF на
+		# странице подписания) живут на порту S3-прокси — им разрешены connect/img/frame.
+		# В локальной разработке с Vite (CSP_SCRIPT_SRC="'self' 'unsafe-inline' 'unsafe-eval'") политику
+		# ослабляют только для скриптов.
+		Content-Security-Policy "default-src 'self'; img-src 'self' data: blob: {$S3_ORIGIN}; connect-src 'self' {$S3_ORIGIN}; style-src 'self' 'unsafe-inline'; script-src {$CSP_SCRIPT_SRC:'self'}; worker-src 'self' blob:; object-src 'self' blob:; frame-src 'self' blob: {$S3_ORIGIN}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
@@ -54,7 +58,10 @@
 		respond "Not Found" 404
 	}
 
-	handle {
+	# API, публичные ручки подписания/проверки, health и статика Swagger UI (`/static/swagger/*`, `app/api/docs.py`,
+	# смонтирована на самом FastAPI-приложении абсолютным путём, не под `/api`) — в FastAPI.
+	@backend path /api/* /public/* /health/* /static/*
+	handle @backend {
 		reverse_proxy {
 			# Динамическое разрешение DNS вместо статического апстрима:
 			# `docker compose up --scale api=3` подхватывается без
@@ -73,6 +80,11 @@
 				write_timeout 300s
 			}
 		}
+	}
+
+	# Всё остальное — веб-клиент (статический SPA-образ `web`; в разработке WEB_UPSTREAM указывает на Vite).
+	handle {
+		reverse_proxy {$WEB_UPSTREAM:web:3000}
 	}
 }
 

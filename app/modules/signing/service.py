@@ -462,6 +462,22 @@ class SignatureDocumentService:
             raise ForbiddenError(f"Создание документов для {entity_type!r} доступно только ADMIN")
         return None
 
+    async def list_for_entity(
+        self, principal: Principal, entity_type: str, entity_id: uuid.UUID, limit: int = 50
+    ) -> list[SignatureDocument]:
+        """История документов сущности (в том числе аннулированные и просроченные)."""
+        await self._check_entity_access(principal, entity_type, entity_id)
+        stmt = (
+            select(SignatureDocument)
+            .where(
+                SignatureDocument.entity_type == entity_type,
+                SignatureDocument.entity_id == entity_id,
+            )
+            .order_by(SignatureDocument.created_at.desc())
+            .limit(limit)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
     async def ensure_access(self, principal: Principal, document: SignatureDocument) -> None:
         """Объектный уровень для `send`/`void` (раздел 3.2) — управление
         документом остаётся у тех, кто видит сделку целиком, а не у любого
@@ -1336,7 +1352,8 @@ class SignatureRequestService:
             bucket=original.bucket, key=original.storage_key
         )
         settings = get_settings()
-        verify_url = f"{settings.base_url.rstrip('/')}{settings.public_prefix}/verify/{{sig_id}}"
+        # QR и ссылка в штампе ведут на страницу проверки веб-клиента (`/verify/{id}`), а не на JSON-ручку.
+        verify_url = f"{settings.base_url.rstrip('/')}/verify/{{sig_id}}"
         last_signature = signatures[-1] if signatures else None
         final_sig_id = str(last_signature.id) if last_signature else document.id
         stamp_lines = [
