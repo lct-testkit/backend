@@ -238,6 +238,46 @@ class WorkflowService:
         )
         return workflow
 
+    # --- Удаление черновика (П4) ---------------------------------------------
+
+    async def delete_draft(self, workflow: Workflow, principal: Principal) -> None:
+        """Раздел 4/П4: удалить можно ТОЛЬКО черновик, который никогда не
+        публиковался — опубликованную воронку (с историей и, возможно, живыми
+        сделками) удалять нельзя ни при каких условиях, только архивировать
+        статусы по одному (раздел 4.11, `archive_status`). Проверка `state`
+        уже отсекает подавляющее большинство случаев, но сделка технически
+        могла быть заведена на черновик (например, интеграцией, до того как
+        воронку успели опубликовать) — второй, defensive-проверкой по
+        `Deal.workflow_id` не полагаемся только на `state`.
+        """
+        if workflow.state != WorkflowState.DRAFT.value:
+            raise AppError(
+                ErrorCode.WORKFLOW_NOT_DRAFT,
+                "Удалить можно только черновик воронки, который не публиковался — "
+                "опубликованную воронку можно только архивировать статусы по одному",
+            )
+
+        from app.modules.crm.models import Deal
+
+        has_deals = await self._session.scalar(
+            select(Deal.id).where(Deal.workflow_id == workflow.id).limit(1)
+        )
+        if has_deals is not None:
+            raise AppError(
+                ErrorCode.WORKFLOW_NOT_DRAFT,
+                "У воронки уже есть сделки — удаление невозможно",
+            )
+
+        workflow_id, code = workflow.id, workflow.code
+        await self._session.delete(workflow)
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.WORKFLOW_DELETED,
+            entity_type="workflow",
+            entity_id=workflow_id,
+            changes={"code": {"old": code, "new": None}},
+        )
+
     # --- Сохранение черновика графа ------------------------------------------
 
     def _check_version(self, workflow: Workflow, expected_version: int) -> None:
@@ -312,8 +352,13 @@ class WorkflowService:
                         await self._session.flush()
                 except IntegrityError:
                     raise ValidationError(
-                        f"Статус «{row.name}» используется в сделках или истории: сначала архивируйте его через мастер сопоставления",
-                        [FieldError(field="statuses", reason=f"статус «{row.name}» нельзя удалить")],
+                        f"Статус «{row.name}» используется в сделках или истории: "
+                        "сначала архивируйте его через мастер сопоставления",
+                        [
+                            FieldError(
+                                field="statuses", reason=f"статус «{row.name}» нельзя удалить"
+                            )
+                        ],
                     ) from None
 
         def resolve(ref: str, *, where: str) -> uuid.UUID:

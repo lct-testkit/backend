@@ -40,6 +40,7 @@ from app.modules.catalog.models import (
     Holiday,
     LossReason,
     Organization,
+    OrganizationLicense,
     Product,
     Region,
 )
@@ -891,6 +892,41 @@ class DirectionService:
         )
         return direction
 
+    async def delete(self, direction: Direction) -> None:
+        """П4: мягкое удаление, только если ничего не сломает — раздел 4:
+        нет дочерних направлений (иерархия, `parent_id`) и ни один продукт
+        на него не ссылается (`Product.direction_id`; сделки — только
+        транзитивно через продукт, отдельной FK на направление у них нет,
+        так что проверки продуктов достаточно)."""
+        child_exists = await self._session.scalar(
+            select(Direction.id)
+            .where(Direction.parent_id == direction.id, Direction.deleted_at.is_(None))
+            .limit(1)
+        )
+        if child_exists is not None:
+            raise AppError(
+                ErrorCode.ENTITY_IN_USE,
+                "У направления есть дочерние направления — удаление невозможно",
+            )
+        product_exists = await self._session.scalar(
+            select(Product.id)
+            .where(Product.direction_id == direction.id, Product.deleted_at.is_(None))
+            .limit(1)
+        )
+        if product_exists is not None:
+            raise AppError(
+                ErrorCode.ENTITY_IN_USE,
+                "На направление ссылаются продукты — удаление невозможно",
+            )
+        direction.deleted_at = dt.datetime.now(dt.UTC)
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.DIRECTION_DELETED,
+            entity_type="direction",
+            entity_id=direction.id,
+            changes={"code": {"old": direction.code, "new": None}},
+        )
+
 
 # =============================================================================
 # Продукты
@@ -1073,6 +1109,31 @@ class LossReasonService:
         )
         return reason
 
+    async def delete(self, reason: LossReason) -> None:
+        """П4: жёсткое удаление (таблица без `deleted_at` — докстринг модели:
+        «деактивируется, не удаляется», это верно вплоть до этого пункта) —
+        только если причина не используется ни в одной сделке
+        (`Deal.loss_reason_id`)."""
+        from app.modules.crm.models import Deal
+
+        in_use = await self._session.scalar(
+            select(Deal.id).where(Deal.loss_reason_id == reason.id).limit(1)
+        )
+        if in_use is not None:
+            raise AppError(
+                ErrorCode.ENTITY_IN_USE,
+                "Причина используется в сделках — удаление невозможно",
+            )
+        reason_id, code = reason.id, reason.code
+        await self._session.delete(reason)
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.LOSS_REASON_DELETED,
+            entity_type="loss_reason",
+            entity_id=reason_id,
+            changes={"code": {"old": code, "new": None}},
+        )
+
 
 # =============================================================================
 # Производственный календарь
@@ -1238,3 +1299,32 @@ class CustomFieldDefService:
 
 def region_list_query() -> Select[tuple[Region]]:
     return select(Region).order_by(Region.name)
+
+
+# =============================================================================
+# Лицензии/договоры вуз↔вендор↔ПО (П3, rtk_requiriments.md разд. 4, Треб.1)
+#
+# Только чтение здесь: единственный путь записи — импорт (`imports.service`,
+# entity_type='license'), у ручки нет отдельных create/update/delete —
+# карточка организации показывает уже загруженное, полноценный экран
+# управления не входит в этот минимум (см. отчёт по П3).
+# =============================================================================
+
+
+class OrganizationLicenseService:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    def list_query(
+        self, *, organization_id: uuid.UUID | None = None
+    ) -> Select[tuple[OrganizationLicense]]:
+        stmt = select(OrganizationLicense).where(OrganizationLicense.deleted_at.is_(None))
+        if organization_id is not None:
+            stmt = stmt.where(OrganizationLicense.organization_id == organization_id)
+        return stmt
+
+    async def get_or_404(self, license_id: uuid.UUID) -> OrganizationLicense:
+        license_ = await self._session.get(OrganizationLicense, license_id)
+        if license_ is None or license_.deleted_at is not None:
+            raise NotFoundError("Лицензия", license_id)
+        return license_

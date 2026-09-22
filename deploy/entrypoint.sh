@@ -59,10 +59,17 @@ case "${MODE}" in
       --no-access-log
     ;;
   seed)
-    # Демо-воронки b2b_university_v1 и b2c_individual_v1 (раздел 7).
-    # Идемпотентно: повторный запуск на заполненной базе ничего не меняет.
-    echo "заполнение демо-воронок..."
-    exec python -m app.modules.workflow.seed
+    # Демо-воронки b2b_university_v1 и b2c_individual_v1 (раздел 7), шаблоны
+    # отчётов + пара строк демо-истории запусков, шаблоны уведомлений,
+    # источники интеграций + служебная учётка INTEGRATION. Каждый сид
+    # идемпотентен по коду/маркеру — повторный запуск на заполненной базе
+    # ничего не меняет (docs/backend-issues.md #29: раньше засевались только
+    # воронки, остальные три модуля запускались только руками).
+    echo "заполнение демо-данных..."
+    python -m app.modules.workflow.seed
+    python -m app.modules.reporting.seed
+    python -m app.modules.notification.seed
+    python -m app.modules.integration.seed
     ;;
   shell)
     exec python

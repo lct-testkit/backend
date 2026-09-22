@@ -8,7 +8,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-ImportEntityLiteral = Literal["organization", "product"]
+ImportEntityLiteral = Literal["organization", "product", "license"]
 ImportModeLiteral = Literal["insert", "upsert", "update"]
 SourceFormatLiteral = Literal["xlsx", "xls", "csv"]
 

@@ -45,7 +45,7 @@ from app.core.storage import ensure_bucket, generate_presigned_get, upload_objec
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
 from app.modules.files.models import Attachment, AttachmentCategory, File, FileStatus
-from app.modules.reporting.builders import REPORT_BUILDERS, REPORT_ESTIMATORS
+from app.modules.reporting.builders import REPORT_BUILDERS, REPORT_ESTIMATORS, ReportDataset
 from app.modules.reporting.models import (
     Dashboard,
     DashboardWidget,
@@ -277,6 +277,23 @@ class ReportJobService:
             entity_id=job.id,
             changes={"error": {"old": None, "new": error[:500]}},
         )
+
+    async def get_data(self, job: ReportJob, principal: Principal) -> ReportDataset:
+        """П2 / backend-issues.md #19: результат в JSON, а не в файле.
+
+        Не читает `job.file_id`/`job.status` нарочно: строит датасет заново
+        по `job.template_code`/`job.params`, тем же builder'ом, что и
+        `generate()` для xlsx/pdf — тогда `/data` отдаёт свежие данные (не
+        снимок на момент, когда файл когда-то генерировался) и работает даже
+        для задания, чей файл ещё строится (`queued`/`processing`) или уже
+        удалён ретеншеном. Никакого файла в S3 и `REPORT_EXPORTED` — это
+        чтение, не выгрузка (docstring `ReportDataOut`).
+        """
+        self.ensure_read_access(job, principal)
+        template = await ReportTemplateService(self._session).get_or_404(job.template_code)
+        kind = template.query_def.get("kind", template.code)
+        builder = REPORT_BUILDERS[kind]
+        return await builder(self._session, principal, job.params)
 
     async def download(self, job: ReportJob, principal: Principal) -> tuple[str, dt.datetime]:
         self.ensure_read_access(job, principal)

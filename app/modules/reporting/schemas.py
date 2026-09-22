@@ -45,7 +45,18 @@ class ReportTemplateListResponse(BaseModel):
 class ReportJobCreateRequest(BaseModel):
     template_code: NonEmptyStr = Field(max_length=64)
     format: FormatLiteral
-    params: dict[str, Any] = Field(default_factory=dict)
+    params: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Параметры вида отчёта, накладываются поверх `default_params` шаблона. "
+            "Специфичные для вида (например `months`/`limit`/`workflow_id`) — "
+            "см. `GET /report-templates`. Общие для П1 (rtk_requiriments.md разд. 4, "
+            "ФТ.1/ФТ.4), поддержаны почти всеми видами, кроме `learning_progress`: "
+            "`date_from`/`date_to` (YYYY-MM-DD, период включительно), "
+            "`organization_ids`/`direction_ids`/`product_ids`/`owner_ids` "
+            "(списки UUID)."
+        ),
+    )
 
 
 class ReportJobOut(BaseModel):
@@ -72,6 +83,22 @@ class ReportJobListResponse(BaseModel):
 class ReportDownloadResponse(BaseModel):
     url: str
     expires_at: dt.datetime
+
+
+class ReportDataOut(BaseModel):
+    """rtk_requiriments.md разд. 6.4 («возможность формирования результирующего
+    json-файла»; см. также backend-issues.md #19): тот же `ReportDataset`,
+    что рендерится в xlsx/pdf/png, отданный как JSON — для дашбордов и
+    клиентских диаграмм. Строится заново по параметрам задания при каждом
+    запросе (свежие данные), не создаёт файл в S3 и не пишет `REPORT_EXPORTED`
+    — это чтение, не выгрузка (`reporting.service.ReportJobService.get_data`)."""
+
+    title: str
+    columns: list[str]
+    rows: list[list[Any]]
+    note: str | None = None
+    generated_at: dt.datetime
+    row_count: int
 
 
 # =============================================================================

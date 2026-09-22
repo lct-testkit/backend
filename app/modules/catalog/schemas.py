@@ -500,3 +500,34 @@ class CustomFieldDefOut(BaseModel):
 class CustomFieldDefListResponse(BaseModel):
     items: list[CustomFieldDefOut]
     next_cursor: str | None = None
+
+
+# =============================================================================
+# Лицензии/договоры вуз↔вендор↔ПО (П3, rtk_requiriments.md разд. 4, Треб.1)
+# =============================================================================
+
+TransferStatusLiteral = Literal["not_started", "in_progress", "transferred", "declined"]
+
+
+class OrganizationLicenseOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    organization_id: uuid.UUID
+    vendor: str
+    product_name: str
+    contract_number: str
+    license_signed_at: dt.date | None = None
+    license_valid_year: int | None = None
+    transfer_status: TransferStatusLiteral | None = None
+    manager_full_name: str | None = None
+    responsible_contacts: str | None = None
+    comment: str | None = None
+    version: int
+    created_at: dt.datetime
+    updated_at: dt.datetime
+
+
+class OrganizationLicenseListResponse(BaseModel):
+    items: list[OrganizationLicenseOut]
+    next_cursor: str | None = None

@@ -271,3 +271,25 @@ async def archive_status(
         affected_count=job.affected_count,
         warnings=warnings,
     )
+
+
+@router.delete(
+    "/{workflow_id}",
+    summary="Удалить черновик воронки",
+    description=(
+        "Только для воронки в состоянии draft, которая никогда не "
+        "публиковалась и на которую не заведено ни одной сделки — иначе 409 "
+        "CRM-1207. Опубликованную воронку удалить нельзя ни при каких "
+        "условиях, только архивировать статусы по одному "
+        "(`POST .../statuses/{status_id}/archive`). Роль: запись воронок."
+    ),
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_workflow(
+    session: DbSession,
+    principal: WorkflowWrite,
+    workflow_id: Annotated[uuid.UUID, Path()],
+) -> None:
+    service = WorkflowService(session)
+    workflow = await service.get_or_404(workflow_id)
+    await service.delete_draft(workflow, principal)

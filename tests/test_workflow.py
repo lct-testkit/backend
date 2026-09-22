@@ -7,12 +7,17 @@
 
 Тесты не требуют поднятых PostgreSQL, Redis и Keycloak: `_validate_graph_data`
 и DSL — чистые функции, а ORM-объекты здесь используются как обычные Python
-инстансы, без сессии и без похода в БД.
+инстансы, без сессии и без похода в БД. Исключение — `TestDeleteDraftWorkflow`
+(П4, удаление черновика воронки): настоящая Postgres обязательна, тот же
+приём, что `tests/test_imports.py::TestLicenseImportEndToEnd` — см.
+`tests/conftest.py`.
 """
 
 from __future__ import annotations
 
 import uuid
+
+import pytest
 
 from app.core.permissions import Permission, has_permission
 from app.modules.workflow import dsl
@@ -24,6 +29,7 @@ from app.modules.workflow.models import (
 )
 from app.modules.workflow.seed import _b2b_spec, _b2c_spec
 from app.modules.workflow.service import _validate_graph_data
+from tests.conftest import TEST_DATABASE_URL, _make_user, authenticate, run
 
 
 def _status(code: str, type_: str, *, archived: bool = False) -> WorkflowStatus:
@@ -346,3 +352,70 @@ class TestPermissionMatrix:
 class TestWorkflowState:
     def test_states_match_spec_enum(self) -> None:
         assert {s.value for s in WorkflowState} == {"draft", "published", "archived"}
+
+
+class TestDeleteDraftWorkflow:
+    """П4: `DELETE /api/workflows/{id}` — только черновик, который никогда не
+    публиковался. Настоящая Postgres обязательна — см. докстринг модуля."""
+
+    pytestmark = pytest.mark.skipif(
+        not TEST_DATABASE_URL, reason="нужен TEST_DATABASE_URL с применёнными миграциями"
+    )
+
+    def _admin(self, client) -> str:
+        admin = run(client, _make_user, "ADMIN")
+        csrf = authenticate(client, admin)
+        client.headers["X-CSRF-Token"] = csrf
+        return csrf
+
+    def test_deletes_a_never_published_draft(self, client) -> None:
+        self._admin(client)
+        create = client.post(
+            "/api/workflows",
+            json={
+                "code": f"wf_draft_{uuid.uuid4().hex[:8]}", "name": "Черновик на удаление",
+                "deal_type": "b2b", "is_default": False,
+            },
+        )
+        assert create.status_code == 201, create.text
+        workflow_id = create.json()["id"]
+
+        delete = client.delete(f"/api/workflows/{workflow_id}")
+        assert delete.status_code == 204, delete.text
+        assert client.get(f"/api/workflows/{workflow_id}").status_code == 404
+
+    def test_published_workflow_cannot_be_deleted(self, client) -> None:
+        from sqlalchemy import update
+
+        from app.core.db import session_scope
+        from app.modules.workflow.models import Workflow
+
+        self._admin(client)
+        create = client.post(
+            "/api/workflows",
+            json={
+                "code": f"wf_pub_{uuid.uuid4().hex[:8]}", "name": "Уже опубликована",
+                "deal_type": "b2b", "is_default": False,
+            },
+        )
+        workflow_id = create.json()["id"]
+
+        async def _mark_published() -> None:
+            async with session_scope() as session:
+                await session.execute(
+                    update(Workflow)
+                    .where(Workflow.id == uuid.UUID(workflow_id))
+                    .values(
+                        state="published",
+                        published_graph={"statuses": [], "transitions": []},
+                        graph_hash="stub-hash-for-test",
+                    )
+                )
+
+        run(client, _mark_published)
+
+        delete = client.delete(f"/api/workflows/{workflow_id}")
+        assert delete.status_code == 409, delete.text
+        assert delete.json()["code"] == "CRM-1207"
+        # Не удалилась — карточка всё ещё читается.
+        assert client.get(f"/api/workflows/{workflow_id}").status_code == 200

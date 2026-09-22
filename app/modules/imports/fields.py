@@ -25,6 +25,13 @@ from app.modules.catalog.validators import validate_requisite
 FieldKind = Literal[
     "text", "int", "decimal", "bool", "date", "email", "phone",
     "inn", "kpp", "ogrn", "region_code", "direction_code", "org_type", "format",
+    # П3 (rtk_requiriments.md разд. 4, Треб.1): `organization_name` — тот же
+    # приём FK-резолва, что `region_code`/`direction_code` (перехватывается
+    # в `imports.service._extract_row` до `validate_field`, см. `_FK_TARGETS`
+    # там же), только колонка поиска — `Organization.name`, а не `.code`.
+    # `transfer_status` — обычное поле с фиксированным набором значений
+    # (валидируется ниже, тем же приёмом, что `org_type`/`format`).
+    "organization_name", "transfer_status",
 ]
 
 _EMAIL_ADAPTER: TypeAdapter[str] = TypeAdapter(EmailStr)
@@ -67,10 +74,31 @@ PRODUCT_FIELDS: tuple[FieldSpec, ...] = (
     FieldSpec("currency", "Валюта", "text"),
 )
 
-_NATURAL_KEYS: dict[str, str] = {"organization": "inn", "product": "code"}
+# П3 (rtk_requiriments.md разд. 4, Треб.1): лицензии/договоры вуз↔вендор↔ПО.
+# Порядок и названия полей — буквально из списка кейса. `organization_name`
+# резолвится в `organization_id` (см. докстринг kind'а выше);
+# `contract_number` — natural key импорта (см. `catalog.models.
+# OrganizationLicense`, докстринг — почему не составной ключ).
+LICENSE_FIELDS: tuple[FieldSpec, ...] = (
+    FieldSpec("organization_name", "Название ВУЗа", "organization_name", required=True),
+    FieldSpec("vendor", "Вендор", "text", required=True),
+    FieldSpec("product_name", "ПО", "text", required=True),
+    FieldSpec("contract_number", "Номер договора", "text", required=True),
+    FieldSpec("license_signed_at", "Подписание лицензии", "date"),
+    FieldSpec("license_valid_year", "Срок действия лицензии (год)", "int"),
+    FieldSpec("transfer_status", "Статус по передаче", "transfer_status"),
+    FieldSpec("manager_full_name", "ФИО Менеджера", "text"),
+    FieldSpec("responsible_contacts", "Ответственные от ВУЗа", "text"),
+    FieldSpec("comment", "Комментарий", "text"),
+)
+
+_NATURAL_KEYS: dict[str, str] = {
+    "organization": "inn", "product": "code", "license": "contract_number",
+}
 _ENTITY_FIELDS: dict[str, tuple[FieldSpec, ...]] = {
     "organization": ORGANIZATION_FIELDS,
     "product": PRODUCT_FIELDS,
+    "license": LICENSE_FIELDS,
 }
 
 
@@ -157,9 +185,17 @@ def validate_field(spec: FieldSpec, raw: str) -> tuple[object | None, str | None
         if value not in allowed:
             return None, f"«{spec.label}»: допустимые значения — {', '.join(sorted(allowed))}"
         return value, None
-    if spec.kind in ("region_code", "direction_code"):
-        # Существование кода проверяется в сервисе (нужен доступ к БД) —
-        # здесь только формат непустой строки.
+    if spec.kind == "transfer_status":
+        allowed = {"not_started", "in_progress", "transferred", "declined"}
+        if value not in allowed:
+            return None, f"«{spec.label}»: допустимые значения — {', '.join(sorted(allowed))}"
+        return value, None
+    if spec.kind in ("region_code", "direction_code", "organization_name"):
+        # Существование проверяется в сервисе (нужен доступ к БД) — здесь
+        # только формат непустой строки. `imports.service._extract_row`
+        # перехватывает эти виды раньше `validate_field` (см. `_FK_TARGETS`),
+        # так что эта ветка — тот же смысловой запасной путь, что уже был
+        # у region_code/direction_code, а не отдельная логика.
         return value, None
 
     return None, f"Неизвестный тип поля: {spec.kind}"

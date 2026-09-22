@@ -8,6 +8,16 @@
 
 name: rtk-crm
 
+# Демо/прод-стенд живёт неделями без внешнего сборщика логов — без ротации
+# json-file-драйвер Docker копит их на диске неограниченно (особенно Caddy:
+# строка JSON на каждый запрос). 10 МБ × 3 файла на контейнер — этого хватает
+# на просмотр недавней истории (docker compose logs), не разрастаясь без контроля.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 x-api-env: &api-env
   APP_PROFILE: ${APP_PROFILE:-demo}
   # Роль crm_app: только SELECT/INSERT на audit_log, без UPDATE/DELETE
@@ -110,6 +120,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    logging: *logging
     networks: [crm]
 
   redis:
@@ -132,6 +143,7 @@ services:
       interval: 10s
       timeout: 3s
       retries: 10
+    logging: *logging
     networks: [crm]
 
   seaweedfs:
@@ -156,6 +168,7 @@ services:
       interval: 15s
       timeout: 5s
       retries: 10
+    logging: *logging
     networks: [crm]
 
   ntp:
@@ -172,6 +185,7 @@ services:
     cap_add:
       - SYS_TIME
       - NET_BIND_SERVICE
+    logging: *logging
     networks: [crm]
 
   sms-gateway-mock:
@@ -190,6 +204,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    logging: *logging
     networks: [crm]
 
   keycloak:
@@ -234,6 +249,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    logging: *logging
     networks: [crm]
 
   migrate:
@@ -252,6 +268,7 @@ services:
       postgres:
         condition: service_healthy
     restart: "no"
+    logging: *logging
     networks: [crm]
 
   seed:
@@ -268,6 +285,7 @@ services:
       migrate:
         condition: service_completed_successfully
     restart: "no"
+    logging: *logging
     networks: [crm]
 
   api:
@@ -293,6 +311,7 @@ services:
         condition: service_healthy
       seed:
         condition: service_completed_successfully
+    logging: *logging
     networks: [crm]
 
   worker:
@@ -318,6 +337,7 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+    logging: *logging
     networks: [crm]
 
   caddy:
@@ -339,6 +359,10 @@ services:
       # или, в разработке, Vite на хосте (WEB_UPSTREAM=host.docker.internal:5273).
       WEB_UPSTREAM: ${WEB_UPSTREAM:-web:3000}
       CSP_SCRIPT_SRC: ${CSP_SCRIPT_SRC:-'self'}
+      # Имя TLS-сайта (SNI сертификата `tls internal`) в Caddyfile — раньше
+      # объявлялась в .env.example, но не пробрасывалась сюда, поэтому смена
+      # значения не имела эффекта и сайт всегда использовал дефолт localhost.
+      CRM_TLS_HOST: ${CRM_TLS_HOST:-localhost}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -356,6 +380,7 @@ services:
     depends_on:
       - api
       - keycloak
+    logging: *logging
     networks: [crm]
 
   web:
@@ -371,6 +396,7 @@ services:
       APP_MODE: ${APP_MODE:-demo}
       KEYCLOAK_REALM: ${KEYCLOAK_REALM:-crm}
       KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-crm-bff}
+    logging: *logging
     networks: [crm]
 
 volumes:

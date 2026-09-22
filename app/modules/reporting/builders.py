@@ -20,6 +20,18 @@ xlsx/pdf/png. Скоуп строк — тот же `deal_scope_clause`, что 
 десятков), поэтому они всегда идут по лёгкому пути. Только `stuck_deals` —
 листинг по отдельным сделкам, где строк может быть много — имеет настоящую
 оценку.
+
+П1 (rtk_requiriments.md разд. 4, ФТ.1/ФТ.4): «фильтрация... за выбранный
+период по выбранным вузам, ИТ-направлениям, ИТ-продуктам, ответственным».
+`ReportFilters`/`_parse_report_filters` разбирают шесть общих ключей
+`params` — `date_from`, `date_to`, `organization_ids`, `direction_ids`,
+`product_ids`, `owner_ids`, все опциональны (отсутствие = без фильтра,
+старые вызовы без этих ключей ведут себя как раньше). `_apply_deal_filters`/
+`_apply_entity_filters` — общие хелперы применения, каждый builder сам решает,
+по какой дате считать «период» (по умолчанию `Deal.created_at`) и какие из
+пяти фильтров ему структурно осмысленны — решение описано в комментарии
+рядом с телом builder'а. `learning_progress` не участвует (честная заглушка,
+данных нет структурно).
 """
 
 from __future__ import annotations
@@ -36,8 +48,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import FieldError, ValidationError
 from app.core.permissions import DealScope, deal_scope_for
 from app.core.security import Principal
-from app.modules.catalog.models import LossReason, Organization, Region
-from app.modules.crm.models import Deal, DealStatusHistory
+from app.modules.catalog.models import LossReason, Organization, Product, Region
+from app.modules.crm.models import Deal, DealProduct, DealStatusHistory
 from app.modules.crm.service import deal_scope_clause
 from app.modules.identity.models import User
 from app.modules.workflow.models import TERMINAL_TYPES, StatusType, Workflow, WorkflowStatus
@@ -83,14 +95,172 @@ def _parse_int(
     return max(minimum, min(maximum, value))
 
 
-async def _scoped_deal_ids(session: AsyncSession, principal: Principal):
+def _parse_date(params: dict[str, Any], key: str) -> dt.date | None:
+    raw = params.get(key)
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, dt.datetime):
+        return raw.date()
+    if isinstance(raw, dt.date):
+        return raw
+    try:
+        return dt.date.fromisoformat(str(raw))
+    except ValueError as exc:
+        raise ValidationError(
+            f"Параметр {key!r} должен быть датой в формате YYYY-MM-DD",
+            [FieldError(field=key, reason="ожидается дата ISO-8601")],
+        ) from exc
+
+
+def _parse_date_range(params: dict[str, Any]) -> tuple[dt.date | None, dt.date | None]:
+    """Раздел 4/ФТ.1: «фильтрация... за выбранный период». Оба конца
+    включительны — `date_to` расширяется до конца дня при применении к
+    timestamptz-колонке (см. `_apply_deal_filters`/`_day_start`)."""
+    date_from = _parse_date(params, "date_from")
+    date_to = _parse_date(params, "date_to")
+    if date_from is not None and date_to is not None and date_from > date_to:
+        raise ValidationError(
+            "Параметр 'date_from' не может быть позже 'date_to'",
+            [FieldError(field="date_from", reason="date_from позже date_to")],
+        )
+    return date_from, date_to
+
+
+def _parse_uuid_list(params: dict[str, Any], key: str) -> list[uuid.UUID] | None:
+    """Список ID фильтра (организации/направления/продукты/ответственные —
+    раздел 4/ФТ.1 и ФТ.4). Принимает JSON-массив (обычный путь: `params`
+    приходит из тела `POST /reports`) и, на всякий случай, CSV-строку —
+    тем же приёмом прощения формата, что уже применяет `validate_field`
+    для чисел с запятой вместо точки."""
+    raw = params.get(key)
+    if raw is None or raw == "" or raw == []:
+        return None
+    if isinstance(raw, str):
+        items: list[Any] = [item.strip() for item in raw.split(",") if item.strip()]
+    elif isinstance(raw, list | tuple):
+        items = list(raw)
+    else:
+        raise ValidationError(
+            f"Параметр {key!r} должен быть списком UUID",
+            [FieldError(field=key, reason="ожидается массив UUID")],
+        )
+    if not items:
+        return None
+    try:
+        parsed = [uuid.UUID(str(item)) for item in items]
+    except ValueError as exc:
+        raise ValidationError(
+            f"Параметр {key!r} должен быть списком UUID",
+            [FieldError(field=key, reason="некорректный UUID в списке")],
+        ) from exc
+    return parsed
+
+
+@dataclass(slots=True)
+class ReportFilters:
+    """П1 (rtk_requiriments.md разд. 4, ФТ.1/ФТ.4): период + фильтры по
+    вузам/направлениям/продуктам/ответственным, общие для builder'ов этого
+    модуля. Каждое поле — опционально, отсутствие означает «без фильтра» —
+    старые вызовы (например, дашборды, уже сохранившие `config.params` без
+    этих ключей) продолжают работать без изменений."""
+
+    date_from: dt.date | None = None
+    date_to: dt.date | None = None
+    organization_ids: list[uuid.UUID] | None = None
+    direction_ids: list[uuid.UUID] | None = None
+    product_ids: list[uuid.UUID] | None = None
+    owner_ids: list[uuid.UUID] | None = None
+
+    def has_any(self) -> bool:
+        return any(
+            (
+                self.date_from,
+                self.date_to,
+                self.organization_ids,
+                self.direction_ids,
+                self.product_ids,
+                self.owner_ids,
+            )
+        )
+
+
+def _parse_report_filters(params: dict[str, Any]) -> ReportFilters:
+    date_from, date_to = _parse_date_range(params)
+    return ReportFilters(
+        date_from=date_from,
+        date_to=date_to,
+        organization_ids=_parse_uuid_list(params, "organization_ids"),
+        direction_ids=_parse_uuid_list(params, "direction_ids"),
+        product_ids=_parse_uuid_list(params, "product_ids"),
+        owner_ids=_parse_uuid_list(params, "owner_ids"),
+    )
+
+
+def _day_start(value: dt.date) -> dt.datetime:
+    return dt.datetime.combine(value, dt.time.min, tzinfo=dt.UTC)
+
+
+def _apply_entity_filters(stmt: Any, filters: ReportFilters) -> Any:
+    """Организации/направления/продукты/ответственные — без периода. Отдельно
+    от `_apply_deal_filters`, потому что `build_monthly_dynamics` применяет
+    период к двум разным колонкам (`created_at`/`closed_at`) самостоятельно,
+    а сущностные фильтры у обеих серий одни и те же."""
+    if filters.organization_ids:
+        stmt = stmt.where(Deal.organization_id.in_(filters.organization_ids))
+    if filters.owner_ids:
+        stmt = stmt.where(Deal.owner_id.in_(filters.owner_ids))
+    if filters.product_ids:
+        stmt = stmt.where(
+            Deal.id.in_(
+                select(DealProduct.deal_id).where(
+                    DealProduct.product_id.in_(filters.product_ids)
+                )
+            )
+        )
+    if filters.direction_ids:
+        stmt = stmt.where(
+            Deal.id.in_(
+                select(DealProduct.deal_id)
+                .join(Product, Product.id == DealProduct.product_id)
+                .where(Product.direction_id.in_(filters.direction_ids))
+            )
+        )
+    return stmt
+
+
+def _apply_deal_filters(
+    stmt: Any, filters: ReportFilters, *, date_column: Any = None
+) -> Any:
+    """Период + фильтры по сущностям для запросов, у которых `Deal` — базовая
+    таблица (`select(...).select_from(Deal)` либо просто `select(Deal...)`).
+
+    `date_column` — по какой дате считать «период»; по умолчанию
+    `Deal.created_at` (когда заведена сделка). Отдельные builder'ы передают
+    более уместную колонку своим принципалам (например `build_loss_reasons`
+    — `Deal.closed_at`, момент, когда причина отказа стала известна) —
+    выбор для каждого builder'а описан в его собственном комментарии."""
+    column = date_column if date_column is not None else Deal.created_at
+    if filters.date_from is not None:
+        stmt = stmt.where(column >= _day_start(filters.date_from))
+    if filters.date_to is not None:
+        stmt = stmt.where(column < _day_start(filters.date_to) + dt.timedelta(days=1))
+    return _apply_entity_filters(stmt, filters)
+
+
+async def _scoped_deal_ids(
+    session: AsyncSession, principal: Principal, filters: ReportFilters | None = None
+):
     """Подзапрос ID сделок в скоупе принципала — переиспользуется билдерами,
     которым нужно фильтровать `deal_status_history`/другие журналы, у
-    которых нет собственного owner_id."""
+    которых нет собственного owner_id. `filters`, когда передан, сужает тот
+    же набор сделок по периоду/сущностям (раздел 4/ФТ.1) — те же условия,
+    что применяются к самой `Deal` в этом же builder'е."""
     clause = await deal_scope_clause(session, principal)
     stmt = select(Deal.id).where(Deal.deleted_at.is_(None))
     if clause is not None:
         stmt = stmt.where(clause)
+    if filters is not None:
+        stmt = _apply_deal_filters(stmt, filters)
     return stmt
 
 
@@ -125,6 +295,7 @@ async def build_deal_funnel(
     session: AsyncSession, principal: Principal, params: dict[str, Any]
 ) -> ReportDataset:
     workflow_id = await _resolve_workflow_id(session, params)
+    filters = _parse_report_filters(params)
     statuses = (
         (
             await session.execute(
@@ -143,11 +314,15 @@ async def build_deal_funnel(
         return ReportDataset(title="Воронка по статусам", columns=columns, rows=[])
 
     note: str | None = None
-    if deal_scope_for(principal.role) is DealScope.ALL:
+    if deal_scope_for(principal.role) is DealScope.ALL and not filters.has_any():
         # Быстрый путь: материализованное представление (раздел 3.4/4.13),
         # обновляется `reporting.tasks.refresh_report_materialized_views`
         # каждые 5 минут. Скоуп ALL — единственный случай, когда это честно:
-        # представление не знает о KAM/HEAD-ограничениях по построению.
+        # представление не знает о KAM/HEAD-ограничениях по построению — и,
+        # по той же причине, не знает о фильтрах П1 (период/вуз/направление/
+        # продукт/ответственный): снимок агрегирован по всем сделкам сразу.
+        # Как только хотя бы один фильтр задан, считаем построчно (ветка
+        # `else`), даже для ADMIN.
         mv_rows = (
             await session.execute(
                 text(
@@ -173,6 +348,7 @@ async def build_deal_funnel(
         )
         if clause is not None:
             current_stmt = current_stmt.where(clause)
+        current_stmt = _apply_deal_filters(current_stmt, filters)
         current_rows = (await session.execute(current_stmt)).all()
         current_map = {row[0]: row[1] for row in current_rows}
 
@@ -186,7 +362,9 @@ async def build_deal_funnel(
                 )
                 .where(
                     DealStatusHistory.to_status_id.in_(status_ids),
-                    DealStatusHistory.deal_id.in_(await _scoped_deal_ids(session, principal)),
+                    DealStatusHistory.deal_id.in_(
+                        await _scoped_deal_ids(session, principal, filters)
+                    ),
                 )
                 .group_by(DealStatusHistory.to_status_id)
             )
@@ -222,6 +400,7 @@ async def build_deal_funnel(
 async def build_kam_summary(
     session: AsyncSession, principal: Principal, params: dict[str, Any]
 ) -> ReportDataset:
+    filters = _parse_report_filters(params)
     clause = await deal_scope_clause(session, principal)
     name_expr = func.coalesce(User.display_name, User.full_name)
     terminal = [t.value for t in TERMINAL_TYPES]
@@ -245,6 +424,7 @@ async def build_kam_summary(
     )
     if clause is not None:
         stmt = stmt.where(clause)
+    stmt = _apply_deal_filters(stmt, filters)
     result = (await session.execute(stmt)).all()
 
     rows = [
@@ -273,6 +453,7 @@ async def build_kam_summary(
 async def build_region_summary(
     session: AsyncSession, principal: Principal, params: dict[str, Any]
 ) -> ReportDataset:
+    filters = _parse_report_filters(params)
     clause = await deal_scope_clause(session, principal)
     region_name = func.coalesce(Region.name, "Без региона")
     stmt = (
@@ -293,6 +474,7 @@ async def build_region_summary(
     )
     if clause is not None:
         stmt = stmt.where(clause)
+    stmt = _apply_deal_filters(stmt, filters)
     result = (await session.execute(stmt)).all()
     rows = [[name, count, float(amount) if amount else 0.0] for name, count, amount in result]
     return ReportDataset(
@@ -310,12 +492,18 @@ async def build_region_summary(
 async def build_loss_reasons(
     session: AsyncSession, principal: Principal, params: dict[str, Any]
 ) -> ReportDataset:
+    # Период считается по `closed_at` (когда сделка фактически проиграна),
+    # а не `created_at`: «причины отказов за период» естественнее читать как
+    # «сколько отказов случилось в этом периоде», а не «сколько отказов дали
+    # сделки, заведённые в этом периоде» (могли быть заведены сильно раньше).
+    filters = _parse_report_filters(params)
     clause = await deal_scope_clause(session, principal)
     total_stmt = select(func.count(Deal.id)).where(
         Deal.deleted_at.is_(None), Deal.loss_reason_id.is_not(None)
     )
     if clause is not None:
         total_stmt = total_stmt.where(clause)
+    total_stmt = _apply_deal_filters(total_stmt, filters, date_column=Deal.closed_at)
     total = (await session.execute(total_stmt)).scalar_one() or 0
 
     stmt = (
@@ -328,6 +516,7 @@ async def build_loss_reasons(
     )
     if clause is not None:
         stmt = stmt.where(clause)
+    stmt = _apply_deal_filters(stmt, filters, date_column=Deal.closed_at)
     result = (await session.execute(stmt)).all()
     rows = [
         [name, category, count, round(count / total * 100, 1) if total else 0.0]
@@ -348,6 +537,7 @@ async def build_loss_reasons(
 async def build_sla_compliance(
     session: AsyncSession, principal: Principal, params: dict[str, Any]
 ) -> ReportDataset:
+    filters = _parse_report_filters(params)
     clause = await deal_scope_clause(session, principal)
     stmt = (
         select(Deal.sla_state, func.count(Deal.id))
@@ -356,6 +546,7 @@ async def build_sla_compliance(
     )
     if clause is not None:
         stmt = stmt.where(clause)
+    stmt = _apply_deal_filters(stmt, filters)
     result = dict((await session.execute(stmt)).all())
     total = sum(result.values())
     labels = {
@@ -380,8 +571,24 @@ async def build_monthly_dynamics(
     session: AsyncSession, principal: Principal, params: dict[str, Any]
 ) -> ReportDataset:
     months = _parse_int(params, "months", default=12, minimum=1, maximum=36)
+    filters = _parse_report_filters(params)
     clause = await deal_scope_clause(session, principal)
-    since = dt.datetime.now(dt.UTC) - dt.timedelta(days=31 * months)
+    # `date_from`/`date_to` (П1), когда заданы, замещают «месяцев назад»
+    # целиком — явный период точнее эвристики по количеству месяцев.
+    # Список организаций сюда тоже добавлен (в отличие от примера в задаче
+    # «может не подходить структурно») — механически это тот же `.where()`,
+    # что у остальных builder'ов, план заведомо не запрещал добавлять его
+    # там, где не ломает структуру запроса.
+    since = (
+        _day_start(filters.date_from)
+        if filters.date_from is not None
+        else dt.datetime.now(dt.UTC) - dt.timedelta(days=31 * months)
+    )
+    until = (
+        _day_start(filters.date_to) + dt.timedelta(days=1)
+        if filters.date_to is not None
+        else None
+    )
 
     # `func.date_trunc("month", ...)` строится один раз в переменную и
     # переиспользуется в SELECT и GROUP BY: два отдельных вызова с одним и
@@ -396,6 +603,8 @@ async def build_monthly_dynamics(
         .where(Deal.deleted_at.is_(None), Deal.created_at >= since)
         .group_by(created_month)
     )
+    if until is not None:
+        created_stmt = created_stmt.where(Deal.created_at < until)
     closed_month = func.date_trunc("month", Deal.closed_at)
     closed_stmt = (
         select(
@@ -411,9 +620,13 @@ async def build_monthly_dynamics(
         .where(Deal.deleted_at.is_(None), Deal.closed_at.is_not(None), Deal.closed_at >= since)
         .group_by(closed_month)
     )
+    if until is not None:
+        closed_stmt = closed_stmt.where(Deal.closed_at < until)
     if clause is not None:
         created_stmt = created_stmt.where(clause)
         closed_stmt = closed_stmt.where(clause)
+    created_stmt = _apply_entity_filters(created_stmt, filters)
+    closed_stmt = _apply_entity_filters(closed_stmt, filters)
 
     created_map = {row[0].date(): row[1] for row in (await session.execute(created_stmt)).all()}
     closed_map = {
@@ -442,7 +655,8 @@ async def build_monthly_dynamics(
 # =============================================================================
 
 
-async def _stuck_deals_query(session: AsyncSession, principal: Principal):
+async def _stuck_deals_query(session: AsyncSession, principal: Principal, params: dict[str, Any]):
+    filters = _parse_report_filters(params)
     clause = await deal_scope_clause(session, principal)
     stmt = (
         select(
@@ -462,6 +676,7 @@ async def _stuck_deals_query(session: AsyncSession, principal: Principal):
     )
     if clause is not None:
         stmt = stmt.where(clause)
+    stmt = _apply_deal_filters(stmt, filters)
     return stmt
 
 
@@ -472,7 +687,7 @@ async def estimate_stuck_deals(
     # `COUNT(*)` без аргументов не ссылается ни на один столбец исходного
     # запроса, и `with_only_columns` в этом случае не гарантированно сохранит
     # явные JOIN'ы — подзапрос убирает эту двусмысленность полностью.
-    inner = await _stuck_deals_query(session, principal)
+    inner = await _stuck_deals_query(session, principal, params)
     count_stmt = select(func.count()).select_from(inner.subquery())
     return (await session.execute(count_stmt)).scalar_one() or 0
 
@@ -481,7 +696,7 @@ async def build_stuck_deals(
     session: AsyncSession, principal: Principal, params: dict[str, Any]
 ) -> ReportDataset:
     limit = _parse_int(params, "limit", default=500, minimum=1, maximum=5000)
-    stmt = (await _stuck_deals_query(session, principal)).limit(limit)
+    stmt = (await _stuck_deals_query(session, principal, params)).limit(limit)
     result = (await session.execute(stmt)).all()
     now = dt.datetime.now(dt.UTC)
     rows = [

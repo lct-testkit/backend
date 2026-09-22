@@ -108,5 +108,6 @@ async def directory(
         pattern = f"%{q.strip()}%"
         stmt = stmt.where(or_(User.full_name.ilike(pattern), User.display_name.ilike(pattern)))
 
-    rows = (await session.execute(stmt.order_by(User.full_name).limit(limit if not ids else _MAX_IDS))).scalars().all()
+    stmt = stmt.order_by(User.full_name).limit(limit if not ids else _MAX_IDS)
+    rows = (await session.execute(stmt)).scalars().all()
     return DirectoryResponse(items=[DirectoryEntry.model_validate(row) for row in rows])

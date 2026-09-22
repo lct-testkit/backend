@@ -1352,7 +1352,8 @@ class SignatureRequestService:
             bucket=original.bucket, key=original.storage_key
         )
         settings = get_settings()
-        # QR и ссылка в штампе ведут на страницу проверки веб-клиента (`/verify/{id}`), а не на JSON-ручку.
+        # QR и ссылка в штампе ведут на страницу проверки веб-клиента (`/verify/{id}`),
+        # а не на JSON-ручку.
         verify_url = f"{settings.base_url.rstrip('/')}/verify/{{sig_id}}"
         last_signature = signatures[-1] if signatures else None
         final_sig_id = str(last_signature.id) if last_signature else document.id

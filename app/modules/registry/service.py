@@ -146,6 +146,48 @@ class RegistryImportService:
             raise NotFoundError("Версия реестра", version_id)
         return version
 
+    async def delete(self, version: RegistryVersion) -> None:
+        """П4, раздел 4: «систему нельзя оставить без реестра». Нельзя
+        удалить версию, которая сейчас импортируется (`running` —
+        `registry.tasks._process_version` обращается к строке по id прямо
+        сейчас), и нельзя удалить последнюю успешно завершённую версию:
+        после удаления должна остаться хотя бы одна `completed`, иначе
+        локальный реестр и автоподстановка по ИНН (`OrgLookupService`)
+        останутся без данных. `EgrulEntry.registry_version_id`/
+        `Organization.registry_version_id` — `ON DELETE SET NULL`, поэтому
+        сам DELETE ничего не блокирует на уровне FK — проверка целиком
+        бизнес-логическая, ниже."""
+        if version.status == RegistryImportStatus.RUNNING.value:
+            raise AppError(
+                ErrorCode.ENTITY_IN_USE,
+                "Версия реестра сейчас импортируется — дождитесь завершения",
+            )
+        if version.status == RegistryImportStatus.COMPLETED.value:
+            other_completed = await self._session.scalar(
+                select(RegistryVersion.id)
+                .where(
+                    RegistryVersion.status == RegistryImportStatus.COMPLETED.value,
+                    RegistryVersion.id != version.id,
+                )
+                .limit(1)
+            )
+            if other_completed is None:
+                raise AppError(
+                    ErrorCode.ENTITY_IN_USE,
+                    "Это последняя завершённая версия реестра — систему нельзя "
+                    "оставить без реестра",
+                )
+
+        version_id, source = version.id, version.source
+        await self._session.delete(version)
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.REGISTRY_VERSION_DELETED,
+            entity_type="registry_version",
+            entity_id=version_id,
+            changes={"source": {"old": source, "new": None}},
+        )
+
     async def start_import(
         self, principal: Principal, *, file_id: uuid.UUID, source: str
     ) -> RegistryVersion:

@@ -36,7 +36,7 @@ from app.core.storage import (
 )
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
-from app.modules.catalog.models import Direction, Organization, Product, Region
+from app.modules.catalog.models import Direction, Organization, OrganizationLicense, Product, Region
 from app.modules.files.models import Attachment, File, FileStatus
 from app.modules.imports.fields import FieldSpec, fields_for, natural_key_for, validate_field
 from app.modules.imports.mapping import suggest_mapping
@@ -52,13 +52,20 @@ from app.modules.imports.models import (
 from app.modules.imports.parsing import ParsedTable, parse_table, sanitize_formula
 from app.modules.registry.models import EgrulEntry
 
-_FK_TARGETS: dict[str, tuple[type, str]] = {
-    "region_code": (Region, "region_id"),
-    "direction_code": (Direction, "direction_id"),
+# kind -> (модель, целевое поле в row_data, колонка поиска по значению из
+# файла). Третий элемент раньше был неявно `model.code` — П3 добавляет
+# `organization_name`, у которого колонка поиска не `code`, а `name`, так
+# что параметризовали явно (region_code/direction_code продолжают resolve'ить
+# по `.code`, поведение не изменилось).
+_FK_TARGETS: dict[str, tuple[type, str, Any]] = {
+    "region_code": (Region, "region_id", Region.code),
+    "direction_code": (Direction, "direction_id", Direction.code),
+    "organization_name": (Organization, "organization_id", Organization.name),
 }
 _MODEL_BY_ENTITY: dict[str, type] = {
     ImportEntityType.ORGANIZATION.value: Organization,
     ImportEntityType.PRODUCT.value: Product,
+    ImportEntityType.LICENSE.value: OrganizationLicense,
 }
 _PENDING_STATUSES = (ImportRowStatus.OK.value, ImportRowStatus.WARN.value)
 
@@ -278,7 +285,13 @@ class ImportService:
         }
         model = _MODEL_BY_ENTITY[job.entity_type]
         is_organization = job.entity_type == ImportEntityType.ORGANIZATION.value
-        key_column = model.inn if is_organization else model.code
+        # Раньше — `model.inn if is_organization else model.code` (годилось
+        # ровно для двух типов). `natural_key` уже посчитан выше через
+        # `natural_key_for(job.entity_type)` и всегда совпадает с реальным
+        # именем колонки на модели (`inn`/`code`/`contract_number`), так что
+        # `getattr` — чистое обобщение без изменения поведения для
+        # organization/product.
+        key_column = getattr(model, natural_key)
         existing_map: dict[str, uuid.UUID] = {}
         if raw_keys:
             key_stmt = select(key_column, model.id).where(key_column.in_(raw_keys))
@@ -382,13 +395,20 @@ class ImportService:
                     codes_by_kind[spec.kind].add(row[col_idx].strip())
 
         resolved: dict[str, dict[str, uuid.UUID]] = {}
-        for kind, (model, _field) in _FK_TARGETS.items():
+        for kind, (model, _field, lookup_column) in _FK_TARGETS.items():
             codes = codes_by_kind[kind]
             if not codes:
                 resolved[kind] = {}
                 continue
-            code_stmt = select(model.code, model.id).where(model.code.in_(codes))
+            code_stmt = select(lookup_column, model.id).where(lookup_column.in_(codes))
             rows_found = (await self._session.execute(code_stmt)).all()
+            # `dict(rows_found)`: при неуникальном значении колонки поиска
+            # (например, два вуза с совпадающим `name` — в отличие от
+            # `region_code`/`direction_code`, `Organization.name` не
+            # уникален) побеждает последняя строка из выборки. Это тот же
+            # компромисс, что и у остального импортёра: dry-run показывает
+            # результат резолва в `row_data` до применения, и явную
+            # неоднозначность видно на этапе проверки, а не после apply.
             resolved[kind] = dict(rows_found)
         return resolved
 
@@ -405,12 +425,20 @@ class ImportService:
             if spec.kind in _FK_TARGETS:
                 stripped = raw.strip()
                 if stripped:
-                    _model, target_field = _FK_TARGETS[spec.kind]
+                    _model, target_field, _lookup_column = _FK_TARGETS[spec.kind]
                     resolved_id = fk_lookup[spec.kind].get(stripped)
                     if resolved_id is None:
-                        errors.append(f"«{spec.label}»: код {stripped!r} не найден")
+                        errors.append(f"«{spec.label}»: значение {stripped!r} не найдено")
                     else:
                         row_data[target_field] = str(resolved_id)
+                elif spec.required:
+                    # Раньше ни один FK-вид (region_code/direction_code) не
+                    # был обязательным, поэтому пустая ячейка молча
+                    # пропускалась. П3 заводит первый обязательный FK
+                    # (`organization_name`) — без этой ветки пустое
+                    # «Название ВУЗа» проходило бы строку в `ok` без
+                    # `organization_id` и падало бы уже на `apply()`.
+                    errors.append(f"«{spec.label}» — обязательное поле")
                 continue
             value, err = validate_field(spec, raw)
             if err:
@@ -546,8 +574,10 @@ class ImportService:
         for row in pending:
             if job.entity_type == ImportEntityType.ORGANIZATION.value:
                 await self._apply_organization_row(job, row)
-            else:
+            elif job.entity_type == ImportEntityType.PRODUCT.value:
                 await self._apply_product_row(job, row)
+            else:
+                await self._apply_license_row(job, row)
         await self._session.flush()
         return len(pending)
 
@@ -681,6 +711,78 @@ class ImportService:
         row.entity_id = existing.id
         row.before_snapshot = before or {}
 
+    async def _apply_license_row(self, job: ImportJob, row: ImportRowResult) -> None:
+        """П3 — natural key `contract_number` (см. `catalog.models.
+        OrganizationLicense`, докстринг). Структура — буквальная копия
+        `_apply_product_row`, тот же generic-приём для третьего типа."""
+        data = dict(row.row_data)
+        contract_number = data.get("contract_number")
+        existing = (
+            await self._session.scalar(
+                select(OrganizationLicense).where(
+                    OrganizationLicense.contract_number == contract_number
+                )
+            )
+            if contract_number
+            else None
+        )
+
+        if existing is None:
+            if job.mode == ImportMode.UPDATE.value:
+                row.status = ImportRowStatus.SKIPPED.value
+                row.errors = [*row.errors, "Запись для обновления не найдена"]
+                return
+            license_ = OrganizationLicense(
+                organization_id=uuid.UUID(data["organization_id"]),
+                vendor=data.get("vendor"),
+                product_name=data.get("product_name"),
+                contract_number=contract_number,
+                license_signed_at=(
+                    dt.date.fromisoformat(data["license_signed_at"])
+                    if data.get("license_signed_at")
+                    else None
+                ),
+                license_valid_year=data.get("license_valid_year"),
+                transfer_status=data.get("transfer_status"),
+                manager_full_name=data.get("manager_full_name"),
+                responsible_contacts=data.get("responsible_contacts"),
+                comment=data.get("comment"),
+                import_job_id=job.id,
+            )
+            self._session.add(license_)
+            await self._session.flush()
+            row.entity_id = license_.id
+            row.before_snapshot = None
+            return
+
+        if job.mode == ImportMode.INSERT.value:
+            row.status = ImportRowStatus.SKIPPED.value
+            row.errors = [*row.errors, "Пропущена при применении: уже существует"]
+            return
+
+        before: dict[str, Any] = {}
+        for field in (
+            "organization_id", "vendor", "product_name", "license_signed_at",
+            "license_valid_year", "transfer_status", "manager_full_name",
+            "responsible_contacts", "comment",
+        ):
+            if field not in data:
+                continue
+            if field == "organization_id":
+                new_value: Any = uuid.UUID(data[field])
+            elif field == "license_signed_at":
+                new_value = dt.date.fromisoformat(data[field]) if data[field] else None
+            else:
+                new_value = data[field]
+            old_value = getattr(existing, field)
+            if _json_safe(old_value) != _json_safe(new_value):
+                before[field] = _json_safe(old_value)
+                setattr(existing, field, new_value)
+        existing.version += 1
+        await self._session.flush()
+        row.entity_id = existing.id
+        row.before_snapshot = before or {}
+
     async def finalize_apply_if_done(self, job: ImportJob) -> bool:
         """Возвращает `True`, если задание больше не в статусе `applying`."""
         remaining = await self._session.scalar(
@@ -750,10 +852,15 @@ class ImportService:
                 continue
             if row.before_snapshot:
                 for field, old_value in row.before_snapshot.items():
-                    if field in ("region_id", "direction_id") and old_value is not None:
+                    if (
+                        field in ("region_id", "direction_id", "organization_id")
+                        and old_value is not None
+                    ):
                         old_value = uuid.UUID(old_value)
                     if field == "base_price" and old_value is not None:
                         old_value = Decimal(str(old_value))
+                    if field == "license_signed_at" and old_value is not None:
+                        old_value = dt.date.fromisoformat(old_value)
                     setattr(entity, field, old_value)
                 entity.version += 1
                 row.status = ImportRowStatus.ROLLED_BACK.value

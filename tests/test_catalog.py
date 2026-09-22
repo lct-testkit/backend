@@ -6,11 +6,17 @@
 рискованная часть: реальные компании (Сбербанк, Яндекс, Ростелеком) взяты
 как фикстуры, потому что придуманный вручную номер легко случайно окажется
 валидным по контрольной сумме и не поймает регрессию в весах.
+
+Исключение — `TestDeleteDirection`/`TestDeleteLossReason` (П4): настоящая
+Postgres обязательна, тот же приём, что `tests/test_imports.py::
+TestLicenseImportEndToEnd` — см. `tests/conftest.py`.
 """
 
 from __future__ import annotations
 
 import uuid
+
+import pytest
 
 from app.core.permissions import Permission, has_permission
 from app.modules.catalog.schemas import ContactOut, OrganizationOut
@@ -21,6 +27,7 @@ from app.modules.catalog.validators import (
     validate_ogrnip,
     validate_requisite,
 )
+from tests.conftest import TEST_DATABASE_URL, _make_user, authenticate, run
 
 
 class _Contact:
@@ -262,3 +269,127 @@ class TestDriftNewValue:
         from app.modules.catalog.drift import drift_new_value
 
         assert drift_new_value({"old": "x"}) == {"old": "x"}
+
+
+def _admin(client) -> None:
+    admin = run(client, _make_user, "ADMIN")
+    csrf = authenticate(client, admin)
+    client.headers["X-CSRF-Token"] = csrf
+
+
+class TestDeleteDirection:
+    """П4: `DELETE /api/directions/{id}` — только без дочерних направлений и
+    без продуктов, которые на него ссылаются. Настоящая Postgres
+    обязательна — см. докстринг модуля."""
+
+    pytestmark = pytest.mark.skipif(
+        not TEST_DATABASE_URL, reason="нужен TEST_DATABASE_URL с применёнными миграциями"
+    )
+
+    def test_deletes_a_leaf_direction(self, client) -> None:
+        _admin(client)
+        code = f"dir-{uuid.uuid4().hex[:8]}"
+        create = client.post(
+            "/api/directions", json={"code": code, "name": "Направление на удаление"}
+        )
+        assert create.status_code == 201, create.text
+        direction_id = create.json()["id"]
+
+        delete = client.delete(f"/api/directions/{direction_id}")
+        assert delete.status_code == 204, delete.text
+        # Список направлений больше не находит удалённое (мягкое удаление).
+        listing = client.get("/api/directions", params={"q": code}).json()
+        assert all(item["id"] != direction_id for item in listing["items"])
+
+    def test_direction_with_a_child_cannot_be_deleted(self, client) -> None:
+        _admin(client)
+        parent_code = f"dir-parent-{uuid.uuid4().hex[:8]}"
+        parent = client.post(
+            "/api/directions", json={"code": parent_code, "name": "Родитель"}
+        ).json()
+        client.post(
+            "/api/directions",
+            json={
+                "code": f"dir-child-{uuid.uuid4().hex[:8]}", "name": "Потомок",
+                "parent_id": parent["id"],
+            },
+        )
+
+        delete = client.delete(f"/api/directions/{parent['id']}")
+        assert delete.status_code == 409, delete.text
+        assert delete.json()["code"] == "CRM-1303"
+
+
+class TestDeleteLossReason:
+    """П4: `DELETE /api/loss-reasons/{id}` — только если не используется ни
+    в одной сделке. Настоящая Postgres обязательна — см. докстринг модуля."""
+
+    pytestmark = pytest.mark.skipif(
+        not TEST_DATABASE_URL, reason="нужен TEST_DATABASE_URL с применёнными миграциями"
+    )
+
+    def test_deletes_an_unused_reason(self, client) -> None:
+        _admin(client)
+        code = f"reason-{uuid.uuid4().hex[:8]}"
+        create = client.post(
+            "/api/loss-reasons",
+            json={"code": code, "name": "Причина на удаление", "category": "other"},
+        )
+        assert create.status_code == 201, create.text
+        reason_id = create.json()["id"]
+
+        delete = client.delete(f"/api/loss-reasons/{reason_id}")
+        assert delete.status_code == 204, delete.text
+
+    def test_reason_used_by_a_deal_cannot_be_deleted(self, client) -> None:
+        _admin(client)
+        code = f"reason-used-{uuid.uuid4().hex[:8]}"
+        reason_id = client.post(
+            "/api/loss-reasons",
+            json={"code": code, "name": "Используемая причина", "category": "other"},
+        ).json()["id"]
+
+        async def _attach_to_a_deal() -> uuid.UUID:
+            from app.core.db import session_scope
+            from app.core.ids import uuid7
+            from app.modules.catalog.models import Organization
+            from app.modules.crm.models import Deal
+            from app.modules.identity.models import User
+            from app.modules.workflow.models import Workflow, WorkflowStatus
+
+            async with session_scope() as session:
+                workflow = Workflow(
+                    code=f"wf-{uuid7().hex[:8]}", name="Тестовая воронка",
+                    deal_type="b2b", state="draft",
+                )
+                session.add(workflow)
+                await session.flush()
+                wf_status = WorkflowStatus(
+                    workflow_id=workflow.id, code="new", name="Новая",
+                )
+                session.add(wf_status)
+                org = Organization(name="Тестовый вуз для П4", org_type="university")
+                session.add(org)
+                owner = User(
+                    keycloak_id=str(uuid.uuid4()),
+                    email=f"{uuid.uuid4().hex[:8]}@rt-it-school.ru",
+                    full_name="Сидоров С.С.", role="KAM", status="active",
+                    consent_version="1.0",
+                )
+                session.add(owner)
+                await session.flush()
+                deal = Deal(
+                    number=f"D-{uuid.uuid4().hex[:10]}", title="Сделка для П4",
+                    deal_type="b2b", workflow_id=workflow.id, status_id=wf_status.id,
+                    organization_id=org.id, owner_id=owner.id,
+                    loss_reason_id=uuid.UUID(reason_id),
+                )
+                session.add(deal)
+                await session.flush()
+                return deal.id
+
+        run(client, _attach_to_a_deal)
+
+        delete = client.delete(f"/api/loss-reasons/{reason_id}")
+        assert delete.status_code == 409, delete.text
+        assert delete.json()["code"] == "CRM-1303"

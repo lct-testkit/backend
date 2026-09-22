@@ -20,6 +20,7 @@ from app.core.deps import ConsentedUser, DbSession, require_permission
 from app.core.errors import ValidationError
 from app.core.permissions import Permission
 from app.core.security import Principal
+from app.modules.signing.models import SignatureDocument
 from app.modules.signing.schemas import (
     ChallengeResponse,
     DownloadUrlOut,
@@ -40,7 +41,6 @@ from app.modules.signing.schemas import (
     VerifyResult,
     VoidRequest,
 )
-from app.modules.signing.models import SignatureDocument
 from app.modules.signing.service import (
     EdmAgreementService,
     SignatureDocumentService,

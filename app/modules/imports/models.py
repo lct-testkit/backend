@@ -25,6 +25,9 @@ from app.db.base import Base, TimestampMixin, UuidPkMixin
 class ImportEntityType(StrEnum):
     ORGANIZATION = "organization"
     PRODUCT = "product"
+    # П3 (rtk_requiriments.md разд. 4, Треб.1): лицензии/договоры
+    # вуз↔вендор↔ПО, см. `catalog.models.OrganizationLicense`.
+    LICENSE = "license"
 
 
 class ImportMode(StrEnum):
@@ -69,7 +72,8 @@ class ImportJob(UuidPkMixin, TimestampMixin, Base):
         Index("ix_import_jobs_status", "status"),
         Index("ix_import_jobs_initiated_by", "initiated_by"),
         CheckConstraint(
-            "entity_type IN ('organization','product')", name="import_jobs_entity_type_valid"
+            "entity_type IN ('organization','product','license')",
+            name="import_jobs_entity_type_valid",
         ),
         CheckConstraint("mode IN ('insert','upsert','update')", name="import_jobs_mode_valid"),
         CheckConstraint(f"status IN {_JOB_STATUSES!r}", name="import_jobs_status_valid"),

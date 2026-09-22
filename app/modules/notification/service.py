@@ -576,3 +576,33 @@ class NotificationTemplateService:
             changes=changes,
         )
         return template
+
+    async def delete(self, template: NotificationTemplate) -> bool:
+        """П4: можно удалить всегда (это шаблон текста, не бизнес-сущность с
+        историей — решение из задачи: блокировать нечего, `event_code`
+        продолжит существовать даже без in_app-шаблона, ровно как уже
+        обрабатывает `notification.schemas` для кодов конструктора воронок
+        без сохранённого шаблона). Возвращает `True`, если удалённый шаблон
+        был активным — `uq_notification_templates_code_channel` не даёт
+        существовать двум строкам с одной парой `code`+`channel`
+        одновременно, так что «единственный активный для своей пары» и
+        «был активен» здесь буквально одно и то же: другого шаблона для
+        этой же пары просто не может быть. Роутер превращает `True` в
+        предупреждение в ответе, не в отказ — раздел 4 не просит
+        блокировать удаление, только не терять эту информацию молча.
+        """
+        was_last_active = template.is_active
+
+        template_id, code, channel = template.id, template.code, template.channel
+        await self._session.delete(template)
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.NOTIFICATION_TEMPLATE_DELETED,
+            entity_type="notification_template",
+            entity_id=template_id,
+            changes={
+                "code": {"old": code, "new": None},
+                "channel": {"old": channel, "new": None},
+            },
+        )
+        return was_last_active

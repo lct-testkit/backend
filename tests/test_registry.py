@@ -7,18 +7,25 @@ PostgreSQL/Redis: покрываются чистые функции — раз�
 `registry_versions` (провайдеры с сессией, фоновая задача импорта) не
 покрыт юнит-тестами по той же причине, что и остальной DB-слой репозитория —
 не потому что не важен, а потому что здесь для него нет инфраструктуры.
+Исключение — `TestDeleteRegistryVersion` (П4): настоящая Postgres
+обязательна, тот же приём, что `tests/test_imports.py::
+TestLicenseImportEndToEnd` — см. `tests/conftest.py`.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import io
+import uuid
+
+import pytest
 
 from app.core.permissions import Permission, has_permission
 from app.modules.registry.egrul_xml import iter_entries
 from app.modules.registry.models import EgrulStatus, is_educational_okved
 from app.modules.registry.providers import MockProvider
 from app.modules.registry.service import _mask_query
+from tests.conftest import TEST_DATABASE_URL, _make_user, authenticate, run
 
 
 def _xml(*bodies: str) -> bytes:
@@ -178,3 +185,82 @@ class TestRegistryPermissions:
     def test_auditor_and_integration_have_no_org_lookup(self) -> None:
         assert not has_permission("AUDITOR", Permission.ORG_LOOKUP_USE)
         assert not has_permission("INTEGRATION", Permission.ORG_LOOKUP_USE)
+
+
+class TestDeleteRegistryVersion:
+    """П4: `DELETE /api/admin/registry/versions/{id}` — нельзя оставить
+    систему без реестра. Настоящая Postgres обязательна — см. докстринг
+    модуля."""
+
+    pytestmark = pytest.mark.skipif(
+        not TEST_DATABASE_URL, reason="нужен TEST_DATABASE_URL с применёнными миграциями"
+    )
+
+    async def _seed_version(self, status: str) -> uuid.UUID:
+        from app.core.db import session_scope
+        from app.modules.registry.models import RegistryVersion
+
+        async with session_scope() as session:
+            version = RegistryVersion(
+                source="fns_egrul", file_id=uuid.uuid4(), status=status,
+            )
+            session.add(version)
+            await session.flush()
+            return version.id
+
+    def _admin(self, client) -> None:
+        admin = run(client, _make_user, "ADMIN")
+        csrf = authenticate(client, admin)
+        client.headers["X-CSRF-Token"] = csrf
+
+    def test_deletes_a_completed_version_when_another_one_remains(self, client) -> None:
+        self._admin(client)
+        run(client, self._seed_version, "completed")
+        extra_id = run(client, self._seed_version, "completed")
+
+        delete = client.delete(f"/api/admin/registry/versions/{extra_id}")
+        assert delete.status_code == 204, delete.text
+
+    async def _clear_other_completed_versions(self) -> None:
+        """Другие тесты этого же класса тоже заводят `completed`-версии в
+        той же настоящей Postgres (`client` не пересоздаёт БД между тестами
+        — только приложение) — без явной чистки «это последняя завершённая»
+        зависело бы от порядка запуска. Безопасно только потому, что это
+        собственная тестовая БД агента, не `rtk-crm-postgres-1`."""
+        from sqlalchemy import delete as sa_delete
+
+        from app.core.db import session_scope
+        from app.modules.registry.models import RegistryVersion
+
+        async with session_scope() as session:
+            await session.execute(
+                sa_delete(RegistryVersion).where(RegistryVersion.status == "completed")
+            )
+
+    def test_cannot_delete_the_last_completed_version(self, client) -> None:
+        self._admin(client)
+        run(client, self._clear_other_completed_versions)
+        only_id = run(client, self._seed_version, "completed")
+
+        delete = client.delete(f"/api/admin/registry/versions/{only_id}")
+        assert delete.status_code == 409, delete.text
+        assert delete.json()["code"] == "CRM-1303"
+
+    def test_cannot_delete_a_version_that_is_currently_running(self, client) -> None:
+        self._admin(client)
+        # Есть и другая completed-версия — блокирующая причина здесь именно
+        # "running", не "последняя завершённая".
+        run(client, self._seed_version, "completed")
+        running_id = run(client, self._seed_version, "running")
+
+        delete = client.delete(f"/api/admin/registry/versions/{running_id}")
+        assert delete.status_code == 409, delete.text
+        assert delete.json()["code"] == "CRM-1303"
+
+    def test_deletes_a_failed_version_freely(self, client) -> None:
+        self._admin(client)
+        run(client, self._seed_version, "completed")
+        failed_id = run(client, self._seed_version, "failed")
+
+        delete = client.delete(f"/api/admin/registry/versions/{failed_id}")
+        assert delete.status_code == 204, delete.text

@@ -94,6 +94,10 @@ class AuditAction(StrEnum):
 
     # --- Workflow ---
     WORKFLOW_CREATED = "WORKFLOW_CREATED"
+    # П4: удаление разрешено только для черновика (`core.errors.ErrorCode.
+    # WORKFLOW_NOT_DRAFT` блокирует остальное) — см. `workflow.service.
+    # WorkflowService.delete_draft`.
+    WORKFLOW_DELETED = "WORKFLOW_DELETED"
     WORKFLOW_PUBLISHED = "WORKFLOW_PUBLISHED"
     WORKFLOW_VALIDATED = "WORKFLOW_VALIDATED"
     STATUS_ARCHIVED = "STATUS_ARCHIVED"
@@ -107,6 +111,10 @@ class AuditAction(StrEnum):
     ORG_REGISTRY_IMPORTED = "ORG_REGISTRY_IMPORTED"
     ORG_DRIFT_APPLIED = "ORG_DRIFT_APPLIED"
     ORG_LIQUIDATION_DETECTED = "ORG_LIQUIDATION_DETECTED"
+    # П4: удаление снэпшота/выгрузки ЕГРЮЛ — только не последней активной
+    # версии (раздел 4: «систему нельзя оставить без реестра»). См.
+    # `registry.service.RegistryImportService.delete`.
+    REGISTRY_VERSION_DELETED = "REGISTRY_VERSION_DELETED"
 
     # --- Контакты и остальной каталог (раздел 5.2/5.3) ---
     # Раздел 18 перечисляет минимум и не называет контакты/справочники
@@ -120,8 +128,16 @@ class AuditAction(StrEnum):
     PRODUCT_UPDATED = "PRODUCT_UPDATED"
     DIRECTION_CREATED = "DIRECTION_CREATED"
     DIRECTION_UPDATED = "DIRECTION_UPDATED"
+    # П4: мягкое удаление (`deleted_at`) — только если нет дочерних
+    # направлений и ничего на него не ссылается (продукты/сделки), иначе
+    # 409 `ENTITY_IN_USE`. См. `catalog.service.DirectionService.delete`.
+    DIRECTION_DELETED = "DIRECTION_DELETED"
     LOSS_REASON_CREATED = "LOSS_REASON_CREATED"
     LOSS_REASON_UPDATED = "LOSS_REASON_UPDATED"
+    # П4: жёсткое удаление (таблица без `deleted_at` — «деактивируется, не
+    # удаляется» было верно до этого пункта) — только если не используется
+    # ни в одной сделке. См. `catalog.service.LossReasonService.delete`.
+    LOSS_REASON_DELETED = "LOSS_REASON_DELETED"
     HOLIDAY_CREATED = "HOLIDAY_CREATED"
     HOLIDAY_UPDATED = "HOLIDAY_UPDATED"
     CUSTOM_FIELD_DEF_CREATED = "CUSTOM_FIELD_DEF_CREATED"
@@ -130,6 +146,9 @@ class AuditAction(StrEnum):
     # --- Уведомления (раздел 5.7, спринт 7) ---
     NOTIFICATION_TEMPLATE_CREATED = "NOTIFICATION_TEMPLATE_CREATED"
     NOTIFICATION_TEMPLATE_UPDATED = "NOTIFICATION_TEMPLATE_UPDATED"
+    # П4: можно всегда (шаблон текста, не бизнес-сущность с историей) — см.
+    # `notification.service.NotificationTemplateService.delete`.
+    NOTIFICATION_TEMPLATE_DELETED = "NOTIFICATION_TEMPLATE_DELETED"
 
     # --- ПЭП ---
     SIGNATURE_DOCUMENT_CREATED = "SIGNATURE_DOCUMENT_CREATED"

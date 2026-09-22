@@ -22,6 +22,7 @@ from app.modules.catalog.models import (
     Contact,
     Direction,
     Organization,
+    OrganizationLicense,
     Product,
 )
 from app.modules.catalog.schemas import (
@@ -50,6 +51,8 @@ from app.modules.catalog.schemas import (
     LossReasonOut,
     LossReasonUpdateRequest,
     OrganizationCreateRequest,
+    OrganizationLicenseListResponse,
+    OrganizationLicenseOut,
     OrganizationListResponse,
     OrganizationOut,
     OrganizationRevealOut,
@@ -70,6 +73,7 @@ from app.modules.catalog.service import (
     HolidayService,
     LossReasonService,
     OrganizationFilters,
+    OrganizationLicenseService,
     OrganizationService,
     ProductFilters,
     ProductService,
@@ -85,6 +89,9 @@ loss_reasons_router = APIRouter(prefix="/loss-reasons", tags=["loss-reasons"])
 holidays_router = APIRouter(prefix="/holidays", tags=["holidays"])
 custom_field_defs_router = APIRouter(prefix="/custom-field-defs", tags=["custom-field-defs"])
 regions_router = APIRouter(prefix="/regions", tags=["regions"])
+organization_licenses_router = APIRouter(
+    prefix="/organization-licenses", tags=["organization-licenses"]
+)
 
 OrgRead = Annotated[Principal, Depends(require_permission(Permission.ORG_READ))]
 OrgWrite = Annotated[Principal, Depends(require_permission(Permission.ORG_WRITE))]
@@ -518,6 +525,23 @@ async def update_direction(
     return DirectionOut.model_validate(direction)
 
 
+@directions_router.delete(
+    "/{direction_id}",
+    summary="Удалить направление",
+    description=(
+        "Только если нет дочерних направлений и ни один продукт на него не "
+        "ссылается — иначе 409 CRM-1303. Роль: запись каталога."
+    ),
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_direction(
+    session: DbSession, principal: CatalogWrite, direction_id: Annotated[uuid.UUID, Path()]
+) -> None:
+    service = DirectionService(session)
+    direction = await service.get_or_404(direction_id)
+    await service.delete(direction)
+
+
 # =============================================================================
 # Причины отказа
 # =============================================================================
@@ -564,6 +588,23 @@ async def update_loss_reason(
     reason = await service.get_or_404(loss_reason_id)
     reason = await service.update(reason, payload, expected_version=if_match)
     return LossReasonOut.model_validate(reason)
+
+
+@loss_reasons_router.delete(
+    "/{loss_reason_id}",
+    summary="Удалить причину отказа",
+    description=(
+        "Только если причина не используется ни в одной сделке — иначе 409 "
+        "CRM-1303. Роль: запись каталога."
+    ),
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_loss_reason(
+    session: DbSession, principal: CatalogWrite, loss_reason_id: Annotated[uuid.UUID, Path()]
+) -> None:
+    service = LossReasonService(session)
+    reason = await service.get_or_404(loss_reason_id)
+    await service.delete(reason)
 
 
 # =============================================================================
@@ -677,3 +718,49 @@ async def update_custom_field_def(
 async def list_regions(session: DbSession, principal: CatalogRead) -> RegionListResponse:
     rows = (await session.execute(region_list_query())).scalars().all()
     return RegionListResponse(items=[RegionOut.model_validate(r) for r in rows])
+
+
+# =============================================================================
+# Лицензии/договоры вуз↔вендор↔ПО (П3, rtk_requiriments.md разд. 4, Треб.1)
+#
+# Только чтение: загружаются через POST /api/imports (entity_type='license'),
+# см. `imports.router`. Достаточно для показа на карточке организации —
+# отдельного экрана управления в этом минимуме нет (см. отчёт по П3).
+# =============================================================================
+
+
+@organization_licenses_router.get(
+    "",
+    summary="Список лицензий/договоров вуз-вендор-ПО",
+    description="Фильтр: organization_id. Роль: чтение каталога.",
+    response_model=OrganizationLicenseListResponse,
+)
+async def list_organization_licenses(
+    session: DbSession,
+    page: Pagination,
+    principal: CatalogRead,
+    organization_id: Annotated[uuid.UUID | None, Query()] = None,
+) -> OrganizationLicenseListResponse:
+    stmt = OrganizationLicenseService(session).list_query(
+        organization_id=organization_id
+    ).order_by(OrganizationLicense.created_at.desc(), OrganizationLicense.id.desc())
+    cursor = page.decoded_cursor
+    if cursor:
+        stmt = stmt.where(
+            keyset_before(OrganizationLicense.created_at, OrganizationLicense.id, cursor)
+        )
+    rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
+    built = Page.build(rows, limit=page.limit, serializer=OrganizationLicenseOut.model_validate)
+    return OrganizationLicenseListResponse(items=built.items, next_cursor=built.next_cursor)
+
+
+@organization_licenses_router.get(
+    "/{license_id}",
+    summary="Карточка лицензии/договора",
+    response_model=OrganizationLicenseOut,
+)
+async def get_organization_license(
+    session: DbSession, principal: CatalogRead, license_id: Annotated[uuid.UUID, Path()]
+) -> OrganizationLicenseOut:
+    license_ = await OrganizationLicenseService(session).get_or_404(license_id)
+    return OrganizationLicenseOut.model_validate(license_)

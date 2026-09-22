@@ -5,133 +5,24 @@
 и реакцию на блокировку. Redis подменяется in-memory реализацией,
 Keycloak — подставным декодером токена.
 
-Запуск:
-
-    createdb crm_test
-    DATABASE_URL=postgresql+asyncpg://user@localhost:5432/crm_test alembic upgrade head
-    TEST_DATABASE_URL=postgresql+asyncpg://user@localhost:5432/crm_test pytest tests/
-
-Без `TEST_DATABASE_URL` тесты пропускаются, поэтому обычный прогон
-остаётся полностью офлайновым.
-
-Асинхронные помощники выполняются через `client.portal`: у TestClient свой
-событийный цикл, и движок БД с Redis обязаны жить именно в нём.
+Запуск и фикстуры (`client`, `run`, `_make_user`, `authenticate`) — теперь в
+`tests/conftest.py` (переехали туда, когда тот же приём понадобился другим
+файлам — `test_reporting.py`/`test_imports.py`/`test_workflow.py`/
+`test_catalog.py`/`test_notifications.py`/`test_registry.py`). Докстринг
+запуска — там же.
 """
 
 from __future__ import annotations
 
 import datetime as dt
-import os
-import uuid
-from typing import Any
 
 import pytest
 
-TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
+from tests.conftest import TEST_DATABASE_URL, _make_user, authenticate, run
 
 pytestmark = pytest.mark.skipif(
     not TEST_DATABASE_URL, reason="нужен TEST_DATABASE_URL с применёнными миграциями"
 )
-
-fakeredis = pytest.importorskip("fakeredis", reason="нужен fakeredis для подмены Redis")
-
-
-def run(client, func, *args: Any) -> Any:
-    """Выполняет корутину в событийном цикле TestClient."""
-    return client.portal.call(func, *args)
-
-
-@pytest.fixture
-def client(monkeypatch):
-    """Приложение с подменёнными Redis и проверкой токена."""
-    os.environ.setdefault("APP_PROFILE", "dev")
-    os.environ["DATABASE_URL"] = TEST_DATABASE_URL or ""
-    os.environ["REDIS_URL"] = "redis://127.0.0.1:6379/0"
-    # Только loopback и только IP: имя хоста уходит в системный резолвер, и
-    # под VPN или в закрытом контуре разрешение имени зависает дольше любого
-    # таймаута httpx. Порт 9 (discard) отказывает в соединении мгновенно.
-    os.environ["KEYCLOAK_URL"] = "http://127.0.0.1:9/auth"
-    os.environ.setdefault("KEYCLOAK_REALM", "crm")
-    os.environ.setdefault("KEYCLOAK_CLIENT_ID", "crm-bff")
-    os.environ.setdefault("KEYCLOAK_CLIENT_SECRET", "secret")
-    os.environ["S3_ENDPOINT_URL"] = "http://127.0.0.1:9"
-    os.environ.setdefault("S3_ACCESS_KEY", "a")
-    os.environ.setdefault("S3_SECRET_KEY", "b")
-    os.environ.setdefault("SIGNATURE_SERVER_SECRET", "test-secret")
-
-    from fastapi.testclient import TestClient
-
-    from app.core import redis_client
-    from app.core.config import get_settings
-    from app.main import create_app
-
-    get_settings.cache_clear()
-    monkeypatch.setattr(
-        redis_client, "_client", fakeredis.aioredis.FakeRedis(decode_responses=True)
-    )
-
-    with TestClient(create_app()) as test_client:
-        yield test_client
-
-
-async def _make_user(role: str = "KAM", status: str = "active"):
-    """Создаёт пользователя напрямую в БД: Keycloak в тестах не участвует."""
-    from app.core.db import session_scope
-    from app.modules.identity.models import User
-
-    async with session_scope() as session:
-        user = User(
-            keycloak_id=str(uuid.uuid4()),
-            email=f"{uuid.uuid4().hex[:12]}@rt-it-school.ru",
-            full_name="Иванов Иван Иванович",
-            role=role,
-            status=status,
-            consent_version="1.0",
-        )
-        session.add(user)
-        await session.flush()
-        session.expunge(user)
-        return user
-
-
-async def _open_session(user) -> str:
-    from app.modules.identity.session_store import session_store
-
-    stored = await session_store.create(
-        user_id=user.id,
-        keycloak_id=user.keycloak_id,
-        access_token="access",
-        refresh_token=None,
-        id_token=None,
-        kc_session_state=None,
-        ip="127.0.0.1",
-        user_agent="pytest",
-    )
-    return stored.sid
-
-
-def authenticate(client, user) -> str:
-    """Кладёт сессию в Redis и подменяет декодер токена. Возвращает CSRF-токен."""
-    from app.core import deps
-    from app.core.csrf import new_csrf_token
-    from app.core.security import TokenClaims
-
-    async def fake_decode(token: str) -> TokenClaims:
-        return TokenClaims(
-            subject=user.keycloak_id,
-            raw={"sub": user.keycloak_id},
-            email=user.email,
-            full_name=user.full_name,
-            roles=frozenset({user.role}),
-        )
-
-    deps.decode_access_token = fake_decode  # type: ignore[assignment]
-
-    sid = run(client, _open_session, user)
-    csrf = new_csrf_token()
-    client.cookies.set("crm_sid", sid)
-    client.cookies.set("crm_csrf", csrf)
-    return csrf
 
 
 class TestAuthChain:

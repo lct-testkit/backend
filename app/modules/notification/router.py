@@ -13,6 +13,7 @@ from app.core.deps import ConsentedUser, DbSession, IfMatch, Pagination, require
 from app.core.pagination import Page, keyset_before
 from app.core.permissions import Permission
 from app.core.security import Principal
+from app.modules.identity.schemas import OperationResult
 from app.modules.notification.models import Notification, NotificationTemplate
 from app.modules.notification.schemas import (
     NotificationListResponse,
@@ -200,3 +201,33 @@ async def update_notification_template(
     template = await service.get_or_404(template_id)
     template = await service.update(template, payload, expected_version=if_match)
     return NotificationTemplateOut.model_validate(template)
+
+
+@notification_templates_admin_router.delete(
+    "/{template_id}",
+    summary="Удалить шаблон уведомления",
+    description=(
+        "Можно всегда — это шаблон текста, не бизнес-сущность с историей. "
+        "Если удаляемый шаблон был единственным активным для своей пары "
+        "code+channel, ответ несёт предупреждение об этом (уведомления "
+        "этого типа перестанут отправляться по каналу, пока не появится "
+        "новый шаблон). Роль: управление шаблонами уведомлений."
+    ),
+    response_model=OperationResult,
+)
+async def delete_notification_template(
+    session: DbSession,
+    principal: NotificationTemplateManage,
+    template_id: Annotated[uuid.UUID, Path()],
+) -> OperationResult:
+    service = NotificationTemplateService(session)
+    template = await service.get_or_404(template_id)
+    was_last_active = await service.delete(template)
+    detail = "Шаблон удалён."
+    if was_last_active:
+        detail += (
+            " Внимание: это был единственный активный шаблон для этой пары "
+            "«код события + канал» — уведомления по нему перестанут отправляться, "
+            "пока не будет создан новый шаблон."
+        )
+    return OperationResult(ok=True, detail=detail)

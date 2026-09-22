@@ -36,10 +36,20 @@ class ErrorCode(StrEnum):
     TRANSITION_COMMENT_REQUIRED = "CRM-1204"
     TRANSITION_FIELDS_REQUIRED = "CRM-1205"
     TRANSITION_SIGNATURE_REQUIRED = "CRM-1206"
+    # П4: `DELETE /workflows/{id}` — раздел 4/ФТ.6 требует удаление воронки,
+    # но только черновика, который никогда не публиковался (опубликованную,
+    # с историей/сделками, удалять нельзя ни при каких условиях — только
+    # архивация статусов, раздел 4.11).
+    WORKFLOW_NOT_DRAFT = "CRM-1207"
 
     # --- Дубликаты ---
     DUPLICATE = "CRM-1301"
     ORGANIZATION_INN_EXISTS = "CRM-1302"
+    # П4: удаление справочника (направление/причина отказа/версия реестра),
+    # на который есть ссылки — общий код для всех трёх, конкретика в
+    # `detail`/`extra` (раздел 4: «разрешай удаление только когда ничего не
+    # сломает»).
+    ENTITY_IN_USE = "CRM-1303"
 
     # --- Файлы ---
     FILE_TYPE_NOT_ALLOWED = "CRM-1401"
@@ -113,8 +123,12 @@ ERROR_CATALOG: dict[ErrorCode, ErrorSpec] = {
         422, "Требуются обязательные поля или вложения"
     ),
     ErrorCode.TRANSITION_SIGNATURE_REQUIRED: ErrorSpec(422, "Требуется действующая подпись"),
+    ErrorCode.WORKFLOW_NOT_DRAFT: ErrorSpec(
+        409, "Удалить можно только черновик воронки, который не публиковался"
+    ),
     ErrorCode.DUPLICATE: ErrorSpec(409, "Найден дубликат сущности"),
     ErrorCode.ORGANIZATION_INN_EXISTS: ErrorSpec(409, "Организация с таким ИНН уже существует"),
+    ErrorCode.ENTITY_IN_USE: ErrorSpec(409, "Сущность используется и не может быть удалена"),
     ErrorCode.FILE_TYPE_NOT_ALLOWED: ErrorSpec(415, "Недопустимый тип файла"),
     ErrorCode.FILE_TOO_LARGE: ErrorSpec(413, "Превышен размер файла"),
     ErrorCode.FILE_INFECTED: ErrorSpec(422, "Файл не прошёл антивирусную проверку"),

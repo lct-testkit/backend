@@ -384,3 +384,79 @@ class CustomFieldDef(UuidPkMixin, TimestampMixin, VersionMixin, Base):
     )
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     is_active: Mapped[bool] = mapped_column(nullable=False, server_default=text("true"))
+
+
+class LicenseTransferStatus(StrEnum):
+    """«Статус по передаче» (rtk_requiriments.md разд. 4, Треб.1). Кейс не
+    перечисляет допустимые значения буквально — набор ниже описывает
+    минимальный жизненный цикл передачи лицензии ИТ-продукта вузу:
+    `not_started` (договор подписан, передача ещё не начиналась),
+    `in_progress` (материалы/доступы передаются), `transferred` (вуз получил
+    всё по договору), `declined` (передача не состоялась — расторжение и
+    т.п.). Тот же приём, что `transfer_status` кодами, а не свободным
+    текстом: значение из импорта проверяется на этапе `dry_run`
+    (`imports.fields.validate_field`), как уже сделано для `org_type`/
+    `format` — опечатка в файле становится видимой ошибкой строки, а не
+    тихо сохраняется как есть."""
+
+    NOT_STARTED = "not_started"
+    IN_PROGRESS = "in_progress"
+    TRANSFERRED = "transferred"
+    DECLINED = "declined"
+
+
+class OrganizationLicense(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteMixin, Base):
+    """Лицензии/договоры вуз↔вендор↔ПО (rtk_requiriments.md разд. 4, Треб.1 —
+    каталог из 10 полей, загружаемый через импорт xls/xlsx: Название ВУЗа,
+    Вендор, ПО, Номер договора, Подписание лицензии, Срок действия лицензии
+    (год), Статус по передаче, ФИО Менеджера, Ответственные от ВУЗа,
+    Комментарий).
+
+    `product_name` — сознательно текстовое поле, не FK на `products.id`:
+    кейс говорит про внешнее лицензируемое ПО вендора (конкретный продукт по
+    договору), которое не обязано совпадать с каталогом образовательных
+    программ Школы (`Product` — курс/трек обучения, другая сущность по
+    смыслу, раздел 5.3). По той же причине `manager_full_name` и
+    `responsible_contacts` — свободный текст из исходного xls, а не ссылка
+    на `users`/`contacts`: «ФИО Менеджера» в кейсе не обязан быть нашим
+    пользователем, «Ответственные от ВУЗа» — не обязаны быть контактами с
+    согласием на обработку ПДн в этой системе (см. отчёт по П3 — решение
+    сознательно упрощено, не изобретаем связи, которых кейс не просит).
+
+    Естественный ключ импорта — `contract_number` (`imports.fields.
+    natural_key_for`): общий импортёр (`imports.service`) структурно
+    поддерживает один natural key на тип сущности — тот же приём, что
+    `Organization.inn`/`Product.code` уже используют. Настоящий составной
+    ключ (вуз, вендор, ПО), предложенный в задаче как альтернатива, здесь не
+    применяется — сознательное упрощение (подробности — отчёт по П3), поэтому
+    уникальность на уровне БД тоже не заведена: единственный путь записи —
+    ревьюируемый импорт (dry-run → apply), отдельных create/update-ручек
+    нет вообще (только чтение, см. `catalog.router.organization_licenses_
+    router`)."""
+
+    __tablename__ = "organization_licenses"
+    __table_args__ = (
+        Index("ix_organization_licenses_organization", "organization_id"),
+        Index("ix_organization_licenses_contract_number", "contract_number"),
+        CheckConstraint(
+            "transfer_status IS NULL OR transfer_status IN "
+            "('not_started','in_progress','transferred','declined')",
+            name="organization_licenses_transfer_status_valid",
+        ),
+    )
+
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    vendor: Mapped[str] = mapped_column(String(255), nullable=False)
+    product_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    contract_number: Mapped[str] = mapped_column(String(128), nullable=False)
+    license_signed_at: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    license_valid_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    transfer_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    manager_full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    responsible_contacts: Mapped[str | None] = mapped_column(Text, nullable=True)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    import_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("import_jobs.id", ondelete="SET NULL"), nullable=True
+    )

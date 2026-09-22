@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Query, status
@@ -137,3 +138,21 @@ async def list_registry_versions(
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
     built: Page = Page.build(rows, limit=page.limit, serializer=RegistryVersionOut.model_validate)
     return RegistryVersionListResponse(items=built.items, next_cursor=built.next_cursor)
+
+
+@registry_admin_router.delete(
+    "/versions/{version_id}",
+    summary="Удалить версию реестра",
+    description=(
+        "Нельзя удалить версию, которая сейчас импортируется, и нельзя "
+        "удалить последнюю успешно завершённую версию — иначе 409 CRM-1303. "
+        "Роль: ADMIN."
+    ),
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_registry_version(
+    session: DbSession, principal: RegistryImportPerm, version_id: Annotated[uuid.UUID, Path()]
+) -> None:
+    service = RegistryImportService(session)
+    version = await service.get_or_404(version_id)
+    await service.delete(version)

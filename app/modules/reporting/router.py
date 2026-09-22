@@ -22,6 +22,7 @@ from app.modules.reporting.schemas import (
     DashboardWidgetListResponse,
     DashboardWidgetOut,
     DashboardWidgetUpdateRequest,
+    ReportDataOut,
     ReportDownloadResponse,
     ReportJobCreateRequest,
     ReportJobListResponse,
@@ -103,6 +104,35 @@ async def get_report(
     job = await service.get_or_404(report_id)
     service.ensure_read_access(job, principal)
     return ReportJobOut.model_validate(job)
+
+
+@reports_router.get(
+    "/{report_id}/data",
+    summary="Данные отчёта в JSON",
+    description=(
+        "Тот же набор данных, что рендерится в xlsx/pdf/png, в виде "
+        "`{columns, rows}` — для виджетов дашбордов и клиентских диаграмм. "
+        "Строится заново по параметрам задания при каждом запросе (свежие "
+        "данные), не создаёт файл в S3 и не пишет событие аудита "
+        "`REPORT_EXPORTED` — это чтение, не выгрузка. Права — как у "
+        "`GET /api/reports/{report_id}`."
+    ),
+    response_model=ReportDataOut,
+)
+async def get_report_data(
+    session: DbSession, principal: ReportRead, report_id: Annotated[uuid.UUID, Path()]
+) -> ReportDataOut:
+    service = ReportJobService(session)
+    job = await service.get_or_404(report_id)
+    dataset = await service.get_data(job, principal)
+    return ReportDataOut(
+        title=dataset.title,
+        columns=dataset.columns,
+        rows=dataset.rows,
+        note=dataset.note,
+        generated_at=dataset.generated_at,
+        row_count=len(dataset.rows),
+    )
 
 
 @reports_router.get(

@@ -30,6 +30,9 @@ from app.modules.catalog.models import (
     LossReason,
     Organization,
     OrganizationBranch,
+    # П3 (rtk_requiriments.md разд. 4, Треб.1): лицензии/договоры
+    # вуз↔вендор↔ПО.
+    OrganizationLicense,
     Product,
     Region,
 )
@@ -141,6 +144,7 @@ __all__ = [
     "NotificationTemplate",
     "Organization",
     "OrganizationBranch",
+    "OrganizationLicense",
     "OrgLookupLog",
     "Product",
     "Region",

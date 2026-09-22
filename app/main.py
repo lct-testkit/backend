@@ -31,6 +31,7 @@ from app.modules.catalog.router import (
     directions_router,
     holidays_router,
     loss_reasons_router,
+    organization_licenses_router,
     organizations_router,
     products_router,
     regions_router,
@@ -185,6 +186,7 @@ def create_app() -> FastAPI:
     app.include_router(holidays_router, prefix=settings.api_prefix)
     app.include_router(custom_field_defs_router, prefix=settings.api_prefix)
     app.include_router(regions_router, prefix=settings.api_prefix)
+    app.include_router(organization_licenses_router, prefix=settings.api_prefix)
     app.include_router(files_router, prefix=settings.api_prefix)
     app.include_router(attachments_router, prefix=settings.api_prefix)
     app.include_router(org_lookup_router, prefix=settings.api_prefix)

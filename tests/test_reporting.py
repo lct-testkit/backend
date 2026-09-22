@@ -12,22 +12,35 @@ matplotlib и проверяет магические байты результ�
 (честная заглушка, см. его докстринг), поэтому вызван по-настоящему.
 Остальные builders (реальные SQL-запросы с RBAC-скоупом) и материализованное
 представление проверены вживую против настоящего Postgres в этой же сессии,
-не как pytest-тест.
+не как pytest-тест — кроме `TestReportDataEndpoint` (П2): настоящая
+Postgres обязательна, тот же приём, что `tests/test_imports.py::
+TestLicenseImportEndToEnd` — см. `tests/conftest.py`.
 """
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
+from sqlalchemy import select
+from sqlalchemy.dialects import postgresql
 
 from app.core.errors import ValidationError
 from app.core.permissions import Permission, has_permission
+from app.modules.crm.models import Deal
 from app.modules.identity.models import Role
 from app.modules.reporting.builders import (
     REPORT_BUILDERS,
     REPORT_ESTIMATORS,
     ReportDataset,
+    ReportFilters,
+    _apply_deal_filters,
+    _apply_entity_filters,
+    _parse_date_range,
     _parse_int,
+    _parse_report_filters,
     _parse_uuid,
+    _parse_uuid_list,
     build_learning_progress,
 )
 from app.modules.reporting.rendering import (
@@ -42,6 +55,7 @@ from app.modules.reporting.rendering import (
 )
 from app.modules.reporting.seed import _DEFAULT_TEMPLATES
 from app.modules.reporting.service import SYNC_ROW_THRESHOLD
+from tests.conftest import TEST_DATABASE_URL, _make_user, authenticate, run
 
 
 def _sample_dataset(rows: list[list] | None = None) -> ReportDataset:
@@ -156,6 +170,119 @@ class TestParamParsing:
         with pytest.raises(ValidationError):
             _parse_int({"limit": "many"}, "limit", default=500, minimum=1, maximum=5000)
 
+    # -- П1: период --------------------------------------------------------
+
+    def test_parse_date_range_accepts_iso_dates(self) -> None:
+        date_from, date_to = _parse_date_range(
+            {"date_from": "2026-01-01", "date_to": "2026-01-31"}
+        )
+        assert date_from.isoformat() == "2026-01-01"
+        assert date_to.isoformat() == "2026-01-31"
+
+    def test_parse_date_range_both_absent_is_none(self) -> None:
+        assert _parse_date_range({}) == (None, None)
+
+    def test_parse_date_range_one_sided_is_allowed(self) -> None:
+        date_from, date_to = _parse_date_range({"date_from": "2026-01-01"})
+        assert date_from is not None
+        assert date_to is None
+
+    def test_parse_date_range_rejects_from_after_to(self) -> None:
+        with pytest.raises(ValidationError):
+            _parse_date_range({"date_from": "2026-02-01", "date_to": "2026-01-01"})
+
+    def test_parse_date_range_rejects_garbage(self) -> None:
+        with pytest.raises(ValidationError):
+            _parse_date_range({"date_from": "не дата"})
+
+    # -- П1: списки ID -------------------------------------------------------
+
+    def test_parse_uuid_list_accepts_json_array(self) -> None:
+        ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+        parsed = _parse_uuid_list({"organization_ids": ids}, "organization_ids")
+        assert [str(p) for p in parsed] == ids
+
+    def test_parse_uuid_list_accepts_csv_string(self) -> None:
+        a, b = uuid.uuid4(), uuid.uuid4()
+        parsed = _parse_uuid_list({"owner_ids": f"{a}, {b}"}, "owner_ids")
+        assert parsed == [a, b]
+
+    def test_parse_uuid_list_returns_none_when_absent_or_empty(self) -> None:
+        assert _parse_uuid_list({}, "product_ids") is None
+        assert _parse_uuid_list({"product_ids": []}, "product_ids") is None
+
+    def test_parse_uuid_list_rejects_garbage(self) -> None:
+        with pytest.raises(ValidationError):
+            _parse_uuid_list({"direction_ids": ["not-a-uuid"]}, "direction_ids")
+
+    def test_parse_report_filters_collects_all_six_keys(self) -> None:
+        org_id = uuid.uuid4()
+        filters = _parse_report_filters(
+            {"date_from": "2026-01-01", "organization_ids": [str(org_id)]}
+        )
+        assert filters.date_from is not None
+        assert filters.date_to is None
+        assert filters.organization_ids == [org_id]
+        assert filters.direction_ids is None
+        assert filters.has_any() is True
+
+    def test_empty_params_yields_no_filters(self) -> None:
+        assert _parse_report_filters({}).has_any() is False
+
+
+class TestReportFilterClauses:
+    """Билдеры выполняют реальные SQL-запросы (нужен Postgres — см. докстринг
+    модуля), но композиция WHERE-условий — чистая функция над `Select`,
+    проверяется компиляцией в SQL-текст без подключения к БД, тем же
+    приёмом, что и остальные тесты этого файла."""
+
+    def _sql(self, stmt) -> str:
+        return str(
+            stmt.compile(
+                dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+            )
+        )
+
+    def test_no_filters_is_a_no_op(self) -> None:
+        stmt = _apply_deal_filters(select(Deal.id), ReportFilters())
+        assert self._sql(stmt) == self._sql(select(Deal.id))
+
+    def test_date_range_filters_inclusive_day_boundaries(self) -> None:
+        filters = _parse_report_filters({"date_from": "2026-01-01", "date_to": "2026-01-31"})
+        sql = self._sql(_apply_deal_filters(select(Deal.id), filters))
+        assert "deals.created_at >=" in sql
+        assert "deals.created_at <" in sql
+        assert "2026-01-01" in sql
+        # Верхняя граница исключающая и сдвинута на следующий день, иначе
+        # весь `date_to` целиком (со временем > 00:00) выпал бы из отчёта.
+        assert "2026-02-01" in sql
+
+    def test_date_filter_uses_custom_column_when_given(self) -> None:
+        filters = _parse_report_filters({"date_from": "2026-01-01"})
+        sql = self._sql(_apply_deal_filters(select(Deal.id), filters, date_column=Deal.closed_at))
+        assert "deals.closed_at >=" in sql
+        assert "deals.created_at" not in sql
+
+    def test_organization_and_owner_filters(self) -> None:
+        org_id, owner_id = uuid.uuid4(), uuid.uuid4()
+        filters = _parse_report_filters(
+            {"organization_ids": [str(org_id)], "owner_ids": [str(owner_id)]}
+        )
+        sql = self._sql(_apply_entity_filters(select(Deal.id), filters))
+        assert "deals.organization_id IN" in sql
+        assert "deals.owner_id IN" in sql
+        assert str(org_id) in sql
+        assert str(owner_id) in sql
+
+    def test_product_and_direction_filters_go_through_deal_products(self) -> None:
+        product_id, direction_id = uuid.uuid4(), uuid.uuid4()
+        filters = _parse_report_filters(
+            {"product_ids": [str(product_id)], "direction_ids": [str(direction_id)]}
+        )
+        sql = self._sql(_apply_entity_filters(select(Deal.id), filters))
+        assert "deal_products" in sql
+        assert "products.direction_id IN" in sql
+
 
 class TestLearningProgressStub:
     async def test_returns_empty_dataset_with_honest_note_not_fake_data(self) -> None:
@@ -222,3 +349,145 @@ class TestReportPermissions:
     def test_denied_to_auditor_and_integration(self, role: Role) -> None:
         assert not has_permission(role.value, Permission.REPORT_CREATE)
         assert not has_permission(role.value, Permission.REPORT_READ)
+
+
+class TestReportDataEndpoint:
+    """П2 (rtk_requiriments.md разд. 6.4; backend-issues.md #19):
+    `GET /api/reports/{report_id}/data` отдаёт тот же датасет, что и
+    xlsx/pdf, но JSON'ом — без файла в S3, без `REPORT_EXPORTED`. Настоящая
+    Postgres обязательна — см. докстринг модуля."""
+
+    pytestmark = pytest.mark.skipif(
+        not TEST_DATABASE_URL, reason="нужен TEST_DATABASE_URL с применёнными миграциями"
+    )
+
+    def _kam(self, client) -> None:
+        kam = run(client, _make_user, "KAM")
+        csrf = authenticate(client, kam)
+        client.headers["X-CSRF-Token"] = csrf
+
+    def _stub_s3(self, monkeypatch) -> None:
+        """`POST /api/reports` для лёгкого шаблона генерирует файл синхронно
+        (`ReportJobService.generate`) и грузит его в S3 — недоступный по
+        design (`S3_ENDPOINT_URL=http://127.0.0.1:9` в `tests/conftest.py`,
+        тот же приём, что уже используют тесты Redis/Keycloak). `/data` сама
+        файл не трогает (это и есть смысл П2), но чтобы вообще получить
+        `report_id` со статусом `completed`, сначала нужно пройти обычный
+        `POST /api/reports` — тот же приём, что `test_imports.py::
+        TestLicenseImportEndToEnd._stub_storage`."""
+        import app.modules.reporting.service as reporting_service
+
+        async def fake_ensure_bucket(bucket: str) -> None:
+            return None
+
+        async def fake_upload(*, bucket: str, key: str, body: bytes, content_type: str) -> None:
+            return None
+
+        monkeypatch.setattr(reporting_service, "ensure_bucket", fake_ensure_bucket)
+        monkeypatch.setattr(reporting_service, "upload_object_bytes", fake_upload)
+
+    def _seed_template(self, client) -> None:
+        """`POST /api/reports` резолвит `template_code` через `report_templates`
+        (`ReportJobService.create`) — таблица пуста на голой БД после
+        `alembic upgrade head` (шаблоны заводит отдельно `python -m
+        app.modules.reporting.seed`, не входит в `tests/conftest.py`).
+        Остальные тесты этого файла самодостаточны (сами заводят пользователей
+        через `_make_user`) — заводим и здесь, вместо того чтобы тесту молча
+        полагаться на то, что кто-то заранее прогнал сид (`tests/conftest.py`
+        документирует только `alembic upgrade head`, без сидов)."""
+        from sqlalchemy import select as sa_select
+
+        from app.core.db import session_scope
+        from app.modules.reporting.models import ReportTemplate
+
+        async def _ensure() -> None:
+            async with session_scope() as session:
+                existing = await session.scalar(
+                    sa_select(ReportTemplate.id).where(ReportTemplate.code == "sla_compliance")
+                )
+                if existing is not None:
+                    return
+                session.add(
+                    ReportTemplate(
+                        code="sla_compliance",
+                        name="Соблюдение SLA",
+                        description="Доля сделок в норме/под угрозой/с нарушением SLA.",
+                        query_def={"kind": "sla_compliance"},
+                        allowed_roles=[],
+                        default_params={},
+                        output_formats=["xlsx", "pdf"],
+                        is_active=True,
+                    )
+                )
+
+        run(client, _ensure)
+
+    def test_data_endpoint_returns_same_shape_as_the_builder(self, client, monkeypatch) -> None:
+        self._stub_s3(monkeypatch)
+        self._seed_template(client)
+        self._kam(client)
+        create = client.post(
+            "/api/reports", json={"template_code": "sla_compliance", "format": "xlsx"}
+        )
+        assert create.status_code == 201, create.text
+        job = create.json()
+        assert job["status"] == "completed", job  # агрегат — всегда лёгкий путь
+
+        data = client.get(f"/api/reports/{job['id']}/data")
+        assert data.status_code == 200, data.text
+        body = data.json()
+        assert body["columns"] == ["Состояние", "Сделок", "Доля, %"]
+        assert body["row_count"] == len(body["rows"])
+        # Четыре строки состояний SLA — раздел 4.13, построитель
+        # `build_sla_compliance` всегда возвращает все четыре, даже нулевые.
+        assert len(body["rows"]) == 4
+        assert body["generated_at"]
+
+    def test_data_endpoint_does_not_create_a_file_or_export_audit_event(
+        self, client, monkeypatch
+    ) -> None:
+        from sqlalchemy import func, select
+
+        from app.core.db import session_scope
+        from app.modules.audit.models import AuditLog
+
+        self._stub_s3(monkeypatch)
+        self._seed_template(client)
+        self._kam(client)
+        job_id = client.post(
+            "/api/reports", json={"template_code": "sla_compliance", "format": "xlsx"}
+        ).json()["id"]
+
+        async def _count_exports() -> int:
+            async with session_scope() as session:
+                return int(
+                    (
+                        await session.execute(
+                            select(func.count(AuditLog.id)).where(
+                                AuditLog.action == "REPORT_EXPORTED",
+                                AuditLog.entity_id == uuid.UUID(job_id),
+                            )
+                        )
+                    ).scalar_one()
+                )
+
+        before = run(client, _count_exports)
+        assert client.get(f"/api/reports/{job_id}/data").status_code == 200
+        assert client.get(f"/api/reports/{job_id}/data").status_code == 200
+        # POST /api/reports само уже написало ровно одно REPORT_EXPORTED
+        # (генерация xlsx) — два вызова /data сверх него не добавили ни
+        # одного: чтение, не выгрузка.
+        assert run(client, _count_exports) == before
+
+    def test_data_endpoint_denies_another_users_report(self, client, monkeypatch) -> None:
+        self._stub_s3(monkeypatch)
+        self._seed_template(client)
+        self._kam(client)
+        job_id = client.post(
+            "/api/reports", json={"template_code": "sla_compliance", "format": "xlsx"}
+        ).json()["id"]
+
+        other_kam = run(client, _make_user, "KAM")
+        authenticate(client, other_kam)
+        response = client.get(f"/api/reports/{job_id}/data")
+        assert response.status_code == 403, response.text

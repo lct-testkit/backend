@@ -84,7 +84,7 @@ curl http://localhost:8080/health/ready
 | http://localhost:8080/ | веб-клиент (профиль `web` или Vite через `WEB_UPSTREAM`) |
 | http://localhost:8333 | SeaweedFS S3 через Caddy: presigned-ссылки, браузер ходит сюда напрямую, минуя API |
 | localhost:5433 | PostgreSQL для pgAdmin (`POSTGRES_PORT`): база `crm`, пользователь `crm` |
-| https://localhost:8443 | ❌ TLS не работает: рукопожатие обрывается, см. «Ограничения» |
+| https://localhost:8443 | то же по TLS (`tls internal`, самоподписанный сертификат — предупреждение браузера ожидаемо) |
 
 Метрики Prometheus доступны только внутри сети (`api:8000/metrics`): через Caddy `/metrics` отвечает `404`.
 
@@ -317,11 +317,11 @@ deploy/                  Caddyfile, entrypoint.sh, keycloak/realm-crm.json, post
 | `INTEGRATION_WEBHOOK_RATE_LIMIT_PER_MIN` | 60 | лимит запросов на вебхуки CMS/LMS/Bitrix24 |
 | `LOG_LEVEL` / `LOG_JSON` | `INFO` / `true` | уровень и формат логов (structlog + JSON) |
 | `UVICORN_WORKERS` | 1 | воркеров uvicorn на контейнер `api`; масштабирование — только репликами |
-| `HTTP_PORT` / `HTTPS_PORT` / `S3_PROXY_PORT` / `POSTGRES_PORT` | 8080 / 8443 / 8333 / 5433 | порты на хосте (`caddy`, `postgres`); `S3_PROXY_PORT` ❌ отсутствует в `.env.example` |
-| `WEB_UPSTREAM` | `web:3000` | куда Caddy отдаёт всё, что не `/api`, `/public`, `/health`, `/auth`. ❌ Отсутствует в `.env.example` |
-| `CSP_SCRIPT_SRC` | `'self'` | `script-src` в CSP; ослабляется для Vite в разработке. ❌ Отсутствует в `.env.example` |
-| `APP_MODE` | `demo` | режим клиента `web`: выбор демо-роли или одна кнопка входа; читает только образ `web`, не `Settings`. ❌ Отсутствует в `.env.example` |
-| `CRM_TLS_HOST` | `localhost` | имя TLS-сайта в Caddyfile. ❌ Не передаётся `docker-compose.yml` в контейнер `caddy` и отсутствует в `.env.example` — на практике всегда дефолт |
+| `HTTP_PORT` / `HTTPS_PORT` / `S3_PROXY_PORT` / `POSTGRES_PORT` | 8080 / 8443 / 8333 / 5433 | порты на хосте (`caddy`, `postgres`) |
+| `WEB_UPSTREAM` | `web:3000` | куда Caddy отдаёт всё, что не `/api`, `/public`, `/health`, `/static`, `/auth` |
+| `CSP_SCRIPT_SRC` | `'self'` | `script-src` в CSP; ослабляется для Vite в разработке |
+| `APP_MODE` | `demo` | режим клиента `web`: выбор демо-роли или одна кнопка входа; читает только образ `web`, не `Settings` |
+| `CRM_TLS_HOST` | `localhost` | имя TLS-сайта в Caddyfile (SNI сертификата `tls internal`); смените, если стенд открывается не по `localhost` |
 | `SESSION_TTL`, `SESSION_IDLE_TIMEOUT`, `CSRF_*`, `ALLOW_BEARER_AUTH`, лимиты файлов, `PASSWORD_CHANGE_*`, `ERASURE_*`, `INVITE_*` и другие | см. `.env.example` | объявлены в `Settings` и документированы в `.env.example`, но **не входят в `x-api-env`** — в контейнерах всегда действует дефолт `config.py`, значение из `.env` игнорируется |
 | `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_ECHO`, `SESSION_COOKIE_NAME`, `PAGINATION_MAX_LIMIT`, `APP_NAME`, `APP_VERSION`, `API_PREFIX`, `PUBLIC_PREFIX`, `LLM_*` | см. `config.py` | есть в `Settings`, но ❌ отсутствуют в `.env.example`; `LLM_*` дополнительно не используется ни в одном модуле кода |
 
@@ -412,18 +412,14 @@ locust -f loadtest/locustfile_transition.py --headless -u 50 -r 25 -t 60s --host
 
 | Проблема | Как обходится / статус |
 |---|---|
-| `https://localhost:8443` не проходит TLS-рукопожатие (`tlsv1 alert internal error`, проверено `openssl s_client` и `curl -k`) | ❌ вход через TLS в этом развёртывании не работает; `:8080` по HTTP работает штатно, причина не установлена при подготовке README |
 | `GET /api/admin/audit/verify-chain` на широких выборках (`limit≥100`) нашёл разрывы цепочки на этом стенде | узкие недавние окна (`limit≤20`) в тот же момент были целыми — похоже на след параллельной активности нескольких сессий на общем стенде за время его жизни; полной трассировки причины не делалось, стоит проверить на выделенном стенде перед сдачей |
 | `PUT /workflows/{id}/graph` раньше удалял и создавал заново все статусы и переходы → `500`, как только по переходу прошла хотя бы одна сделка (внешний ключ истории) | исправлено в рабочей копии (не закоммичено): переходы сопоставляются по паре статусов и обновляются на месте, занятый статус/переход даёт `422` вместо `500` |
 | `GET /api/auth/login?next=…` был открытым редиректом | исправлено: `safe_next_path` принимает только путь внутри сайта, проверено тестами и живым запросом (см. «Безопасность») |
 | Сиды `reporting`/`notification`/`integration` не входят в `entrypoint.sh seed` (только воронки) | запускаются вручную, идемпотентны (см. «Разработка»); на этом стенде уже применены |
 | Автоподстановка по ИНН не имеет реального внешнего провайдера | цепочка «локальный реестр → подтверждённые организации → мок» — мок работает только вне `prod`; в `prod` доступен только локальный реестр и уже подтверждённые организации |
-| `ALLOWED_FILE_EXTENSIONS` в `.env.example` не включает `xml,csv`, хотя дефолт кода их включает (нужны реестру ЕГРЮЛ и импорту каталогов) | в Docker действует дефолт кода — переменная не входит в `x-api-env`, поведение не страдает, но `.env.example` вводит в заблуждение при чтении |
-| `IMPORT_MAX_ROWS` в `.env.example` (50 000) меньше дефолта кода (100 000) | та же причина — переменная не в `x-api-env`, в Docker действует больший дефолт кода |
-| `ruff check app tests` — 5 замечаний на момент подготовки этого README (неотсортированный импорт, длинные строки) | не устранено; не влияет на тесты, но ломает CI-джоб `lint` |
 | Мастер передачи дел (offboard) принимает только одного преемника, «по-сделочно» нет | точечное распределение — через отдельную массовую ручку `POST /deals/bulk/reassign` |
 
-Остальные пункты — несогласованные коды ошибок для лимита отчётов, отсутствующие `DELETE`-ручки у части справочников, N+1 запросы карточек без денормализованных имён, отсутствие данных дашбордов в JSON (только файл-экспорт), отсутствие пагинации у части списков — в [`../frontend/docs/backend-issues.md`](../frontend/docs/backend-issues.md), с привязкой к файлу и строке.
+Остальные пункты — несогласованные коды ошибок для лимита отчётов, отсутствующая `DELETE`-ручка у производственного календаря (остальные справочники и воронки её уже получили, см. выше), N+1 запросы карточек без денормализованных имён, отсутствие пагинации у части списков — в [`../frontend/docs/backend-issues.md`](../frontend/docs/backend-issues.md), с привязкой к файлу и строке. Данные отчёта в JSON, не только файлом, — `GET /api/reports/{report_id}/data`.
 
 | Документ | Что внутри |
 |---|---|

@@ -10,8 +10,15 @@
 
 {
 	admin off
-	# В закрытом контуре внешний ACME недоступен: сертификаты только внутренние.
-	auto_https off
+	# `off` (было раньше) выключает у Caddy весь TLS-automation слой целиком —
+	# включая выпуск сертификата самим `tls internal` на сайте :8443 ниже (тот
+	# идёт через тот же automation, просто с internal issuer вместо ACME).
+	# Результат бага: `cert_cache_fill:0`, рукопожатие на :8443 падало с TLS
+	# alert 80 «no certificate available for 'localhost'» — сайт ни разу не
+	# выпустил себе сертификат с момента создания стенда. `disable_redirects`
+	# убирает автоredirect :8080→:8443 (видимо ради этого и ставили `off`), но
+	# не блокирует выпуск сертификата для explicit `tls internal`.
+	auto_https disable_redirects
 	servers {
 		trusted_proxies static private_ranges
 	}

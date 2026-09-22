@@ -17,6 +17,7 @@ PostgreSQL/Redis: покрываются чистые функции — рен�
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 
 import pytest
 
@@ -37,6 +38,7 @@ from app.modules.notification.service import (
     get_channel_gateway,
     render_template,
 )
+from tests.conftest import TEST_DATABASE_URL, _make_user, authenticate, run
 
 
 class TestRenderTemplate:
@@ -158,3 +160,91 @@ class TestNotificationPermissions:
         assert not has_permission(Role.HEAD.value, Permission.NOTIFICATION_TEMPLATE_MANAGE)
         assert not has_permission(Role.AUDITOR.value, Permission.NOTIFICATION_TEMPLATE_MANAGE)
         assert not has_permission(Role.INTEGRATION.value, Permission.NOTIFICATION_TEMPLATE_MANAGE)
+
+
+class TestDeleteNotificationTemplate:
+    """П4: `DELETE /api/admin/notification-templates/{id}` — можно всегда,
+    но предупреждает, если это был последний активный шаблон для своей пары
+    code+channel. Настоящая Postgres обязательна — см. докстринг модуля."""
+
+    pytestmark = pytest.mark.skipif(
+        not TEST_DATABASE_URL, reason="нужен TEST_DATABASE_URL с применёнными миграциями"
+    )
+
+    def _admin(self, client) -> None:
+        admin = run(client, _make_user, "ADMIN")
+        csrf = authenticate(client, admin)
+        client.headers["X-CSRF-Token"] = csrf
+
+    def test_deleting_the_only_active_template_warns(self, client) -> None:
+        self._admin(client)
+        code = f"tpl-{uuid.uuid4().hex[:8]}"
+        create = client.post(
+            "/api/admin/notification-templates",
+            json={
+                "code": code, "channel": "email", "body_template": "Текст письма",
+                "is_active": True,
+            },
+        )
+        assert create.status_code == 201, create.text
+        template_id = create.json()["id"]
+
+        delete = client.delete(f"/api/admin/notification-templates/{template_id}")
+        assert delete.status_code == 200, delete.text
+        body = delete.json()
+        assert body["ok"] is True
+        assert "единственный активный" in body["detail"]
+
+        assert client.get(
+            "/api/admin/notification-templates", params={"code": code}
+        ).json()["items"] == []
+
+    def test_deleting_an_already_inactive_template_does_not_warn(self, client) -> None:
+        # `uq_notification_templates_code_channel` не даёт двум шаблонам
+        # существовать с одной парой code+channel одновременно — значит,
+        # единственный случай, когда удаление НЕ теряет действующее
+        # покрытие, это когда шаблон уже был неактивен (не использовался).
+        self._admin(client)
+        code = f"tpl-{uuid.uuid4().hex[:8]}"
+        create = client.post(
+            "/api/admin/notification-templates",
+            json={
+                "code": code, "channel": "email", "body_template": "Черновик письма",
+                "is_active": False,
+            },
+        )
+        assert create.status_code == 201, create.text
+        template_id = create.json()["id"]
+
+        delete = client.delete(f"/api/admin/notification-templates/{template_id}")
+        assert delete.status_code == 200, delete.text
+        body = delete.json()
+        assert body["ok"] is True
+        assert "единственный активный" not in body["detail"]
+
+    def test_deleting_a_template_does_not_touch_another_code(self, client) -> None:
+        self._admin(client)
+        keep_code = f"tpl-keep-{uuid.uuid4().hex[:8]}"
+        keep = client.post(
+            "/api/admin/notification-templates",
+            json={
+                "code": keep_code, "channel": "email", "body_template": "Оставить",
+                "is_active": True,
+            },
+        ).json()
+        gone_code = f"tpl-gone-{uuid.uuid4().hex[:8]}"
+        gone = client.post(
+            "/api/admin/notification-templates",
+            json={
+                "code": gone_code, "channel": "email", "body_template": "Удалить",
+                "is_active": True,
+            },
+        ).json()
+
+        delete = client.delete(f"/api/admin/notification-templates/{gone['id']}")
+        assert delete.status_code == 200, delete.text
+
+        still_there = client.get(
+            "/api/admin/notification-templates", params={"code": keep_code}
+        ).json()["items"]
+        assert any(item["id"] == keep["id"] for item in still_there)
