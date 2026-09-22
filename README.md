@@ -4,8 +4,10 @@
 
 **Модульный монолит на FastAPI для CRM ИТ Школы Ростелекома: закрытый контур, вход через Keycloak, неизменяемый аудит и простая электронная подпись**
 
+<sub>Команда **«Тесткит»** — [github.com/lct-testkit](https://github.com/lct-testkit)</sub>
+
 <!--STATS-->
-**173** операции API &nbsp;·&nbsp; **13** модулей &nbsp;·&nbsp; **64** таблицы &nbsp;·&nbsp; **14** миграций &nbsp;·&nbsp; **417** тестов &nbsp;·&nbsp; **11** сервисов Compose
+**181** операция API &nbsp;·&nbsp; **13** модулей &nbsp;·&nbsp; **65** таблиц &nbsp;·&nbsp; **15** миграций &nbsp;·&nbsp; **458** тестов &nbsp;·&nbsp; **11** сервисов Compose
 <!--/STATS-->
 
 [Быстрый старт](#быстрый-старт) · [Примеры](#примеры-использования) · [Как устроено](#как-устроено) · [Модули](#что-внутри) · [Настройка](#настройка) · [Разработка](#разработка) · [Безопасность](#безопасность) · [Ограничения](#ограничения-и-известные-проблемы)
@@ -36,7 +38,7 @@
 
 <img src="docs/img/swagger.png" width="720" alt="Swagger UI: 29 групп ручек, кнопка Authorize для Bearer-токена">
 
-*Swagger UI на `/api/docs`: 173 операции в 29 группах, схема `BearerAuth` (вставьте access-токен Keycloak в Authorize). В `prod` интерактивный UI закрыт, схема `/api/openapi.json` остаётся.*
+*Swagger UI на `/api/docs`: 181 операция в 30 группах, схема `BearerAuth` (вставьте access-токен Keycloak в Authorize). В `prod` интерактивный UI закрыт, схема `/api/openapi.json` остаётся.*
 
 <img src="docs/img/keycloak-login.png" width="410" alt="Форма входа Keycloak, realm crm">
 
@@ -77,7 +79,7 @@ curl http://localhost:8080/health/ready
 | Адрес | Что это |
 |---|---|
 | http://localhost:8080/api/docs | Swagger UI (в профиле `prod` закрыт) |
-| http://localhost:8080/api/openapi.json | OpenAPI 3.0.3, 173 операции |
+| http://localhost:8080/api/openapi.json | OpenAPI 3.0.3, 181 операция |
 | http://localhost:8080/health/live | liveness |
 | http://localhost:8080/health/ready | готовность: БД, Redis, JWKS Keycloak, SeaweedFS, очередь |
 | http://localhost:8080/auth | Keycloak, realm `crm`; консоль — `/auth/admin` |
@@ -140,8 +142,9 @@ curl -s http://localhost:8080/api/me -H "Authorization: Bearer $TOKEN"
 ```
 
 ```json
-{"id":"01a0bf55-486b-7000-9454-4c74200b2209","full_name":"Иван Иванов","email":"ivanov@rt-it-school.ru",
- "role":"KAM","team_id":"01a0c00e-…","status":"active","consent_required":false,
+{"id":"01a0bf55-486b-7000-9454-4c74200b2209","full_name":"Иван Тесткитович","email":"ivanov@rt-it-school.ru",
+ "role":"KAM","team_id":"01a0c00e-…","status":"active","locale":"ru","timezone":"Europe/Moscow",
+ "consent_required":false,"password_change_required":false,
  "scopes":["catalog:read","contact:read","contact:reveal","contact:write","deal:create","deal:read", …],
  "teams":["01a0c00e-…"],"perm_epoch":1,"last_login_at":"2026-09-20T18:23:56.579722Z","version":2}
 ```
@@ -186,7 +189,7 @@ curl -s "http://localhost:8080/api/admin/audit/verify-chain?limit=1000" -H "Auth
 curl -s http://localhost:8080/api/openapi.json -o openapi.json
 ```
 
-`openapi.json` — 3.0.3, 142 пути, 173 операции, 210 схем, единственная схема авторизации `BearerAuth`. Тот же файл — источник для генератора клиента фронтенда (`frontend/tools/gen-api.mjs`).
+`openapi.json` — 3.0.3, 146 путей, 181 операция, 213 схем, единственная схема авторизации `BearerAuth`. Тот же файл — источник для генератора клиента фронтенда (`frontend/tools/gen-api.mjs`).
 
 ### Автоподстановка и проверка ИНН
 
@@ -255,23 +258,23 @@ flowchart LR
 
 ## Что внутри
 
-Число операций на модуль — по тегам `GET /api/openapi.json`; сумма по таблице сходится с общими 173 без остатка.
+Число операций на модуль — по тегам `GET /api/openapi.json`; 13 модулей в сумме дают 179, плюс 2 health-пробы вне модульной системы (`GET /health/live`, `/health/ready` — объявлены в `app/main.py`, ни один `app/modules/*` пакет их не владеет) — 181 всего.
 
 | Модуль | Что делает | Ключевые эндпоинты · таблицы |
 |---|---|---|
 | `admin` | системные настройки, флаги, чтение/экспорт журнала аудита и проверка его цепочки | `GET/PATCH /api/admin/feature-flags`, `GET/PUT /api/admin/system-settings`, `GET /api/admin/audit`, `/export`, `/verify-chain` — 7 операций · `feature_flags`, `system_settings`, `admin_approvals`, `idempotency_keys` |
 | `audit` | сервис записи в неизменяемый журнал; своих эндпоинтов нет — вызывается всеми модулями в той же транзакции, что бизнес-изменение | 0 операций · `audit_log` (партиции по месяцам, триггеры неизменяемости на каждой) |
-| `catalog` | организации, контакты, продукты, справочники (направления, причины отказа, календарь, пользовательские поля, регионы) | `GET/POST /api/organizations`, `/contacts`, `/products` + 5 справочников — 28 операций · 10 таблиц (`organizations`, `contacts`, `products`, `directions`, `regions`, …) |
+| `catalog` | организации, контакты, продукты, справочники (направления, причины отказа, календарь, пользовательские поля, регионы), лицензии/договоры вуз-вендор-ПО | `GET/POST /api/organizations`, `/contacts`, `/products` + 5 справочников + `GET /api/organization-licenses` (раздел 4, Треб.1), `DELETE` у направлений и причин отказа — 32 операции · 11 таблиц (`organizations`, `contacts`, `products`, `directions`, `regions`, `organization_licenses`, …) |
 | `crm` | сделки, переходы по воронке, комментарии, задачи, участники | `GET/POST /api/deals`, `/{id}/transition`, `/reassign`, `/comments`, `/tasks` — 20 операций · 8 таблиц (`deals`, `deal_status_history`, `deal_comments`, `tasks`, …) |
 | `files` | загрузка через presigned-URL, magic-bytes и антивирус-заглушка, вложения к сущностям | `POST /api/files/upload-intent`, `/{id}/commit`, `GET /api/attachments` — 7 операций · `files`, `attachments` |
 | `identity` | аутентификация BFF/OIDC, администрирование пользователей и команд, приглашения, согласие, обезличивание | `GET/POST /api/auth/*`, `GET /api/me`, `GET/POST /api/admin/users`, `/teams`, `/approvals` — 37 операций · 7 таблиц (`users`, `teams`, `consents`, `data_erasure_requests`, …) |
 | `imports` | импорт каталогов из xlsx/xls/csv: профилирование, автоподбор маппинга, dry-run, применение, откат | `POST /api/imports`, `/{id}/dry-run`, `/apply`, `/rollback`, `PUT /{id}/mapping` — 9 операций · `import_jobs`, `import_row_results`, `import_presets` |
 | `integration` | вебхуки CMS/LMS/Bitrix24 с HMAC-подписью, исходящий outbox с backoff, административный контур источников | `POST /api/v1/integrations/{cms,lms,bitrix}/*`, `GET/PATCH /api/admin/integrations/sources` — 8 операций · 6 таблиц (`integration_sources`, `inbound_messages`, `outbox_events`, …) |
-| `notification` | уведомления (in-app, заглушки email/telegram), шаблоны Jinja2, настройки получателя | `GET /api/notifications`, `/read`, `GET/PUT /api/me/notification-prefs`, `GET/POST /api/admin/notification-templates` — 7 операций · 4 таблицы |
-| `registry` | автоподстановка и проверка ИНН/ОГРН, локальный реестр ЕГРЮЛ, сверка реквизитов (drift) | `GET /api/org-lookup/suggest`, `POST /validate`, `POST /api/admin/registry/import` — 5 операций · 4 таблицы (`registry_versions`, `egrul_entries`, …) |
-| `reporting` | 8 видов отчётов (xlsx/pdf/png через matplotlib и xhtml2pdf), дашборды с виджетами | `GET/POST /api/reports`, `/report-templates`, `GET/POST /api/dashboards`, `/widgets` — 14 операций · `report_templates`, `report_jobs`, `dashboards`, `dashboard_widgets` |
+| `notification` | уведомления (in-app, заглушки email/telegram), шаблоны Jinja2, настройки получателя | `GET /api/notifications`, `/read`, `GET/PUT /api/me/notification-prefs`, `GET/POST/DELETE /api/admin/notification-templates` — 8 операций · 4 таблицы |
+| `registry` | автоподстановка и проверка ИНН/ОГРН, локальный реестр ЕГРЮЛ, сверка реквизитов (drift) | `GET /api/org-lookup/suggest`, `POST /validate`, `POST /api/admin/registry/import`, `DELETE /api/admin/registry/versions/{id}` — 6 операций · 4 таблицы (`registry_versions`, `egrul_entries`, …) |
+| `reporting` | 8 видов отчётов (xlsx/pdf/png через matplotlib и xhtml2pdf), дашборды с виджетами | `GET/POST /api/reports`, `/report-templates`, `GET /{id}/data` (датасет в JSON без файла), `GET/POST /api/dashboards`, `/widgets` — 15 операций · `report_templates`, `report_jobs`, `dashboards`, `dashboard_widgets` |
 | `signing` | ПЭП: документы и запросы на подпись, OTP-код, публичная страница подписания и проверки, соглашения об ЭДО | `POST /api/signature-documents`, `/send`, `POST /api/signature-requests/{id}/{challenge,sign}`, `GET /public/sign/{token}`, `POST /api/signatures/verify` — 21 операция · 6 таблиц |
-| `workflow` | конструктор воронок: статусы, переходы, DSL условий, валидация, публикация со снимком, архивирование статуса | `GET/POST /api/workflows`, `PUT /{id}/graph`, `POST /{id}/publish`, `POST /{id}/statuses/{sid}/archive` — 8 операций · `workflows`, `workflow_statuses`, `workflow_transitions`, `sla_rules`, `status_mapping_jobs` |
+| `workflow` | конструктор воронок: статусы, переходы, DSL условий, валидация, публикация со снимком, архивирование статуса, удаление черновика | `GET/POST /api/workflows`, `PUT /{id}/graph`, `POST /{id}/publish`, `POST /{id}/statuses/{sid}/archive`, `DELETE /api/workflows/{id}` — 9 операций · `workflows`, `workflow_statuses`, `workflow_transitions`, `sla_rules`, `status_mapping_jobs` |
 
 ```
 app/
@@ -428,7 +431,7 @@ locust -f loadtest/locustfile_transition.py --headless -u 50 -r 25 -t 60s --host
 | [`../dop.md`](../dop.md) | дополнения: ПЭП, автоподстановка по ИНН и ЕГРЮЛ, дизайн-система |
 | [`../README.md`](../README.md) | обзор всего проекта: состав репозиториев, быстрый старт демо- и prod-версии клиента, адреса и порты всего стека |
 | [`../frontend/README.md`](../frontend/README.md) | веб-клиент: стек, сборка, режимы demo/prod |
-| [`../frontend/docs/api-endpoints.md`](../frontend/docs/api-endpoints.md) | те же 173 операции API, сгенерированный список по тегам |
+| [`../frontend/docs/api-endpoints.md`](../frontend/docs/api-endpoints.md) | те же 181 операция API, сгенерированный список по тегам |
 | [`../frontend/docs/backend-issues.md`](../frontend/docs/backend-issues.md) | 96 несоответствий бэкенда, найденных на живом стенде, с привязкой к файлу и строке |
 | [`loadtest/README.md`](loadtest/README.md) | нагрузочное тестирование: методика, зафиксированный прогон, интерпретация результатов |
 | [`../deploy/README.md`](../deploy/README.md) | инфраструктурный репозиторий: манифест образов, CI/CD, состояние по фазам |
