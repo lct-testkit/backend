@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
+      actions: read # для приватных репозиториев: CodeQL читает данные о запуске (get-a-workflow-run)
       contents: read
       security-events: write
     steps:
