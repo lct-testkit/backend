@@ -7,7 +7,7 @@
 <sub>Команда **«Тесткит»** — [github.com/lct-testkit](https://github.com/lct-testkit)</sub>
 
 <!--STATS-->
-**181** операция API &nbsp;·&nbsp; **13** модулей &nbsp;·&nbsp; **65** таблиц &nbsp;·&nbsp; **15** миграций &nbsp;·&nbsp; **458** тестов &nbsp;·&nbsp; **11** сервисов Compose
+**181** операция API &nbsp;·&nbsp; **13** модулей &nbsp;·&nbsp; **65** таблиц &nbsp;·&nbsp; **15** миграций &nbsp;·&nbsp; **459** тестов &nbsp;·&nbsp; **11** сервисов Compose
 <!--/STATS-->
 
 [Быстрый старт](#быстрый-старт) · [Примеры](#примеры-использования) · [Как устроено](#как-устроено) · [Модули](#что-внутри) · [Настройка](#настройка) · [Разработка](#разработка) · [Безопасность](#безопасность) · [Ограничения](#ограничения-и-известные-проблемы)
@@ -221,6 +221,35 @@ curl -si "http://localhost:8080/api/auth/login?next=https://evil.example" | grep
 ```
 
 Оба ответа — `307` на Keycloak с одинаковой формой `redirect_uri=…/api/auth/callback`; посторонний адрес в `next` не влияет на редирект — он либо сохраняется в Redis как безопасный путь (`/deals`), либо отбрасывается в `null` (`app/modules/identity/redirects.py::safe_next_path`, проверено `tests/test_redirects.py`).
+
+### Доставка сделки в Битрикс24 (проверено на живом портале)
+
+Создание сделки пишет событие `DEAL_CREATED` в `outbox_events` **в той же транзакции**, что сделку и запись аудита; воркер раз в минуту (`integration.tasks.sweep_outbox_events`) доставляет его в Битрикс24 методом `crm.item.add` через входящий вебхук (`integration/bitrix.py`), а id, который вернул Битрикс, сохраняет в `external_refs`. Полный разбор с логами, БД и скриншотами из самого Битрикса — в [README фронтенда](https://github.com/lct-testkit/frontend#интеграция-с-битрикс24).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as CRM API
+    participant DB as PostgreSQL
+    participant W as worker (arq)
+    participant B as Bitrix24 REST
+
+    A->>DB: сделка + аудит + outbox_events (DEAL_CREATED)<br/>одна транзакция
+    W->>DB: pending и failed, срок повтора наступил
+    W->>W: BITRIX_CONNECTOR_ENABLED и источник bitrix24 активны?
+    W->>B: POST rest/ID/КОД/crm.item.add.json
+    B-->>W: 200 OK, result.item.id
+    W->>DB: external_refs + status = sent
+```
+
+Включается тремя условиями, все обязательны: `BITRIX_CONNECTOR_ENABLED=true`, `BITRIX_WEBHOOK_URL=https://<портал>/rest/<id>/<код>` (весь URL — секрет, в БД хранится только имя переменной) и переключатель источника `bitrix24` в «Настройка → Интеграции». Флаг функции `bitrix_connector` (`feature_flags`) кодом не читается.
+
+```bash
+docker compose exec -T postgres psql -U crm -d crm -x -c "SELECT event_type, target, status, attempts, last_error, created_at, sent_at FROM outbox_events WHERE target='bitrix24' ORDER BY created_at DESC LIMIT 1;"
+docker compose exec -T postgres psql -U crm -d crm -x -c "SELECT entity_type, external_id, synced_version, sync_direction, last_synced_at FROM external_refs WHERE source_code='bitrix24';"
+```
+
+Первая команда показывает статус доставки последнего события (`sent`, число попыток, ошибка), вторая — связь «сделка ↔ id в Битриксе». Повторы: 1 с, 5 с, 30 с, 5 мин, 30 мин, 2 ч, после 8-й неудачи — `dead` (разбор вручную: `GET /api/admin/integrations/outbox-events?status=dead` или вкладка «Исходящие»). При обновлении перед `crm.item.update` читается `crm.item.get`: если в Битриксе сделку правили после нашей последней синхронизации (`updatedTime`), запись не затирается, доставка падает с «требует ручного разбора». Обратного направления реальными событиями Битрикса нет — `POST /api/v1/integrations/bitrix/webhook` принимает упрощённый собственный контракт с HMAC-подписью. URL вебхука в логи не попадает: логгеры `httpx`/`httpcore` подняты до WARNING (`app/core/logging.py`, `tests/test_logging.py`).
 
 ## Как устроено
 

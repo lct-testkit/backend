@@ -118,6 +118,13 @@ def configure_logging(*, level: str = "INFO", json_output: bool = True) -> None:
         ("uvicorn.error", logging.INFO),
         ("sqlalchemy.engine", logging.WARNING),
         ("arq", logging.INFO),
+        # httpx на INFO пишет каждый исходящий запрос вместе с ПОЛНЫМ URL. У
+        # Bitrix24 секрет — сам URL входящего вебхука (`.../rest/{id}/{код}/`,
+        # см. `integration/bitrix.py`), поэтому INFO от httpx клал секрет в
+        # логи контейнера на каждую доставку. `_redact_secrets` выше
+        # маскирует только ключи словаря события, но не подстроки в тексте.
+        ("httpx", logging.WARNING),
+        ("httpcore", logging.WARNING),
     ):
         logger = logging.getLogger(name)
         logger.handlers.clear()
