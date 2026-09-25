@@ -7,31 +7,45 @@
 # HTTP-сайт слушает без имени хоста (catch-all), поэтому TLS-сайт обязан
 # иметь имя: два безымянных блока с разными политиками TLS конфликтуют.
 # Имя берётся из CRM_TLS_HOST, по умолчанию localhost.
+#
+# Режимы TLS задают переменные окружения (их пишет scripts/gen_env.sh, по умолчанию —
+# прежнее поведение локального стенда):
+#   CRM_TLS_HOST     имя TLS-сайта (SNI/ACME)                           localhost
+#   CRM_TLS_PORT     порт TLS-сайта внутри контейнера                   8443 (на публичном хосте — 443)
+#   CRM_TLS_SNIPPET  tls_internal (самоподписанный) | tls_acme (Let's Encrypt)   tls_internal
+#   S3_SITE_ADDRESS  адрес сайта S3-прокси (`:8333` или `хост:8333`)   :8333
+#   S3_TLS_SNIPPET   TLS S3-сайта: tls_none | tls_internal | tls_acme     tls_none
+# С публичным именем на 443 Caddy сам поднимает :80: выпускает сертификат (HTTP-01) и
+# редиректит http на https. Сертификаты лежат в томе caddy_data — при `down -v` они теряются
+# (у Let's Encrypt лимит выпусков на домен), не удаляйте том без нужды.
 
 {
 	admin off
-	# `off` (было раньше) выключает у Caddy весь TLS-automation слой целиком —
-	# включая выпуск сертификата самим `tls internal` на сайте :8443 ниже (тот
-	# идёт через тот же automation, просто с internal issuer вместо ACME).
-	# Результат бага: `cert_cache_fill:0`, рукопожатие на :8443 падало с TLS
-	# alert 80 «no certificate available for 'localhost'» — сайт ни разу не
-	# выпустил себе сертификат с момента создания стенда. `disable_redirects`
-	# убирает автоredirect :8080→:8443 (видимо ради этого и ставили `off`), но
-	# не блокирует выпуск сертификата для explicit `tls internal`.
-	auto_https disable_redirects
 	servers {
 		trusted_proxies static private_ranges
 	}
 }
 
+# --- TLS-режимы (выбираются переменными CRM_TLS_SNIPPET / S3_TLS_SNIPPET) ---------------------
+(tls_internal) {
+	# Самоподписанный сертификат: в закрытом контуре внешний CA недоступен.
+	tls internal
+}
+
+(tls_acme) {
+	# Сертификат Let's Encrypt (нужны публичный DNS и порт 80 из интернета).
+	tls {
+		issuer acme
+	}
+}
+
+(tls_none) {
+	# Без TLS-директив: S3-прокси в локальном режиме отдаётся по plain http.
+}
+
 (common_headers) {
+	# Content-Security-Policy задаётся в crm_routes (не для /auth/*), здесь — остальные заголовки.
 	header {
-		# Веб-клиент (SPA) отдаётся с того же origin. Скрипты только со своего origin (сборка выносит
-		# bootstrap SvelteKit в /boot.js), presigned-ссылки SeaweedFS (загрузка, скачивание, PDF на
-		# странице подписания) живут на порту S3-прокси — им разрешены connect/img/frame.
-		# В локальной разработке с Vite (CSP_SCRIPT_SRC="'self' 'unsafe-inline' 'unsafe-eval'") политику
-		# ослабляют только для скриптов.
-		Content-Security-Policy "default-src 'self'; img-src 'self' data: blob: {$S3_ORIGIN}; connect-src 'self' {$S3_ORIGIN}; style-src 'self' 'unsafe-inline'; script-src {$CSP_SCRIPT_SRC:'self'}; worker-src 'self' blob:; object-src 'self' blob:; frame-src 'self' blob: {$S3_ORIGIN}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
@@ -43,6 +57,17 @@
 
 (crm_routes) {
 	import common_headers
+
+	# Веб-клиент (SPA) отдаётся с того же origin. Скрипты только со своего origin (сборка выносит
+	# bootstrap SvelteKit в /boot.js), presigned-ссылки SeaweedFS (загрузка, скачивание, PDF на
+	# странице подписания) живут на порту S3-прокси — им разрешены connect/img/frame.
+	# В локальной разработке с Vite (CSP_SCRIPT_SRC="'self' 'unsafe-inline' 'unsafe-eval'") политику
+	# ослабляют только для скриптов.
+	# Не для /auth/*: страницы входа и консоль Keycloak используют inline-скрипты (importmap), и наша
+	# script-src 'self' их блокировала. Там действует собственная CSP Keycloak (frame-ancestors 'self',
+	# object-src 'none'). `>` — отложенная установка: перекрывает CSP апстрима, как и раньше.
+	@app_csp not path /auth/*
+	header @app_csp >Content-Security-Policy "default-src 'self'; img-src 'self' data: blob: {$S3_ORIGIN}; connect-src 'self' {$S3_ORIGIN}; style-src 'self' 'unsafe-inline'; script-src {$CSP_SCRIPT_SRC:'self'}; worker-src 'self' blob:; object-src 'self' blob:; frame-src 'self' blob: {$S3_ORIGIN}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 
 	# Прокидываем идентификатор запроса или создаём новый.
 	@no_request_id not header X-Request-Id *
@@ -89,6 +114,30 @@
 		}
 	}
 
+	# Шрифты Rostelecom Basis. Они лицензионные и в git и образ `web` не входят (frontend/static/fonts
+	# в .gitignore, файлы выдаёт заказчик), поэтому лежат отдельным каталогом, смонтированным в /srv/fonts
+	# (compose: FONTS_DIR, по умолчанию ./fonts). Порядок: файл из каталога -> иначе апстрим (в разработке
+	# Vite отдаёт шрифты сам) -> если апстрим ответил HTML-заглушкой SPA, отдаём честный 404. Без этого
+	# SPA-fallback отвечает на /fonts/*.woff файлом index.html с кодом 200, браузер пишет «downloadable font:
+	# rejected by sanitizer», хотя нужна просто запасная гарнитура. no-cache: браузер не залипает на старом ответе.
+	# Вложенный `route`: порядок директив внутри должен остаться как написан (file_server до reverse_proxy),
+	# а сам `handle` нужен, чтобы блок входил в ту же взаимоисключающую группу, что и остальные handle.
+	handle /fonts/* {
+		route {
+			header Cache-Control "no-cache"
+			root * /srv
+			file_server {
+				pass_thru
+			}
+			reverse_proxy {$WEB_UPSTREAM:web:3000} {
+				@spa_fallback header Content-Type text/html*
+				handle_response @spa_fallback {
+					respond "Not Found" 404
+				}
+			}
+		}
+	}
+
 	# Всё остальное — веб-клиент (статический SPA-образ `web`; в разработке WEB_UPSTREAM указывает на Vite).
 	handle {
 		reverse_proxy {$WEB_UPSTREAM:web:3000}
@@ -99,9 +148,8 @@
 	import crm_routes
 }
 
-{$CRM_TLS_HOST:localhost}:8443 {
-	# Самоподписанный сертификат: в закрытом контуре внешний CA недоступен.
-	tls internal
+{$CRM_TLS_HOST:localhost}:{$CRM_TLS_PORT:8443} {
+	import {$CRM_TLS_SNIPPET:tls_internal}
 	import crm_routes
 }
 
@@ -113,6 +161,7 @@
 # прокси меняет подписанный путь и роняет проверку подписи на SeaweedFS —
 # префикс пути в принципе несовместим с presigned-URL так же, как был бы
 # несовместим с Keycloak, если бы у него не было собственного KC_HTTP_RELATIVE_PATH.
-:8333 {
+{$S3_SITE_ADDRESS::8333} {
+	import {$S3_TLS_SNIPPET:tls_none}
 	reverse_proxy seaweedfs:8333
 }
