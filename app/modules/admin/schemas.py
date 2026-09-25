@@ -6,7 +6,10 @@ import datetime as dt
 import uuid
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+# Маркер, которым списки и ответы заменяют значение секретной настройки.
+SECRET_PLACEHOLDER = "********"
 
 
 class FeatureFlagOut(BaseModel):
@@ -50,6 +53,17 @@ class SystemSettingPut(BaseModel):
     value: Any
     description: str | None = None
     is_secret: bool | None = None
+
+    @field_validator("value")
+    @classmethod
+    def _not_the_secret_placeholder(cls, value: Any) -> Any:
+        # Форма, отправившая обратно то, что показал `GET`, затёрла бы
+        # настоящий секрет самим маркером.
+        if value == SECRET_PLACEHOLDER:
+            raise ValueError(
+                "Маркер «********» не является значением: передайте новое значение секрета"
+            )
+        return value
 
 
 class AuditChainReport(BaseModel):

@@ -17,6 +17,7 @@ import json
 import secrets
 import uuid
 from dataclasses import dataclass
+from typing import Any
 
 import structlog
 from sqlalchemy import func, select, text
@@ -30,7 +31,7 @@ from app.core.redis_client import get_redis
 from app.core.security import TokenClaims
 from app.modules.admin.models import SystemSetting
 from app.modules.audit.actions import AuditAction
-from app.modules.audit.service import AuditService
+from app.modules.audit.service import AuditService, diff_changes
 from app.modules.identity.models import (
     Consent,
     Role,
@@ -94,6 +95,22 @@ class IdentityService:
         """
         user = await self.get_by_keycloak_id(claims.subject)
         if user:
+            if user.status == UserStatus.INVITED:
+                # Первый вход по приглашению. `AdminUserService.create_user` заводит
+                # учётку в Keycloak сразу — `keycloak_id` у неё уже есть, и ветка
+                # ниже (привязка `keycloak_id` по email) сюда не доходит.
+                user.status = UserStatus.ACTIVE.value
+                user.activated_at = dt.datetime.now(dt.UTC)
+                await self._session.flush()
+                await self.mark_invites_used(user.id)
+                await self._audit.record(
+                    AuditAction.USER_ACTIVATED,
+                    entity_type="user",
+                    entity_id=user.id,
+                    changes={"status": {"old": UserStatus.INVITED.value, "new": user.status}},
+                    actor_id=user.id,
+                    actor_role=user.role,
+                )
             await self._sync_role(user, claims)
             return user
 
@@ -202,6 +219,30 @@ class IdentityService:
     async def mark_login(self, user: User) -> None:
         user.last_login_at = dt.datetime.now(dt.UTC)
         await self._session.flush()
+
+    async def update_profile(self, user: User, updates: dict[str, Any]) -> None:
+        """Самообслуживание: отображаемое имя, часовой пояс, телефон.
+
+        Версия растёт, чтобы устаревшая форма администратора не затёрла правку;
+        кэш прав сбрасывается — в нём лежит отображаемое имя. Вход подтягивает
+        из токена только роль (`_sync_role`), поэтому правка профиля им не
+        перезаписывается.
+        """
+        before = {name: getattr(user, name) for name in updates}
+        changes = diff_changes(before, updates)
+        if not changes:
+            return
+        for name, value in updates.items():
+            setattr(user, name, value)
+        user.version += 1
+        await self._session.flush()
+        await invalidate_principal(user.id, keycloak_id=user.keycloak_id)
+        await self._audit.record(
+            AuditAction.USER_UPDATED,
+            entity_type="user",
+            entity_id=user.id,
+            changes=changes,
+        )
 
     # --- Политика и согласия ---------------------------------------------
 

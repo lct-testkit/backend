@@ -23,7 +23,7 @@ from app.core.metrics import background_tasks_total
 from app.core.redis_client import close_redis
 from app.modules.admin.models import IdempotencyKey
 from app.modules.crm.tasks import sweep_sla_breaches
-from app.modules.identity.tasks import sweep_erasure_requests
+from app.modules.identity.tasks import sweep_erasure_requests, sweep_user_lifecycle
 from app.modules.imports.tasks import sweep_import_jobs
 from app.modules.integration.service import RealOutboxService, register_outbox_service
 from app.modules.integration.tasks import sweep_lms_progress_pull, sweep_outbox_events
@@ -118,6 +118,7 @@ class WorkerSettings:
         sweep_outbox_events,
         sweep_lms_progress_pull,
         sweep_erasure_requests,
+        sweep_user_lifecycle,
     ]
     cron_jobs = [
         # Раз в сутки: партиции аудита на будущее.
@@ -172,6 +173,9 @@ class WorkerSettings:
         # проверять незачем, реже — заметная задержка исполнения обязательства
         # по 152-ФЗ.
         cron(sweep_erasure_requests, minute={0, 15, 30, 45}),
+        # Раз в 5 минут: снятие блокировки по `auto_unblock_at` и `INVITE_EXPIRED`
+        # (приглашение не принято за 30 дней) — new_spec §4.5, §4.1.
+        cron(sweep_user_lifecycle, minute=set(range(0, 60, 5))),
     ]
     on_startup = startup
     on_shutdown = shutdown

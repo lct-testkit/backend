@@ -7,7 +7,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Query, status
 
-from app.core.deps import DbSession, Pagination, require_permission
+from app.core.deps import ConsentedUser, DbSession, Pagination, require_permission
 from app.core.errors import AppError, ErrorCode, ForbiddenError
 from app.core.pagination import Page, keyset_before
 from app.core.permissions import Permission
@@ -31,7 +31,20 @@ attachments_router = APIRouter(prefix="/attachments", tags=["attachments"])
 
 FileUploadPerm = Annotated[Principal, Depends(require_permission(Permission.FILE_UPLOAD))]
 FileDownloadPerm = Annotated[Principal, Depends(require_permission(Permission.FILE_DOWNLOAD))]
-FileDeletePerm = Annotated[Principal, Depends(require_permission(Permission.FILE_DELETE))]
+
+
+async def _download_permission(
+    principal: ConsentedUser,
+    session: DbSession,
+    entity_type: Annotated[str, Query(max_length=32)],
+) -> Principal:
+    """Скан соглашения об ЭДО читает роль с `edm:read` (AUDITOR, у неё нет
+    `file:download`); всё остальное — как раньше, по `file:download`."""
+    needed = Permission.EDM_READ if entity_type == "edm_agreement" else Permission.FILE_DOWNLOAD
+    return await require_permission(needed)(principal, session)
+
+
+FileDownloadOrEdmPerm = Annotated[Principal, Depends(_download_permission)]
 
 
 @files_router.post(
@@ -92,7 +105,7 @@ async def commit_file(
 )
 async def get_download_url(
     session: DbSession,
-    principal: FileDownloadPerm,
+    principal: FileDownloadOrEdmPerm,
     file_id: Annotated[uuid.UUID, Path()],
     entity_type: Annotated[str, Query(max_length=32)],
     entity_id: Annotated[uuid.UUID, Query()],
@@ -113,14 +126,18 @@ async def get_download_url(
 @files_router.delete(
     "/{file_id}",
     summary="Удалить файл",
-    description="Мягкое удаление. Файл с активными вложениями (refcount > 0) удалить нельзя.",
+    description=(
+        "Мягкое удаление. Файл с активными вложениями (refcount > 0) удалить нельзя. "
+        "Роль: автор файла (свой, без вложений), HEAD, ADMIN."
+    ),
     response_model=OperationResult,
 )
 async def delete_file(
-    session: DbSession, principal: FileDeletePerm, file_id: Annotated[uuid.UUID, Path()]
+    session: DbSession, principal: FileUploadPerm, file_id: Annotated[uuid.UUID, Path()]
 ) -> OperationResult:
     service = FileService(session)
     file = await service.get_or_404(file_id)
+    service.ensure_can_delete(principal, file)
     await service.soft_delete(file)
     return OperationResult(ok=True, detail="Файл удалён")
 
@@ -177,15 +194,22 @@ async def create_attachment(
 
 
 @attachments_router.delete(
-    "/{attachment_id}", summary="Отвязать файл", response_model=OperationResult
+    "/{attachment_id}",
+    summary="Отвязать файл",
+    description=(
+        "Отвязывает вложение от сущности; доступ к сущности проверяется. Роль: автор "
+        "вложения (своё ошибочное), HEAD, ADMIN."
+    ),
+    response_model=OperationResult,
 )
 async def delete_attachment(
     session: DbSession,
-    principal: FileDeletePerm,
+    principal: FileUploadPerm,
     attachment_id: Annotated[uuid.UUID, Path()],
 ) -> OperationResult:
     service = AttachmentService(session)
     attachment = await service.get_or_404(attachment_id)
+    service.ensure_can_delete(principal, attachment)
     await check_entity_access(
         session,
         principal,

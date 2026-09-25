@@ -41,6 +41,11 @@ class ErrorCode(StrEnum):
     # с историей/сделками, удалять нельзя ни при каких условиях — только
     # архивация статусов, раздел 4.11).
     WORKFLOW_NOT_DRAFT = "CRM-1207"
+    # `PUT /workflows/{id}/graph`: убранный с холста статус или переход, на
+    # который уже ссылаются сделки или их история (FK RESTRICT). Статус
+    # сначала архивируют через мастер сопоставления (раздел 4.11).
+    WORKFLOW_STATUS_IN_USE = "CRM-1208"
+    WORKFLOW_TRANSITION_IN_USE = "CRM-1209"
 
     # --- Дубликаты ---
     DUPLICATE = "CRM-1301"
@@ -78,6 +83,9 @@ class ErrorCode(StrEnum):
     INTEGRATION_BAD_SIGNATURE = "CRM-1701"
     INTEGRATION_DUPLICATE = "CRM-1702"
     INTEGRATION_SOURCE_INACTIVE = "CRM-1703"
+    # `POST /admin/integrations/outbox-events/{id}/retry` для события, которое
+    # не в `failed`/`dead`: `pending` уже стоит в очереди, `sent` доставлено.
+    INTEGRATION_EVENT_NOT_RETRYABLE = "CRM-1704"
 
     # --- Импорт ---
     IMPORT_BAD_FORMAT = "CRM-1801"
@@ -126,6 +134,12 @@ ERROR_CATALOG: dict[ErrorCode, ErrorSpec] = {
     ErrorCode.WORKFLOW_NOT_DRAFT: ErrorSpec(
         409, "Удалить можно только черновик воронки, который не публиковался"
     ),
+    ErrorCode.WORKFLOW_STATUS_IN_USE: ErrorSpec(
+        409, "Статус используется в сделках или их истории и не может быть удалён"
+    ),
+    ErrorCode.WORKFLOW_TRANSITION_IN_USE: ErrorSpec(
+        409, "Переход использован в истории сделок и не может быть удалён"
+    ),
     ErrorCode.DUPLICATE: ErrorSpec(409, "Найден дубликат сущности"),
     ErrorCode.ORGANIZATION_INN_EXISTS: ErrorSpec(409, "Организация с таким ИНН уже существует"),
     ErrorCode.ENTITY_IN_USE: ErrorSpec(409, "Сущность используется и не может быть удалена"),
@@ -147,6 +161,9 @@ ERROR_CATALOG: dict[ErrorCode, ErrorSpec] = {
     ErrorCode.INTEGRATION_BAD_SIGNATURE: ErrorSpec(401, "Неверная подпись входящего запроса"),
     ErrorCode.INTEGRATION_DUPLICATE: ErrorSpec(200, "Сообщение уже обработано"),
     ErrorCode.INTEGRATION_SOURCE_INACTIVE: ErrorSpec(409, "Источник интеграции неактивен"),
+    ErrorCode.INTEGRATION_EVENT_NOT_RETRYABLE: ErrorSpec(
+        409, "Повторить можно только событие в статусе failed или dead"
+    ),
     ErrorCode.IMPORT_BAD_FORMAT: ErrorSpec(422, "Недопустимый или повреждённый формат импорта"),
     ErrorCode.IMPORT_MAPPING_INCOMPLETE: ErrorSpec(422, "Маппинг импорта не завершён"),
     ErrorCode.IMPORT_NOT_APPLICABLE: ErrorSpec(422, "Импорт нельзя применить из-за ошибок"),

@@ -6,10 +6,12 @@
 `sla_state` по доле прошедшего времени: `status_changed_at` — момент входа в
 статус, `sla_due_at` — абсолютный дедлайн, значит
 `(now - status_changed_at) / (sla_due_at - status_changed_at)` и есть доля
-израсходованного срока. Пороги из raздела 4.10: 75% — предупреждение
-владельцу, 100% — владельцу и руководителю, 150% — тоже breached (отдельного
-состояния «эскалировано» в перечне `sla_state` нет, поэтому дальнейшая
-эскалация видна по количеству уведомлённых, а не по значению поля).
+израсходованного срока. Пороги из раздела 4.10: предупреждение владельцу —
+`warn_threshold_pct` правила SLA статуса из опубликованного снимка воронки (75%,
+если правила уже нет: сделку перенесли с сохранением срока), 100% — владельцу
+и руководителю, 150% — тоже breached (отдельного состояния «эскалировано» в
+перечне `sla_state` нет, поэтому дальнейшая эскалация видна по количеству
+уведомлённых, а не по значению поля).
 
 Частичный индекс `ix_deals_sla_due_open` (только незакрытые сделки) держит
 запрос быстрым независимо от общего объёма — тот же приём, что и в
@@ -19,22 +21,41 @@
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 from typing import Any
 
 import structlog
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import session_scope
 from app.core.metrics import background_tasks_total
 from app.modules.crm.models import Deal, SlaState
 from app.modules.identity.models import User
 from app.modules.notification.service import NotificationPriority, get_notification_service
+from app.modules.workflow.models import Workflow
 
 logger = structlog.get_logger(__name__)
 
 WARN_THRESHOLD = 0.75
 BREACH_THRESHOLD = 1.0
 ESCALATE_THRESHOLD = 1.5
+
+
+async def _warn_thresholds(
+    session: AsyncSession, workflow_ids: set[uuid.UUID]
+) -> dict[tuple[uuid.UUID, str], float]:
+    """Порог предупреждения по правилам SLA: (воронка, id статуса) → доля срока.
+    Сделки живут по снимку воронки на момент публикации, поэтому и правила берутся
+    из него, а не из живых `sla_rules` черновика."""
+    rows = await session.execute(
+        select(Workflow.id, Workflow.published_graph).where(Workflow.id.in_(workflow_ids))
+    )
+    return {
+        (workflow_id, rule["status_id"]): rule["warn_threshold_pct"] / 100
+        for workflow_id, graph in rows.all()
+        for rule in (graph or {}).get("sla_rules", [])
+    }
 
 
 async def sweep_sla_breaches(ctx: dict[str, Any]) -> dict[str, int]:
@@ -57,15 +78,18 @@ async def sweep_sla_breaches(ctx: dict[str, Any]) -> dict[str, int]:
             .all()
         )
 
+        warn_thresholds = await _warn_thresholds(session, {deal.workflow_id for deal in deals})
+
         for deal in deals:
             total = (deal.sla_due_at - deal.status_changed_at).total_seconds()
             if total <= 0:
                 continue
             fraction = (now - deal.status_changed_at).total_seconds() / total
+            warn_threshold = warn_thresholds.get((deal.workflow_id, str(deal.status_id)))
 
             if fraction >= BREACH_THRESHOLD:
                 new_state = SlaState.BREACHED.value
-            elif fraction >= WARN_THRESHOLD:
+            elif fraction >= (WARN_THRESHOLD if warn_threshold is None else warn_threshold):
                 new_state = SlaState.WARNING.value
             else:
                 new_state = SlaState.OK.value

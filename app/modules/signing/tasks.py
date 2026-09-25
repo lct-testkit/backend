@@ -1,5 +1,6 @@
 """Фоновые задачи ПЭП (spec.txt §15: `signature.expire_deadlines`,
-`signature.clean_otp`).
+`signature.clean_otp`). Тем же тиком, что и сроки подписания, соглашения об
+ЭДО с истёкшим `valid_to` получают статус `expired`.
 
 Частичный индекс `ix_signature_documents_status_deadline` (только
 `pending`/`partially_signed`) держит выборку быстрой независимо от общего
@@ -14,6 +15,7 @@ from typing import Any
 
 import structlog
 from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import session_scope
 from app.core.metrics import background_tasks_total
@@ -24,6 +26,8 @@ from app.modules.crm.models import SignatureStatus as DealSignatureStatus
 from app.modules.notification.service import NotificationPriority, get_notification_service
 from app.modules.signing.models import (
     OPEN_REQUEST_STATUSES,
+    EdmAgreement,
+    EdmAgreementStatus,
     SignatureDocument,
     SignatureOtpCode,
     SignatureRequest,
@@ -96,10 +100,38 @@ async def sweep_signature_deadlines(ctx: dict[str, Any]) -> dict[str, int]:
                     )
             expired += 1
 
+        agreements_expired = await _expire_edm_agreements(session, today=dt.date.today())
+
     background_tasks_total.labels(task="sweep_signature_deadlines", result="success").inc()
-    if expired:
-        logger.info("signature_deadlines_swept", expired=expired)
-    return {"expired": expired}
+    if expired or agreements_expired:
+        logger.info(
+            "signature_deadlines_swept", expired=expired, agreements_expired=agreements_expired
+        )
+    return {"expired": expired, "agreements_expired": agreements_expired}
+
+
+async def _expire_edm_agreements(session: AsyncSession, *, today: dt.date) -> int:
+    """`valid_to` включительно (`EdmAgreementService.find_active_for_contact`):
+    просрочено то, что закончилось вчера и раньше. Отозванные не трогаем."""
+    stmt = select(EdmAgreement).where(
+        EdmAgreement.status == EdmAgreementStatus.ACTIVE.value,
+        EdmAgreement.valid_to.is_not(None),
+        EdmAgreement.valid_to < today,
+    )
+    agreements = list((await session.execute(stmt)).scalars().all())
+    for agreement in agreements:
+        agreement.status = EdmAgreementStatus.EXPIRED.value
+        await session.flush()
+        await AuditService(session).record(
+            AuditAction.EDM_AGREEMENT_EXPIRED,
+            entity_type="edm_agreement",
+            entity_id=agreement.id,
+            changes={
+                "status": {"old": EdmAgreementStatus.ACTIVE.value, "new": agreement.status},
+                "reason": {"old": None, "new": "valid_to_passed"},
+            },
+        )
+    return len(agreements)
 
 
 async def sweep_signature_otp_cleanup(ctx: dict[str, Any]) -> dict[str, int]:

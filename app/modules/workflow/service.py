@@ -5,6 +5,9 @@
 * **`save_graph` — полная замена живой части графа.** Тело `PUT .../graph`
   описывает весь граф целиком, поэтому статусы и переходы, не попавшие в
   запрос, удаляются — это ожидаемое поведение редактора, а не потеря данных.
+  Статусы и переходы с `id` обновляются на месте: на них ссылаются сделки и
+  их история. Убранный, но уже используемый статус или переход — 409
+  (CRM-1208/CRM-1209), а не 500.
   Исключение — архивные статусы и переходы между ними: они история, и этот
   эндпоинт их не видит и не трогает.
 * **`publish` проверяет граф тем же валидатором, что и `POST /validate`.**
@@ -28,6 +31,7 @@ import hashlib
 import json
 import uuid
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -52,7 +56,7 @@ from app.modules.workflow.models import (
     WorkflowStatus,
     WorkflowTransition,
 )
-from app.modules.workflow.schemas import GraphIn
+from app.modules.workflow.schemas import GraphIn, TransitionIn
 
 MAPPING_BATCH_SIZE = 100
 
@@ -151,6 +155,14 @@ class WorkflowService:
             raise NotFoundError("Статус воронки", status_id)
         return status
 
+    async def get_mapping_job_or_404(
+        self, workflow_id: uuid.UUID, job_id: uuid.UUID
+    ) -> StatusMappingJob:
+        job = await self._session.get(StatusMappingJob, job_id)
+        if job is None or job.workflow_id != workflow_id:
+            raise NotFoundError("Задача сопоставления", job_id)
+        return job
+
     async def get_graph(self, workflow: Workflow) -> Graph:
         statuses = await self._load_statuses(workflow.id)
         transitions = await self._load_transitions(workflow.id)
@@ -161,6 +173,37 @@ class WorkflowService:
             transitions=sorted(transitions, key=lambda t: t.sort_order),
             sla_rules=sla_rules,
         )
+
+    async def unpublished_flags(self, workflows: Sequence[Workflow]) -> dict[uuid.UUID, bool]:
+        """`has_unpublished_changes` для списка воронок: три запроса на всех, а не три на каждую."""
+        ids = [workflow.id for workflow in workflows]
+        if not ids:
+            return {}
+        statuses: dict[uuid.UUID, list[WorkflowStatus]] = defaultdict(list)
+        transitions: dict[uuid.UUID, list[WorkflowTransition]] = defaultdict(list)
+        sla_rules: dict[uuid.UUID, list[SlaRule]] = defaultdict(list)
+        for status in (
+            await self._session.execute(
+                select(WorkflowStatus).where(WorkflowStatus.workflow_id.in_(ids))
+            )
+        ).scalars():
+            statuses[status.workflow_id].append(status)
+        for transition in (
+            await self._session.execute(
+                select(WorkflowTransition).where(WorkflowTransition.workflow_id.in_(ids))
+            )
+        ).scalars():
+            transitions[transition.workflow_id].append(transition)
+        for rule in (
+            await self._session.execute(select(SlaRule).where(SlaRule.workflow_id.in_(ids)))
+        ).scalars():
+            sla_rules[rule.workflow_id].append(rule)
+        return {
+            workflow.id: has_unpublished_changes(
+                workflow, statuses[workflow.id], transitions[workflow.id], sla_rules[workflow.id]
+            )
+            for workflow in workflows
+        }
 
     async def _load_statuses(self, workflow_id: uuid.UUID) -> dict[uuid.UUID, WorkflowStatus]:
         rows = (
@@ -231,6 +274,62 @@ class WorkflowService:
                 "code": {"old": None, "new": code},
                 "deal_type": {"old": None, "new": deal_type},
             },
+        )
+        return workflow
+
+    # --- Метаданные воронки ----------------------------------------------------
+
+    async def _demote_other_defaults(self, workflow: Workflow) -> None:
+        """Воронка по умолчанию среди опубликованных на тип сделки одна (уникальный индекс):
+        прежняя уступает раньше, чем новая её займёт — в одной пачке порядок UPDATE не
+        гарантирован."""
+        others = (
+            (
+                await self._session.execute(
+                    select(Workflow).where(
+                        Workflow.deal_type == workflow.deal_type,
+                        Workflow.id != workflow.id,
+                        Workflow.is_default.is_(True),
+                        Workflow.state == WorkflowState.PUBLISHED.value,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for other in others:
+            other.is_default = False
+        await self._session.flush()
+
+    async def update(self, workflow: Workflow, payload: Any, *, expected_version: int) -> Workflow:
+        """`PATCH /workflows/{id}`: имя и воронка по умолчанию. Граф и опубликованный снимок не
+        трогает; версия растёт, как у любой правки воронки."""
+        self._check_version(workflow, expected_version)
+        self._ensure_not_archived(workflow)
+
+        data = payload.model_dump(exclude_unset=True)
+        changes: dict[str, dict[str, Any]] = {}
+        for key in ("name", "is_default"):
+            value = data.get(key)
+            if value is not None and value != getattr(workflow, key):
+                changes[key] = {"old": getattr(workflow, key), "new": value}
+        if not changes:
+            return workflow
+
+        if (
+            changes.get("is_default", {}).get("new")
+            and workflow.state == WorkflowState.PUBLISHED.value
+        ):
+            await self._demote_other_defaults(workflow)
+        for key, change in changes.items():
+            setattr(workflow, key, change["new"])
+        workflow.version += 1
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.WORKFLOW_UPDATED,
+            entity_type="workflow",
+            entity_id=workflow.id,
+            changes=changes,
         )
         return workflow
 
@@ -342,19 +441,20 @@ class WorkflowService:
         # такой статус нужно сначала архивировать через мастер сопоставления.
         for sid, row in existing_statuses.items():
             if sid not in kept_ids and not row.is_archived:
+                name = row.name
                 try:
                     async with self._session.begin_nested():
                         await self._session.delete(row)
                         await self._session.flush()
                 except IntegrityError:
-                    raise ValidationError(
-                        f"Статус «{row.name}» используется в сделках или истории: "
+                    raise AppError(
+                        ErrorCode.WORKFLOW_STATUS_IN_USE,
+                        f"Статус «{name}» используется в сделках или истории: "
                         "сначала архивируйте его через мастер сопоставления",
-                        [
-                            FieldError(
-                                field="statuses", reason=f"статус «{row.name}» нельзя удалить"
-                            )
+                        errors=[
+                            FieldError(field="statuses", reason=f"статус «{name}» нельзя удалить")
                         ],
+                        extra={"status_id": str(sid)},
                     ) from None
 
         def resolve(ref: str, *, where: str) -> uuid.UUID:
@@ -366,15 +466,17 @@ class WorkflowService:
                 )
             return resolved
 
-        # Переходы сопоставляются по паре статусов и обновляются на месте: на их id ссылается
-        # история сделок (FK RESTRICT), поэтому «удалить всё и создать заново» падало с 500,
-        # как только хотя бы одна сделка прошла по переходу.
-        reusable: dict[tuple[uuid.UUID, uuid.UUID], WorkflowTransition] = {}
-        for row in await self._load_transitions(workflow.id):
-            if row.from_status_id in archived_ids or row.to_status_id in archived_ids:
-                continue  # исторические переходы не редактируются
-            reusable[(row.from_status_id, row.to_status_id)] = row
+        # Переходы обновляются на месте, а не пересоздаются: на их id ссылается история сделок
+        # (FK RESTRICT), и «удалить всё и создать заново» падало, как только хотя бы одна сделка
+        # прошла по переходу. Строку ищут по `id` из тела, а у перехода без `id` (новый на
+        # холсте) — по паре статусов; не нашедшееся создаётся, оставшееся без пары — удаляется.
+        rows_by_id = {
+            row.id: row
+            for row in await self._load_transitions(workflow.id)
+            if row.from_status_id not in archived_ids and row.to_status_id not in archived_ids
+        }  # переходы через архивный статус — история, их не редактируют
 
+        items: list[tuple[TransitionIn, uuid.UUID, uuid.UUID]] = []
         seen_pairs: set[tuple[uuid.UUID, uuid.UUID]] = set()
         for item in payload.transitions:
             from_id = resolve(item.from_status, where="transitions.from_status")
@@ -395,42 +497,65 @@ class WorkflowService:
                     [FieldError(field="transitions", reason=item.name)],
                 )
             seen_pairs.add((from_id, to_id))
+            items.append((item, from_id, to_id))
 
-            row = reusable.pop((from_id, to_id), None)
-            if row is not None:
-                row.name = item.name
-                row.allowed_roles = item.allowed_roles
-                row.conditions = item.conditions
-                row.actions = item.actions
-                row.requires_comment = item.requires_comment
-                row.sort_order = item.sort_order
-            else:
-                self._session.add(
-                    WorkflowTransition(
-                        workflow_id=workflow.id,
-                        from_status_id=from_id,
-                        to_status_id=to_id,
-                        name=item.name,
-                        allowed_roles=item.allowed_roles,
-                        conditions=item.conditions,
-                        actions=item.actions,
-                        requires_comment=item.requires_comment,
-                        sort_order=item.sort_order,
-                    )
+        claimed: dict[uuid.UUID, WorkflowTransition] = {}
+        for item, _from_id, _to_id in items:
+            if item.id is None:
+                continue
+            row = rows_by_id.get(item.id)
+            if row is None:
+                raise NotFoundError("Переход воронки", item.id)
+            if row.id in claimed:
+                raise ValidationError(
+                    f"Переход {item.id} указан в теле запроса дважды",
+                    [FieldError(field="transitions", reason=item.name)],
                 )
+            claimed[row.id] = row
+        free_by_pair = {
+            (row.from_status_id, row.to_status_id): row
+            for row in rows_by_id.values()
+            if row.id not in claimed
+        }
+        matched: list[WorkflowTransition | None] = [
+            claimed[item.id] if item.id is not None else free_by_pair.pop((from_id, to_id), None)
+            for item, from_id, to_id in items
+        ]
 
-        # Убранные с холста переходы удаляются; если по ним уже проходили сделки — БД остановит
-        # это внешним ключом, и пользователь получит понятный отказ вместо 500.
-        for row in reusable.values():
+        # Убранные с холста переходы удаляются до правок: их пару статусов может занять другой
+        # переход. Если по ним уже проходили сделки, БД остановит это внешним ключом — вместо 500
+        # пользователь получает отказ.
+        kept_transition_ids = {row.id for row in matched if row is not None}
+        for transition_id, row in rows_by_id.items():
+            if transition_id in kept_transition_ids:
+                continue
+            name = row.name
             try:
                 async with self._session.begin_nested():
                     await self._session.delete(row)
                     await self._session.flush()
             except IntegrityError:
-                raise ValidationError(
-                    f"Переход «{row.name}» уже использован в истории сделок и не может быть удалён",
-                    [FieldError(field="transitions", reason=f"переход «{row.name}» использован")],
+                raise AppError(
+                    ErrorCode.WORKFLOW_TRANSITION_IN_USE,
+                    f"Переход «{name}» уже использован в истории сделок и не может быть удалён",
+                    errors=[
+                        FieldError(field="transitions", reason=f"переход «{name}» использован")
+                    ],
+                    extra={"transition_id": str(transition_id)},
                 ) from None
+
+        for (item, from_id, to_id), row in zip(items, matched, strict=True):
+            if row is None:
+                row = WorkflowTransition(workflow_id=workflow.id)
+                self._session.add(row)
+            row.from_status_id = from_id
+            row.to_status_id = to_id
+            row.name = item.name
+            row.allowed_roles = item.allowed_roles
+            row.conditions = item.conditions
+            row.actions = item.actions
+            row.requires_comment = item.requires_comment
+            row.sort_order = item.sort_order
         await self._session.flush()
 
         existing_sla = await self._load_sla_rules(workflow.id)
@@ -514,22 +639,7 @@ class WorkflowService:
         ).hexdigest()
 
         if workflow.is_default:
-            others = (
-                (
-                    await self._session.execute(
-                        select(Workflow).where(
-                            Workflow.deal_type == workflow.deal_type,
-                            Workflow.id != workflow.id,
-                            Workflow.is_default.is_(True),
-                            Workflow.state == WorkflowState.PUBLISHED.value,
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            for other in others:
-                other.is_default = False
+            await self._demote_other_defaults(workflow)
 
         now = dt.datetime.now(dt.UTC)
         workflow.published_graph = snapshot
@@ -552,7 +662,10 @@ class WorkflowService:
     # --- Архивирование статуса --------------------------------------------
 
     async def status_impact(
-        self, workflow: Workflow, status: WorkflowStatus
+        self,
+        workflow: Workflow,
+        status: WorkflowStatus,
+        target_status_id: uuid.UUID | None = None,
     ) -> tuple[Any, list[WorkflowStatus]]:
         # Импорт отложен: с спринта 3 `crm.service` сам импортирует
         # `get_cached_published_graph` из этого модуля (переход по статусу
@@ -562,7 +675,27 @@ class WorkflowService:
         # модуля полностью загружены.
         from app.modules.crm.service import get_deal_status_service
 
-        workload = await get_deal_status_service().status_workload(self._session, status.id)
+        if target_status_id is not None:
+            # Те же условия, что у архивирования: цель — другой живой статус этой воронки.
+            if target_status_id == status.id:
+                raise ValidationError(
+                    "Целевой статус должен отличаться от архивируемого",
+                    [
+                        FieldError(
+                            field="target_status_id", reason="совпадает со статусом архивирования"
+                        )
+                    ],
+                )
+            target = await self.get_status_or_404(workflow.id, target_status_id)
+            if target.is_archived:
+                raise ValidationError(
+                    "Целевой статус архивирован",
+                    [FieldError(field="target_status_id", reason="статус недоступен")],
+                )
+
+        workload = await get_deal_status_service().status_workload(
+            self._session, status.id, target_status_id
+        )
         candidates = [
             row
             for row in (await self._load_statuses(workflow.id)).values()
@@ -918,4 +1051,31 @@ def _build_snapshot(
             for r in sla_rules
             if r.status_id in live_ids and r.is_active
         ],
+    }
+
+
+def has_unpublished_changes(
+    workflow: Workflow,
+    statuses: Sequence[WorkflowStatus],
+    transitions: Sequence[WorkflowTransition],
+    sla_rules: Sequence[SlaRule],
+) -> bool:
+    """Черновик графа отличается от опубликованного снимка. Сравнивается содержимое, а не
+    `graph_hash`: порядок строк из БД не задан, и хэш одного и того же графа мог бы
+    разойтись. Поэтому оба снимка приводятся к одному порядку списков."""
+    published = workflow.published_graph
+    if published is None:
+        return True
+    draft = _build_snapshot(workflow, list(statuses), list(transitions), list(sla_rules))
+    return _canonical_snapshot(draft) != _canonical_snapshot(published)
+
+
+def _canonical_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Списки снимка в одном порядке. Ключи берутся через `.get`: снимки старых публикаций
+    бывают неполными, и это не повод отвечать 500 на чтение воронки."""
+    return {
+        **snapshot,
+        "statuses": sorted(snapshot.get("statuses", []), key=lambda item: item["id"]),
+        "transitions": sorted(snapshot.get("transitions", []), key=lambda item: item["id"]),
+        "sla_rules": sorted(snapshot.get("sla_rules", []), key=lambda item: item["status_id"]),
     }

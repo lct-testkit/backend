@@ -16,6 +16,8 @@ from app.core.security import Principal
 from app.modules.identity.schemas import OperationResult
 from app.modules.notification.models import Notification, NotificationTemplate
 from app.modules.notification.schemas import (
+    EventCodeListResponse,
+    EventCodeOut,
     NotificationListResponse,
     NotificationOut,
     NotificationPrefListResponse,
@@ -27,6 +29,9 @@ from app.modules.notification.schemas import (
     NotificationTemplateListResponse,
     NotificationTemplateOut,
     NotificationTemplateUpdateRequest,
+    TemplatePreviewRequest,
+    TemplatePreviewResponse,
+    UnreadCountResponse,
 )
 from app.modules.notification.service import (
     NotificationFilters,
@@ -34,6 +39,7 @@ from app.modules.notification.service import (
     NotificationQueryService,
     NotificationReadFilters,
     NotificationTemplateService,
+    preview_template,
 )
 
 notifications_router = APIRouter(prefix="/notifications", tags=["notifications"])
@@ -85,6 +91,33 @@ async def list_notifications(
         items.append(out)
 
     return NotificationListResponse(items=items, next_cursor=built.next_cursor)
+
+
+@notifications_router.get(
+    "/unread-count",
+    summary="Число непрочитанных уведомлений",
+    description="Точное число, без потолка страницы списка. Роль: любой аутентифицированный.",
+    response_model=UnreadCountResponse,
+)
+async def unread_count(session: DbSession, principal: ConsentedUser) -> UnreadCountResponse:
+    count = await NotificationQueryService(session).unread_count(principal.user_id)
+    return UnreadCountResponse(count=count)
+
+
+@notifications_router.get(
+    "/event-codes",
+    summary="Коды событий для настроек уведомлений",
+    description=(
+        "Коды событий с активными шаблонами и каналы, по которым они доставляются: то, "
+        "что можно передать в `PUT /me/notification-prefs`. Роль: любой аутентифицированный."
+    ),
+    response_model=EventCodeListResponse,
+)
+async def event_codes(session: DbSession, principal: ConsentedUser) -> EventCodeListResponse:
+    items = await NotificationPrefService(session).event_codes()
+    return EventCodeListResponse(
+        items=[EventCodeOut(code=code, channels=channels) for code, channels in items]
+    )
 
 
 @notifications_router.post(
@@ -166,6 +199,29 @@ async def list_notification_templates(
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
     built = Page.build(rows, limit=page.limit, serializer=NotificationTemplateOut.model_validate)
     return NotificationTemplateListResponse(items=built.items, next_cursor=built.next_cursor)
+
+
+@notification_templates_admin_router.post(
+    "/preview",
+    summary="Предпросмотр шаблона уведомления",
+    description=(
+        "Рендерит черновик (тело и тему) на переданных данных события, не сохраняя его. "
+        "Ошибка шаблона приходит в теле (`ok=false`, `error.field`, `error.line`), а не "
+        "кодом ответа; `variables` — что шаблон берёт из данных события. Роль: управление "
+        "шаблонами уведомлений."
+    ),
+    response_model=TemplatePreviewResponse,
+)
+async def preview_notification_template(
+    payload: TemplatePreviewRequest, principal: NotificationTemplateManage
+) -> TemplatePreviewResponse:
+    return TemplatePreviewResponse(
+        **preview_template(
+            subject_template=payload.subject_template,
+            body_template=payload.body_template,
+            payload=payload.payload,
+        )
+    )
 
 
 @notification_templates_admin_router.post(

@@ -29,7 +29,7 @@ from app.core.cache import (
 from app.core.config import Settings, get_settings
 from app.core.context import ActorContext, set_actor
 from app.core.csrf import verify_csrf
-from app.core.db import get_db_session
+from app.core.db import get_db_session, run_after_commit
 from app.core.errors import (
     AppError,
     ErrorCode,
@@ -158,7 +158,10 @@ async def get_principal(
         )
         principal = _principal_from_cache(entry, claims, sid)
         if principal.status not in _DENIED_STATUSES:
-            await set_principal_cache(entry)
+            # В кэш — только после коммита запроса. JIT-пользователь создан в этой же
+            # транзакции: отклонят запрос (403 CRM-1105 без согласия) — строка `users`
+            # откатится, а запись в Redis осталась бы указывать на неё.
+            run_after_commit(session, lambda: set_principal_cache(entry))
 
     # Блокировка и увольнение должны отсекать пользователя немедленно,
     # даже если его токен ещё формально живой.

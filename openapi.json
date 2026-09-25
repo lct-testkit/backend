@@ -574,6 +574,11 @@
             "title": "Conditions",
             "type": "array"
           },
+          "conditions_tree": {
+            "additionalProperties": true,
+            "title": "Conditions Tree",
+            "type": "object"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -721,6 +726,17 @@
             "title": "Expires In Seconds",
             "type": "integer"
           },
+          "max_attempts": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Attempts"
+          },
           "sent_to_masked": {
             "title": "Sent To Masked",
             "type": "string"
@@ -798,6 +814,17 @@
             },
             "title": "Items",
             "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
           }
         },
         "required": [
@@ -2328,6 +2355,28 @@
             "title": "Events",
             "type": "array"
           },
+          "next_events_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Events Cursor"
+          },
+          "next_statuses_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Statuses Cursor"
+          },
           "statuses": {
             "items": {
               "$ref": "#/components/schemas/DealStatusHistoryOut"
@@ -2362,6 +2411,11 @@
               }
             ],
             "title": "Next Cursor"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
           }
         },
         "required": [
@@ -2407,6 +2461,17 @@
               }
             ],
             "title": "Contact Id"
+          },
+          "contact_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Name"
           },
           "created_at": {
             "format": "date-time",
@@ -2487,6 +2552,17 @@
               }
             ],
             "title": "Organization Id"
+          },
+          "organization_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Organization Name"
           },
           "owner_id": {
             "format": "uuid",
@@ -2713,6 +2789,24 @@
           "discount_pct"
         ],
         "title": "DealProductOut",
+        "type": "object"
+      },
+      "DealProductsReplaceRequest": {
+        "description": "Полный новый список продуктов сделки; пустой список очищает. Поле обязательное: тело\nбез него — ошибка клиента, а не просьба стереть продукты.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/DealProductIn"
+            },
+            "maxItems": 100,
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "DealProductsReplaceRequest",
         "type": "object"
       },
       "DealStatusHistoryOut": {
@@ -3789,6 +3883,17 @@
             "title": "Status",
             "type": "string"
           },
+          "subject_display": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Display"
+          },
           "subject_id": {
             "format": "uuid",
             "title": "Subject Id",
@@ -3900,6 +4005,49 @@
           "status"
         ],
         "title": "ErasureRequestOut",
+        "type": "object"
+      },
+      "EventCodeListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EventCodeOut"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "EventCodeListResponse",
+        "type": "object"
+      },
+      "EventCodeOut": {
+        "description": "Код события, на который можно настроить `PUT /me/notification-prefs`, и каналы,\nпо которым для него есть активные шаблоны.",
+        "properties": {
+          "channels": {
+            "items": {
+              "enum": [
+                "email",
+                "telegram",
+                "in_app"
+              ],
+              "type": "string"
+            },
+            "title": "Channels",
+            "type": "array"
+          },
+          "code": {
+            "title": "Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "channels"
+        ],
+        "title": "EventCodeOut",
         "type": "object"
       },
       "ExternalRefOut": {
@@ -5283,6 +5431,51 @@
         "title": "LossReasonUpdateRequest",
         "type": "object"
       },
+      "MePatchRequest": {
+        "additionalProperties": false,
+        "description": "Свой профиль: имя для отображения, часовой пояс и телефон. Роль, email,\nстатус и остальное меняет только администратор — лишние поля отклоняются,\nа не молча игнорируются.",
+        "properties": {
+          "display_name": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "phone": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone"
+          },
+          "timezone": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timezone"
+          }
+        },
+        "title": "MePatchRequest",
+        "type": "object"
+      },
       "MeResponse": {
         "properties": {
           "consent_required": {
@@ -5367,6 +5560,17 @@
           "perm_epoch": {
             "title": "Perm Epoch",
             "type": "integer"
+          },
+          "phone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone"
           },
           "policy_version": {
             "title": "Policy Version",
@@ -6025,6 +6229,17 @@
       },
       "OffboardRequest": {
         "properties": {
+          "deal_successors": {
+            "additionalProperties": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "propertyNames": {
+              "format": "uuid"
+            },
+            "title": "Deal Successors",
+            "type": "object"
+          },
           "mode": {
             "default": "preview",
             "enum": [
@@ -8278,6 +8493,53 @@
         "title": "ReassignRequest",
         "type": "object"
       },
+      "RecentItemOut": {
+        "description": "Последний открытый объект: `type` — вид (`deal`), `id` — его идентификатор.",
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "opened_at": {
+            "format": "date-time",
+            "title": "Opened At",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "title",
+          "opened_at"
+        ],
+        "title": "RecentItemOut",
+        "type": "object"
+      },
+      "RecentListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RecentItemOut"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "RecentListResponse",
+        "type": "object"
+      },
       "RegionListResponse": {
         "properties": {
           "items": {
@@ -8925,6 +9187,32 @@
         "title": "SignRequest",
         "type": "object"
       },
+      "SignatureBrief": {
+        "description": "Подпись в карточке документа: по `id` строится ссылка на проверку `/verify/{id}`.",
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "signed_at": {
+            "format": "date-time",
+            "title": "Signed At",
+            "type": "string"
+          },
+          "signer_display": {
+            "title": "Signer Display",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "signer_display",
+          "signed_at"
+        ],
+        "title": "SignatureBrief",
+        "type": "object"
+      },
       "SignatureDocumentCreateRequest": {
         "properties": {
           "deadline_days": {
@@ -9116,12 +9404,43 @@
             "title": "Id",
             "type": "string"
           },
+          "protocol_file_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protocol File Id"
+          },
           "requests": {
             "items": {
               "$ref": "#/components/schemas/SignatureRequestOut"
             },
             "title": "Requests",
             "type": "array"
+          },
+          "signatures": {
+            "items": {
+              "$ref": "#/components/schemas/SignatureBrief"
+            },
+            "title": "Signatures",
+            "type": "array"
+          },
+          "signed_file_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Signed File Id"
           },
           "signing_order": {
             "title": "Signing Order",
@@ -9586,6 +9905,17 @@
             "title": "Doc Type",
             "type": "string"
           },
+          "file_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "File Url"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -9913,6 +10243,11 @@
             "title": "Active Count",
             "type": "integer"
           },
+          "problem_count": {
+            "default": 0,
+            "title": "Problem Count",
+            "type": "integer"
+          },
           "problem_deals": {
             "items": {
               "additionalProperties": true,
@@ -10025,6 +10360,123 @@
           "name"
         ],
         "title": "StatusIn",
+        "type": "object"
+      },
+      "StatusMappingJobOut": {
+        "properties": {
+          "affected_count": {
+            "title": "Affected Count",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "failed_count": {
+            "title": "Failed Count",
+            "type": "integer"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "from_status_id": {
+            "format": "uuid",
+            "title": "From Status Id",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "initiated_by": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Initiated By"
+          },
+          "mapping_rules": {
+            "additionalProperties": true,
+            "title": "Mapping Rules",
+            "type": "object"
+          },
+          "processed_count": {
+            "title": "Processed Count",
+            "type": "integer"
+          },
+          "report": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Report"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "workflow_id": {
+            "format": "uuid",
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workflow_id",
+          "from_status_id",
+          "mapping_rules",
+          "affected_count",
+          "processed_count",
+          "failed_count",
+          "status",
+          "created_at"
+        ],
+        "title": "StatusMappingJobOut",
         "type": "object"
       },
       "StatusOut": {
@@ -10363,6 +10815,28 @@
             "title": "Deal Id",
             "type": "string"
           },
+          "deal_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deal Number"
+          },
+          "deal_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deal Title"
+          },
           "description": {
             "anyOf": [
               {
@@ -10639,12 +11113,23 @@
               }
             ],
             "title": "Region Id"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
           }
         },
         "required": [
           "id",
           "name",
-          "created_at"
+          "created_at",
+          "updated_at",
+          "version"
         ],
         "title": "TeamOut",
         "type": "object"
@@ -10702,6 +11187,123 @@
           }
         },
         "title": "TeamPatchRequest",
+        "type": "object"
+      },
+      "TemplatePreviewError": {
+        "properties": {
+          "field": {
+            "enum": [
+              "subject_template",
+              "body_template"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "line": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "message"
+        ],
+        "title": "TemplatePreviewError",
+        "type": "object"
+      },
+      "TemplatePreviewRequest": {
+        "description": "Черновик шаблона и данные события, на которых его надо отрисовать.",
+        "properties": {
+          "body_template": {
+            "minLength": 1,
+            "title": "Body Template",
+            "type": "string"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "title": "Payload",
+            "type": "object"
+          },
+          "subject_template": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Template"
+          }
+        },
+        "required": [
+          "body_template"
+        ],
+        "title": "TemplatePreviewRequest",
+        "type": "object"
+      },
+      "TemplatePreviewResponse": {
+        "description": "`ok=false` — это ответ, а не ошибка запроса: интерфейс показывает `error`\nрядом с полем, не дожидаясь сохранения.",
+        "properties": {
+          "body": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Body"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TemplatePreviewError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          },
+          "variables": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Variables",
+            "type": "array"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "title": "TemplatePreviewResponse",
         "type": "object"
       },
       "TransitionConditionOut": {
@@ -10914,6 +11516,20 @@
           "deal"
         ],
         "title": "TransitionResponse",
+        "type": "object"
+      },
+      "UnreadCountResponse": {
+        "description": "Число непрочитанных без потолка страницы — для значка в шапке.",
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "count"
+        ],
+        "title": "UnreadCountResponse",
         "type": "object"
       },
       "UploadIntentRequest": {
@@ -11220,6 +11836,18 @@
             ],
             "title": "Anonymized At"
           },
+          "auto_unblock_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auto Unblock At"
+          },
           "blocked_at": {
             "anyOf": [
               {
@@ -11327,6 +11955,17 @@
           "perm_epoch": {
             "title": "Perm Epoch",
             "type": "integer"
+          },
+          "phone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone"
           },
           "position": {
             "anyOf": [
@@ -11436,6 +12075,18 @@
               }
             ],
             "title": "Manager Id"
+          },
+          "phone": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone"
           },
           "position": {
             "anyOf": [
@@ -11839,6 +12490,11 @@
             ],
             "title": "Graph Hash"
           },
+          "has_unpublished_changes": {
+            "default": false,
+            "title": "Has Unpublished Changes",
+            "type": "boolean"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -11902,6 +12558,37 @@
           "updated_at"
         ],
         "title": "WorkflowOut",
+        "type": "object"
+      },
+      "WorkflowUpdateRequest": {
+        "description": "`PATCH /workflows/{id}`: метаданные воронки. Граф правится через `PUT .../graph`.",
+        "properties": {
+          "is_default": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Default"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "title": "WorkflowUpdateRequest",
         "type": "object"
       }
     },
@@ -12880,6 +13567,23 @@
           },
           {
             "in": "query",
+            "name": "subject_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Subject Id"
+            }
+          },
+          {
+            "in": "query",
             "name": "limit",
             "required": false,
             "schema": {
@@ -13411,6 +14115,7 @@
     },
     "/api/admin/integrations/external-refs": {
       "get": {
+        "description": "Соответствие «наша сущность — id во внешней системе», недавно синхронизированные первыми (несинхронизированные — в конце). Фильтры: `source_code`, `entity_type`, период `from`/`to` по `last_synced_at`. Продолжение — `cursor` из заголовка `X-Next-Cursor`.",
         "operationId": "list_external_refs_api_admin_integrations_external_refs_get",
         "parameters": [
           {
@@ -13446,14 +14151,71 @@
             }
           },
           {
+            "description": "Не раньше (включительно)",
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Не раньше (включительно)",
+              "title": "From"
+            }
+          },
+          {
+            "description": "Раньше (исключительно)",
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Раньше (исключительно)",
+              "title": "To"
+            }
+          },
+          {
             "in": "query",
             "name": "limit",
             "required": false,
             "schema": {
               "default": 50,
               "maximum": 200,
+              "minimum": 1,
               "title": "Limit",
               "type": "integer"
+            }
+          },
+          {
+            "description": "Курсор из `X-Next-Cursor` прошлой страницы",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Курсор из `X-Next-Cursor` прошлой страницы",
+              "title": "Cursor"
             }
           },
           {
@@ -13486,7 +14248,15 @@
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Successful Response",
+            "headers": {
+              "X-Next-Cursor": {
+                "description": "Курсор следующей страницы; на последней странице заголовка нет.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "422": {
             "content": {
@@ -13499,7 +14269,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "List External Refs",
+        "summary": "Связи с внешними системами",
         "tags": [
           "integrations-admin"
         ]
@@ -13507,6 +14277,7 @@
     },
     "/api/admin/integrations/inbound-messages": {
       "get": {
+        "description": "Журнал входящих вызовов, новые первыми. Фильтры: `source_code`, период `from`/`to` по `received_at`. Продолжение — `cursor` из заголовка `X-Next-Cursor`.",
         "operationId": "list_inbound_messages_api_admin_integrations_inbound_messages_get",
         "parameters": [
           {
@@ -13526,14 +14297,71 @@
             }
           },
           {
+            "description": "Не раньше (включительно)",
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Не раньше (включительно)",
+              "title": "From"
+            }
+          },
+          {
+            "description": "Раньше (исключительно)",
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Раньше (исключительно)",
+              "title": "To"
+            }
+          },
+          {
             "in": "query",
             "name": "limit",
             "required": false,
             "schema": {
               "default": 50,
               "maximum": 200,
+              "minimum": 1,
               "title": "Limit",
               "type": "integer"
+            }
+          },
+          {
+            "description": "Курсор из `X-Next-Cursor` прошлой страницы",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Курсор из `X-Next-Cursor` прошлой страницы",
+              "title": "Cursor"
             }
           },
           {
@@ -13566,7 +14394,15 @@
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Successful Response",
+            "headers": {
+              "X-Next-Cursor": {
+                "description": "Курсор следующей страницы; на последней странице заголовка нет.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "422": {
             "content": {
@@ -13579,7 +14415,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "List Inbound Messages",
+        "summary": "Входящие сообщения",
         "tags": [
           "integrations-admin"
         ]
@@ -13587,6 +14423,7 @@
     },
     "/api/admin/integrations/outbox-events": {
       "get": {
+        "description": "Очередь доставки, новые первыми. Фильтры: `status`, период `from`/`to` по `created_at`. Продолжение — `cursor` из заголовка `X-Next-Cursor`.",
         "operationId": "list_outbox_events_api_admin_integrations_outbox_events_get",
         "parameters": [
           {
@@ -13606,14 +14443,71 @@
             }
           },
           {
+            "description": "Не раньше (включительно)",
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Не раньше (включительно)",
+              "title": "From"
+            }
+          },
+          {
+            "description": "Раньше (исключительно)",
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Раньше (исключительно)",
+              "title": "To"
+            }
+          },
+          {
             "in": "query",
             "name": "limit",
             "required": false,
             "schema": {
               "default": 50,
               "maximum": 200,
+              "minimum": 1,
               "title": "Limit",
               "type": "integer"
+            }
+          },
+          {
+            "description": "Курсор из `X-Next-Cursor` прошлой страницы",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Курсор из `X-Next-Cursor` прошлой страницы",
+              "title": "Cursor"
             }
           },
           {
@@ -13646,6 +14540,74 @@
                 }
               }
             },
+            "description": "Successful Response",
+            "headers": {
+              "X-Next-Cursor": {
+                "description": "Курсор следующей страницы; на последней странице заголовка нет.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Исходящие события",
+        "tags": [
+          "integrations-admin"
+        ]
+      }
+    },
+    "/api/admin/integrations/outbox-events/{event_id}/retry": {
+      "post": {
+        "description": "Возвращает событие из `failed`/`dead` в очередь: статус `pending`, счётчик попыток и ошибка сброшены, доставка — на ближайшем тике воркера. Для остальных статусов — 409 (CRM-1704). Причина сбоя должна быть устранена до повтора, например включён источник. Пишется в аудит. Роль: ADMIN.",
+        "operationId": "retry_outbox_event_api_admin_integrations_outbox_events__event_id__retry_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "event_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Event Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutboxEventOut"
+                }
+              }
+            },
             "description": "Successful Response"
           },
           "422": {
@@ -13659,7 +14621,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "List Outbox Events",
+        "summary": "Повторить доставку события",
         "tags": [
           "integrations-admin"
         ]
@@ -13947,6 +14909,66 @@
           }
         },
         "summary": "Создать шаблон уведомления",
+        "tags": [
+          "notifications"
+        ]
+      }
+    },
+    "/api/admin/notification-templates/preview": {
+      "post": {
+        "description": "Рендерит черновик (тело и тему) на переданных данных события, не сохраняя его. Ошибка шаблона приходит в теле (`ok=false`, `error.field`, `error.line`), а не кодом ответа; `variables` — что шаблон берёт из данных события. Роль: управление шаблонами уведомлений.",
+        "operationId": "preview_notification_template_api_admin_notification_templates_preview_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TemplatePreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplatePreviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Предпросмотр шаблона уведомления",
         "tags": [
           "notifications"
         ]
@@ -14425,7 +15447,7 @@
     },
     "/api/admin/system-settings/{key}": {
       "put": {
-        "description": "Создаёт или обновляет системную настройку. Изменение пишется в аудит; значение секретной настройки в аудит не попадает. Роль: ADMIN.",
+        "description": "Создаёт или обновляет системную настройку. Изменение пишется в аудит; значение секретной настройки в аудит не попадает. Маркер `********`, которым секрет скрыт в списке, как значение не принимается (422). Роль: ADMIN.",
         "operationId": "put_system_setting_api_admin_system_settings__key__put",
         "parameters": [
           {
@@ -14648,8 +15670,66 @@
       }
     },
     "/api/admin/teams/{team_id}": {
+      "get": {
+        "description": "Команда с версией и временем последней правки. Роль: ADMIN.",
+        "operationId": "get_team_api_admin_teams__team_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Карточка команды",
+        "tags": [
+          "admin-users"
+        ]
+      },
       "patch": {
-        "description": "Меняет название, родителя, руководителя или регион. Роль: ADMIN.",
+        "description": "Меняет название, родителя, руководителя или регион. `If-Match` с версией команды необязателен: с ним устаревшая версия даёт 409 (CRM-1002), без него правка применяется как раньше. Каждая правка поднимает `version`. Роль: ADMIN.",
         "operationId": "patch_team_api_admin_teams__team_id__patch",
         "parameters": [
           {
@@ -14676,6 +15756,22 @@
                 }
               ],
               "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
             }
           }
         ],
@@ -15016,7 +16112,7 @@
         ]
       },
       "patch": {
-        "description": "Меняет роль, команду, руководителя, статус и локальные настройки. Обязателен `If-Match`. При смене роли обновляется маппинг в Keycloak, растёт `perm_epoch` и сбрасывается кэш прав. Понизить последнего администратора нельзя (CRM-1903). Роль: ADMIN.",
+        "description": "Меняет роль, команду, руководителя и локальные настройки. Обязателен `If-Match`. При смене роли обновляется маппинг в Keycloak, растёт `perm_epoch` и сбрасывается кэш прав. Понизить последнего администратора нельзя (CRM-1903). Статус правкой не меняется: активация происходит при первом входе, блокировка, разблокировка и увольнение — отдельные операции (422). Роль: ADMIN.",
         "operationId": "patch_user_api_admin_users__user_id__patch",
         "parameters": [
           {
@@ -15302,7 +16398,7 @@
     },
     "/api/admin/users/{user_id}/offboard": {
       "post": {
-        "description": "Режим `preview` показывает, что держит пользователь; режим `confirm` переназначает сделки преемнику, переводит учётку в `terminated`, отключает её в Keycloak и завершает сессии. История и авторство комментариев сохраняются. Роль: ADMIN.",
+        "description": "Режим `preview` показывает, что держит пользователь; режим `confirm` переназначает сделки преемнику, переводит учётку в `terminated`, отключает её в Keycloak и завершает сессии. `deal_successors` (`{id сделки: id преемника}`) отдаёт названные сделки другим преемникам — остальное уходит `successor_id`. История и авторство комментариев сохраняются. Роль: ADMIN.",
         "operationId": "offboard_user_api_admin_users__user_id__offboard_post",
         "parameters": [
           {
@@ -15666,6 +16762,7 @@
     },
     "/api/attachments/{attachment_id}": {
       "delete": {
+        "description": "Отвязывает вложение от сущности; доступ к сущности проверяется. Роль: автор вложения (своё ошибочное), HEAD, ADMIN.",
         "operationId": "delete_attachment_api_attachments__attachment_id__delete",
         "parameters": [
           {
@@ -17347,7 +18444,7 @@
     },
     "/api/deals": {
       "get": {
-        "description": "Курсорная пагинация, фильтры по статусу/воронке/типу/владельцу/приоритету/SLA/датам/тексту. Скоуп по роли (раздел 4): KAM — свои сделки, HEAD — команда, ADMIN — все. Роль: чтение сделок.",
+        "description": "Курсорная пагинация, фильтры по статусу/воронке/типу/владельцу/приоритету/SLA/датам/тексту. `status_id` можно повторять (`?status_id=a&status_id=b`), `is_closed` отделяет закрытые сделки (won/lost/parked) от открытых. `sort` — поле сортировки, минус в начале — по убыванию: created_at (по умолчанию `-created_at`), updated_at, status_changed_at, number, title, amount, expected_close_date, sla_due_at; сделки без значения всегда в конце. `total` — сколько сделок подходит под фильтры, без учёта курсора. Скоуп по роли (раздел 4): KAM — свои сделки, HEAD — команда, ADMIN — все. Роль: чтение сделок.",
         "operationId": "list_deals_api_deals_get",
         "parameters": [
           {
@@ -17357,14 +18454,49 @@
             "schema": {
               "anyOf": [
                 {
-                  "format": "uuid",
-                  "type": "string"
+                  "items": {
+                    "format": "uuid",
+                    "type": "string"
+                  },
+                  "type": "array"
                 },
                 {
                   "type": "null"
                 }
               ],
               "title": "Status Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "is_closed",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Is Closed"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Sort"
             }
           },
           {
@@ -17691,7 +18823,7 @@
         ]
       },
       "post": {
-        "description": "Для B2B обязателен organization_id, для B2C — contact_id (new_spec §4.9). Сделка получает начальный статус опубликованной воронки по умолчанию для своего типа (или явно переданного workflow_id), номер, событие CREATED и аудит. Поддерживает Idempotency-Key. Роль: создание сделок.",
+        "description": "Для B2B обязателен organization_id, для B2C — contact_id (new_spec §4.9). Сделка получает начальный статус опубликованной воронки по умолчанию для своего типа (или явно переданного workflow_id), номер, событие CREATED и аудит. Ответственный (owner_id): без него или свой — сам создатель; чужого назначает ADMIN (любого активного сотрудника) и HEAD (из своей команды), остальным — 403. Поддерживает Idempotency-Key. Роль: создание сделок.",
         "operationId": "create_deal_api_deals_post",
         "parameters": [
           {
@@ -17971,7 +19103,7 @@
     },
     "/api/deals/{deal_id}/available-transitions": {
       "get": {
-        "description": "Для каждого перехода — условия с флагом satisfied и человекочитаемым полем/оператором/ожидаемым и фактическим значением. Фронтенд рисует чек-лист по этому ответу и не принимает решение сам (раздел 6.6). Роль: чтение сделок.",
+        "description": "Для каждого перехода — условия с флагом satisfied и человекочитаемым полем/оператором/ожидаемым и фактическим значением, а также те же условия деревом all/any (conditions_tree) с satisfied на каждом узле: по плоскому списку не понять, что достаточно одного из условий any. Фронтенд рисует чек-лист по этому ответу и не принимает решение сам (раздел 6.6). Роль: чтение сделок.",
         "operationId": "list_available_transitions_api_deals__deal_id__available_transitions_get",
         "parameters": [
           {
@@ -18031,6 +19163,7 @@
     },
     "/api/deals/{deal_id}/comments": {
       "get": {
+        "description": "Без `limit` — все комментарии. С `limit` (1–100) — страница в хронологическом порядке; продолжение — `cursor` из `next_cursor` предыдущего ответа. Роль: чтение сделок.",
         "operationId": "list_comments_api_deals__deal_id__comments_get",
         "parameters": [
           {
@@ -18041,6 +19174,40 @@
               "format": "uuid",
               "title": "Deal Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 100,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
             }
           },
           {
@@ -18157,6 +19324,7 @@
     },
     "/api/deals/{deal_id}/history": {
       "get": {
+        "description": "Без `limit` — целиком. С `limit` (1–100) каждый из двух списков отдаётся страницей в хронологическом порядке; продолжение — `statuses_cursor` / `events_cursor` из `next_statuses_cursor` / `next_events_cursor` предыдущего ответа, у списков курсоры независимы. Роль: чтение сделок.",
         "operationId": "get_deal_history_api_deals__deal_id__history_get",
         "parameters": [
           {
@@ -18167,6 +19335,56 @@
               "format": "uuid",
               "title": "Deal Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 100,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          },
+          {
+            "in": "query",
+            "name": "statuses_cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Statuses Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "events_cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Events Cursor"
             }
           },
           {
@@ -18409,6 +19627,92 @@
         ]
       }
     },
+    "/api/deals/{deal_id}/products": {
+      "put": {
+        "description": "Тело — полный новый список продуктов сделки (пустой очищает). Обязателен If-Match; версия сделки растёт. Ответ — карточка сделки с новым списком. Роль: обновление сделок.",
+        "operationId": "replace_deal_products_api_deals__deal_id__products_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "deal_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Deal Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DealProductsReplaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DealCardOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Заменить продукты сделки",
+        "tags": [
+          "deals"
+        ]
+      }
+    },
     "/api/deals/{deal_id}/reassign": {
       "post": {
         "description": "Обязателен If-Match. Создаёт системный комментарий, событие, уведомление и аудит.",
@@ -18497,7 +19801,7 @@
     },
     "/api/deals/{deal_id}/transition": {
       "post": {
-        "description": "Проверяет версию, наличие перехода в опубликованном графе, роль, guard-условия; пишет историю, аудит и запускает действия перехода. Обязателен If-Match. Двойной клик по одной и той же сделке сериализуется коротким Redis-локом `deal:{id}:transition` (раздел 3.5), а не Idempotency-Key — двойной переход опасен побочными эффектами, а не дублем самой записи. Роль: переход по статусу.",
+        "description": "Проверяет версию, наличие перехода в опубликованном графе, роль, guard-условия и обязательные поля целевого статуса (не заполнены — 422 CRM-1205 с перечнем полей; закрыть их можно через `fields`); пишет историю, аудит и запускает действия перехода. Обязателен If-Match. Двойной клик по одной и той же сделке сериализуется коротким Redis-локом `deal:{id}:transition` (раздел 3.5), а не Idempotency-Key — двойной переход опасен побочными эффектами, а не дублем самой записи. Роль: переход по статусу.",
         "operationId": "transition_deal_api_deals__deal_id__transition_post",
         "parameters": [
           {
@@ -18583,6 +19887,7 @@
     },
     "/api/directions": {
       "get": {
+        "description": "Курсорная пагинация. `all=true` отдаёт весь справочник одним ответом, `limit` и `cursor` игнорируются — для построения дерева целиком. Роль: чтение каталога.",
         "operationId": "list_directions_api_directions_get",
         "parameters": [
           {
@@ -18616,6 +19921,16 @@
                 }
               ],
               "title": "Q"
+            }
+          },
+          {
+            "in": "query",
+            "name": "all",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "All",
+              "type": "boolean"
             }
           },
           {
@@ -18691,6 +20006,7 @@
         ]
       },
       "post": {
+        "description": "Родитель (`parent_id`) должен существовать, иначе 404. Роль: запись каталога.",
         "operationId": "create_direction_api_directions_post",
         "parameters": [
           {
@@ -18801,6 +20117,7 @@
         ]
       },
       "patch": {
+        "description": "Новый родитель должен существовать (404) и не замыкать цикл: направление не может стать потомком самого себя или своего потомка (422). Роль: запись каталога.",
         "operationId": "update_direction_api_directions__direction_id__patch",
         "parameters": [
           {
@@ -18946,7 +20263,7 @@
     },
     "/api/files/{file_id}": {
       "delete": {
-        "description": "Мягкое удаление. Файл с активными вложениями (refcount > 0) удалить нельзя.",
+        "description": "Мягкое удаление. Файл с активными вложениями (refcount > 0) удалить нельзя. Роль: автор файла (свой, без вложений), HEAD, ADMIN.",
         "operationId": "delete_file_api_files__file_id__delete",
         "parameters": [
           {
@@ -20280,6 +21597,64 @@
         "tags": [
           "me"
         ]
+      },
+      "patch": {
+        "description": "Отображаемое имя, часовой пояс и телефон — только себе; чужой профиль меняется через администрирование. Телефон нужен для кода подтверждения подписи (SMS), `null` очищает его. Роль, email и статус здесь не принимаются (422). Сбрасывает кэш прав, пишет `USER_UPDATED` в аудит (телефон маскируется). Роль: любой аутентифицированный пользователь.",
+        "operationId": "patch_me_api_me_patch",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MePatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Изменить свой профиль",
+        "tags": [
+          "me"
+        ]
       }
     },
     "/api/me/consent": {
@@ -20560,7 +21935,7 @@
     },
     "/api/me/recent": {
       "get": {
-        "description": "Возвращает до 20 последних открытых пользователем сделок, организаций, контактов и отчётов из Redis ZSET `recent:{user_id}`. Роль: любой аутентифицированный пользователь.",
+        "description": "Возвращает до 20 последних открытых пользователем объектов из Redis ZSET `recent:{user_id}`, новые первыми: вид (`type`), `id`, название и время открытия. Сейчас в историю попадают сделки. Роль: любой аутентифицированный пользователь.",
         "operationId": "get_recent_api_me_recent_get",
         "parameters": [
           {
@@ -20585,15 +21960,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {
-                    "items": {
-                      "additionalProperties": true,
-                      "type": "object"
-                    },
-                    "type": "array"
-                  },
-                  "title": "Response Get Recent Api Me Recent Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/RecentListResponse"
                 }
               }
             },
@@ -20921,6 +22288,56 @@
         ]
       }
     },
+    "/api/notifications/event-codes": {
+      "get": {
+        "description": "Коды событий с активными шаблонами и каналы, по которым они доставляются: то, что можно передать в `PUT /me/notification-prefs`. Роль: любой аутентифицированный.",
+        "operationId": "event_codes_api_notifications_event_codes_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventCodeListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Коды событий для настроек уведомлений",
+        "tags": [
+          "notifications"
+        ]
+      }
+    },
     "/api/notifications/read": {
       "post": {
         "operationId": "mark_notifications_read_api_notifications_read_post",
@@ -20975,6 +22392,56 @@
           }
         },
         "summary": "Отметить уведомления прочитанными",
+        "tags": [
+          "notifications"
+        ]
+      }
+    },
+    "/api/notifications/unread-count": {
+      "get": {
+        "description": "Точное число, без потолка страницы списка. Роль: любой аутентифицированный.",
+        "operationId": "unread_count_api_notifications_unread_count_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnreadCountResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Число непрочитанных уведомлений",
         "tags": [
           "notifications"
         ]
@@ -22184,6 +23651,7 @@
         ]
       },
       "post": {
+        "description": "`valid_from` не позже `valid_to`, иначе 422. Роль: запись каталога.",
         "operationId": "create_product_api_products_post",
         "parameters": [
           {
@@ -22243,6 +23711,7 @@
     },
     "/api/products/{product_id}": {
       "patch": {
+        "description": "`valid_from` не позже `valid_to` (новая дата сверяется с сохранённой), иначе 422. Роль: запись каталога.",
         "operationId": "update_product_api_products__product_id__patch",
         "parameters": [
           {
@@ -22426,8 +23895,25 @@
     },
     "/api/reports": {
       "get": {
+        "description": "Фильтр: template_code (код вида отчёта). Администратор видит все отчёты.",
         "operationId": "list_reports_api_reports_get",
         "parameters": [
+          {
+            "in": "query",
+            "name": "template_code",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Template Code"
+            }
+          },
           {
             "in": "query",
             "name": "limit",
@@ -22501,6 +23987,7 @@
         ]
       },
       "post": {
+        "description": "Лёгкий отчёт формируется сразу (`status=completed`, `progress_pct=100`), тяжёлый встаёт в очередь. Незавершённых отчётов у одного сотрудника не больше REPORTS_MAX_CONCURRENT — иначе 429 CRM-1601. Роль: создание отчётов.",
         "operationId": "create_report_api_reports_post",
         "parameters": [
           {
@@ -22679,6 +24166,7 @@
     },
     "/api/reports/{report_id}/download": {
       "get": {
+        "description": "Отчёт ещё не готов или не сформирован из-за ошибки — 409 CRM-1602; срок хранения результата истёк (`expires_at`) — 410 CRM-1603. Права — как у `GET /api/reports/{report_id}`.",
         "operationId": "download_report_api_reports__report_id__download_get",
         "parameters": [
           {
@@ -23178,6 +24666,122 @@
           }
         },
         "summary": "Запросить одноразовый код",
+        "tags": [
+          "signing"
+        ]
+      }
+    },
+    "/api/signature-requests/{request_id}/file": {
+      "get": {
+        "description": "PDF документа запроса с origin приложения: `inline`, без CORS и без ссылки на хранилище. Только свой запрос. Роль: подписант.",
+        "operationId": "get_request_file_api_signature_requests__request_id__file_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Request Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/pdf": {}
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "PDF документа для просмотра (внутренний подписант)",
+        "tags": [
+          "signing"
+        ]
+      }
+    },
+    "/api/signature-requests/{request_id}/reissue-link": {
+      "post": {
+        "description": "Выдаёт инициатору документа новую ссылку `sign_url`, пока запрос внешнего подписанта ждёт подписи (`sent`/`viewed`); прежняя ссылка перестаёт работать. Нужна, когда очередь дошла до подписанта после подписи предыдущего и ссылка не была выдана. Внутреннему подписанту — 422, запросу не в ожидании подписи — 409. Роль: инициатор документа, ADMIN.",
+        "operationId": "reissue_link_api_signature_requests__request_id__reissue_link_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Request Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignatureRequestOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Переиздать ссылку внешнему подписанту",
         "tags": [
           "signing"
         ]
@@ -24425,11 +26029,95 @@
         "tags": [
           "workflows"
         ]
+      },
+      "patch": {
+        "description": "Тело: name и/или is_default. `is_default=true` у опубликованной воронки снимает флаг с прежней воронки того же типа сделки; у черновика флаг вступает в силу при публикации. Граф и опубликованный снимок не меняются, версия воронки растёт. Обязателен If-Match. Роль: запись воронок.",
+        "operationId": "update_workflow_api_workflows__workflow_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Изменить имя и воронку по умолчанию",
+        "tags": [
+          "workflows"
+        ]
       }
     },
     "/api/workflows/{workflow_id}/graph": {
       "put": {
-        "description": "Тело — полный снимок графа: statuses, transitions, sla_rules. Статусы и переходы, не попавшие в тело, удаляются. Архивные статусы этой ручкой не редактируются. Обязателен If-Match. Роль: запись воронок.",
+        "description": "Тело — полный снимок графа: statuses, transitions, sla_rules. Статусы и переходы с `id` обновляются на месте (переход без `id` сопоставляется по паре статусов), не попавшие в тело — удаляются. Статус, на который уже ссылаются сделки или их история, удалить нельзя — 409 CRM-1208 (сначала архивация через мастер), переход, использованный в истории, — 409 CRM-1209. Архивные статусы этой ручкой не редактируются. Обязателен If-Match. Роль: запись воронок.",
         "operationId": "put_workflow_graph_api_workflows__workflow_id__graph_put",
         "parameters": [
           {
@@ -24508,6 +26196,76 @@
           }
         },
         "summary": "Сохранить черновик графа",
+        "tags": [
+          "workflows"
+        ]
+      }
+    },
+    "/api/workflows/{workflow_id}/mapping-jobs/{job_id}": {
+      "get": {
+        "description": "Прогресс и итог задачи, которую запустила архивация статуса (`job_id` — из ответа `POST .../archive`): `status`, `affected_count`, `processed_count`, `failed_count`, `report`. Пока задача `running`, остаток сделок докручивает воркер. Роль: чтение воронок.",
+        "operationId": "get_mapping_job_api_workflows__workflow_id__mapping_jobs__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusMappingJobOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Задача переноса сделок",
         "tags": [
           "workflows"
         ]
@@ -24687,7 +26445,7 @@
     },
     "/api/workflows/{workflow_id}/statuses/{status_id}/impact": {
       "get": {
-        "description": "Число активных сделок, проблемные сделки, предложения целевых статусов. Роль: чтение воронок.",
+        "description": "Число активных сделок, проблемные сделки, предложения целевых статусов. Без `target_status_id` список проблемных сделок пуст: сверять обязательные поля не с чем. С ним в `problem_deals` — сделки статуса без обязательных полей целевого (`id`, `number`, `title`, `missing_fields`; не больше 100, всего — `problem_count`): при архивации они уйдут в резервный статус. Роль: чтение воронок.",
         "operationId": "status_impact_api_workflows__workflow_id__statuses__status_id__impact_get",
         "parameters": [
           {
@@ -24708,6 +26466,23 @@
               "format": "uuid",
               "title": "Status Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "target_status_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Target Status Id"
             }
           },
           {
@@ -24947,6 +26722,45 @@
           }
         },
         "summary": "Запросить одноразовый код (внешний подписант)",
+        "tags": [
+          "signing-public"
+        ]
+      }
+    },
+    "/public/sign/{token}/file": {
+      "get": {
+        "description": "Тот же PDF, что по `preview_url`, но с origin приложения: `inline`, без CORS и без ссылки на хранилище. Доступ — по той же ссылке подписи, лимит — общий с ней.",
+        "operationId": "get_sign_file_public_sign__token__file_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "title": "Token",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/pdf": {}
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "PDF документа для просмотра (внешний подписант)",
         "tags": [
           "signing-public"
         ]

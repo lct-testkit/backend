@@ -26,14 +26,21 @@ from app.modules.workflow.schemas import (
     StatusArchiveRequest,
     StatusArchiveResponse,
     StatusImpactResponse,
+    StatusMappingJobOut,
     StatusOut,
     TransitionOut,
     ValidateResponse,
     WorkflowCreateRequest,
     WorkflowListResponse,
     WorkflowOut,
+    WorkflowUpdateRequest,
 )
-from app.modules.workflow.service import Graph, WorkflowFilters, WorkflowService
+from app.modules.workflow.service import (
+    Graph,
+    WorkflowFilters,
+    WorkflowService,
+    has_unpublished_changes,
+)
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
 
@@ -42,9 +49,18 @@ WorkflowWrite = Annotated[Principal, Depends(require_permission(Permission.WORKF
 WorkflowPublish = Annotated[Principal, Depends(require_permission(Permission.WORKFLOW_PUBLISH))]
 
 
+def _workflow_out(workflow: Workflow, *, unpublished: bool) -> WorkflowOut:
+    return WorkflowOut.model_validate(workflow).model_copy(
+        update={"has_unpublished_changes": unpublished}
+    )
+
+
 def _graph_out(graph: Graph) -> GraphOut:
+    unpublished = has_unpublished_changes(
+        graph.workflow, graph.statuses, graph.transitions, graph.sla_rules
+    )
     return GraphOut(
-        workflow=WorkflowOut.model_validate(graph.workflow),
+        workflow=_workflow_out(graph.workflow, unpublished=unpublished),
         statuses=[StatusOut.model_validate(s) for s in graph.statuses],
         transitions=[TransitionOut.model_validate(t) for t in graph.transitions],
         sla_rules=[SlaRuleOut.from_model(r) for r in graph.sla_rules],
@@ -75,7 +91,12 @@ async def list_workflows(
         stmt = stmt.where(keyset_before(Workflow.created_at, Workflow.id, cursor))
 
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
-    built: Page = Page.build(rows, limit=page.limit, serializer=WorkflowOut.model_validate)
+    flags = await service.unpublished_flags(rows[: page.limit])
+    built: Page = Page.build(
+        rows,
+        limit=page.limit,
+        serializer=lambda workflow: _workflow_out(workflow, unpublished=flags[workflow.id]),
+    )
     return WorkflowListResponse(items=built.items, next_cursor=built.next_cursor)
 
 
@@ -98,7 +119,7 @@ async def create_workflow(
         is_default=payload.is_default,
         principal=principal,
     )
-    return WorkflowOut.model_validate(workflow)
+    return _workflow_out(workflow, unpublished=True)  # ещё не публиковалась
 
 
 @router.get(
@@ -120,13 +141,43 @@ async def get_workflow_graph(
     return _graph_out(await service.get_graph(workflow))
 
 
+@router.patch(
+    "/{workflow_id}",
+    summary="Изменить имя и воронку по умолчанию",
+    description=(
+        "Тело: name и/или is_default. `is_default=true` у опубликованной воронки "
+        "снимает флаг с прежней воронки того же типа сделки; у черновика флаг "
+        "вступает в силу при публикации. Граф и опубликованный снимок не "
+        "меняются, версия воронки растёт. Обязателен If-Match. Роль: запись "
+        "воронок."
+    ),
+    response_model=WorkflowOut,
+)
+async def update_workflow(
+    payload: WorkflowUpdateRequest,
+    session: DbSession,
+    _: WorkflowWrite,
+    if_match: IfMatch,
+    workflow_id: Annotated[uuid.UUID, Path()],
+) -> WorkflowOut:
+    service = WorkflowService(session)
+    workflow = await service.get_or_404(workflow_id)
+    workflow = await service.update(workflow, payload, expected_version=if_match)
+    flags = await service.unpublished_flags([workflow])
+    return _workflow_out(workflow, unpublished=flags[workflow.id])
+
+
 @router.put(
     "/{workflow_id}/graph",
     summary="Сохранить черновик графа",
     description=(
         "Тело — полный снимок графа: statuses, transitions, sla_rules. Статусы "
-        "и переходы, не попавшие в тело, удаляются. Архивные статусы этой "
-        "ручкой не редактируются. Обязателен If-Match. Роль: запись воронок."
+        "и переходы с `id` обновляются на месте (переход без `id` "
+        "сопоставляется по паре статусов), не попавшие в тело — удаляются. "
+        "Статус, на который уже ссылаются сделки или их история, удалить нельзя "
+        "— 409 CRM-1208 (сначала архивация через мастер), переход, использованный "
+        "в истории, — 409 CRM-1209. Архивные статусы этой ручкой не "
+        "редактируются. Обязателен If-Match. Роль: запись воронок."
     ),
     response_model=GraphOut,
 )
@@ -184,7 +235,8 @@ async def publish_workflow(
     workflow = await service.get_or_404(workflow_id)
     published, _warnings = await service.publish(workflow, principal, expected_version=if_match)
     return PublishResponse(
-        workflow=WorkflowOut.model_validate(published), graph_hash=published.graph_hash or ""
+        workflow=_workflow_out(published, unpublished=False),
+        graph_hash=published.graph_hash or "",
     )
 
 
@@ -193,7 +245,11 @@ async def publish_workflow(
     summary="Предпросмотр архивирования статуса",
     description=(
         "Число активных сделок, проблемные сделки, предложения целевых "
-        "статусов. Роль: чтение воронок."
+        "статусов. Без `target_status_id` список проблемных сделок пуст: "
+        "сверять обязательные поля не с чем. С ним в `problem_deals` — сделки "
+        "статуса без обязательных полей целевого (`id`, `number`, `title`, "
+        "`missing_fields`; не больше 100, всего — `problem_count`): при "
+        "архивации они уйдут в резервный статус. Роль: чтение воронок."
     ),
     response_model=StatusImpactResponse,
 )
@@ -202,11 +258,12 @@ async def status_impact(
     _: WorkflowRead,
     workflow_id: Annotated[uuid.UUID, Path()],
     status_id: Annotated[uuid.UUID, Path()],
+    target_status_id: Annotated[uuid.UUID | None, Query()] = None,
 ) -> StatusImpactResponse:
     service = WorkflowService(session)
     workflow = await service.get_or_404(workflow_id)
     target_status = await service.get_status_or_404(workflow_id, status_id)
-    workload, candidates = await service.status_impact(workflow, target_status)
+    workload, candidates = await service.status_impact(workflow, target_status, target_status_id)
 
     warnings: list[str] = []
     if not workload.supported:
@@ -217,6 +274,7 @@ async def status_impact(
         supported=workload.supported,
         active_count=workload.active_count,
         problem_deals=workload.problem_deals,
+        problem_count=workload.problem_count,
         sla_affected=workload.sla_affected,
         suggested_targets=[StatusOut.model_validate(s) for s in candidates],
         warnings=warnings,
@@ -271,6 +329,29 @@ async def archive_status(
         affected_count=job.affected_count,
         warnings=warnings,
     )
+
+
+@router.get(
+    "/{workflow_id}/mapping-jobs/{job_id}",
+    summary="Задача переноса сделок",
+    description=(
+        "Прогресс и итог задачи, которую запустила архивация статуса "
+        "(`job_id` — из ответа `POST .../archive`): `status`, `affected_count`, "
+        "`processed_count`, `failed_count`, `report`. Пока задача `running`, "
+        "остаток сделок докручивает воркер. Роль: чтение воронок."
+    ),
+    response_model=StatusMappingJobOut,
+)
+async def get_mapping_job(
+    session: DbSession,
+    _: WorkflowRead,
+    workflow_id: Annotated[uuid.UUID, Path()],
+    job_id: Annotated[uuid.UUID, Path()],
+) -> StatusMappingJobOut:
+    service = WorkflowService(session)
+    await service.get_or_404(workflow_id)
+    job = await service.get_mapping_job_or_404(workflow_id, job_id)
+    return StatusMappingJobOut.model_validate(job)
 
 
 @router.delete(

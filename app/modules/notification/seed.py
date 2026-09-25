@@ -94,6 +94,14 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str | None, str]] = [
         "Ваша роль изменена: {{ old_role }} → {{ new_role }}.",
     ),
     (
+        "USER_INVITE_EXPIRED",
+        "in_app",
+        None,
+        "Приглашение не принято за 30 дней: {{ full_name }}"
+        "{% if email %} ({{ email }}){% endif %}. Учётная запись отключена; чтобы "
+        "пригласить снова, нажмите «Отправить повторно».",
+    ),
+    (
         "USER_OFFBOARD_SUCCESSOR",
         "in_app",
         None,

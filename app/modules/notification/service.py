@@ -32,8 +32,10 @@ from typing import Any, Protocol, runtime_checkable
 from zoneinfo import ZoneInfo
 
 import jinja2
+import jinja2.meta
+import jinja2.sandbox
 import structlog
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import FieldError, NotFoundError, ValidationError, VersionConflictError
@@ -61,6 +63,8 @@ TPL_ACCOUNT_BLOCKED = "USER_ACCOUNT_BLOCKED"
 TPL_ACCOUNT_UNBLOCKED = "USER_ACCOUNT_UNBLOCKED"
 TPL_ROLE_CHANGED = "USER_ROLE_CHANGED"
 TPL_OFFBOARD_SUCCESSOR = "USER_OFFBOARD_SUCCESSOR"
+# new_spec §4.1: «задача админу в уведомлениях» — приглашение не принято за 30 дней.
+TPL_INVITE_EXPIRED = "USER_INVITE_EXPIRED"
 TPL_ERASURE_BLOCKED = "ERASURE_REQUEST_BLOCKED"
 # Спринт 10: исполнение запроса на удаление/обезличивание (new_spec §4.8.4
 # шаг 7) — уведомляется инициатор запроса, а не сам субъект (для режима B
@@ -115,13 +119,53 @@ class LoggingNotificationService:
         )
 
 
+# Шаблоны пишет администратор, но исполняются они на сервере: песочница не даёт
+# дотянуться из шаблона до внутренностей Python (`{{ ''.__class__ }}`).
+_JINJA = jinja2.sandbox.SandboxedEnvironment()
+
+
 def render_template(template_str: str, payload: dict[str, Any]) -> str:
     """Простая текстовая подстановка (не HTML-документ, поэтому без
     `autoescape` — тело уведомления возвращается как обычная строка JSON-поля,
     экранирование при показе в HTML — забота фронтенда, как и для любого
     другого текстового поля этого API (комментарии сделок, названия
     организаций и т.д. тоже не экранируются на бэкенде)."""
-    return jinja2.Template(template_str).render(**payload)
+    return _JINJA.from_string(template_str).render(**payload)
+
+
+def preview_template(
+    *, subject_template: str | None, body_template: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Предпросмотр черновика: тот же рендер, что и в проде (`render_template`),
+    но любая ошибка шаблона — часть ответа с указанием поля и строки."""
+    variables: set[str] = set()
+    rendered: dict[str, str | None] = {"subject_template": None, "body_template": None}
+    for field, source in (("subject_template", subject_template), ("body_template", body_template)):
+        if not source:
+            continue
+        try:
+            variables |= jinja2.meta.find_undeclared_variables(_JINJA.parse(source))
+            rendered[field] = render_template(source, payload)
+        except Exception as exc:  # noqa: BLE001 — черновик администратора: любой сбой — ответ, не 500
+            message = getattr(exc, "message", None) or str(exc) or type(exc).__name__
+            return {
+                "ok": False,
+                "subject": None,
+                "body": None,
+                "variables": sorted(variables),
+                "error": {
+                    "field": field,
+                    "message": message,
+                    "line": getattr(exc, "lineno", None),
+                },
+            }
+    return {
+        "ok": True,
+        "subject": rendered["subject_template"],
+        "body": rendered["body_template"],
+        "variables": sorted(variables),
+        "error": None,
+    }
 
 
 def _in_quiet_hours(
@@ -430,6 +474,14 @@ class NotificationQueryService:
             return None, None
         return subject, body
 
+    async def unread_count(self, recipient_id: uuid.UUID) -> int:
+        count = await self._session.scalar(
+            select(func.count())
+            .select_from(Notification)
+            .where(Notification.recipient_id == recipient_id, Notification.is_read.is_(False))
+        )
+        return int(count or 0)
+
     async def mark_read(self, recipient_id: uuid.UUID, filters: NotificationReadFilters) -> int:
         stmt = select(Notification).where(
             Notification.recipient_id == recipient_id, Notification.is_read.is_(False)
@@ -473,6 +525,21 @@ class NotificationPrefService:
             .scalars()
             .all()
         )
+
+    async def event_codes(self) -> list[tuple[str, list[str]]]:
+        """Коды событий с активными шаблонами и их каналы — то, что имеет смысл
+        настраивать пользователю."""
+        rows = (
+            await self._session.execute(
+                select(NotificationTemplate.code, NotificationTemplate.channel)
+                .where(NotificationTemplate.is_active.is_(True))
+                .order_by(NotificationTemplate.code, NotificationTemplate.channel)
+            )
+        ).all()
+        grouped: dict[str, list[str]] = {}
+        for code, channel in rows:
+            grouped.setdefault(code, []).append(channel)
+        return list(grouped.items())
 
     async def upsert(self, user_id: uuid.UUID, items: list[Any]) -> list[UserNotificationPref]:
         result: list[UserNotificationPref] = []

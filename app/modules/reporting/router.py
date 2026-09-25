@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Path, status
+from fastapi import APIRouter, Depends, Path, Query, status
 
 from app.core.deps import DbSession, IfMatch, Pagination, require_permission
 from app.core.errors import NotFoundError
@@ -72,6 +72,11 @@ async def list_report_templates(
 @reports_router.post(
     "",
     summary="Запустить отчёт",
+    description=(
+        "Лёгкий отчёт формируется сразу (`status=completed`, `progress_pct=100`), "
+        "тяжёлый встаёт в очередь. Незавершённых отчётов у одного сотрудника не "
+        "больше REPORTS_MAX_CONCURRENT — иначе 429 CRM-1601. Роль: создание отчётов."
+    ),
     response_model=ReportJobOut,
     status_code=status.HTTP_201_CREATED,
 )
@@ -82,12 +87,20 @@ async def create_report(
     return ReportJobOut.model_validate(job)
 
 
-@reports_router.get("", summary="Мои отчёты", response_model=ReportJobListResponse)
+@reports_router.get(
+    "",
+    summary="Мои отчёты",
+    description="Фильтр: template_code (код вида отчёта). Администратор видит все отчёты.",
+    response_model=ReportJobListResponse,
+)
 async def list_reports(
-    session: DbSession, page: Pagination, principal: ReportRead
+    session: DbSession,
+    page: Pagination,
+    principal: ReportRead,
+    template_code: Annotated[str | None, Query()] = None,
 ) -> ReportJobListResponse:
     service = ReportJobService(session)
-    stmt = service.list_query(principal)
+    stmt = service.list_query(principal, template_code=template_code)
     cursor = page.decoded_cursor
     if cursor:
         stmt = stmt.where(keyset_before(ReportJob.created_at, ReportJob.id, cursor))
@@ -136,7 +149,14 @@ async def get_report_data(
 
 
 @reports_router.get(
-    "/{report_id}/download", summary="Ссылка на файл отчёта", response_model=ReportDownloadResponse
+    "/{report_id}/download",
+    summary="Ссылка на файл отчёта",
+    description=(
+        "Отчёт ещё не готов или не сформирован из-за ошибки — 409 CRM-1602; срок "
+        "хранения результата истёк (`expires_at`) — 410 CRM-1603. Права — как у "
+        "`GET /api/reports/{report_id}`."
+    ),
+    response_model=ReportDownloadResponse,
 )
 async def download_report(
     session: DbSession, principal: ReportRead, report_id: Annotated[uuid.UUID, Path()]

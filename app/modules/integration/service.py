@@ -19,6 +19,7 @@ RealNotificationService`/`signing.service.RealSigningService` уже приме�
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from typing import Any, Protocol, runtime_checkable
 
@@ -30,10 +31,10 @@ from app.core.context import ActorContext, set_actor
 from app.core.errors import AppError, ErrorCode, NotFoundError
 from app.core.security import Principal, TokenClaims
 from app.modules.audit.actions import AuditAction
-from app.modules.audit.service import AuditService
+from app.modules.audit.service import AuditService, diff_changes
 from app.modules.crm.models import Deal
 from app.modules.identity.models import Role, User
-from app.modules.integration.models import IntegrationSource, OutboxEvent
+from app.modules.integration.models import IntegrationSource, OutboxEvent, OutboxStatus
 
 logger = structlog.get_logger(__name__)
 
@@ -164,6 +165,55 @@ class IntegrationSourceService:
                 changes=changes,
             )
         return source
+
+
+class OutboxEventService:
+    """Ручное управление очередью доставки — то, что цикл
+    `integration.tasks.sweep_outbox_events` сам не делает."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self._audit = AuditService(session)
+
+    async def retry(self, event_id: uuid.UUID) -> OutboxEvent:
+        """Возвращает `failed`/`dead` в очередь: следующий тик доставки берёт
+        событие как новое (счётчик попыток и ошибка сброшены; прежние значения
+        остаются в аудите)."""
+        # Блокировка строки: два одновременных «Повторить» не должны оба пройти.
+        event = (
+            await self._session.execute(
+                select(OutboxEvent).where(OutboxEvent.id == event_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if event is None:
+            raise NotFoundError("Событие outbox", event_id)
+        retryable = (OutboxStatus.FAILED.value, OutboxStatus.DEAD.value)
+        if event.status not in retryable:
+            raise AppError(
+                ErrorCode.INTEGRATION_EVENT_NOT_RETRYABLE,
+                extra={"status": event.status},
+            )
+
+        before = {
+            "status": event.status,
+            "attempts": event.attempts,
+            "last_error": event.last_error,
+        }
+        event.status = OutboxStatus.PENDING.value
+        event.attempts = 0
+        event.last_error = None
+        event.next_retry_at = dt.datetime.now(dt.UTC)
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.INTEGRATION_OUTBOX_RETRIED,
+            entity_type="outbox_event",
+            entity_id=event.id,
+            changes=diff_changes(
+                before,
+                {"status": event.status, "attempts": event.attempts, "last_error": None},
+            ),
+        )
+        return event
 
 
 # --- Синтетический Principal для потоков, инициированных внешними
