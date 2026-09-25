@@ -419,7 +419,6 @@ locust -f loadtest/locustfile_transition.py --headless -u 50 -r 25 -t 60s --host
 | `ci.yml` | PR, push в `main` | Три параллельных гейта — `lint · types · architecture · contract` (ruff, mypy, import-linter, `openapi.json`, lock-файлы), `pytest + миграции (Postgres)` (одна голова, `upgrade`, `alembic check`, round-trip, тесты с покрытием ≥ 55% и **без пропусков**), `зависимости · секреты · Dockerfile` (`pip-audit`, Trivy fs: уязвимости+секреты+misconfig, hadolint). С `main` после зелёных гейтов — публикация образа |
 | публикация образа | `ci.yml`, только `main` | Общий конвейер из `lct-testkit/deploy`: сборка → **Trivy до push** → push в GHCR → SBOM + provenance → подпись cosign → dispatch в `deploy` (без токена — падает, а не молчит) |
 | `loadtest.yml` | ночью, вручную, PR с меткой `perf` | Locust против стека из исходников, SLO p95 ≤ 300 мс при 50 RPS |
-| `codeql.yml` | PR, `main`, раз в неделю | SAST (CodeQL, Python, `security-extended`) |
 
 Образ собирается multi-stage из `requirements.lock` (`pip --require-hashes`), базовый образ закреплён по digest, в рантайме нет pip/setuptools; `.trivyignore` пуст намеренно. Настройки репозитория (защита `main`, обязательные проверки) — `deploy/docs/REPO-SETTINGS.md`.
 
