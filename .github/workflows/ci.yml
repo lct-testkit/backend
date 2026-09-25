@@ -32,8 +32,6 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0 # нужен base-коммит для проверки формата изменённых файлов
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -47,24 +45,8 @@ jobs:
       - name: ruff check
         run: ruff check app tests tools loadtest migrations
 
-      # Полный `ruff format --check` дал бы правки ~90 файлов разом; чтобы не
-      # смешивать это с функциональными изменениями, формат проверяем на файлах,
-      # изменённых в PR/push. Когда весь репозиторий будет отформатирован
-      # (`ruff format .`), замените шаг на `ruff format --check .`.
-      - name: ruff format (изменённые файлы)
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          set -euo pipefail
-          files=""
-          if [ -n "${BASE_SHA}" ] && ! echo "${BASE_SHA}" | grep -qE '^0+$'; then
-            files="$(git diff --name-only --diff-filter=ACMR "${BASE_SHA}" HEAD -- '*.py' | grep -v '^migrations/versions/' || true)"
-          fi
-          if [ -z "${files}" ]; then
-            echo "изменённых .py файлов нет"
-          else
-            echo "${files}" | xargs ruff format --check
-          fi
+      - name: ruff format (весь репозиторий)
+        run: ruff format --check .
 
       - name: mypy (храповик — долг перечислен в pyproject.toml)
         run: mypy

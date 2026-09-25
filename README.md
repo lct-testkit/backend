@@ -361,7 +361,7 @@ TEST_DATABASE_URL=postgresql+asyncpg://crm@127.0.0.1:5432/crm_test pytest -q
 
 ```bash
 ruff check app tests tools loadtest migrations   # E,F,I,UP,B,ASYNC + S (bandit), SIM, C4, PT, RUF
-ruff format --check <изменённые файлы>            # формат — только на изменённых в PR файлах
+ruff format --check .                            # формат всего репозитория (исправить: ruff format .)
 mypy                                              # «храповик»: долг типизации перечислен в pyproject.toml
 lint-imports                                      # границы модулей (.importlinter)
 python tools/export_openapi.py --check            # контракт API: openapi.json не разошёлся с кодом
