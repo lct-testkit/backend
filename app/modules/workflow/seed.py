@@ -37,6 +37,7 @@ from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
 from app.modules.signing.models import SignatureTemplate
 from app.modules.workflow.models import (
+    SlaRule,
     StatusType,
     Workflow,
     WorkflowState,
@@ -46,6 +47,13 @@ from app.modules.workflow.models import (
 from app.modules.workflow.service import _build_snapshot, _validate_graph_data
 
 logger = structlog.get_logger(__name__)
+
+# SLA шагов воронки (new_spec §4.10): в начальном статусе — сутки, в промежуточных — три
+# рабочих дня; предупреждение на 75% срока, эскалация — руководителю. Без правил у всех
+# сделок `sla_due_at = null`, и фильтры с индикаторами SLA пусты.
+_INITIAL_SLA_HOURS = 24
+_STEP_SLA_HOURS = 72
+_SLA_WARN_PCT = 75
 
 # Условие «Заморозить»: дата возобновления или причина обязательны, иначе
 # сделка «зависает» в parked без понятного плана дальнейших действий.
@@ -71,6 +79,9 @@ class StatusSpec:
     type: str = StatusType.INTERMEDIATE.value
     required_fields: list[str] = field(default_factory=list)
     sort_order: int = 0
+    #: Срок пребывания в статусе в часах, выходные не считаются (`count_business_days`);
+    #: `None` — без SLA (won, lost, parked).
+    sla_hours: int | None = None
 
 
 @dataclass(slots=True)
@@ -112,6 +123,7 @@ def _linear_funnel(
             name=name,
             type=StatusType.INITIAL.value if index == 0 else StatusType.INTERMEDIATE.value,
             sort_order=(index + 1) * 10,
+            sla_hours=_INITIAL_SLA_HOURS if index == 0 else _STEP_SLA_HOURS,
         )
         for index, (code, name) in enumerate(steps)
     ]
@@ -400,6 +412,20 @@ async def seed_workflow(session: AsyncSession, spec: WorkflowSpec) -> Workflow |
                 sort_order=transition_spec.sort_order,
             )
         )
+    sla_rules = [
+        SlaRule(
+            workflow_id=workflow.id,
+            status_id=by_code[status_spec.code].id,
+            max_duration=dt.timedelta(hours=status_spec.sla_hours),
+            warn_threshold_pct=_SLA_WARN_PCT,
+            escalate_to_role="HEAD",
+            channels=["in_app"],
+            count_business_days=True,
+        )
+        for status_spec in spec.statuses
+        if status_spec.sla_hours is not None
+    ]
+    session.add_all(sla_rules)
     await session.flush()
 
     statuses = list(by_code.values())
@@ -419,7 +445,7 @@ async def seed_workflow(session: AsyncSession, spec: WorkflowSpec) -> Workflow |
     for warning in warnings:
         logger.warning("workflow_seed_warning", code=spec.code, warning=warning)
 
-    snapshot = _build_snapshot(workflow, statuses, transitions, [])
+    snapshot = _build_snapshot(workflow, statuses, transitions, sla_rules)
     digest = hashlib.sha256(
         json.dumps(snapshot, sort_keys=True, separators=(",", ":"), default=str).encode()
     ).hexdigest()

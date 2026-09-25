@@ -10,7 +10,19 @@ Backoff — раздел 3.6, дословно: `1s, 5s, 30s, 5m, 30m, 2h`, `dea
 стали (тот же довод, по которому `RealOutboxService.publish()` сам не делает
 HTTP-вызовов): любая задержка/исключение в notify не должна блокировать
 обработку остальной очереди. Отслеживается через `GET /api/admin/
-integrations/outbox-events?status=dead`.
+integrations/outbox-events?status=dead`, вернуть событие в очередь после
+устранения причины — `POST .../outbox-events/{id}/retry`.
+
+Доставка в Bitrix24 включена, только когда совпали три выключателя:
+`BITRIX_CONNECTOR_ENABLED` (окружение), `integration_sources.is_active`
+(«Настройка → Интеграции») и флаг функции `bitrix_connector`
+(`feature_flags`, «Настройка → Флаги»). Выключенный источник или коннектор —
+`dead` с `last_error='source_inactive'`, выключенный флаг — `dead` с
+`last_error='feature_flag_disabled'`; в обоих случаях событие остаётся в
+таблице и повторяется вручную. Флаг читается так же, как в `admin.router`
+(строка `feature_flags` по коду), `rollout` здесь не применяется: коннектор
+включается целиком. Флаги заводятся вручную — нет строки, нечего выключать, и
+доставку решают остальные два условия.
 """
 
 from __future__ import annotations
@@ -25,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.db import session_scope
 from app.core.metrics import background_tasks_total
+from app.modules.admin.models import FeatureFlag
 from app.modules.integration import bitrix, lms
 from app.modules.integration.models import IntegrationSource, OutboxEvent, OutboxStatus
 from app.modules.integration.security import resolve_secret
@@ -35,6 +48,8 @@ logger = structlog.get_logger(__name__)
 _BACKOFF_SECONDS = [1, 5, 30, 300, 1800, 7200]
 _MAX_ATTEMPTS = 8
 _KNOWN_TARGETS = frozenset({"lms", "bitrix24"})
+# Код флага функции в `feature_flags` — третий выключатель доставки в Bitrix24.
+_BITRIX_FLAG_CODE = "bitrix_connector"
 
 
 async def sweep_outbox_events(ctx: dict[str, Any]) -> dict[str, int]:
@@ -64,6 +79,11 @@ async def sweep_outbox_events(ctx: dict[str, Any]) -> dict[str, int]:
             row.code: row
             for row in (await session.execute(select(IntegrationSource))).scalars().all()
         }
+        bitrix_flag = (
+            await session.execute(
+                select(FeatureFlag.is_enabled).where(FeatureFlag.code == _BITRIX_FLAG_CODE)
+            )
+        ).scalar_one_or_none()
 
         for event in rows:
             if event.target is None:
@@ -91,6 +111,13 @@ async def sweep_outbox_events(ctx: dict[str, Any]) -> dict[str, int]:
             if not active:
                 event.status = OutboxStatus.DEAD.value
                 event.last_error = "source_inactive"
+                skipped += 1
+                continue
+
+            # Строки флага нет (`None`) — доставку решают остальные два условия.
+            if event.target == "bitrix24" and bitrix_flag is False:
+                event.status = OutboxStatus.DEAD.value
+                event.last_error = "feature_flag_disabled"
                 skipped += 1
                 continue
 

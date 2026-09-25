@@ -162,6 +162,12 @@ async def check_entity_access(
         job = await report_service.get_or_404(entity_id)
         report_service.ensure_read_access(job, principal)
         return
+    if entity_type == "edm_agreement":
+        # Скан соглашения об ЭДО (`edm_agreements.agreement_file_id`, dop.md §13):
+        # читает администратор и тот, у кого `edm:read` (AUDITOR).
+        if not (principal.is_admin or has_permission(principal.role, Permission.EDM_READ)):
+            raise ForbiddenError("Файл соглашения об ЭДО недоступен")
+        return
     if entity_type == "signature_document":
         # Штамп/протокол/оригинал документа на подпись (dop.md §10.9) —
         # доступ по той же сущности, к которой привязан документ (deal и
@@ -368,6 +374,15 @@ class FileService:
         )
         return url, expires_at
 
+    def ensure_can_delete(self, principal: Principal, file: File) -> None:
+        """Удалить файл может тот, у кого есть `file:delete`, и его автор; файл
+        с вложениями не удаляется никем (`soft_delete`)."""
+        if has_permission(principal.role, Permission.FILE_DELETE) or (
+            file.uploaded_by == principal.user_id
+        ):
+            return
+        raise ForbiddenError("Удалить файл может его автор или руководитель")
+
     async def soft_delete(self, file: File) -> None:
         # Раздел 3.7/9: подписанные документы и файлы, закрывающие пройденный
         # переход, не удаляются без административного действия — здесь это
@@ -406,6 +421,17 @@ class AttachmentService:
         общим правом `file:download` мог бы подобрать чужой `file_id` к
         своей же (доступной ему) сущности и получить presigned URL на
         произвольный файл в системе."""
+        if entity_type == "edm_agreement":
+            # Скан лежит в самом соглашении (`agreement_file_id`), а не во вложениях.
+            from app.modules.signing.models import EdmAgreement
+
+            return bool(
+                await self._session.scalar(
+                    select(EdmAgreement.id).where(
+                        EdmAgreement.id == entity_id, EdmAgreement.agreement_file_id == file_id
+                    )
+                )
+            )
         return bool(
             await self._session.scalar(
                 select(Attachment.id).where(
@@ -460,10 +486,18 @@ class AttachmentService:
         )
         return attachment
 
+    def ensure_can_delete(self, principal: Principal, attachment: Attachment) -> None:
+        """Отвязать вложение может тот, у кого есть `file:delete` (HEAD, ADMIN),
+        и его автор — KAM убирает своё ошибочное вложение. Доступ к родительской
+        сущности проверяет роутер отдельно."""
+        if (
+            has_permission(principal.role, Permission.FILE_DELETE)
+            or attachment.uploaded_by == principal.user_id
+        ):
+            return
+        raise ForbiddenError("Отвязать вложение может его автор или руководитель")
+
     async def delete(self, attachment: Attachment) -> None:
-        # Владение здесь не проверяется: маршрут уже требует `file:delete`
-        # (раздел 4 — эта роль есть только у HEAD/ADMIN, см. `permissions.py`),
-        # а не «своё/чужое», как в комментариях сделки.
         file = await self._session.get(File, attachment.file_id)
         attachment.deleted_at = dt.datetime.now(dt.UTC)
         if file is not None and file.refcount > 0:

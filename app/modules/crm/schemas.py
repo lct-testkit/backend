@@ -48,6 +48,13 @@ class DealProductOut(BaseModel):
     total: Decimal | None = None
 
 
+class DealProductsReplaceRequest(BaseModel):
+    """Полный новый список продуктов сделки; пустой список очищает. Поле обязательное: тело
+    без него — ошибка клиента, а не просьба стереть продукты."""
+
+    items: list[DealProductIn] = Field(max_length=100)
+
+
 # --- Сделка ------------------------------------------------------------------
 
 
@@ -105,7 +112,11 @@ class DealOut(BaseModel):
     workflow_id: uuid.UUID
     status_id: uuid.UUID
     organization_id: uuid.UUID | None = None
+    # Названия связанных сущностей — чтобы таблице не ходить за каждым отдельно. Контакт — ПДн:
+    # его имя только с правом `contact:read`, иначе `null`.
+    organization_name: str | None = None
     contact_id: uuid.UUID | None = None
+    contact_name: str | None = None
     owner_id: uuid.UUID
     created_by: uuid.UUID | None = None
     amount: Decimal | None = None
@@ -140,6 +151,9 @@ class DealCardOut(BaseModel):
 class DealListResponse(BaseModel):
     items: list[DealOut]
     next_cursor: str | None = None
+    #: Сколько сделок подходит под фильтры (без учёта курсора и `limit`). `GET /deals`
+    #: заполняет его всегда; значение по умолчанию — чтобы поле оставалось необязательным.
+    total: int = 0
 
 
 # --- Переходы ------------------------------------------------------------
@@ -161,6 +175,8 @@ class AvailableTransitionOut(BaseModel):
     role_allowed: bool
     satisfied: bool
     conditions: list[TransitionConditionOut] = Field(default_factory=list)
+    # Те же условия деревом `all`/`any`; `satisfied` на каждом узле, `actual` в листьях.
+    conditions_tree: dict[str, Any] = Field(default_factory=dict)
     actions: list[dict[str, Any]] = Field(default_factory=list)
 
 
@@ -172,8 +188,9 @@ class TransitionRequest(BaseModel):
     to_status_id: uuid.UUID
     comment: str | None = None
     fields: dict[str, Any] = Field(default_factory=dict)
-    # Вложения: модуль files — спринт 4. Поле принимается ради стабильности
-    # контракта с фронтендом, но пока не обрабатывается (см. docstring модуля).
+    # Поле принимается ради стабильности контракта и не обрабатывается: условия
+    # `attachments.*` перехода считаются по вложениям, уже привязанным к сделке
+    # (`POST /api/attachments`), а не по этому списку.
     attachments: list[uuid.UUID] = Field(default_factory=list)
 
 
@@ -212,6 +229,9 @@ class DealEventOut(BaseModel):
 class DealHistoryResponse(BaseModel):
     statuses: list[DealStatusHistoryOut]
     events: list[DealEventOut]
+    #: Курсоры страниц заполнены, только если передан `limit` и есть продолжение.
+    next_statuses_cursor: str | None = None
+    next_events_cursor: str | None = None
 
 
 # --- Назначение ответственного ---------------------------------------------
@@ -292,6 +312,7 @@ class CommentOut(BaseModel):
 
 class CommentListResponse(BaseModel):
     items: list[CommentOut]
+    next_cursor: str | None = None
 
 
 # --- Задачи --------------------------------------------------------------
@@ -320,6 +341,9 @@ class TaskOut(BaseModel):
 
     id: uuid.UUID
     deal_id: uuid.UUID
+    # Номер и название сделки — списку задач не нужен запрос карточки на каждую строку.
+    deal_number: str | None = None
+    deal_title: str | None = None
     title: str
     description: str | None = None
     assignee_id: uuid.UUID

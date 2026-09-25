@@ -84,6 +84,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.modules.crm.models import Deal
 from app.modules.integration.models import ExternalRef, IntegrationSourceCode, SyncDirection
 
@@ -160,14 +161,15 @@ def _deal_to_bitrix_fields(deal: Deal) -> dict[str, Any]:
     (`title`, `opportunity`, `currencyId`, `sourceId`/`sourceDescription`),
     camelCase — не путать со старым `crm.deal.*`, где те же понятия звались
     `TITLE`/`OPPORTUNITY`/`CURRENCY_ID` заглавными. `sourceId` — код из
-    встроенного справочника источников Bitrix (настраивается на портале);
-    `"OTHER"` — безопасный дефолт, реальный источник уходит текстом в
-    `sourceDescription`, где ограничений на значения нет."""
+    справочника источников Bitrix (настраивается на портале), берётся из
+    `BITRIX_SOURCE_ID`; дефолт `"OTHER"` есть в стандартном справочнике,
+    реальный источник уходит текстом в `sourceDescription`, где ограничений
+    на значения нет."""
     return {
         "title": deal.title,
         "opportunity": str(deal.amount) if deal.amount is not None else None,
         "currencyId": deal.currency,
-        "sourceId": "OTHER",
+        "sourceId": get_settings().bitrix_source_id,
         "sourceDescription": f"CRM #{deal.number}" + (f" ({deal.source})" if deal.source else ""),
     }
 

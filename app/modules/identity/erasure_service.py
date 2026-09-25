@@ -27,6 +27,7 @@ import uuid
 from typing import Any
 
 import structlog
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -79,6 +80,40 @@ class ErasureExecutionService:
         if request is None:
             raise NotFoundError("Запрос на удаление", request_id)
         return request
+
+    async def subject_displays(self, requests: list[DataErasureRequest]) -> dict[uuid.UUID, str]:
+        """Имена субъектов запросов одним запросом на тип субъекта; ключ —
+        `subject_id`. Нет строки (субъект удалён физически) — нет и ключа."""
+        ids: dict[str, set[uuid.UUID]] = {"user": set(), "contact": set(), "organization": set()}
+        for request in requests:
+            ids.setdefault(request.subject_type, set()).add(request.subject_id)
+
+        names: dict[uuid.UUID, str] = {}
+        if ids["user"]:
+            rows = await self._session.execute(
+                select(User.id, User.display_name, User.full_name).where(User.id.in_(ids["user"]))
+            )
+            for row in rows:
+                names[row.id] = row.display_name or row.full_name
+        if ids["contact"]:
+            rows = await self._session.execute(
+                select(
+                    Contact.id, Contact.last_name, Contact.first_name, Contact.middle_name
+                ).where(Contact.id.in_(ids["contact"]))
+            )
+            for row in rows:
+                names[row.id] = " ".join(
+                    part for part in (row.last_name, row.first_name, row.middle_name) if part
+                )
+        if ids["organization"]:
+            rows = await self._session.execute(
+                select(Organization.id, Organization.name).where(
+                    Organization.id.in_(ids["organization"])
+                )
+            )
+            for row in rows:
+                names[row.id] = row.name
+        return names
 
     # --- Контакт: создание запроса (new_spec §4.8.5) -----------------------
 

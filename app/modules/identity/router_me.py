@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from typing import Annotated, Any
+from typing import Annotated
 
 from fastapi import APIRouter, Path, Request, Response, status
 from sqlalchemy import select
@@ -30,11 +30,14 @@ from app.modules.identity.models import SecurityEventType, Severity, User
 from app.modules.identity.schemas import (
     ConsentRequest,
     ConsentResponse,
+    MePatchRequest,
     MeResponse,
     OperationResult,
     PasswordChangeRequest,
     PasswordChangeResponse,
     PolicyResponse,
+    RecentItemOut,
+    RecentListResponse,
     SessionInfo,
     SessionListResponse,
 )
@@ -61,6 +64,7 @@ async def build_me(session, user: User) -> MeResponse:
         full_name=user.full_name,
         display_name=user.display_name,
         email=user.email,
+        phone=user.phone,
         role=user.role,
         team_id=user.team_id,
         manager_id=user.manager_id,
@@ -94,6 +98,26 @@ async def get_me(principal: CurrentUser, session: DbSession) -> MeResponse:
     return await build_me(session, user)
 
 
+@router.patch(
+    "",
+    summary="Изменить свой профиль",
+    description=(
+        "Отображаемое имя, часовой пояс и телефон — только себе; чужой профиль "
+        "меняется через администрирование. Телефон нужен для кода подтверждения "
+        "подписи (SMS), `null` очищает его. Роль, email и статус здесь не "
+        "принимаются (422). Сбрасывает кэш прав, пишет `USER_UPDATED` в аудит "
+        "(телефон маскируется). Роль: любой аутентифицированный пользователь."
+    ),
+    response_model=MeResponse,
+)
+async def patch_me(
+    payload: MePatchRequest, principal: CurrentUser, session: DbSession
+) -> MeResponse:
+    user = (await session.execute(select(User).where(User.id == principal.user_id))).scalar_one()
+    await IdentityService(session).update_profile(user, payload.model_dump(exclude_unset=True))
+    return await build_me(session, user)
+
+
 @router.get(
     "/policy",
     summary="Действующая политика обработки ПДн",
@@ -112,29 +136,37 @@ async def get_policy(_: CurrentUser, session: DbSession) -> PolicyResponse:
     "/recent",
     summary="Последние открытые объекты",
     description=(
-        "Возвращает до 20 последних открытых пользователем сделок, организаций, "
-        "контактов и отчётов из Redis ZSET `recent:{user_id}`. "
+        "Возвращает до 20 последних открытых пользователем объектов из Redis ZSET "
+        "`recent:{user_id}`, новые первыми: вид (`type`), `id`, название и время "
+        "открытия. Сейчас в историю попадают сделки. "
         "Роль: любой аутентифицированный пользователь."
     ),
+    response_model=RecentListResponse,
 )
-async def get_recent(principal: CurrentUser) -> dict[str, list[dict[str, Any]]]:
+async def get_recent(principal: CurrentUser) -> RecentListResponse:
     try:
         raw_items = await get_redis().zrevrange(
             key_recent(principal.user_id), 0, RECENT_MAX_ITEMS - 1, withscores=True
         )
     except Exception:
         # Redis — не источник истины: пустой список лучше, чем ошибка (раздел 16).
-        return {"items": []}
+        return RecentListResponse(items=[])
 
-    items: list[dict[str, Any]] = []
+    items: list[RecentItemOut] = []
     for member, score in raw_items:
         try:
             entry = json.loads(member)
-        except ValueError:
-            continue
-        entry["opened_at"] = dt.datetime.fromtimestamp(score, dt.UTC).isoformat()
-        items.append(entry)
-    return {"items": items}
+            items.append(
+                RecentItemOut(
+                    type=entry["type"],
+                    id=entry["id"],
+                    title=entry["title"],
+                    opened_at=dt.datetime.fromtimestamp(score, dt.UTC),
+                )
+            )
+        except (ValueError, KeyError, TypeError):
+            continue  # битая запись истории не должна ломать список
+    return RecentListResponse(items=items)
 
 
 @router.get(

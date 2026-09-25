@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from collections.abc import Sequence
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Query, Request, status
@@ -28,7 +29,7 @@ from app.core.deps import (
 )
 from app.core.errors import AppError, ErrorCode, NotFoundError
 from app.core.idempotency import IdempotencyGuard
-from app.core.pagination import Page, keyset_before
+from app.core.pagination import MAX_LIMIT, Cursor, Page, keyset_before
 from app.core.permissions import Permission
 from app.core.redis_client import distributed_lock
 from app.core.security import Principal
@@ -51,6 +52,7 @@ from app.modules.crm.schemas import (
     DealListResponse,
     DealOut,
     DealProductOut,
+    DealProductsReplaceRequest,
     DealStatusHistoryOut,
     DealUpdateRequest,
     ParticipantAddRequest,
@@ -72,8 +74,10 @@ from app.modules.crm.service import (
     ParticipantService,
     TaskFilters,
     TaskService,
+    apply_deal_order,
     deal_scope_clause,
     get_cached_deal_card,
+    parse_deal_sort,
     set_cached_deal_card,
     touch_recent,
 )
@@ -103,7 +107,13 @@ DealReassignBulkPerm = Annotated[
     summary="Список сделок",
     description=(
         "Курсорная пагинация, фильтры по статусу/воронке/типу/владельцу/приоритету/"
-        "SLA/датам/тексту. Скоуп по роли (раздел 4): KAM — свои сделки, HEAD — "
+        "SLA/датам/тексту. `status_id` можно повторять (`?status_id=a&status_id=b`), "
+        "`is_closed` отделяет закрытые сделки (won/lost/parked) от открытых. "
+        "`sort` — поле сортировки, минус в начале — по убыванию: created_at "
+        "(по умолчанию `-created_at`), updated_at, status_changed_at, number, "
+        "title, amount, expected_close_date, sla_due_at; сделки без значения "
+        "всегда в конце. `total` — сколько сделок подходит под фильтры, без "
+        "учёта курсора. Скоуп по роли (раздел 4): KAM — свои сделки, HEAD — "
         "команда, ADMIN — все. Роль: чтение сделок."
     ),
     response_model=DealListResponse,
@@ -112,7 +122,9 @@ async def list_deals(
     session: DbSession,
     page: Pagination,
     principal: DealRead,
-    status_id: Annotated[uuid.UUID | None, Query()] = None,
+    status_id: Annotated[list[uuid.UUID] | None, Query()] = None,
+    is_closed: Annotated[bool | None, Query()] = None,
+    sort: Annotated[str | None, Query()] = None,
     workflow_id: Annotated[uuid.UUID | None, Query()] = None,
     deal_type: Annotated[str | None, Query()] = None,
     organization_id: Annotated[uuid.UUID | None, Query()] = None,
@@ -130,7 +142,8 @@ async def list_deals(
     q: Annotated[str | None, Query()] = None,
 ) -> DealListResponse:
     filters = DealFilters(
-        status_id=status_id,
+        status_ids=status_id,
+        is_closed=is_closed,
         workflow_id=workflow_id,
         deal_type=deal_type,
         organization_id=organization_id,
@@ -147,15 +160,21 @@ async def list_deals(
         closed_to=closed_to,
         q=q,
     )
-    stmt = (await DealService(session).list_query(principal, filters)).order_by(
-        Deal.created_at.desc(), Deal.id.desc()
-    )
-    cursor = page.decoded_cursor
-    if cursor:
-        stmt = stmt.where(keyset_before(Deal.created_at, Deal.id, cursor))
+    service = DealService(session)
+    sort_by = parse_deal_sort(sort)
+    filtered = await service.list_query(principal, filters)
+    total = await service.count(filtered)
+    stmt = apply_deal_order(filtered, sort_by, page.decoded_cursor)
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
-    built = Page.build(rows, limit=page.limit, serializer=DealOut.model_validate)
-    return DealListResponse(items=built.items, next_cursor=built.next_cursor)
+    visible = rows[: page.limit]
+    next_cursor = (
+        Cursor(value=getattr(visible[-1], sort_by.field), id=visible[-1].id).encode()
+        if len(rows) > page.limit
+        else None
+    )
+    return DealListResponse(
+        items=await _deal_outs(service, principal, visible), next_cursor=next_cursor, total=total
+    )
 
 
 @deals_router.post(
@@ -165,7 +184,9 @@ async def list_deals(
         "Для B2B обязателен organization_id, для B2C — contact_id (new_spec §4.9). "
         "Сделка получает начальный статус опубликованной воронки по умолчанию для "
         "своего типа (или явно переданного workflow_id), номер, событие CREATED и "
-        "аудит. Поддерживает Idempotency-Key. Роль: создание сделок."
+        "аудит. Ответственный (owner_id): без него или свой — сам создатель; чужого "
+        "назначает ADMIN (любого активного сотрудника) и HEAD (из своей команды), "
+        "остальным — 403. Поддерживает Idempotency-Key. Роль: создание сделок."
     ),
     response_model=DealOut,
     status_code=status.HTTP_201_CREATED,
@@ -189,8 +210,9 @@ async def create_deal(
             key=idempotency_key, method=request.method, path=request.url.path, body=body
         )
 
-    deal = await DealService(session).create(principal, payload)
-    result = DealOut.model_validate(deal)
+    service = DealService(session)
+    deal = await service.create(principal, payload)
+    result = (await _deal_outs(service, principal, [deal]))[0]
 
     if idempotency_key:
         await guard.store(
@@ -251,18 +273,40 @@ async def get_deal(
 
     cached = await get_cached_deal_card(deal.id, deal.version)
     if cached is not None:
-        return DealCardOut.model_validate(cached)
+        card = DealCardOut.model_validate(cached)
+    else:
+        card = await _build_card(service, deal)
+        await set_cached_deal_card(deal.id, deal.version, card.model_dump(mode="json"))
+    # Названия в кэш не попадают: переименование организации версию сделки не меняет.
+    card.deal = (await _deal_outs(service, principal, [deal]))[0]
+    return card
 
+
+async def _build_card(service: DealService, deal: Deal) -> DealCardOut:
     products = await service.load_products(deal.id)
     open_tasks_count, comments_count = await service.counters(deal.id)
-    card = DealCardOut(
+    return DealCardOut(
         deal=DealOut.model_validate(deal),
         products=[DealProductOut.model_validate(p) for p in products],
         open_tasks_count=open_tasks_count,
         comments_count=comments_count,
     )
-    await set_cached_deal_card(deal.id, deal.version, card.model_dump(mode="json"))
-    return card
+
+
+async def _deal_outs(
+    service: DealService, principal: Principal, deals: Sequence[Deal]
+) -> list[DealOut]:
+    """`DealOut` с названием организации и именем контакта — по запросу на тип, не на сделку."""
+    organizations, contacts = await service.party_names(principal, deals)
+    return [
+        DealOut.model_validate(deal).model_copy(
+            update={
+                "organization_name": organizations.get(deal.organization_id),
+                "contact_name": contacts.get(deal.contact_id),
+            }
+        )
+        for deal in deals
+    ]
 
 
 @deals_router.patch(
@@ -285,7 +329,32 @@ async def update_deal(
     service = DealService(session)
     deal = await service.get_or_404(deal_id, principal)
     deal = await service.update(deal, payload, expected_version=if_match)
-    return DealOut.model_validate(deal)
+    return (await _deal_outs(service, principal, [deal]))[0]
+
+
+@deals_router.put(
+    "/{deal_id}/products",
+    summary="Заменить продукты сделки",
+    description=(
+        "Тело — полный новый список продуктов сделки (пустой очищает). Обязателен "
+        "If-Match; версия сделки растёт. Ответ — карточка сделки с новым списком. "
+        "Роль: обновление сделок."
+    ),
+    response_model=DealCardOut,
+)
+async def replace_deal_products(
+    payload: DealProductsReplaceRequest,
+    session: DbSession,
+    principal: DealUpdatePerm,
+    if_match: IfMatch,
+    deal_id: Annotated[uuid.UUID, Path()],
+) -> DealCardOut:
+    service = DealService(session)
+    deal = await service.get_or_404(deal_id, principal)
+    await service.replace_products(deal, payload.items, expected_version=if_match)
+    card = await _build_card(service, deal)
+    card.deal = (await _deal_outs(service, principal, [deal]))[0]
+    return card
 
 
 @deals_router.get(
@@ -293,9 +362,11 @@ async def update_deal(
     summary="Доступные переходы",
     description=(
         "Для каждого перехода — условия с флагом satisfied и человекочитаемым "
-        "полем/оператором/ожидаемым и фактическим значением. Фронтенд рисует "
-        "чек-лист по этому ответу и не принимает решение сам (раздел 6.6). "
-        "Роль: чтение сделок."
+        "полем/оператором/ожидаемым и фактическим значением, а также те же "
+        "условия деревом all/any (conditions_tree) с satisfied на каждом узле: "
+        "по плоскому списку не понять, что достаточно одного из условий any. "
+        "Фронтенд рисует чек-лист по этому ответу и не принимает решение сам "
+        "(раздел 6.6). Роль: чтение сделок."
     ),
     response_model=AvailableTransitionsResponse,
 )
@@ -324,6 +395,7 @@ async def list_available_transitions(
                     )
                     for c in t.conditions
                 ],
+                conditions_tree=t.conditions_tree,
                 actions=t.actions,
             )
             for t in items
@@ -336,7 +408,9 @@ async def list_available_transitions(
     summary="Перейти по статусу",
     description=(
         "Проверяет версию, наличие перехода в опубликованном графе, роль, "
-        "guard-условия; пишет историю, аудит и запускает действия перехода. "
+        "guard-условия и обязательные поля целевого статуса (не заполнены — 422 "
+        "CRM-1205 с перечнем полей; закрыть их можно через `fields`); пишет "
+        "историю, аудит и запускает действия перехода. "
         "Обязателен If-Match. Двойной клик по одной и той же сделке сериализуется "
         "коротким Redis-локом `deal:{id}:transition` (раздел 3.5), а не "
         "Idempotency-Key — двойной переход опасен побочными эффектами, а не "
@@ -373,23 +447,41 @@ async def transition_deal(
         )
 
     await touch_recent(principal.user_id, entity_type="deal", entity_id=deal.id, title=deal.title)
-    return TransitionResponse(deal=DealOut.model_validate(deal))
+    return TransitionResponse(deal=(await _deal_outs(service, principal, [deal]))[0])
 
 
 @deals_router.get(
     "/{deal_id}/history",
     summary="История статусов и событий",
+    description=(
+        "Без `limit` — целиком. С `limit` (1–100) каждый из двух списков отдаётся "
+        "страницей в хронологическом порядке; продолжение — `statuses_cursor` / "
+        "`events_cursor` из `next_statuses_cursor` / `next_events_cursor` "
+        "предыдущего ответа, у списков курсоры независимы. Роль: чтение сделок."
+    ),
     response_model=DealHistoryResponse,
 )
 async def get_deal_history(
-    session: DbSession, principal: DealRead, deal_id: Annotated[uuid.UUID, Path()]
+    session: DbSession,
+    principal: DealRead,
+    deal_id: Annotated[uuid.UUID, Path()],
+    limit: Annotated[int | None, Query(ge=1, le=MAX_LIMIT)] = None,
+    statuses_cursor: Annotated[str | None, Query()] = None,
+    events_cursor: Annotated[str | None, Query()] = None,
 ) -> DealHistoryResponse:
     service = DealService(session)
     deal = await service.get_or_404(deal_id, principal)
-    statuses, events = await service.history(deal.id)
+    history = await service.history(
+        deal.id,
+        limit=limit,
+        statuses_cursor=Cursor.decode(statuses_cursor) if statuses_cursor else None,
+        events_cursor=Cursor.decode(events_cursor) if events_cursor else None,
+    )
     return DealHistoryResponse(
-        statuses=[DealStatusHistoryOut.model_validate(s) for s in statuses],
-        events=[DealEventOut.model_validate(e) for e in events],
+        statuses=[DealStatusHistoryOut.model_validate(s) for s in history.statuses],
+        events=[DealEventOut.model_validate(e) for e in history.events],
+        next_statuses_cursor=history.next_statuses_cursor,
+        next_events_cursor=history.next_events_cursor,
     )
 
 
@@ -411,7 +503,7 @@ async def reassign_deal(
     deal = await service.reassign(
         deal, principal, owner_id=payload.owner_id, reason=payload.reason, expected_version=if_match
     )
-    return DealOut.model_validate(deal)
+    return (await _deal_outs(service, principal, [deal]))[0]
 
 
 # =============================================================================
@@ -470,15 +562,30 @@ async def remove_participant(
 
 
 @deals_router.get(
-    "/{deal_id}/comments", summary="Комментарии сделки", response_model=CommentListResponse
+    "/{deal_id}/comments",
+    summary="Комментарии сделки",
+    description=(
+        "Без `limit` — все комментарии. С `limit` (1–100) — страница в хронологическом "
+        "порядке; продолжение — `cursor` из `next_cursor` предыдущего ответа. "
+        "Роль: чтение сделок."
+    ),
+    response_model=CommentListResponse,
 )
 async def list_comments(
-    session: DbSession, principal: DealRead, deal_id: Annotated[uuid.UUID, Path()]
+    session: DbSession,
+    principal: DealRead,
+    deal_id: Annotated[uuid.UUID, Path()],
+    limit: Annotated[int | None, Query(ge=1, le=MAX_LIMIT)] = None,
+    cursor: Annotated[str | None, Query()] = None,
 ) -> CommentListResponse:
     service = DealService(session)
     deal = await service.get_or_404(deal_id, principal)
-    rows = await CommentService(session).list(deal.id)
-    return CommentListResponse(items=[CommentOut.model_validate(c) for c in rows])
+    rows, next_cursor = await CommentService(session).list(
+        deal.id, limit=limit, cursor=Cursor.decode(cursor) if cursor else None
+    )
+    return CommentListResponse(
+        items=[CommentOut.model_validate(c) for c in rows], next_cursor=next_cursor
+    )
 
 
 @deals_router.post(
@@ -548,6 +655,12 @@ async def delete_comment(
 # =============================================================================
 
 
+def _task_out(task: Task, deal_number: str | None, deal_title: str | None) -> TaskOut:
+    return TaskOut.model_validate(task).model_copy(
+        update={"deal_number": deal_number, "deal_title": deal_title}
+    )
+
+
 @tasks_router.get("", summary="Список задач", response_model=TaskListResponse)
 async def list_tasks(
     session: DbSession,
@@ -569,16 +682,20 @@ async def list_tasks(
         overdue=overdue,
     )
     scope_clause = await deal_scope_clause(session, principal)
-    stmt = (
-        TaskService(session)
-        .list_query(filters, scope_clause)
-        .order_by(Task.created_at.desc(), Task.id.desc())
+    task_service = TaskService(session)
+    stmt = task_service.list_query(filters, scope_clause).order_by(
+        Task.created_at.desc(), Task.id.desc()
     )
     cursor = page.decoded_cursor
     if cursor:
         stmt = stmt.where(keyset_before(Task.created_at, Task.id, cursor))
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
-    built = Page.build(rows, limit=page.limit, serializer=TaskOut.model_validate)
+    deals = await task_service.deal_titles({task.deal_id for task in rows})
+    built = Page.build(
+        rows,
+        limit=page.limit,
+        serializer=lambda task: _task_out(task, *deals.get(task.deal_id, (None, None))),
+    )
     return TaskListResponse(items=built.items, next_cursor=built.next_cursor)
 
 
@@ -599,7 +716,7 @@ async def create_task(
         due_at=payload.due_at,
         priority=payload.priority,
     )
-    return TaskOut.model_validate(task)
+    return _task_out(task, deal.number, deal.title)
 
 
 @tasks_router.patch("/{task_id}", summary="Обновить задачу", response_model=TaskOut)
@@ -611,9 +728,9 @@ async def update_task(
 ) -> TaskOut:
     task_service = TaskService(session)
     task = await task_service.get_or_404(task_id)
-    await DealService(session).get_or_404(task.deal_id, principal)
+    deal = await DealService(session).get_or_404(task.deal_id, principal)
     task = await task_service.update(task, payload)
-    return TaskOut.model_validate(task)
+    return _task_out(task, deal.number, deal.title)
 
 
 @tasks_router.post("/{task_id}/complete", summary="Завершить задачу", response_model=TaskOut)
@@ -622,6 +739,6 @@ async def complete_task(
 ) -> TaskOut:
     task_service = TaskService(session)
     task = await task_service.get_or_404(task_id)
-    await DealService(session).get_or_404(task.deal_id, principal)
+    deal = await DealService(session).get_or_404(task.deal_id, principal)
     task = await task_service.complete(task, principal)
-    return TaskOut.model_validate(task)
+    return _task_out(task, deal.number, deal.title)

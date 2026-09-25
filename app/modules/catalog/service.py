@@ -851,6 +851,30 @@ class DirectionService:
             raise NotFoundError("Направление", direction_id)
         return direction
 
+    async def _check_parent(self, direction: Direction | None, parent_id: uuid.UUID) -> None:
+        """Родитель существует и не замыкает цикл: родителем направления не может быть оно
+        само или его потомок. Идём вверх по предкам нового родителя — встретили само
+        направление, значит, новый родитель его потомок."""
+        parent = await self._session.get(Direction, parent_id)
+        if parent is None or parent.deleted_at is not None:
+            raise NotFoundError("Направление", parent_id)
+        if direction is None:
+            return
+        visited: set[uuid.UUID] = set()
+        ancestor: Direction | None = parent
+        while ancestor is not None and ancestor.id not in visited:
+            if ancestor.id == direction.id:
+                raise ValidationError(
+                    "Направление не может быть родителем самого себя или своего потомка",
+                    [FieldError(field="parent_id", reason="цикл в иерархии направлений")],
+                )
+            visited.add(ancestor.id)
+            ancestor = (
+                await self._session.get(Direction, ancestor.parent_id)
+                if ancestor.parent_id is not None
+                else None
+            )
+
     async def create(self, payload: Any) -> Direction:
         existing = await self._session.scalar(
             select(Direction).where(Direction.code == payload.code, Direction.deleted_at.is_(None))
@@ -860,6 +884,8 @@ class DirectionService:
                 "Направление с таким кодом уже существует",
                 [FieldError(field="code", reason="код уже используется")],
             )
+        if payload.parent_id is not None:
+            await self._check_parent(None, payload.parent_id)
         direction = Direction(code=payload.code, name=payload.name, parent_id=payload.parent_id)
         self._session.add(direction)
         await self._session.flush()
@@ -877,6 +903,8 @@ class DirectionService:
         if direction.version != expected_version:
             raise VersionConflictError(direction.version, {"name": direction.name})
         data = payload.model_dump(exclude_unset=True)
+        if data.get("parent_id") is not None:
+            await self._check_parent(direction, data["parent_id"])
         changes: dict[str, dict[str, Any]] = {}
         for key, value in data.items():
             old = getattr(direction, key)
@@ -947,6 +975,14 @@ class ProductFilters:
     q: str | None = None
 
 
+def _check_validity_period(valid_from: dt.date | None, valid_to: dt.date | None) -> None:
+    if valid_from is not None and valid_to is not None and valid_from > valid_to:
+        raise ValidationError(
+            "Срок действия продукта заканчивается раньше, чем начинается",
+            [FieldError(field="valid_to", reason="не может быть раньше valid_from")],
+        )
+
+
 class ProductService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -982,6 +1018,7 @@ class ProductService:
                 "Продукт с таким кодом уже существует",
                 [FieldError(field="code", reason="код уже используется")],
             )
+        _check_validity_period(payload.valid_from, payload.valid_to)
         product = Product(
             code=payload.code,
             name=payload.name,
@@ -1010,6 +1047,10 @@ class ProductService:
         if product.version != expected_version:
             raise VersionConflictError(product.version, {"name": product.name})
         data = payload.model_dump(exclude_unset=True)
+        # Дата из запроса сверяется с сохранённой второй: в PATCH может прийти только одна.
+        _check_validity_period(
+            data.get("valid_from", product.valid_from), data.get("valid_to", product.valid_to)
+        )
         changes: dict[str, dict[str, Any]] = {}
 
         if "custom_fields" in data:

@@ -11,12 +11,19 @@ import datetime as dt
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Path, Query, status
+from fastapi import APIRouter, Depends, Header, Path, Query, status
 from sqlalchemy import select
 
 from app.core.config import get_settings
-from app.core.deps import AuditDep, DbSession, IfMatch, Pagination, require_permission
-from app.core.errors import AppError, ErrorCode, NotFoundError
+from app.core.deps import (
+    AuditDep,
+    DbSession,
+    IfMatch,
+    Pagination,
+    get_if_match,
+    require_permission,
+)
+from app.core.errors import AppError, ErrorCode, NotFoundError, VersionConflictError
 from app.core.pagination import Page, keyset_before
 from app.core.permissions import Permission
 from app.core.rate_limit import enforce as rate_limit
@@ -27,12 +34,13 @@ from app.modules.catalog.service import ContactService, OrganizationService
 from app.modules.files.models import File
 from app.modules.files.service import FileService
 from app.modules.identity.admin_service import (
+    INVITE_EXPIRED_REASON,
     AdminUserService,
     ApprovalService,
     UserFilters,
 )
 from app.modules.identity.erasure_service import ErasureExecutionService
-from app.modules.identity.models import DataErasureRequest, Team, User
+from app.modules.identity.models import DataErasureRequest, Team, User, UserStatus
 from app.modules.identity.schemas import (
     ApprovalDecision,
     ApprovalListResponse,
@@ -68,6 +76,21 @@ router = APIRouter(prefix="/admin", tags=["admin-users"])
 AdminRead = Annotated[Principal, Depends(require_permission(Permission.USER_READ))]
 AdminWrite = Annotated[Principal, Depends(require_permission(Permission.USER_WRITE))]
 ErasureManager = Annotated[Principal, Depends(require_permission(Permission.ERASURE_MANAGE))]
+
+
+async def _erasure_details(
+    session: DbSession, requests: list[DataErasureRequest]
+) -> list[ErasureRequestDetail]:
+    """Карточки запросов с именами субъектов (по одному запросу на тип субъекта)."""
+    names = await ErasureExecutionService(session).subject_displays(requests)
+    return [
+        ErasureRequestDetail.from_model(request, subject_display=names.get(request.subject_id))
+        for request in requests
+    ]
+
+
+async def _erasure_detail(session: DbSession, request: DataErasureRequest) -> ErasureRequestDetail:
+    return (await _erasure_details(session, [request]))[0]
 
 
 # --- Пользователи ---------------------------------------------------------
@@ -172,10 +195,12 @@ async def create_user(
     "/users/{user_id}",
     summary="Изменить пользователя",
     description=(
-        "Меняет роль, команду, руководителя, статус и локальные настройки. "
-        "Обязателен `If-Match`. При смене роли обновляется маппинг в Keycloak, "
-        "растёт `perm_epoch` и сбрасывается кэш прав. Понизить последнего "
-        "администратора нельзя (CRM-1903). Роль: ADMIN."
+        "Меняет роль, команду, руководителя и локальные настройки. Обязателен "
+        "`If-Match`. При смене роли обновляется маппинг в Keycloak, растёт "
+        "`perm_epoch` и сбрасывается кэш прав. Понизить последнего "
+        "администратора нельзя (CRM-1903). Статус правкой не меняется: активация "
+        "происходит при первом входе, блокировка, разблокировка и увольнение — "
+        "отдельные операции (422). Роль: ADMIN."
     ),
     response_model=UserOut,
 )
@@ -289,7 +314,11 @@ async def resend_invite(
     settings = get_settings()
     service = AdminUserService(session)
     user = await service.get_or_404(user_id)
-    if user.status not in ("invited",):
+    # Учётку, отключённую за непринятое приглашение (INVITE_EXPIRED), приглашают снова.
+    expired = (
+        user.status == UserStatus.BLOCKED.value and user.status_reason == INVITE_EXPIRED_REASON
+    )
+    if user.status != UserStatus.INVITED.value and not expired:
         raise AppError(
             ErrorCode.VALIDATION,
             "Приглашение выдаётся только пользователю в статусе invited",
@@ -311,6 +340,8 @@ async def resend_invite(
         detail="Исчерпан суточный лимит повторных приглашений",
     )
 
+    if expired:
+        await service.reopen_expired_invite(user)
     identity = IdentityService(session)
     await identity.revoke_invites(user.id)
     token = await identity.issue_invite(user, created_by=principal.user_id)
@@ -329,8 +360,10 @@ async def resend_invite(
     description=(
         "Режим `preview` показывает, что держит пользователь; режим `confirm` "
         "переназначает сделки преемнику, переводит учётку в `terminated`, "
-        "отключает её в Keycloak и завершает сессии. История и авторство "
-        "комментариев сохраняются. Роль: ADMIN."
+        "отключает её в Keycloak и завершает сессии. `deal_successors` "
+        "(`{id сделки: id преемника}`) отдаёт названные сделки другим преемникам — "
+        "остальное уходит `successor_id`. История и авторство комментариев "
+        "сохраняются. Роль: ADMIN."
     ),
     response_model=OffboardResponse,
 )
@@ -377,6 +410,7 @@ async def offboard_user(
         principal=principal,
         successor_id=payload.successor_id,
         reason=payload.reason,
+        deal_successors=payload.deal_successors,
     )
     return OffboardResponse(
         mode="confirm",
@@ -408,7 +442,6 @@ async def create_erasure_request(
     principal: ErasureManager,
     user_id: Annotated[uuid.UUID, Path()],
 ) -> ErasureRequestOut:
-    settings = get_settings()
     service = AdminUserService(session)
     user = await service.get_or_404(user_id)
     request, blockers = await service.create_erasure_request(
@@ -428,7 +461,8 @@ async def create_erasure_request(
         status=request.status,
         deadline_at=request.deadline_at,
         blockers=[ErasureBlocker(**item) for item in blockers],
-        grace_until=dt.datetime.now(dt.UTC) + dt.timedelta(days=settings.erasure_grace_days),
+        # Сохранённое значение: у `blocked` отсрочка не начинается (None).
+        grace_until=request.grace_until,
     )
 
 
@@ -455,6 +489,7 @@ async def list_erasure_requests(
     _: ErasureManager,
     erasure_status: Annotated[str | None, Query(alias="status")] = None,
     subject_type: Annotated[str | None, Query()] = None,
+    subject_id: Annotated[uuid.UUID | None, Query()] = None,
 ) -> ErasureRequestListResponse:
     stmt = select(DataErasureRequest).order_by(
         DataErasureRequest.created_at.desc(), DataErasureRequest.id.desc()
@@ -463,6 +498,8 @@ async def list_erasure_requests(
         stmt = stmt.where(DataErasureRequest.status == erasure_status)
     if subject_type:
         stmt = stmt.where(DataErasureRequest.subject_type == subject_type)
+    if subject_id:
+        stmt = stmt.where(DataErasureRequest.subject_id == subject_id)
     cursor = page.decoded_cursor
     if cursor:
         stmt = stmt.where(
@@ -470,8 +507,10 @@ async def list_erasure_requests(
         )
 
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
-    built: Page = Page.build(rows, limit=page.limit, serializer=ErasureRequestDetail.from_model)
-    return ErasureRequestListResponse(items=built.items, next_cursor=built.next_cursor)
+    built: Page = Page.build(rows, limit=page.limit)
+    return ErasureRequestListResponse(
+        items=await _erasure_details(session, built.items), next_cursor=built.next_cursor
+    )
 
 
 @router.get(
@@ -485,7 +524,7 @@ async def get_erasure_request(
     request_id: Annotated[uuid.UUID, Path()],
 ) -> ErasureRequestDetail:
     request = await ErasureExecutionService(session).get_or_404(request_id)
-    return ErasureRequestDetail.from_model(request)
+    return await _erasure_detail(session, request)
 
 
 @router.post(
@@ -506,7 +545,7 @@ async def recheck_erasure_request(
     service = ErasureExecutionService(session)
     request = await service.get_or_404(request_id)
     await service.recheck(request, principal)
-    return ErasureRequestDetail.from_model(request)
+    return await _erasure_detail(session, request)
 
 
 @router.post(
@@ -528,7 +567,7 @@ async def reject_erasure_request(
     service = ErasureExecutionService(session)
     request = await service.get_or_404(request_id)
     await service.reject(request, reason=payload.reason)
-    return ErasureRequestDetail.from_model(request)
+    return await _erasure_detail(session, request)
 
 
 @router.post(
@@ -549,7 +588,7 @@ async def restore_erasure_request(
     service = ErasureExecutionService(session)
     request = await service.get_or_404(request_id)
     await service.restore(request)
-    return ErasureRequestDetail.from_model(request)
+    return await _erasure_detail(session, request)
 
 
 @router.get(
@@ -601,7 +640,7 @@ async def create_contact_erasure_request(
         comment=payload.comment,
         approval_id=payload.approval_id,
     )
-    return ErasureRequestDetail.from_model(request)
+    return await _erasure_detail(session, request)
 
 
 @router.post(
@@ -632,7 +671,7 @@ async def create_organization_erasure_request(
         comment=payload.comment,
         approval_id=payload.approval_id,
     )
-    return ErasureRequestDetail.from_model(request)
+    return await _erasure_detail(session, request)
 
 
 # --- Подтверждения «четырёх глаз» ----------------------------------------
@@ -728,6 +767,38 @@ async def list_teams(
     return TeamListResponse(items=built.items, next_cursor=built.next_cursor)
 
 
+async def _get_team(session: DbSession, team_id: uuid.UUID) -> Team:
+    team = (await session.execute(select(Team).where(Team.id == team_id))).scalar_one_or_none()
+    if team is None or team.deleted_at is not None:
+        raise NotFoundError("Команда", team_id)
+    return team
+
+
+async def _optional_if_match(
+    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
+) -> int | None:
+    """У команд `If-Match` необязателен: без него правка идёт как раньше, с ним — с
+    проверкой версии."""
+    return None if if_match is None else await get_if_match(if_match)
+
+
+OptionalIfMatch = Annotated[int | None, Depends(_optional_if_match)]
+
+
+@router.get(
+    "/teams/{team_id}",
+    summary="Карточка команды",
+    description="Команда с версией и временем последней правки. Роль: ADMIN.",
+    response_model=TeamOut,
+)
+async def get_team(
+    session: DbSession,
+    _: AdminRead,
+    team_id: Annotated[uuid.UUID, Path()],
+) -> TeamOut:
+    return TeamOut.model_validate(await _get_team(session, team_id))
+
+
 @router.post(
     "/teams",
     summary="Создать команду",
@@ -768,7 +839,11 @@ async def create_team(
 @router.patch(
     "/teams/{team_id}",
     summary="Изменить команду",
-    description="Меняет название, родителя, руководителя или регион. Роль: ADMIN.",
+    description=(
+        "Меняет название, родителя, руководителя или регион. `If-Match` с версией "
+        "команды необязателен: с ним устаревшая версия даёт 409 (CRM-1002), без него "
+        "правка применяется как раньше. Каждая правка поднимает `version`. Роль: ADMIN."
+    ),
     response_model=TeamOut,
 )
 async def patch_team(
@@ -777,10 +852,11 @@ async def patch_team(
     audit: AuditDep,
     _: AdminWrite,
     team_id: Annotated[uuid.UUID, Path()],
+    if_match: OptionalIfMatch,
 ) -> TeamOut:
-    team = (await session.execute(select(Team).where(Team.id == team_id))).scalar_one_or_none()
-    if team is None or team.deleted_at is not None:
-        raise NotFoundError("Команда", team_id)
+    team = await _get_team(session, team_id)
+    if if_match is not None and team.version != if_match:
+        raise VersionConflictError(team.version, {"name": team.name})
 
     updates = payload.model_dump(exclude_unset=True)
     if updates.get("parent_id") == team.id:
@@ -807,11 +883,15 @@ async def patch_team(
     }
     from app.modules.audit.service import diff_changes
 
+    changes = diff_changes(before, after)
+    if changes:
+        team.version += 1
+        await session.flush()
     await audit.record(
         AuditAction.TEAM_UPDATED,
         entity_type="team",
         entity_id=team.id,
-        changes=diff_changes(before, after),
+        changes=changes,
     )
     return TeamOut.model_validate(team)
 

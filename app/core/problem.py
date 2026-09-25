@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError as PydanticValidationError
+from sqlalchemy.exc import IntegrityError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.context import get_request_id
@@ -46,6 +47,12 @@ _STATUS_TO_CODE: dict[int, ErrorCode] = {
     429: ErrorCode.REPORTS_LIMIT_EXCEEDED,
     503: ErrorCode.DEPENDENCY_UNAVAILABLE,
 }
+
+# SQLSTATE нарушений, которые вызвал сам клиент запросом: ссылка на связанные данные и дубль
+# по уникальному индексу. NOT NULL и CHECK сюда не входят — это дыра в валидации или баг
+# сервиса, и такая ошибка остаётся внутренней (500), а не маскируется под конфликт.
+_PG_FOREIGN_KEY_VIOLATION = "23503"
+_PG_UNIQUE_VIOLATION = "23505"
 
 
 def build_problem(
@@ -208,9 +215,41 @@ async def unhandled_error_handler(request: Request, exc: Exception) -> JSONRespo
     )
 
 
+async def integrity_error_handler(request: Request, exc: IntegrityError) -> JSONResponse:
+    """Страховка для нарушений ограничений БД, которые не перехватил сервис:
+    дубль и ссылка на связанные данные — 409, а не «Внутренняя ошибка». Сервис
+    по-прежнему обязан проверять сам и отвечать точнее (404/422 с полем): здесь
+    только последний рубеж. Имя ограничения и значения ключа уходят в лог, но не в
+    ответ — в них бывают ПДн и устройство схемы."""
+    sqlstate = getattr(exc.orig, "pgcode", None)
+    if sqlstate == _PG_UNIQUE_VIOLATION:
+        code, detail = ErrorCode.DUPLICATE, "Запись с такими данными уже существует"
+    elif sqlstate == _PG_FOREIGN_KEY_VIOLATION:
+        code = ErrorCode.ENTITY_IN_USE
+        if (exc.statement or "").lstrip().upper().startswith("DELETE"):
+            detail = "Объект используется в других записях и не может быть удалён"
+        else:
+            detail = "Запись ссылается на несуществующий объект"
+    else:
+        return await unhandled_error_handler(request, exc)
+
+    cause = getattr(exc.orig, "__cause__", None)
+    logger.warning(
+        "integrity_conflict",
+        sqlstate=sqlstate,
+        constraint=getattr(cause, "constraint_name", None),
+        path=request.url.path,
+        method=request.method,
+    )
+    return problem_response(
+        code=code, detail=detail, instance=str(request.url.path), request=request
+    )
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(AppError, app_error_handler)  # type: ignore[arg-type]
     app.add_exception_handler(RequestValidationError, validation_error_handler)  # type: ignore[arg-type]
     app.add_exception_handler(PydanticValidationError, pydantic_error_handler)  # type: ignore[arg-type]
     app.add_exception_handler(StarletteHTTPException, http_error_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(IntegrityError, integrity_error_handler)  # type: ignore[arg-type]
     app.add_exception_handler(Exception, unhandled_error_handler)

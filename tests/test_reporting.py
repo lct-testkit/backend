@@ -12,13 +12,15 @@ matplotlib и проверяет магические байты результ�
 (честная заглушка, см. его докстринг), поэтому вызван по-настоящему.
 Остальные builders (реальные SQL-запросы с RBAC-скоупом) и материализованное
 представление проверены вживую против настоящего Postgres в этой же сессии,
-не как pytest-тест — кроме `TestReportDataEndpoint` (П2): настоящая
+не как pytest-тест — кроме `TestReportDataEndpoint` (П2) и `TestReportJobs`
+(коды CRM-1601/1602/1603, `progress_pct`, фильтр `template_code`): настоящая
 Postgres обязательна, тот же приём, что `tests/test_imports.py::
 TestLicenseImportEndToEnd` — см. `tests/conftest.py`.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 
 import pytest
@@ -487,3 +489,181 @@ class TestReportDataEndpoint:
         authenticate(client, other_kam)
         response = client.get(f"/api/reports/{job_id}/data")
         assert response.status_code == 403, response.text
+
+
+class TestReportJobs:
+    """B#17, B#18, B#20 (`frontend/docs/backend-issues.md`): коды CRM-1601/1602/1603,
+    `progress_pct` и фильтр `template_code` в `GET /api/reports`. Настоящая Postgres
+    обязательна — см. докстринг модуля."""
+
+    pytestmark = pytest.mark.skipif(
+        not TEST_DATABASE_URL, reason="нужен TEST_DATABASE_URL с применёнными миграциями"
+    )
+
+    def _kam(self, client):
+        kam = run(client, _make_user, "KAM")
+        client.headers["X-CSRF-Token"] = authenticate(client, kam)
+        return kam
+
+    def _stub_s3(self, monkeypatch) -> None:
+        import app.modules.reporting.service as reporting_service
+
+        async def fake_ensure_bucket(bucket: str) -> None:
+            return None
+
+        async def fake_upload(*, bucket: str, key: str, body: bytes, content_type: str) -> None:
+            return None
+
+        monkeypatch.setattr(reporting_service, "ensure_bucket", fake_ensure_bucket)
+        monkeypatch.setattr(reporting_service, "upload_object_bytes", fake_upload)
+
+    def _ensure_templates(self, client, *codes: str) -> None:
+        """Лёгкие агрегатные шаблоны: `kind` совпадает с кодом (см. `reporting.seed`)."""
+        from sqlalchemy import select as sa_select
+
+        from app.core.db import session_scope
+        from app.modules.reporting.models import ReportTemplate
+
+        async def _ensure() -> None:
+            async with session_scope() as session:
+                for code in codes:
+                    existing = await session.scalar(
+                        sa_select(ReportTemplate.id).where(ReportTemplate.code == code)
+                    )
+                    if existing is None:
+                        session.add(
+                            ReportTemplate(
+                                code=code,
+                                name=code,
+                                query_def={"kind": code},
+                                allowed_roles=[],
+                                default_params={},
+                                output_formats=["xlsx", "pdf"],
+                                is_active=True,
+                            )
+                        )
+
+        run(client, _ensure)
+
+    def _insert_job(self, client, requester, **fields) -> str:
+        """Задание отчёта напрямую в БД: так получаются `queued`/`failed`/просроченные."""
+        from app.core.db import session_scope
+        from app.modules.reporting.models import ReportJob
+
+        async def _create() -> str:
+            async with session_scope() as session:
+                job = ReportJob(
+                    **{
+                        "template_code": "sla_compliance",
+                        "format": "xlsx",
+                        "requested_by": requester.id,
+                        "status": "queued",
+                        **fields,
+                    }
+                )
+                session.add(job)
+                await session.flush()
+                return str(job.id)
+
+        return run(client, _create)
+
+    def _download(self, client, job_id: str):
+        return client.get(f"/api/reports/{job_id}/download")
+
+    def test_completed_report_has_full_progress(self, client, monkeypatch) -> None:
+        self._stub_s3(monkeypatch)
+        self._ensure_templates(client, "sla_compliance")
+        self._kam(client)
+
+        response = client.post(
+            "/api/reports", json={"template_code": "sla_compliance", "format": "xlsx"}
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["status"] == "completed"
+        assert response.json()["progress_pct"] == 100
+
+    def test_download_of_an_unfinished_report_is_not_ready(self, client) -> None:
+        kam = self._kam(client)
+
+        for status in ("queued", "processing", "failed"):
+            response = self._download(client, self._insert_job(client, kam, status=status))
+            assert response.status_code == 409, (status, response.text)
+            assert response.json()["code"] == "CRM-1602", status
+
+    def test_download_after_retention_is_gone(self, client) -> None:
+        # `expire_report_files` удаляет файл, но оставляет `completed` и `expires_at`.
+        kam = self._kam(client)
+        job_id = self._insert_job(
+            client,
+            kam,
+            status="completed",
+            file_id=None,
+            expires_at=dt.datetime.now(dt.UTC) - dt.timedelta(days=1),
+        )
+
+        response = self._download(client, job_id)
+        assert response.status_code == 410, response.text
+        assert response.json()["code"] == "CRM-1603"
+
+    def test_download_after_expiry_is_gone_even_if_the_file_is_not_swept_yet(self, client) -> None:
+        from app.core.db import session_scope
+        from app.modules.files.models import File
+
+        async def _ready_file() -> uuid.UUID:
+            async with session_scope() as session:
+                file = File(
+                    storage_key=f"test/{uuid.uuid4()}.xlsx",
+                    bucket="reports",
+                    original_filename="Отчёт.xlsx",
+                    mime_type="application/vnd.ms-excel",
+                    size_bytes=10,
+                    status="ready",
+                )
+                session.add(file)
+                await session.flush()
+                return file.id
+
+        kam = self._kam(client)
+        job_id = self._insert_job(
+            client,
+            kam,
+            status="completed",
+            file_id=run(client, _ready_file),
+            expires_at=dt.datetime.now(dt.UTC) - dt.timedelta(minutes=5),
+        )
+
+        response = self._download(client, job_id)
+        assert response.status_code == 410, response.text
+        assert response.json()["code"] == "CRM-1603"
+
+    def test_too_many_unfinished_reports_are_refused(self, client, monkeypatch) -> None:
+        from app.core.config import get_settings
+
+        self._stub_s3(monkeypatch)
+        self._ensure_templates(client, "sla_compliance")
+        kam = self._kam(client)
+        for _ in range(get_settings().reports_max_concurrent):
+            self._insert_job(client, kam, status="queued")
+
+        request = {"template_code": "sla_compliance", "format": "xlsx"}
+        refused = client.post("/api/reports", json=request)
+        assert refused.status_code == 429, refused.text
+        assert refused.json()["code"] == "CRM-1601"
+
+        # Лимит личный: чужая очередь другому сотруднику не мешает.
+        self._kam(client)
+        assert client.post("/api/reports", json=request).status_code == 201
+
+    def test_list_is_filtered_by_template_code(self, client, monkeypatch) -> None:
+        self._stub_s3(monkeypatch)
+        self._ensure_templates(client, "sla_compliance", "loss_reasons")
+        self._kam(client)
+        for code in ("sla_compliance", "loss_reasons", "sla_compliance"):
+            created = client.post("/api/reports", json={"template_code": code, "format": "xlsx"})
+            assert created.status_code == 201, created.text
+
+        everything = client.get("/api/reports").json()["items"]
+        assert {job["template_code"] for job in everything} == {"sla_compliance", "loss_reasons"}
+
+        filtered = client.get("/api/reports", params={"template_code": "loss_reasons"}).json()
+        assert [job["template_code"] for job in filtered["items"]] == ["loss_reasons"]

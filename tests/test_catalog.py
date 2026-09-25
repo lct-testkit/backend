@@ -7,8 +7,9 @@
 как фикстуры, потому что придуманный вручную номер легко случайно окажется
 валидным по контрольной сумме и не поймает регрессию в весах.
 
-Исключение — `TestDeleteDirection`/`TestDeleteLossReason` (П4): настоящая
-Postgres обязательна, тот же приём, что `tests/test_imports.py::
+Исключение — `TestDeleteDirection`/`TestDeleteLossReason` (П4),
+`TestDirectionHierarchy`, `TestProductValidityPeriod`, `TestDirectionsAll`:
+настоящая Postgres обязательна, тот же приём, что `tests/test_imports.py::
 TestLicenseImportEndToEnd` — см. `tests/conftest.py`.
 """
 
@@ -404,3 +405,167 @@ class TestDeleteLossReason:
         delete = client.delete(f"/api/loss-reasons/{reason_id}")
         assert delete.status_code == 409, delete.text
         assert delete.json()["code"] == "CRM-1303"
+
+
+class TestDirectionHierarchy:
+    """B#10: направление нельзя сделать потомком самого себя или своего потомка (цикл в
+    иерархии), а родитель должен существовать. Настоящая Postgres обязательна — см.
+    докстринг модуля."""
+
+    pytestmark = pytest.mark.skipif(
+        not TEST_DATABASE_URL, reason="нужен TEST_DATABASE_URL с применёнными миграциями"
+    )
+
+    def _direction(self, client, name: str, parent_id: str | None = None) -> dict:
+        response = client.post(
+            "/api/directions",
+            json={"code": f"dir-{uuid.uuid4().hex[:8]}", "name": name, "parent_id": parent_id},
+        )
+        assert response.status_code == 201, response.text
+        return response.json()
+
+    def _reparent(self, client, direction: dict, parent_id: str | None):
+        return client.patch(
+            f"/api/directions/{direction['id']}",
+            json={"parent_id": parent_id},
+            headers={"If-Match": str(direction["version"])},
+        )
+
+    def _chain(self, client) -> tuple[dict, dict, dict]:
+        _admin(client)
+        root = self._direction(client, "Корень")
+        child = self._direction(client, "Ребёнок", root["id"])
+        grandchild = self._direction(client, "Внук", child["id"])
+        return root, child, grandchild
+
+    def test_direction_cannot_be_its_own_parent(self, client) -> None:
+        root, _child, _grandchild = self._chain(client)
+
+        response = self._reparent(client, root, root["id"])
+        assert response.status_code == 422, response.text
+        assert response.json()["errors"][0]["field"] == "parent_id"
+
+    def test_direction_cannot_move_under_its_descendant(self, client) -> None:
+        root, _child, grandchild = self._chain(client)
+
+        response = self._reparent(client, root, grandchild["id"])
+        assert response.status_code == 422, response.text
+        assert response.json()["errors"][0]["field"] == "parent_id"
+
+    def test_direction_can_move_to_another_branch_or_to_the_root(self, client) -> None:
+        root, _child, grandchild = self._chain(client)
+
+        moved = self._reparent(client, grandchild, root["id"])
+        assert moved.status_code == 200, moved.text
+        assert moved.json()["parent_id"] == root["id"]
+
+        detached = self._reparent(client, moved.json(), None)
+        assert detached.status_code == 200, detached.text
+        assert detached.json()["parent_id"] is None
+
+    def test_parent_must_exist(self, client) -> None:
+        root, _child, _grandchild = self._chain(client)
+
+        assert self._reparent(client, root, str(uuid.uuid4())).status_code == 404
+        created = client.post(
+            "/api/directions",
+            json={
+                "code": f"dir-{uuid.uuid4().hex[:8]}",
+                "name": "Сирота",
+                "parent_id": str(uuid.uuid4()),
+            },
+        )
+        assert created.status_code == 404, created.text
+
+
+class TestProductValidityPeriod:
+    """B#11: `valid_from` не позже `valid_to`. Настоящая Postgres обязательна — см.
+    докстринг модуля."""
+
+    pytestmark = pytest.mark.skipif(
+        not TEST_DATABASE_URL, reason="нужен TEST_DATABASE_URL с применёнными миграциями"
+    )
+
+    def _create(self, client, **period):
+        return client.post(
+            "/api/products",
+            json={"code": f"prod-{uuid.uuid4().hex[:8]}", "name": "Курс", **period},
+        )
+
+    def test_inverted_period_is_refused_on_create(self, client) -> None:
+        _admin(client)
+
+        response = self._create(client, valid_from="2026-09-01", valid_to="2026-01-01")
+        assert response.status_code == 422, response.text
+        assert response.json()["errors"][0]["field"] == "valid_to"
+
+    def test_one_day_period_and_open_ends_are_fine(self, client) -> None:
+        _admin(client)
+
+        for period in (
+            {"valid_from": "2026-09-01", "valid_to": "2026-09-01"},
+            {"valid_from": "2026-09-01"},
+            {"valid_to": "2026-09-01"},
+            {},
+        ):
+            assert self._create(client, **period).status_code == 201, period
+
+    def test_update_checks_the_new_date_against_the_stored_one(self, client) -> None:
+        _admin(client)
+        product = self._create(client, valid_from="2026-09-01").json()
+
+        response = client.patch(
+            f"/api/products/{product['id']}",
+            json={"valid_to": "2026-01-01"},
+            headers={"If-Match": str(product["version"])},
+        )
+        assert response.status_code == 422, response.text
+        assert response.json()["errors"][0]["field"] == "valid_to"
+
+        ok = client.patch(
+            f"/api/products/{product['id']}",
+            json={"valid_to": "2026-12-31"},
+            headers={"If-Match": str(product["version"])},
+        )
+        assert ok.status_code == 200, ok.text
+
+
+class TestDirectionsAll:
+    """B#12: `GET /directions?all=true` — весь справочник одним ответом для дерева, без
+    `limit`/`cursor`. Настоящая Postgres обязательна — см. докстринг модуля."""
+
+    pytestmark = pytest.mark.skipif(
+        not TEST_DATABASE_URL, reason="нужен TEST_DATABASE_URL с применёнными миграциями"
+    )
+
+    def test_all_ignores_the_page_size(self, client) -> None:
+        _admin(client)
+        created = {
+            client.post(
+                "/api/directions",
+                json={"code": f"dir-{uuid.uuid4().hex[:8]}", "name": f"Направление {i}"},
+            ).json()["id"]
+            for i in range(3)
+        }
+
+        paged = client.get("/api/directions", params={"limit": 1}).json()
+        assert len(paged["items"]) == 1
+        assert paged["next_cursor"] is not None
+
+        everything = client.get("/api/directions", params={"all": "true", "limit": 1}).json()
+        assert created <= {item["id"] for item in everything["items"]}
+        assert everything["next_cursor"] is None
+
+    def test_all_keeps_the_filters(self, client) -> None:
+        _admin(client)
+        marker = uuid.uuid4().hex[:8]
+        wanted = client.post(
+            "/api/directions", json={"code": f"dir-{marker}", "name": f"Нужное {marker}"}
+        ).json()["id"]
+        client.post(
+            "/api/directions",
+            json={"code": f"dir-{uuid.uuid4().hex[:8]}", "name": "Постороннее направление"},
+        )
+
+        found = client.get("/api/directions", params={"all": "true", "q": marker}).json()
+        assert [item["id"] for item in found["items"]] == [wanted]

@@ -8,9 +8,10 @@
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
+import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -22,8 +23,13 @@ from sqlalchemy.ext.asyncio import (
 from app.core.config import get_settings
 from app.core.errors import DependencyStatus
 
+logger = structlog.get_logger(__name__)
+
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
+
+# Ключ `session.info` со списком действий, отложенных до коммита (`run_after_commit`).
+_AFTER_COMMIT_KEY = "after_commit"
 
 
 def create_engine() -> AsyncEngine:
@@ -66,6 +72,25 @@ async def dispose_engine() -> None:
     _session_factory = None
 
 
+def run_after_commit(session: AsyncSession, action: Callable[[], Awaitable[None]]) -> None:
+    """Откладывает `action` до успешного коммита транзакции запроса.
+
+    Запись во внешнее хранилище (кэш Redis) до коммита оставляет «призрака», если
+    запрос потом откатится: кэш указывает на строку, которой в БД нет. Действие
+    выполняется после коммита и пропускается, если запрос завершился исключением.
+    Его сбой транзакцию не отменяет — она уже зафиксирована.
+    """
+    session.info.setdefault(_AFTER_COMMIT_KEY, []).append(action)
+
+
+async def _run_after_commit_actions(session: AsyncSession) -> None:
+    for action in session.info.pop(_AFTER_COMMIT_KEY, []):
+        try:
+            await action()
+        except Exception:  # noqa: BLE001 — коммит уже состоялся
+            logger.warning("after_commit_action_failed", exc_info=True)
+
+
 async def get_db_session() -> AsyncIterator[AsyncSession]:
     """FastAPI-зависимость: одна транзакция на запрос.
 
@@ -82,6 +107,7 @@ async def get_db_session() -> AsyncIterator[AsyncSession]:
         except Exception:
             await session.rollback()
             raise
+        await _run_after_commit_actions(session)
 
 
 @asynccontextmanager
@@ -96,6 +122,7 @@ async def session_scope() -> AsyncIterator[AsyncSession]:
         except Exception:
             await session.rollback()
             raise
+        await _run_after_commit_actions(session)
 
 
 async def check_database() -> DependencyStatus:

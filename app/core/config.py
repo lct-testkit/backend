@@ -187,6 +187,9 @@ class Settings(BaseSettings):
     # входящего вебхука Bitrix24 целиком (`https://{портал}/rest/{user_id}/
     # {webhook_code}`, без отдельного токена — см. `integration/bitrix.py`).
     bitrix_webhook_url_ref: str | None = None
+    # Код источника сделки (`sourceId` в `crm.item.add`) из справочника
+    # конкретного портала; `OTHER` есть в стандартном справочнике Bitrix24.
+    bitrix_source_id: str = "OTHER"
     # Раздел 4.14 не требует рейт-лимит на вебхуки явно (в отличие от
     # dop.md §10.11 для /public/sign/*), но это единственные пути без
     # сессионной аутентификации — тот же принцип защиты по умолчанию.

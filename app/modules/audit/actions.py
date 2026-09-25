@@ -23,6 +23,8 @@ class AuditAction(StrEnum):
     USER_ROLE_CHANGED = "USER_ROLE_CHANGED"
     USER_OFFBOARDED = "USER_OFFBOARDED"
     USER_TERMINATED = "USER_TERMINATED"
+    # new_spec §4.1: не вошёл по приглашению за 30 дней — учётка отключена.
+    USER_INVITE_EXPIRED = "USER_INVITE_EXPIRED"
     PASSWORD_CHANGED = "PASSWORD_CHANGED"
     PASSWORD_RESET = "PASSWORD_RESET"
     CONSENT_ACCEPTED = "CONSENT_ACCEPTED"
@@ -83,6 +85,8 @@ class AuditAction(StrEnum):
 
     # --- Интеграции (спринт 9, §4.14/§7.8) ---
     INTEGRATION_SOURCE_UPDATED = "INTEGRATION_SOURCE_UPDATED"
+    # Ручной возврат события outbox из failed/dead в очередь доставки.
+    INTEGRATION_OUTBOX_RETRIED = "INTEGRATION_OUTBOX_RETRIED"
 
     # --- Отчётность и дашборды (спринт 8, §4.13/§7.9) ---
     DASHBOARD_CREATED = "DASHBOARD_CREATED"
@@ -98,6 +102,8 @@ class AuditAction(StrEnum):
     # WORKFLOW_NOT_DRAFT` блокирует остальное) — см. `workflow.service.
     # WorkflowService.delete_draft`.
     WORKFLOW_DELETED = "WORKFLOW_DELETED"
+    # `PATCH /workflows/{id}`: имя и воронка по умолчанию (граф правит `PUT .../graph`).
+    WORKFLOW_UPDATED = "WORKFLOW_UPDATED"
     WORKFLOW_PUBLISHED = "WORKFLOW_PUBLISHED"
     WORKFLOW_VALIDATED = "WORKFLOW_VALIDATED"
     STATUS_ARCHIVED = "STATUS_ARCHIVED"
@@ -163,6 +169,10 @@ class AuditAction(StrEnum):
     SIGNATURE_KEY_COMPROMISED = "SIGNATURE_KEY_COMPROMISED"
     EDM_AGREEMENT_CREATED = "EDM_AGREEMENT_CREATED"
     EDM_AGREEMENT_REVOKED = "EDM_AGREEMENT_REVOKED"
+    # Срок действия вышел (`valid_to`): статус `expired` выставляет фоновая задача.
+    EDM_AGREEMENT_EXPIRED = "EDM_AGREEMENT_EXPIRED"
+    # Инициатор получил новую ссылку внешнему подписанту; прежняя перестала работать.
+    SIGNATURE_LINK_REISSUED = "SIGNATURE_LINK_REISSUED"
 
     # --- 152-ФЗ ---
     ERASURE_REQUEST_CREATED = "ERASURE_REQUEST_CREATED"

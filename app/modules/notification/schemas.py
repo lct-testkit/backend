@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
@@ -70,6 +70,12 @@ class NotificationReadResponse(BaseModel):
     updated: int
 
 
+class UnreadCountResponse(BaseModel):
+    """Число непрочитанных без потолка страницы — для значка в шапке."""
+
+    count: int
+
+
 # =============================================================================
 # Настройки пользователя (/api/me/notification-prefs)
 # =============================================================================
@@ -100,6 +106,18 @@ class NotificationPrefUpsert(BaseModel):
 
 class NotificationPrefsUpdateRequest(BaseModel):
     prefs: list[NotificationPrefUpsert]
+
+
+class EventCodeOut(BaseModel):
+    """Код события, на который можно настроить `PUT /me/notification-prefs`, и каналы,
+    по которым для него есть активные шаблоны."""
+
+    code: str
+    channels: list[ChannelLiteral]
+
+
+class EventCodeListResponse(BaseModel):
+    items: list[EventCodeOut]
 
 
 # =============================================================================
@@ -141,3 +159,30 @@ class NotificationTemplateOut(BaseModel):
 class NotificationTemplateListResponse(BaseModel):
     items: list[NotificationTemplateOut]
     next_cursor: str | None = None
+
+
+class TemplatePreviewRequest(BaseModel):
+    """Черновик шаблона и данные события, на которых его надо отрисовать."""
+
+    subject_template: str | None = None
+    body_template: NonEmptyStr
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class TemplatePreviewError(BaseModel):
+    field: Literal["subject_template", "body_template"]
+    message: str
+    line: int | None = None
+
+
+class TemplatePreviewResponse(BaseModel):
+    """`ok=false` — это ответ, а не ошибка запроса: интерфейс показывает `error`
+    рядом с полем, не дожидаясь сохранения."""
+
+    ok: bool
+    subject: str | None = None
+    body: str | None = None
+    # Переменные, которые шаблон берёт из данных события (заданные в самом
+    # шаблоне — `{% set %}`, переменные циклов — не в счёт).
+    variables: list[str] = Field(default_factory=list)
+    error: TemplatePreviewError | None = None

@@ -20,6 +20,7 @@ from app.core.permissions import Permission
 from app.core.security import Principal
 from app.modules.admin.models import FeatureFlag, SystemSetting
 from app.modules.admin.schemas import (
+    SECRET_PLACEHOLDER,
     AuditChainReport,
     AuditEntryOut,
     AuditListResponse,
@@ -37,8 +38,6 @@ from app.modules.identity.models import Role, SecurityEventType, Severity
 from app.modules.identity.service import IdentityService
 
 router = APIRouter(prefix="/admin", tags=["admin"])
-
-SECRET_PLACEHOLDER = "********"
 
 
 @router.get(
@@ -150,7 +149,8 @@ async def list_system_settings(
     summary="Изменить настройку",
     description=(
         "Создаёт или обновляет системную настройку. Изменение пишется в аудит; "
-        "значение секретной настройки в аудит не попадает. Роль: ADMIN."
+        "значение секретной настройки в аудит не попадает. Маркер `********`, которым "
+        "секрет скрыт в списке, как значение не принимается (422). Роль: ADMIN."
     ),
     response_model=SystemSettingOut,
 )

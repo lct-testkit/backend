@@ -27,12 +27,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import invalidate_principal
 from app.core.config import get_settings
-from app.core.errors import AppError, ErrorCode, NotFoundError, VersionConflictError
+from app.core.errors import AppError, ErrorCode, FieldError, NotFoundError, VersionConflictError
+from app.core.masking import mask_email
 from app.core.security import Principal
 from app.modules.admin.models import AdminApproval
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService, diff_changes
-from app.modules.crm.service import UserWorkload, get_ownership_service
+from app.modules.crm.service import DealService, UserWorkload, get_ownership_service
 from app.modules.identity.keycloak import keycloak_client
 from app.modules.identity.models import (
     DataErasureRequest,
@@ -50,6 +51,7 @@ from app.modules.notification.service import (
     TPL_ACCOUNT_BLOCKED,
     TPL_ACCOUNT_UNBLOCKED,
     TPL_ERASURE_BLOCKED,
+    TPL_INVITE_EXPIRED,
     TPL_OFFBOARD_SUCCESSOR,
     TPL_PASSWORD_RESET,
     TPL_ROLE_CHANGED,
@@ -68,6 +70,9 @@ ROLE_NAMES = [role.value for role in Role]
 # Обязательные действия Keycloak при заведении учётки (new_spec §4.1 шаг 2).
 INVITE_REQUIRED_ACTIONS = ["UPDATE_PASSWORD", "VERIFY_EMAIL"]
 TOTP_ACTION = "CONFIGURE_TOTP"
+
+# `users.status_reason` учётки, отключённой за непринятое приглашение.
+INVITE_EXPIRED_REASON = "invite_expired"
 
 OPERATION_CREATE_ADMIN = "user.create_admin"
 OPERATION_ERASURE = "user.erasure"
@@ -314,16 +319,6 @@ class AdminUserService:
         settings = get_settings()
         email = email.strip().lower()
 
-        if role == Role.ADMIN.value:
-            # Создание администратора — операция «четырёх глаз» (§4.1).
-            await self._approvals.require(
-                operation=OPERATION_CREATE_ADMIN,
-                payload={"email": email, "role": role, "full_name": full_name},
-                principal=principal,
-                approval_id=approval_id,
-                entity_type="user",
-            )
-
         existing = await self._identity.get_by_email(email)
         if existing is not None:
             raise AppError(
@@ -333,6 +328,18 @@ class AdminUserService:
             )
 
         await self._validate_team_and_manager(role=role, team_id=team_id, manager_id=manager_id)
+
+        if role == Role.ADMIN.value:
+            # Создание администратора — операция «четырёх глаз» (§4.1). Заявка
+            # открывается только после проверок выше: иначе второй администратор
+            # подтверждал бы операцию, повтор которой заведомо упадёт.
+            await self._approvals.require(
+                operation=OPERATION_CREATE_ADMIN,
+                payload={"email": email, "role": role, "full_name": full_name},
+                principal=principal,
+                approval_id=approval_id,
+                entity_type="user",
+            )
 
         required_actions = list(INVITE_REQUIRED_ACTIONS)
         if require_totp or role in (Role.ADMIN.value, Role.HEAD.value):
@@ -439,6 +446,7 @@ class AdminUserService:
             "manager_id": str(user.manager_id) if user.manager_id else None,
             "status": user.status,
             "display_name": user.display_name,
+            "phone": user.phone,
             "position": user.position,
             "locale": user.locale,
             "timezone": user.timezone,
@@ -465,6 +473,22 @@ class AdminUserService:
             raise AppError(
                 ErrorCode.VALIDATION,
                 "Разблокировать можно только через POST /admin/users/{id}/unblock",
+            )
+        new_status = updates.get("status")
+        if new_status is not None and new_status != user.status:
+            # Активация — не правка поля: `activated_at`, `USER_ACTIVATED` и погашение
+            # приглашения происходят при первом входе пользователя
+            # (`IdentityService.provision_from_claims`). Перевод `invited → active`
+            # отсюда обходил бы вход и оставлял учётку без `activated_at`.
+            reason = (
+                "активация происходит при первом входе пользователя"
+                if new_status == UserStatus.ACTIVE.value
+                else "вернуть учётную запись в статус invited нельзя"
+            )
+            raise AppError(
+                ErrorCode.VALIDATION,
+                f"Статус не меняется правкой поля: {reason}",
+                errors=[FieldError(field="status", reason=reason)],
             )
 
         target_role = new_role or user.role
@@ -503,6 +527,7 @@ class AdminUserService:
             "manager_id": str(user.manager_id) if user.manager_id else None,
             "status": user.status,
             "display_name": user.display_name,
+            "phone": user.phone,
             "position": user.position,
             "locale": user.locale,
             "timezone": user.timezone,
@@ -530,6 +555,7 @@ class AdminUserService:
         user.status = UserStatus.BLOCKED.value
         user.status_reason = reason
         user.blocked_at = dt.datetime.now(dt.UTC)
+        user.auto_unblock_at = _utc(auto_unblock_at)
         user.version += 1
         await self._session.flush()
 
@@ -580,6 +606,7 @@ class AdminUserService:
         user.status = UserStatus.ACTIVE.value
         user.status_reason = reason
         user.blocked_at = None
+        user.auto_unblock_at = None
         user.version += 1
         await self._session.flush()
 
@@ -599,8 +626,75 @@ class AdminUserService:
             AuditAction.USER_UNBLOCKED,
             entity_type="user",
             entity_id=user.id,
-            changes={"status": {"old": UserStatus.BLOCKED.value, "new": user.status}},
+            changes={
+                "status": {"old": UserStatus.BLOCKED.value, "new": user.status},
+                **({"reason": {"old": None, "new": reason}} if reason else {}),
+            },
         )
+
+    async def expire_invite(self, user: User) -> bool:
+        """new_spec §4.1: не вошёл по приглашению за 30 дней — `INVITE_EXPIRED`.
+
+        Учётка отключается (`blocked` с причиной `invite_expired`, в Keycloak —
+        `enabled=false`), неиспользованные ссылки отзываются, администраторам
+        уходит уведомление. Вернуть её можно повторным приглашением
+        (`POST /admin/users/{id}/invite`). Сначала IdP, потом локальная запись:
+        если Keycloak недоступен, учётка остаётся `invited` до следующего тика.
+        """
+        if user.status != UserStatus.INVITED.value or user.last_login_at is not None:
+            return False  # успел войти, пока задача выбирала кандидатов
+        if user.keycloak_id:
+            await keycloak_client.set_enabled(user.keycloak_id, enabled=False)
+        user.status = UserStatus.BLOCKED.value
+        user.status_reason = INVITE_EXPIRED_REASON
+        user.blocked_at = dt.datetime.now(dt.UTC)
+        user.version += 1
+        await self._session.flush()
+        await self._identity.revoke_invites(user.id)
+        await invalidate_principal(user.id, keycloak_id=user.keycloak_id)
+        await self._audit.record(
+            AuditAction.USER_INVITE_EXPIRED,
+            entity_type="user",
+            entity_id=user.id,
+            changes={
+                "status": {"old": UserStatus.INVITED.value, "new": user.status},
+                "reason": {"old": None, "new": INVITE_EXPIRED_REASON},
+            },
+        )
+        admin_ids = (
+            (
+                await self._session.execute(
+                    select(User.id).where(
+                        User.role == Role.ADMIN.value,
+                        User.status == UserStatus.ACTIVE.value,
+                        User.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for admin_id in admin_ids:
+            await get_notification_service().notify_user(
+                self._session,
+                recipient_id=admin_id,
+                template_code=TPL_INVITE_EXPIRED,
+                entity_type="user",
+                entity_id=user.id,
+                payload={"full_name": user.full_name, "email": mask_email(user.email)},
+            )
+        return True
+
+    async def reopen_expired_invite(self, user: User) -> None:
+        """Повторное приглашение снимает `INVITE_EXPIRED`: учётка снова `invited`."""
+        if user.keycloak_id:
+            await keycloak_client.set_enabled(user.keycloak_id, enabled=True)
+        user.status = UserStatus.INVITED.value
+        user.status_reason = None
+        user.blocked_at = None
+        user.version += 1
+        await self._session.flush()
+        await invalidate_principal(user.id, keycloak_id=user.keycloak_id)
 
     # --- Сброс пароля ----------------------------------------------------
 
@@ -682,22 +776,26 @@ class AdminUserService:
         return workload, pending_signatures
 
     async def offboard_confirm(
-        self, *, user: User, principal: Principal, successor_id: uuid.UUID, reason: str
+        self,
+        *,
+        user: User,
+        principal: Principal,
+        successor_id: uuid.UUID,
+        reason: str,
+        deal_successors: dict[uuid.UUID, uuid.UUID] | None = None,
     ) -> dict[str, Any]:
-        if successor_id == user.id:
-            raise AppError(ErrorCode.VALIDATION, "Преемник не может совпадать с увольняемым")
-        successor = await self.get_or_404(successor_id)
-        if successor.status != UserStatus.ACTIVE.value:
-            raise AppError(
-                ErrorCode.VALIDATION,
-                "Преемник должен быть активным пользователем",
-                extra={"status": successor.status},
-            )
+        await self._ensure_successor(user, successor_id)
         await self._identity.ensure_not_last_admin(user)
 
-        reassigned = await get_ownership_service().reassign_all(
+        # Сделки с назначенным преемником уходят первыми обычным переназначением
+        # сделки; `reassign_all` потом забирает у увольняемого всё, что осталось.
+        individually = await self._reassign_individually(
+            user, principal, deal_successors or {}, reason=reason
+        )
+        bulk = await get_ownership_service().reassign_all(
             self._session, user.id, successor_id=successor_id, reason=reason
         )
+        reassigned = [*individually, *bulk]
         signatures = await get_signing_service().reassign_pending(
             self._session, user.id, successor_id=successor_id
         )
@@ -719,7 +817,7 @@ class AdminUserService:
             recipient_id=successor_id,
             template_code=TPL_OFFBOARD_SUCCESSOR,
             priority=NotificationPriority.HIGH,
-            payload={"deals": [str(d) for d in reassigned], "from_user": str(user.id)},
+            payload={"deals": [str(d) for d in bulk], "from_user": str(user.id)},
         )
         await self._audit.record(
             AuditAction.USER_OFFBOARDED,
@@ -743,6 +841,51 @@ class AdminUserService:
             "signature_requests_reassigned": signatures,
             "sessions_terminated": terminated,
         }
+
+    async def _ensure_successor(self, user: User, successor_id: uuid.UUID) -> User:
+        if successor_id == user.id:
+            raise AppError(ErrorCode.VALIDATION, "Преемник не может совпадать с увольняемым")
+        successor = await self.get_or_404(successor_id)
+        if successor.status != UserStatus.ACTIVE.value:
+            raise AppError(
+                ErrorCode.VALIDATION,
+                "Преемник должен быть активным пользователем",
+                extra={"status": successor.status, "user_id": str(successor_id)},
+            )
+        return successor
+
+    async def _reassign_individually(
+        self,
+        user: User,
+        principal: Principal,
+        deal_successors: dict[uuid.UUID, uuid.UUID],
+        *,
+        reason: str,
+    ) -> list[uuid.UUID]:
+        """Переназначает названные сделки их преемникам. Любая ошибка (чужая
+        сделка, неактивный преемник) откатывает весь увольнение целиком."""
+        if not deal_successors:
+            return []
+        deals = DealService(self._session)
+        moved: list[uuid.UUID] = []
+        for deal_id, deal_successor_id in deal_successors.items():
+            await self._ensure_successor(user, deal_successor_id)
+            deal = await deals.get_or_404(deal_id, principal)
+            if deal.owner_id != user.id:
+                raise AppError(
+                    ErrorCode.VALIDATION,
+                    "Сделка не принадлежит увольняемому сотруднику",
+                    errors=[FieldError(field="deal_successors", reason=str(deal_id))],
+                )
+            await deals.reassign(
+                deal,
+                principal,
+                owner_id=deal_successor_id,
+                reason=reason,
+                expected_version=deal.version,
+            )
+            moved.append(deal_id)
+        return moved
 
     # --- 152-ФЗ: запрос на удаление --------------------------------------
 
@@ -915,3 +1058,11 @@ class AdminUserService:
 
 def _iso(value: dt.datetime | None) -> str | None:
     return value.isoformat() if value else None
+
+
+def _utc(value: dt.datetime | None) -> dt.datetime | None:
+    """Время без пояса из тела запроса считаем UTC: иначе его нечем сравнить с
+    временем фоновой задачи."""
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=dt.UTC)

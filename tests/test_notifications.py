@@ -28,6 +28,7 @@ from app.modules.notification.seed import _DEFAULT_TEMPLATES
 from app.modules.notification.service import (
     TPL_ACCOUNT_BLOCKED,
     TPL_ACCOUNT_UNBLOCKED,
+    TPL_INVITE_EXPIRED,
     TPL_OFFBOARD_SUCCESSOR,
     TPL_PASSWORD_CHANGED,
     TPL_PASSWORD_RESET,
@@ -124,6 +125,7 @@ class TestSeedCoversAllReferencedTemplateCodes:
             TPL_ACCOUNT_UNBLOCKED,
             TPL_ROLE_CHANGED,
             TPL_OFFBOARD_SUCCESSOR,
+            TPL_INVITE_EXPIRED,
             "SIGNATURE_REQUESTED",
             "SIGNATURE_DOCUMENT_SIGNED",
             "SIGNATURE_DOCUMENT_REJECTED",

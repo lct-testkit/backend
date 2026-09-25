@@ -38,6 +38,13 @@ class WorkflowCreateRequest(BaseModel):
     is_default: bool = False
 
 
+class WorkflowUpdateRequest(BaseModel):
+    """`PATCH /workflows/{id}`: метаданные воронки. Граф правится через `PUT .../graph`."""
+
+    name: NonEmptyStr | None = Field(default=None, max_length=255)
+    is_default: bool | None = None
+
+
 class WorkflowOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -50,6 +57,9 @@ class WorkflowOut(BaseModel):
     published_at: dt.datetime | None = None
     published_by: uuid.UUID | None = None
     graph_hash: str | None = None
+    # Черновик графа отличается от опубликованного снимка (у воронки, которую ещё не
+    # публиковали, — всегда `true`). Считается по содержимому, а не по `updated_at`.
+    has_unpublished_changes: bool = False
     version: int
     created_at: dt.datetime
     updated_at: dt.datetime
@@ -218,7 +228,10 @@ class PublishResponse(BaseModel):
 class StatusImpactResponse(BaseModel):
     supported: bool
     active_count: int
+    # Сделки без обязательных полей целевого статуса (`?target_status_id=`; иначе пусто): `id`,
+    # `number`, `title`, `missing_fields`. Не больше 100, всего их — `problem_count`.
     problem_deals: list[dict[str, Any]] = Field(default_factory=list)
+    problem_count: int = 0
     sla_affected: int = 0
     suggested_targets: list[StatusOut] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)

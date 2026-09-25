@@ -37,10 +37,11 @@ import secrets
 import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
+from urllib.parse import quote
 
 import bcrypt
 import structlog
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -654,7 +655,8 @@ class SignatureDocumentService:
             # некому: внешний подписант из workflow-перехода — теоретический
             # случай (сиды используют только `{"role": "HEAD"}`), но фиксируем
             # честно, а не теряем токен молча (тот же принцип, что OTP-заглушка
-            # в `SignatureRequestService.challenge`).
+            # в `SignatureRequestService.challenge`). Инициатор получит ссылку
+            # через `reissue_link`.
             logger.warning(
                 "external_signer_token_undeliverable_from_workflow_action",
                 document_id=str(document.id),
@@ -808,9 +810,9 @@ class SignatureDocumentService:
         тело своего ответа (dop.md §10.4 фаза 2, тот же приём, что
         `IdentityService.issue_invite`). Если внешний подписант активируется
         не из `send()`, а из `_seal()` (следующая очередь `sequential`-цепочки
-        после чужой подписи) — раздать токен через API уже некому, и это
-        честно логируется как ограничение (см. комментарий ниже), а не молча
-        теряется.
+        после чужой подписи) — отдать токен в HTTP-ответе уже некому, это
+        честно логируется (см. комментарий ниже), а инициатор получает новую
+        ссылку через `reissue_link`.
         """
         now = dt.datetime.now(dt.UTC)
         revealed: dict[uuid.UUID, str] = {}
@@ -824,11 +826,7 @@ class SignatureDocumentService:
             request.status = SignatureRequestStatus.SENT.value
             request.sent_at = now
             if request.signer_type == SignerType.EXTERNAL.value:
-                token = secrets.token_urlsafe(32)
-                request.access_token_hash = hashlib.sha256(token.encode()).hexdigest()
-                ttl_days = self._settings.signature_token_ttl_days
-                request.token_expires_at = now + dt.timedelta(days=ttl_days)
-                revealed[request.id] = token
+                revealed[request.id] = self._issue_token(request, now)
             else:
                 await get_notification_service().notify_user(
                     self._session,
@@ -839,6 +837,67 @@ class SignatureDocumentService:
                     entity_id=request.id,
                 )
         return revealed
+
+    def _issue_token(self, request: SignatureRequest, now: dt.datetime) -> str:
+        """Новый токен внешнему подписанту. В БД остаётся только его sha256,
+        поэтому прежняя ссылка перестаёт работать."""
+        token = secrets.token_urlsafe(32)
+        request.access_token_hash = hashlib.sha256(token.encode()).hexdigest()
+        ttl_days = self._settings.signature_token_ttl_days
+        request.token_expires_at = now + dt.timedelta(days=ttl_days)
+        return token
+
+    async def reissue_link(self, request: SignatureRequest, *, principal: Principal) -> str:
+        """Выдаёт инициатору новую ссылку внешнему подписанту, пока запрос ждёт
+        подписи. Нужна, когда очередь `sequential` дошла до него из `_seal()`:
+        токен там сгенерирован, но отдать его некому."""
+        document = await self.get_or_404(request.document_id)
+        if not (principal.is_admin or document.created_by == principal.user_id):
+            raise ForbiddenError("Ссылку выдаёт инициатор документа или администратор")
+        if request.signer_type != SignerType.EXTERNAL.value:
+            raise ValidationError(
+                "Ссылка нужна только внешнему подписанту: внутренний подписывает в CRM"
+            )
+        waiting = (SignatureRequestStatus.SENT.value, SignatureRequestStatus.VIEWED.value)
+        if request.status not in waiting or document.status not in {
+            s.value for s in OPEN_DOCUMENT_STATUSES
+        }:
+            raise AppError(
+                ErrorCode.DOCUMENT_NOT_SIGNABLE,
+                "Запрос сейчас не ждёт подписи: ссылку выдать нельзя",
+                extra={"status": request.status},
+            )
+        old_expires_at = request.token_expires_at
+        token = self._issue_token(request, dt.datetime.now(dt.UTC))
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.SIGNATURE_LINK_REISSUED,
+            entity_type="signature_request",
+            entity_id=request.id,
+            changes={
+                "token_expires_at": {
+                    "old": old_expires_at.isoformat() if old_expires_at else None,
+                    "new": request.token_expires_at.isoformat(),
+                }
+            },
+        )
+        return token
+
+    async def signatures_by_document(
+        self, document_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, list[Signature]]:
+        """Подписи документов одним запросом, по порядку подписания."""
+        grouped: dict[uuid.UUID, list[Signature]] = {}
+        if not document_ids:
+            return grouped
+        rows = await self._session.execute(
+            select(Signature)
+            .where(Signature.document_id.in_(document_ids))
+            .order_by(Signature.signed_at)
+        )
+        for signature in rows.scalars():
+            grouped.setdefault(signature.document_id, []).append(signature)
+        return grouped
 
     async def void(
         self, document: SignatureDocument, *, principal: Principal, reason: str
@@ -966,7 +1025,7 @@ class SignatureRequestService:
             bucket=file.bucket,
             key=file.storage_key,
             expires_seconds=600,
-            filename=file.original_filename,
+            inline=True,
         )
         siblings = await SignatureDocumentService(self._session).list_requests(document.id)
         return SigningPageOut(
@@ -992,6 +1051,17 @@ class SignatureRequestService:
             my_status=request.status,
             agreement_text=AGREEMENT_TEXT,
         )
+
+    async def load_document_pdf(self, request: SignatureRequest) -> tuple[bytes, str]:
+        """PDF документа запроса и его имя — для просмотра с origin приложения."""
+        document = await self._session.get(SignatureDocument, request.document_id)
+        if document is None:
+            raise NotFoundError("Документ на подпись", request.document_id)
+        file = await self._session.get(File, document.file_id)
+        if file is None:
+            raise NotFoundError("Файл документа", document.file_id)
+        data = await download_object_bytes(bucket=file.bucket, key=file.storage_key)
+        return data, file.original_filename
 
     # --- OTP ---------------------------------------------------------------
 
@@ -1163,7 +1233,11 @@ class SignatureRequestService:
             # (sprint9-integration-implementation.md, где он же был впервые
             # замечен здесь и сознательно оставлен не исправленным).
             await self._session.commit()
-            raise AppError(ErrorCode.SIGNATURE_OTP_INVALID, "Код подтверждения неверен")
+            raise AppError(
+                ErrorCode.SIGNATURE_OTP_INVALID,
+                "Код подтверждения неверен",
+                extra={"attempts_left": max(otp.max_attempts - otp.attempts, 0)},
+            )
         otp.consumed_at = dt.datetime.now(dt.UTC)
         await self._session.flush()
 
@@ -1329,8 +1403,8 @@ class SignatureRequestService:
                 if revealed:
                     # Следующий подписант в цепочке активировался не из
                     # `send()`, отдать ему ссылку через HTTP-ответ некому —
-                    # тот же честно залогированный пробел, что в
-                    # `create_from_workflow_action` (см. комментарий там).
+                    # инициатор выдаёт её сам: `POST /signature-requests/{id}/
+                    # reissue-link` (`reissue_link`).
                     logger.warning(
                         "external_signer_token_undeliverable_mid_chain",
                         document_id=str(document.id),
@@ -1549,6 +1623,17 @@ class SignatureRequestService:
         return request
 
 
+def pdf_inline_headers(filename: str) -> dict[str, str]:
+    """Заголовки ответа с PDF «для просмотра»: `inline`, имя — по RFC 5987 (кириллица),
+    без кэширования (документ подписывают, чужой прокси хранить его незачем)."""
+    disposition = f"inline; filename=\"document.pdf\"; filename*=UTF-8''{quote(filename, safe='')}"
+    return {
+        "Content-Disposition": disposition,
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+    }
+
+
 def compute_signature_value(
     *, secret: str, content_hash: str, signer_id: str, signed_at_iso: str, nonce: str
 ) -> str:
@@ -1654,9 +1739,19 @@ class VerifyService:
 
     async def verify_by_file(self, file_bytes: bytes) -> dict[str, Any]:
         digest = hashlib.sha256(file_bytes).hexdigest()
+        # Проверяют не только исходный PDF (`content_hash` подписи), но и копию со
+        # штампом `signed-{id}.pdf` — файл документа в `signed_file_id`: у него
+        # другой хэш, а подписи те же.
+        stamped_documents = (
+            select(SignatureDocument.id)
+            .join(File, File.id == SignatureDocument.signed_file_id)
+            .where(File.sha256 == digest)
+        )
         stmt = (
             select(Signature)
-            .where(Signature.content_hash == digest)
+            .where(
+                or_(Signature.content_hash == digest, Signature.document_id.in_(stamped_documents))
+            )
             .order_by(Signature.signed_at.desc())
         )
         signature = (await self._session.execute(stmt)).scalars().first()

@@ -447,7 +447,11 @@ async def list_products(
 
 
 @products_router.post(
-    "", summary="Создать продукт", response_model=ProductOut, status_code=status.HTTP_201_CREATED
+    "",
+    summary="Создать продукт",
+    description="`valid_from` не позже `valid_to`, иначе 422. Роль: запись каталога.",
+    response_model=ProductOut,
+    status_code=status.HTTP_201_CREATED,
 )
 async def create_product(
     payload: ProductCreateRequest, session: DbSession, principal: CatalogWrite
@@ -456,7 +460,15 @@ async def create_product(
     return ProductOut.model_validate(product)
 
 
-@products_router.patch("/{product_id}", summary="Обновить продукт", response_model=ProductOut)
+@products_router.patch(
+    "/{product_id}",
+    summary="Обновить продукт",
+    description=(
+        "`valid_from` не позже `valid_to` (новая дата сверяется с сохранённой), "
+        "иначе 422. Роль: запись каталога."
+    ),
+    response_model=ProductOut,
+)
 async def update_product(
     payload: ProductUpdateRequest,
     session: DbSession,
@@ -475,13 +487,23 @@ async def update_product(
 # =============================================================================
 
 
-@directions_router.get("", summary="Иерархия ИТ-направлений", response_model=DirectionListResponse)
+@directions_router.get(
+    "",
+    summary="Иерархия ИТ-направлений",
+    description=(
+        "Курсорная пагинация. `all=true` отдаёт весь справочник одним ответом, "
+        "`limit` и `cursor` игнорируются — для построения дерева целиком. "
+        "Роль: чтение каталога."
+    ),
+    response_model=DirectionListResponse,
+)
 async def list_directions(
     session: DbSession,
     page: Pagination,
     principal: CatalogRead,
     parent_id: Annotated[uuid.UUID | None, Query()] = None,
     q: Annotated[str | None, Query()] = None,
+    return_all: Annotated[bool, Query(alias="all")] = False,
 ) -> DirectionListResponse:
     filters = DirectionFilters(q=q, parent_id=parent_id)
     stmt = (
@@ -489,6 +511,9 @@ async def list_directions(
         .list_query(filters)
         .order_by(Direction.created_at.desc(), Direction.id.desc())
     )
+    if return_all:
+        everything = (await session.execute(stmt)).scalars().all()
+        return DirectionListResponse(items=[DirectionOut.model_validate(d) for d in everything])
     cursor = page.decoded_cursor
     if cursor:
         stmt = stmt.where(keyset_before(Direction.created_at, Direction.id, cursor))
@@ -500,6 +525,7 @@ async def list_directions(
 @directions_router.post(
     "",
     summary="Создать направление",
+    description="Родитель (`parent_id`) должен существовать, иначе 404. Роль: запись каталога.",
     response_model=DirectionOut,
     status_code=status.HTTP_201_CREATED,
 )
@@ -511,7 +537,14 @@ async def create_direction(
 
 
 @directions_router.patch(
-    "/{direction_id}", summary="Обновить направление", response_model=DirectionOut
+    "/{direction_id}",
+    summary="Обновить направление",
+    description=(
+        "Новый родитель должен существовать (404) и не замыкать цикл: направление "
+        "не может стать потомком самого себя или своего потомка (422). Роль: запись "
+        "каталога."
+    ),
+    response_model=DirectionOut,
 )
 async def update_direction(
     payload: DirectionUpdateRequest,

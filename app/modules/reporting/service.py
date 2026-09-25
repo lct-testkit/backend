@@ -170,6 +170,24 @@ class ReportJobService:
         if kind not in REPORT_BUILDERS:
             raise AppError(ErrorCode.VALIDATION, f"Неизвестный вид отчёта: {kind!r}")
 
+        # Лимит личный: `reports_max_concurrent` ограничивает и воркер, но очередь одного
+        # сотрудника не должна вытеснять отчёты остальных.
+        limit = get_settings().reports_max_concurrent
+        unfinished = await self._session.scalar(
+            select(func.count(ReportJob.id)).where(
+                ReportJob.requested_by == principal.user_id,
+                ReportJob.status.in_(
+                    [ReportJobStatus.QUEUED.value, ReportJobStatus.PROCESSING.value]
+                ),
+            )
+        )
+        if (unfinished or 0) >= limit:
+            raise AppError(
+                ErrorCode.REPORTS_LIMIT_EXCEEDED,
+                f"Не завершено отчётов: {unfinished} (лимит {limit}). Дождитесь готовности "
+                "запущенных и повторите",
+            )
+
         params = {**template.default_params, **(payload.params or {})}
 
         job = ReportJob(
@@ -245,6 +263,9 @@ class ReportJobService:
         )
 
         job.status = ReportJobStatus.COMPLETED.value
+        # Генерация идёт одной транзакцией: промежуточных значений клиент не увидит,
+        # только 0 до готовности и 100 после.
+        job.progress_pct = 100
         job.file_id = file.id
         job.row_count = len(dataset.rows)
         job.finished_at = dt.datetime.now(dt.UTC)
@@ -297,11 +318,22 @@ class ReportJobService:
 
     async def download(self, job: ReportJob, principal: Principal) -> tuple[str, dt.datetime]:
         self.ensure_read_access(job, principal)
-        if job.status != ReportJobStatus.COMPLETED.value or job.file_id is None:
-            raise AppError(ErrorCode.VALIDATION, "Отчёт ещё не готов")
-        file = await self._session.get(File, job.file_id)
-        if file is None or file.status != FileStatus.READY.value:
-            raise AppError(ErrorCode.VALIDATION, "Файл отчёта недоступен (истёк срок хранения)")
+        if job.status == ReportJobStatus.FAILED.value:
+            raise AppError(
+                ErrorCode.REPORT_NOT_READY,
+                "Отчёт не сформирован из-за ошибки: запустите его заново",
+            )
+        if job.status != ReportJobStatus.COMPLETED.value:
+            raise AppError(ErrorCode.REPORT_NOT_READY)
+        # Ретеншен (`expire_report_files`) удаляет файл, а запись оставляет `completed` с
+        # `expires_at` — по нему же клиент показывает «срок хранения истёк».
+        file = await self._session.get(File, job.file_id) if job.file_id is not None else None
+        expired = job.expires_at is not None and job.expires_at < dt.datetime.now(dt.UTC)
+        if file is None or file.status != FileStatus.READY.value or expired:
+            raise AppError(
+                ErrorCode.REPORT_EXPIRED,
+                "Срок хранения результата отчёта истёк: запустите отчёт заново",
+            )
 
         settings = get_settings()
         ttl_seconds = settings.reports_link_ttl_minutes * 60

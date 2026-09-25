@@ -27,14 +27,32 @@ from __future__ import annotations
 import datetime as dt
 import json
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Protocol, runtime_checkable
 
 import structlog
-from sqlalchemy import ColumnElement, Select, exists, false, func, or_, select, text, update
+from sqlalchemy import (
+    ColumnElement,
+    Date,
+    DateTime,
+    Numeric,
+    Select,
+    and_,
+    exists,
+    false,
+    func,
+    or_,
+    select,
+    text,
+    true,
+    update,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
 
+from app.core.db import run_after_commit
 from app.core.errors import (
     AppError,
     ErrorCode,
@@ -44,7 +62,8 @@ from app.core.errors import (
     ValidationError,
     VersionConflictError,
 )
-from app.core.permissions import DealScope, deal_scope_for
+from app.core.pagination import Cursor, keyset_after, keyset_before
+from app.core.permissions import DealScope, Permission, deal_scope_for, has_permission
 from app.core.redis_client import (
     RECENT_MAX_ITEMS,
     TTL_DEAL_CARD,
@@ -72,6 +91,7 @@ from app.modules.crm.models import (
     Task,
     TaskStatus,
 )
+from app.modules.files.models import Attachment
 from app.modules.identity.models import Role, Team, User
 from app.modules.identity.service import IdentityService
 from app.modules.integration.service import get_outbox_service
@@ -84,6 +104,7 @@ from app.modules.workflow.models import (
     Workflow,
     WorkflowState,
     WorkflowStatus,
+    WorkflowTransition,
 )
 from app.modules.workflow.service import get_cached_published_graph
 
@@ -405,8 +426,15 @@ async def count_all_deals_for_organization(
 class StatusWorkload:
     supported: bool = False
     active_count: int = 0
+    #: Сделки без обязательных полей целевого статуса (не больше `PROBLEM_DEALS_LIMIT`).
     problem_deals: list[dict[str, Any]] = field(default_factory=list)
+    problem_count: int = 0
     sla_affected: int = 0
+
+
+#: Сколько проблемных сделок показывает превью архивирования: полный список нужен мастеру
+#: как ориентир, а не как выгрузка.
+PROBLEM_DEALS_LIMIT = 100
 
 
 @dataclass(slots=True)
@@ -419,7 +447,10 @@ class MappingBatchResult:
 @runtime_checkable
 class DealStatusService(Protocol):
     async def status_workload(
-        self, session: AsyncSession, status_id: uuid.UUID
+        self,
+        session: AsyncSession,
+        status_id: uuid.UUID,
+        target_status_id: uuid.UUID | None = None,
     ) -> StatusWorkload: ...
 
     async def migrate_batch(
@@ -435,7 +466,12 @@ class DealStatusService(Protocol):
 
 
 class NullDealStatusService:
-    async def status_workload(self, session: AsyncSession, status_id: uuid.UUID) -> StatusWorkload:
+    async def status_workload(
+        self,
+        session: AsyncSession,
+        status_id: uuid.UUID,
+        target_status_id: uuid.UUID | None = None,
+    ) -> StatusWorkload:
         return StatusWorkload(supported=False)
 
     async def migrate_batch(
@@ -463,18 +499,48 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
-def _field_present(deal: Deal, field_name: str) -> bool:
-    """Проверка `required_fields` целевого статуса при миграции (раздел 4.11
-    п.4: «какие обязательные поля целевого статуса у них не заполнены»)."""
+def _field_missing_clause(field_name: str) -> ColumnElement[bool]:
+    """SQL-двойник отрицания `_field_present`: у сделки этого поля нет."""
     if field_name.startswith("custom_fields."):
-        return bool(deal.custom_fields.get(field_name.removeprefix("custom_fields.")))
+        value = Deal.custom_fields[field_name.removeprefix("custom_fields.")].as_string()
+        return or_(value.is_(None), value == "")
+    column = getattr(Deal, field_name, None)
+    if not isinstance(column, InstrumentedAttribute):
+        return true()  # `getattr(deal, имя, None)` для такого имени пуст
+    return column.is_(None)
+
+
+def _product_view(row: DealProduct) -> dict[str, Any]:
+    """Строка продуктов сделки для `audit_log.changes` (JSONB без Decimal и UUID)."""
+    return {
+        "product_id": str(row.product_id),
+        "quantity": row.quantity,
+        "price": _json_safe(row.price),
+        "discount_pct": _json_safe(row.discount_pct),
+        "total": _json_safe(row.total),
+    }
+
+
+def _field_present(deal: Deal, field_name: str) -> bool:
+    """Проверка `required_fields` целевого статуса: при переходе сделки и при
+    миграции (раздел 4.11 п.4: «какие обязательные поля целевого статуса у них
+    не заполнены»). Заполненное поле — не пустое: `0` и `false` в
+    пользовательском поле это значение, а не пропуск."""
+    if field_name.startswith("custom_fields."):
+        value = deal.custom_fields.get(field_name.removeprefix("custom_fields."))
+        return value is not None and value != ""
     return getattr(deal, field_name, None) is not None
 
 
 class RealDealStatusService:
     """Реализация контракта `DealStatusService` для мастера сопоставления."""
 
-    async def status_workload(self, session: AsyncSession, status_id: uuid.UUID) -> StatusWorkload:
+    async def status_workload(
+        self,
+        session: AsyncSession,
+        status_id: uuid.UUID,
+        target_status_id: uuid.UUID | None = None,
+    ) -> StatusWorkload:
         active_count = await session.scalar(
             select(func.count())
             .select_from(Deal)
@@ -489,16 +555,56 @@ class RealDealStatusService:
                 Deal.sla_due_at.is_not(None),
             )
         )
-        # `problem_deals` в превью пуст: целевой статус ещё не выбран на этом
-        # шаге мастера (раздел 4.11 п.2-3 идут после `status_impact`), значит
-        # required_fields сверять не с чем. Список проблемных сделок строится
-        # по факту в `migrate_batch`, когда цель уже известна.
-        return StatusWorkload(
+        workload = StatusWorkload(
             supported=True,
             active_count=int(active_count or 0),
-            problem_deals=[],
             sla_affected=int(sla_affected or 0),
         )
+        # Без целевого статуса (первый шаг мастера, раздел 4.11 п.2-3) сверять `required_fields`
+        # не с чем: проблемные сделки считаются, только когда цель известна.
+        if target_status_id is not None:
+            await self._fill_problem_deals(session, workload, status_id, target_status_id)
+        return workload
+
+    async def _fill_problem_deals(
+        self,
+        session: AsyncSession,
+        workload: StatusWorkload,
+        status_id: uuid.UUID,
+        target_status_id: uuid.UUID,
+    ) -> None:
+        """Сделки статуса, у которых нет обязательных полей целевого: их `migrate_batch`
+        отправит в резервный статус. Отбор — в SQL, а не по всем сделкам в памяти."""
+        target = await session.get(WorkflowStatus, target_status_id)
+        required = list(target.required_fields or []) if target is not None else []
+        if not required:
+            return
+        problem = select(Deal).where(
+            Deal.status_id == status_id,
+            Deal.deleted_at.is_(None),
+            or_(*(_field_missing_clause(name) for name in required)),
+        )
+        workload.problem_count = int(
+            await session.scalar(select(func.count()).select_from(problem.subquery())) or 0
+        )
+        rows = (
+            (
+                await session.execute(
+                    problem.order_by(Deal.created_at, Deal.id).limit(PROBLEM_DEALS_LIMIT)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        workload.problem_deals = [
+            {
+                "id": str(deal.id),
+                "number": deal.number,
+                "title": deal.title,
+                "missing_fields": [name for name in required if not _field_present(deal, name)],
+            }
+            for deal in rows
+        ]
 
     async def migrate_batch(
         self,
@@ -697,10 +803,10 @@ def _apply_sla_for_status(
 async def build_deal_context(session: AsyncSession, deal: Deal) -> dict[str, Any]:
     """Собирает контекст для `dsl.evaluate`/`dsl.resolve_field`.
 
-    `attachments` — пустой словарь: модуль files (спринт 4) ещё не
-    существует, а DSL по конструкции не падает на отсутствующем поле (раздел
-    8), значит `attachments.contract` просто не выполнится, а не уронит
-    переход с 500.
+    `attachments` — файлы, привязанные к сделке, по категориям: условие
+    `attachments.contract exists` выполняется, когда у сделки есть хотя бы одно
+    неудалённое вложение этой категории. Категории без вложений в словаре нет,
+    а DSL по конструкции не падает на отсутствующем поле (раздел 8).
     """
     open_tasks = await session.scalar(
         select(func.count())
@@ -714,6 +820,16 @@ async def build_deal_context(session: AsyncSession, deal: Deal) -> dict[str, Any
     products_count = await session.scalar(
         select(func.count()).select_from(DealProduct).where(DealProduct.deal_id == deal.id)
     )
+    attachments: dict[str, list[str]] = {}
+    attachment_rows = await session.execute(
+        select(Attachment.category, Attachment.file_id).where(
+            Attachment.entity_type == "deal",
+            Attachment.entity_id == deal.id,
+            Attachment.deleted_at.is_(None),
+        )
+    )
+    for category, file_id in attachment_rows.all():
+        attachments.setdefault(category, []).append(str(file_id))
     return {
         "amount": deal.amount,
         "currency": deal.currency,
@@ -726,7 +842,7 @@ async def build_deal_context(session: AsyncSession, deal: Deal) -> dict[str, Any
         "signature_status": deal.signature_status,
         "students_planned": deal.students_planned,
         "custom_fields": deal.custom_fields or {},
-        "attachments": {},
+        "attachments": attachments,
         "tasks": {"open_count": int(open_tasks or 0)},
         "products": {"count": int(products_count or 0)},
     }
@@ -811,6 +927,23 @@ async def set_cached_deal_card(deal_id: uuid.UUID, version: int, payload: dict[s
         logger.warning("deal_card_cache_write_failed")
 
 
+async def invalidate_deal_card(deal_id: uuid.UUID, version: int) -> None:
+    try:
+        await get_redis().delete(key_deal_card(deal_id, version))
+    except Exception:  # noqa: BLE001 — кэш не источник истины
+        logger.warning("deal_card_cache_invalidate_failed")
+
+
+async def drop_deal_card_after_commit(session: AsyncSession, deal_id: uuid.UUID) -> None:
+    """Комментарии и задачи не меняют `version` сделки, а значит, и ключ карточки, но
+    меняют её счётчики: без сброса они устаревают до конца TTL. Сбрасываем после
+    коммита — до него параллельное чтение успело бы закэшировать старые числа."""
+    deal = await session.get(Deal, deal_id)
+    if deal is not None:
+        version = deal.version
+        run_after_commit(session, lambda: invalidate_deal_card(deal_id, version))
+
+
 # =============================================================================
 # Фильтры списков
 # =============================================================================
@@ -818,7 +951,9 @@ async def set_cached_deal_card(deal_id: uuid.UUID, version: int, payload: dict[s
 
 @dataclass(slots=True)
 class DealFilters:
-    status_id: uuid.UUID | None = None
+    status_ids: list[uuid.UUID] | None = None
+    #: `True` — закрытые (won/lost/parked, есть `closed_at`), `False` — открытые.
+    is_closed: bool | None = None
     workflow_id: uuid.UUID | None = None
     deal_type: str | None = None
     organization_id: uuid.UUID | None = None
@@ -844,6 +979,114 @@ class TaskFilters:
     priority: str | None = None
     due_before: dt.datetime | None = None
     overdue: bool = False
+
+
+@dataclass(slots=True)
+class HistoryPage:
+    statuses: list[DealStatusHistory]
+    events: list[DealEvent]
+    next_statuses_cursor: str | None = None
+    next_events_cursor: str | None = None
+
+
+async def _ascending_page(
+    session: AsyncSession,
+    stmt: Select[Any],
+    sort_column: Any,
+    id_column: Any,
+    *,
+    limit: int | None,
+    cursor: Cursor | None,
+) -> tuple[list[Any], str | None]:
+    """Выборка по возрастанию `(sort_column, id)`: строки после курсора, не больше `limit`
+    (без него — все) и курсор следующей страницы, если она есть."""
+    stmt = stmt.order_by(sort_column, id_column)
+    if cursor is not None:
+        stmt = stmt.where(keyset_after(sort_column, id_column, cursor))
+    if limit is not None:
+        stmt = stmt.limit(limit + 1)
+    rows = list((await session.execute(stmt)).scalars().all())
+    if limit is None or len(rows) <= limit:
+        return rows, None
+    rows = rows[:limit]
+    return rows, Cursor(value=getattr(rows[-1], sort_column.key), id=rows[-1].id).encode()
+
+
+#: Сортировка списка сделок (`sort=поле`, минус в начале — по убыванию). Строки без значения
+#: (`amount`, `sla_due_at`, `expected_close_date` бывают пустыми) всегда в конце.
+_DEAL_SORT_COLUMNS: dict[str, Any] = {
+    "created_at": Deal.created_at,
+    "updated_at": Deal.updated_at,
+    "status_changed_at": Deal.status_changed_at,
+    "number": Deal.number,
+    "title": Deal.title,
+    "amount": Deal.amount,
+    "expected_close_date": Deal.expected_close_date,
+    "sla_due_at": Deal.sla_due_at,
+}
+_DEFAULT_DEAL_SORT = "-created_at"
+
+
+@dataclass(slots=True)
+class DealSort:
+    field: str
+    descending: bool
+
+
+def parse_deal_sort(raw: str | None) -> DealSort:
+    value = raw or _DEFAULT_DEAL_SORT
+    name = value.removeprefix("-")
+    if name not in _DEAL_SORT_COLUMNS:
+        allowed = ", ".join(_DEAL_SORT_COLUMNS)
+        raise ValidationError(
+            f"Сортировка по полю {name!r} не поддерживается; допустимы {allowed}",
+            [FieldError(field="sort", reason=f"допустимы {allowed}; минус — по убыванию")],
+        )
+    return DealSort(field=name, descending=value.startswith("-"))
+
+
+def _sort_cursor_value(column: Any, raw: Any) -> Any:
+    """Значение курсора обратно в тип колонки: в курсоре (JSON) оно строка."""
+    if raw is None:
+        return None
+    try:
+        if isinstance(column.type, DateTime):
+            return dt.datetime.fromisoformat(str(raw))
+        if isinstance(column.type, Date):
+            return dt.date.fromisoformat(str(raw))
+        if isinstance(column.type, Numeric):
+            return Decimal(str(raw))
+    except (ValueError, ArithmeticError):
+        raise ValidationError(
+            "Курсор повреждён или устарел",
+            [FieldError(field="cursor", reason="Некорректное значение курсора")],
+        ) from None
+    return raw
+
+
+def apply_deal_order(stmt: Select[Any], sort: DealSort, cursor: Cursor | None) -> Select[Any]:
+    """Порядок списка сделок и строки строго после курсора. Порядок по умолчанию (новые
+    сверху) — кортежным сравнением, как везде; остальные — с пустыми значениями в конце."""
+    if sort.field == "created_at" and sort.descending:
+        stmt = stmt.order_by(Deal.created_at.desc(), Deal.id.desc())
+        return (
+            stmt if cursor is None else stmt.where(keyset_before(Deal.created_at, Deal.id, cursor))
+        )
+
+    column = _DEAL_SORT_COLUMNS[sort.field]
+    if sort.descending:
+        stmt = stmt.order_by(column.desc().nulls_last(), Deal.id.desc())
+    else:
+        stmt = stmt.order_by(column.asc().nulls_last(), Deal.id.asc())
+    if cursor is None:
+        return stmt
+
+    value = _sort_cursor_value(column, cursor.value)
+    beyond_id = Deal.id < cursor.id if sort.descending else Deal.id > cursor.id
+    if value is None:  # курсор уже среди строк без значения
+        return stmt.where(and_(column.is_(None), beyond_id))
+    beyond = column < value if sort.descending else column > value
+    return stmt.where(or_(beyond, and_(column == value, beyond_id), column.is_(None)))
 
 
 # =============================================================================
@@ -893,6 +1136,26 @@ class TransitionAvailability:
     satisfied: bool
     conditions: list[TransitionConditionView]
     actions: list[dict[str, Any]]
+    conditions_tree: dict[str, Any] = field(default_factory=dict)
+
+
+def _condition_tree_view(node: Any, context: dict[str, Any]) -> dict[str, Any]:
+    """Дерево условий перехода с `satisfied` на каждом узле (и `actual` в листьях) — чтобы
+    чек-листу было видно, что достаточно одного условия из `any`. Решает сервер, а не клиент
+    (раздел 6.6). Пустое условие — пустой словарь."""
+    if not isinstance(node, dict) or not node:
+        return {}
+    for group in ("all", "any"):
+        if group in node:
+            return {
+                group: [_condition_tree_view(branch, context) for branch in node[group]],
+                "satisfied": dsl.evaluate(node, context).ok,
+            }
+    return {
+        **node,
+        "actual": dsl.resolve_field(str(node.get("field")), context),
+        "satisfied": dsl.evaluate(node, context).ok,
+    }
 
 
 class DealService:
@@ -908,8 +1171,12 @@ class DealService:
         if clause is not None:
             stmt = stmt.where(clause)
 
-        if filters.status_id:
-            stmt = stmt.where(Deal.status_id == filters.status_id)
+        if filters.status_ids:
+            stmt = stmt.where(Deal.status_id.in_(filters.status_ids))
+        if filters.is_closed is not None:
+            stmt = stmt.where(
+                Deal.closed_at.is_not(None) if filters.is_closed else Deal.closed_at.is_(None)
+            )
         if filters.workflow_id:
             stmt = stmt.where(Deal.workflow_id == filters.workflow_id)
         if filters.deal_type:
@@ -958,6 +1225,41 @@ class DealService:
             pattern = f"%{filters.q.strip()}%"
             stmt = stmt.where(Deal.title.ilike(pattern) | Deal.number.ilike(pattern))
         return stmt
+
+    async def party_names(
+        self, principal: Principal, deals: Sequence[Deal]
+    ) -> tuple[dict[uuid.UUID, str], dict[uuid.UUID, str]]:
+        """Названия организаций и имена контактов сделок: по запросу на каждый тип, а не на
+        каждую сделку. Контакт — ПДн: без права `contact:read` его имени нет."""
+        organization_ids = {d.organization_id for d in deals if d.organization_id is not None}
+        contact_ids = {d.contact_id for d in deals if d.contact_id is not None}
+        organizations: dict[uuid.UUID, str] = {}
+        contacts: dict[uuid.UUID, str] = {}
+        if organization_ids and has_permission(principal.role, Permission.ORG_READ):
+            rows = await self._session.execute(
+                select(Organization.id, Organization.name).where(
+                    Organization.id.in_(organization_ids)
+                )
+            )
+            organizations = {row.id: row.name for row in rows}
+        if contact_ids and has_permission(principal.role, Permission.CONTACT_READ):
+            rows = await self._session.execute(
+                select(
+                    Contact.id, Contact.last_name, Contact.first_name, Contact.middle_name
+                ).where(Contact.id.in_(contact_ids))
+            )
+            contacts = {
+                row.id: " ".join(p for p in (row.last_name, row.first_name, row.middle_name) if p)
+                for row in rows
+            }
+        return organizations, contacts
+
+    async def count(self, stmt: Select[Any]) -> int:
+        """Сколько строк в выборке — без порядка и курсора: `total` списка."""
+        total = await self._session.scalar(
+            select(func.count()).select_from(stmt.order_by(None).subquery())
+        )
+        return int(total or 0)
 
     async def get_or_404(self, deal_id: uuid.UUID, principal: Principal) -> Deal:
         deal = await self._session.get(Deal, deal_id)
@@ -1019,6 +1321,39 @@ class DealService:
         if found is None or getattr(found, "deleted_at", None) is not None:
             raise NotFoundError(label, ref_id)
 
+    async def _resolve_owner(self, principal: Principal, owner_id: uuid.UUID | None) -> uuid.UUID:
+        """Ответственный новой сделки: без `owner_id` или свой — сам вызывающий. Чужого
+        назначает ADMIN и интеграция (вебхук CMS сам выбирает КАМа), HEAD — только из своей
+        команды, KAM не назначает никого. Раньше `owner_id` принимался как есть: КАМ заводил
+        сделки «на коллегу», а несуществующий id доходил до FK и давал 500.
+
+        Тому, кому чужого назначать нельзя, отказ (403) одинаков для любого id — так по
+        ответу не узнать, есть ли такой сотрудник."""
+        if owner_id is None or owner_id == principal.user_id:
+            return principal.user_id
+        if principal.role == Role.HEAD.value:
+            team_ids = (
+                await IdentityService(self._session).team_member_ids(principal.team_id)
+                if principal.team_id is not None
+                else []
+            )
+            if owner_id not in team_ids:
+                raise ForbiddenError(
+                    "Назначить ответственным можно только сотрудника своей команды"
+                )
+        elif not (principal.is_admin or principal.role == Role.INTEGRATION.value):
+            raise ForbiddenError("Заводить сделку на другого сотрудника может только руководитель")
+
+        owner = await self._session.get(User, owner_id)
+        if owner is None:
+            raise NotFoundError("Пользователь", owner_id)
+        if not owner.is_active:
+            raise ValidationError(
+                "Ответственным можно назначить только активного сотрудника",
+                [FieldError(field="owner_id", reason="сотрудник неактивен")],
+            )
+        return owner.id
+
     async def create(self, principal: Principal, payload: Any) -> Deal:
         workflow = await self._resolve_workflow(payload.deal_type, payload.workflow_id)
         graph = await get_cached_published_graph(workflow)
@@ -1028,6 +1363,7 @@ class DealService:
         if initial is None:
             raise AppError(ErrorCode.VALIDATION, "У воронки нет начального статуса")
 
+        owner_id = await self._resolve_owner(principal, payload.owner_id)
         await self._ensure_ref_exists(Organization, payload.organization_id, "Организация")
         await self._ensure_ref_exists(Contact, payload.contact_id, "Контакт")
         for item in payload.products:
@@ -1058,7 +1394,7 @@ class DealService:
             status_id=uuid.UUID(initial["id"]),
             organization_id=payload.organization_id,
             contact_id=payload.contact_id,
-            owner_id=payload.owner_id or principal.user_id,
+            owner_id=owner_id,
             created_by=principal.user_id,
             amount=payload.amount,
             currency=payload.currency or "RUB",
@@ -1180,6 +1516,46 @@ class DealService:
         )
         return deal
 
+    async def replace_products(
+        self, deal: Deal, items: list[Any], *, expected_version: int
+    ) -> list[DealProduct]:
+        """Заменяет список продуктов сделки целиком. Версия сделки растёт: продукты входят
+        в карточку, а её кэш привязан к версии."""
+        if deal.version != expected_version:
+            raise VersionConflictError(deal.version, {"title": deal.title})
+        if deal.deleted_at is not None:
+            raise AppError(ErrorCode.DEAL_NOT_ACTIVE, "Сделка удалена")
+        for item in items:
+            await self._ensure_ref_exists(Product, item.product_id, "Продукт")
+
+        old = await self.load_products(deal.id)
+        old_view = [_product_view(row) for row in old]
+        for row in old:
+            await self._session.delete(row)
+        await self._session.flush()
+
+        rows = [
+            DealProduct(
+                deal_id=deal.id,
+                product_id=item.product_id,
+                quantity=item.quantity,
+                price=item.price,
+                discount_pct=item.discount_pct,
+                total=item.total,
+            )
+            for item in items
+        ]
+        self._session.add_all(rows)
+        deal.version += 1
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.DEAL_UPDATED,
+            entity_type="deal",
+            entity_id=deal.id,
+            changes={"products": {"old": old_view, "new": [_product_view(row) for row in rows]}},
+        )
+        return rows
+
     # --- Переходы ------------------------------------------------------------
 
     async def _load_graph(self, deal: Deal) -> tuple[Workflow, dict[str, Any]]:
@@ -1223,6 +1599,7 @@ class DealService:
                     satisfied=role_ok and evaluation.ok,
                     conditions=conditions_view,
                     actions=list(t.get("actions") or []),
+                    conditions_tree=_condition_tree_view(t["conditions"], context),
                 )
             )
         return results
@@ -1308,6 +1685,21 @@ class DealService:
         to_status = statuses_by_id.get(str(to_status_id))
         if to_status is None:
             raise NotFoundError("Статус воронки", to_status_id)
+
+        # `required_fields` целевого статуса — отдельно от `conditions` (админ может задать
+        # только их). Условия проверены выше и остаются первыми: сид-воронки дублируют ими
+        # поля закрытия, и фронтенд ждёт от них CRM-1201.
+        missing = [f for f in to_status.get("required_fields") or [] if not _field_present(deal, f)]
+        if missing:
+            raise AppError(
+                ErrorCode.TRANSITION_FIELDS_REQUIRED,
+                f"Для перехода в статус «{to_status['name']}» заполните поля: {', '.join(missing)}",
+                errors=[
+                    FieldError(field=name, reason="обязательно для целевого статуса")
+                    for name in missing
+                ],
+                extra={"missing_fields": missing},
+            )
         from_status = statuses_by_id.get(str(deal.status_id))
 
         now = dt.datetime.now(dt.UTC)
@@ -1326,13 +1718,20 @@ class DealService:
         if to_status["type"] in _TERMINAL_TYPE_VALUES:
             deal.closed_at = now
 
+        # Сделка живёт по снимку, где переход ещё есть, а из черновика его могли убрать (сделок
+        # по нему не было — удалить можно): тогда ссылаться истории не на что.
+        transition_id: uuid.UUID | None = uuid.UUID(transition["id"])
+        if not await self._session.scalar(
+            select(WorkflowTransition.id).where(WorkflowTransition.id == transition_id)
+        ):
+            transition_id = None
         self._session.add(
             DealStatusHistory(
                 deal_id=deal.id,
                 from_status_id=previous_status_id,
                 to_status_id=deal.status_id,
                 changed_by=principal.user_id,
-                transition_id=uuid.UUID(transition["id"]),
+                transition_id=transition_id,
                 reason=HistoryReason.MANUAL.value,
                 comment=comment,
                 duration_in_prev=duration_in_prev,
@@ -1597,30 +1996,33 @@ class DealService:
 
     # --- История ---------------------------------------------------------
 
-    async def history(self, deal_id: uuid.UUID) -> tuple[list[DealStatusHistory], list[DealEvent]]:
-        statuses = (
-            (
-                await self._session.execute(
-                    select(DealStatusHistory)
-                    .where(DealStatusHistory.deal_id == deal_id)
-                    .order_by(DealStatusHistory.changed_at)
-                )
-            )
-            .scalars()
-            .all()
+    async def history(
+        self,
+        deal_id: uuid.UUID,
+        *,
+        limit: int | None = None,
+        statuses_cursor: Cursor | None = None,
+        events_cursor: Cursor | None = None,
+    ) -> HistoryPage:
+        """История статусов и лента событий; без `limit` — целиком. Два списка листаются
+        независимо, у каждого свой курсор."""
+        statuses, next_statuses = await _ascending_page(
+            self._session,
+            select(DealStatusHistory).where(DealStatusHistory.deal_id == deal_id),
+            DealStatusHistory.changed_at,
+            DealStatusHistory.id,
+            limit=limit,
+            cursor=statuses_cursor,
         )
-        events = (
-            (
-                await self._session.execute(
-                    select(DealEvent)
-                    .where(DealEvent.deal_id == deal_id)
-                    .order_by(DealEvent.created_at)
-                )
-            )
-            .scalars()
-            .all()
+        events, next_events = await _ascending_page(
+            self._session,
+            select(DealEvent).where(DealEvent.deal_id == deal_id),
+            DealEvent.created_at,
+            DealEvent.id,
+            limit=limit,
+            cursor=events_cursor,
         )
-        return list(statuses), list(events)
+        return HistoryPage(statuses, events, next_statuses, next_events)
 
     # --- Счётчики карточки -------------------------------------------------
 
@@ -1741,19 +2143,21 @@ class CommentService:
         self._session = session
         self._audit = AuditService(session)
 
-    async def list(self, deal_id: uuid.UUID) -> list[DealComment]:
-        rows = (
-            (
-                await self._session.execute(
-                    select(DealComment)
-                    .where(DealComment.deal_id == deal_id, DealComment.deleted_at.is_(None))
-                    .order_by(DealComment.created_at)
-                )
-            )
-            .scalars()
-            .all()
+    async def list(
+        self, deal_id: uuid.UUID, *, limit: int | None = None, cursor: Cursor | None = None
+    ) -> tuple[list[DealComment], str | None]:
+        """Комментарии в хронологическом порядке и курсор следующей страницы; без `limit` —
+        все."""
+        return await _ascending_page(
+            self._session,
+            select(DealComment).where(
+                DealComment.deal_id == deal_id, DealComment.deleted_at.is_(None)
+            ),
+            DealComment.created_at,
+            DealComment.id,
+            limit=limit,
+            cursor=cursor,
         )
-        return list(rows)
 
     async def get_or_404(self, comment_id: uuid.UUID) -> DealComment:
         comment = await self._session.get(DealComment, comment_id)
@@ -1792,6 +2196,7 @@ class CommentService:
             entity_id=comment.id,
             changes={"deal_id": {"old": None, "new": str(deal.id)}},
         )
+        await drop_deal_card_after_commit(self._session, deal.id)
         return comment
 
     async def update(self, comment: DealComment, principal: Principal, *, body: str) -> DealComment:
@@ -1833,6 +2238,7 @@ class CommentService:
             entity_id=comment.id,
             changes={"reason": {"old": None, "new": reason}},
         )
+        await drop_deal_card_after_commit(self._session, comment.deal_id)
 
 
 # =============================================================================
@@ -1866,6 +2272,15 @@ class TaskService:
                 Task.due_at < dt.datetime.now(dt.UTC), Task.status.in_(OPEN_TASK_STATUSES)
             )
         return stmt
+
+    async def deal_titles(self, deal_ids: set[uuid.UUID]) -> dict[uuid.UUID, tuple[str, str]]:
+        """Номер и название сделок задач — одним запросом на список."""
+        if not deal_ids:
+            return {}
+        rows = await self._session.execute(
+            select(Deal.id, Deal.number, Deal.title).where(Deal.id.in_(deal_ids))
+        )
+        return {row.id: (row.number, row.title) for row in rows}
 
     async def get_or_404(self, task_id: uuid.UUID) -> Task:
         task = await self._session.get(Task, task_id)
@@ -1901,6 +2316,7 @@ class TaskService:
             entity_id=task.id,
             changes={"deal_id": {"old": None, "new": str(deal_id)}},
         )
+        await drop_deal_card_after_commit(self._session, deal_id)
         return task
 
     async def update(self, task: Task, payload: Any) -> Task:
@@ -1923,6 +2339,8 @@ class TaskService:
         await self._audit.record(
             AuditAction.TASK_UPDATED, entity_type="task", entity_id=task.id, changes=changes
         )
+        if "status" in changes:
+            await drop_deal_card_after_commit(self._session, task.deal_id)
         return task
 
     async def complete(self, task: Task, principal: Principal) -> Task:
@@ -1938,4 +2356,5 @@ class TaskService:
             entity_id=task.id,
             changes={"status": {"old": "open", "new": "done"}},
         )
+        await drop_deal_card_after_commit(self._session, task.deal_id)
         return task

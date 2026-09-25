@@ -11,7 +11,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Path, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Path, Query, Response, UploadFile, status
 from sqlalchemy import select
 
 from app.core.config import get_settings
@@ -29,6 +29,7 @@ from app.modules.signing.schemas import (
     EdmAgreementOut,
     EdmAgreementRevokeRequest,
     RejectRequest,
+    SignatureBrief,
     SignatureDocumentCreateRequest,
     SignatureDocumentListResponse,
     SignatureDocumentOut,
@@ -47,6 +48,7 @@ from app.modules.signing.service import (
     SignatureRequestService,
     SignatureTemplateService,
     VerifyService,
+    pdf_inline_headers,
 )
 
 signature_documents_router = APIRouter(prefix="/signature-documents", tags=["signing"])
@@ -77,8 +79,7 @@ async def create_document(
 ) -> SignatureDocumentOut:
     service = SignatureDocumentService(session)
     document = await service.create(principal, payload)
-    requests = await service.list_requests(document.id)
-    return _document_out(document, requests)
+    return await _card(service, document)
 
 
 @signature_documents_router.get(
@@ -99,7 +100,11 @@ async def list_documents(
 ) -> SignatureDocumentListResponse:
     service = SignatureDocumentService(session)
     documents = await service.list_for_entity(principal, entity_type, entity_id, limit)
-    items = [_document_out(d, await service.list_requests(d.id)) for d in documents]
+    signatures = await service.signatures_by_document([d.id for d in documents])
+    items = [
+        _document_out(d, await service.list_requests(d.id), signatures=signatures.get(d.id))
+        for d in documents
+    ]
     return SignatureDocumentListResponse(items=items)
 
 
@@ -116,8 +121,7 @@ async def get_document(
     service = SignatureDocumentService(session)
     document = await service.get_or_404(document_id)
     await service.ensure_read_access(principal, document)
-    requests = await service.list_requests(document.id)
-    return _document_out(document, requests)
+    return await _card(service, document)
 
 
 @signature_documents_router.post(
@@ -138,8 +142,7 @@ async def send_document(
     document = await service.get_or_404(document_id)
     await service.ensure_access(principal, document)
     document, revealed_tokens = await service.send(document)
-    requests = await service.list_requests(document.id)
-    return _document_out(document, requests, revealed_tokens=revealed_tokens)
+    return await _card(service, document, revealed_tokens=revealed_tokens)
 
 
 @signature_documents_router.post(
@@ -158,8 +161,7 @@ async def void_document(
     document = await service.get_or_404(document_id)
     await service.ensure_access(principal, document)
     document = await service.void(document, principal=principal, reason=payload.reason)
-    requests = await service.list_requests(document.id)
-    return _document_out(document, requests)
+    return await _card(service, document)
 
 
 @signature_documents_router.get(
@@ -229,6 +231,30 @@ async def my_signature_requests(
 
 
 @signature_requests_router.post(
+    "/signature-requests/{request_id}/reissue-link",
+    summary="Переиздать ссылку внешнему подписанту",
+    description=(
+        "Выдаёт инициатору документа новую ссылку `sign_url`, пока запрос внешнего "
+        "подписанта ждёт подписи (`sent`/`viewed`); прежняя ссылка перестаёт "
+        "работать. Нужна, когда очередь дошла до подписанта после подписи "
+        "предыдущего и ссылка не была выдана. Внутреннему подписанту — 422, запросу "
+        "не в ожидании подписи — 409. Роль: инициатор документа, ADMIN."
+    ),
+    response_model=SignatureRequestOut,
+)
+async def reissue_link(
+    session: DbSession,
+    principal: Annotated[Principal, Depends(require_permission(Permission.SIGNATURE_CREATE))],
+    request_id: Annotated[uuid.UUID, Path()],
+) -> SignatureRequestOut:
+    request = await SignatureRequestService(session).get_or_404(request_id)
+    token = await SignatureDocumentService(session).reissue_link(request, principal=principal)
+    out = SignatureRequestOut.model_validate(request)
+    out.sign_url = _sign_url(token)
+    return out
+
+
+@signature_requests_router.post(
     "/signature-requests/{request_id}/view",
     summary="Отметить ознакомление (внутренний подписант)",
     response_model=SigningPageOut,
@@ -243,7 +269,32 @@ async def view_request(
     client = get_client()
     ip = client.ip if client else None
     user_agent = client.user_agent if client else None
-    return await service.build_signing_page(request, mark_viewed=True, ip=ip, user_agent=user_agent)
+    page = await service.build_signing_page(request, mark_viewed=True, ip=ip, user_agent=user_agent)
+    page.document.file_url = _internal_file_url(request_id)
+    return page
+
+
+@signature_requests_router.get(
+    "/signature-requests/{request_id}/file",
+    summary="PDF документа для просмотра (внутренний подписант)",
+    description=(
+        "PDF документа запроса с origin приложения: `inline`, без CORS и без ссылки на "
+        "хранилище. Только свой запрос. Роль: подписант."
+    ),
+    response_class=Response,
+    responses={200: {"content": {"application/pdf": {}}}},
+)
+async def get_request_file(
+    session: DbSession,
+    principal: Annotated[Principal, Depends(require_permission(Permission.SIGNATURE_SIGN))],
+    request_id: Annotated[uuid.UUID, Path()],
+) -> Response:
+    service = SignatureRequestService(session)
+    request = await service.get_for_internal_signer(request_id, principal)
+    data, filename = await service.load_document_pdf(request)
+    return Response(
+        content=data, media_type="application/pdf", headers=pdf_inline_headers(filename)
+    )
 
 
 @signature_requests_router.post(
@@ -259,7 +310,7 @@ async def challenge_request(
     service = SignatureRequestService(session)
     request = await service.get_for_internal_signer(request_id, principal)
     client = get_client()
-    _otp, channel, masked, debug_code = await service.challenge(
+    otp, channel, masked, debug_code = await service.challenge(
         request, ip=client.ip if client else None, user_agent=client.user_agent if client else None
     )
     return ChallengeResponse(
@@ -267,6 +318,7 @@ async def challenge_request(
         sent_to_masked=masked,
         expires_in_seconds=get_settings().signature_otp_ttl_seconds,
         debug_code=debug_code,
+        max_attempts=otp.max_attempts,
     )
 
 
@@ -391,19 +443,42 @@ async def revoke_edm_agreement(
     return EdmAgreementOut.model_validate(agreement)
 
 
+async def _card(
+    service: SignatureDocumentService,
+    document,
+    *,
+    revealed_tokens: dict[uuid.UUID, str] | None = None,
+) -> SignatureDocumentOut:
+    requests = await service.list_requests(document.id)
+    signatures = (await service.signatures_by_document([document.id])).get(document.id)
+    return _document_out(document, requests, revealed_tokens=revealed_tokens, signatures=signatures)
+
+
+def _internal_file_url(request_id: uuid.UUID) -> str:
+    return f"{get_settings().api_prefix}/signature-requests/{request_id}/file"
+
+
+def _sign_url(token: str) -> str:
+    # Ссылка ведёт на страницу веб-клиента (SPA `/sign/{token}`), а не на JSON-ручку API.
+    return f"{get_settings().base_url.rstrip('/')}/sign/{token}"
+
+
 def _document_out(
-    document, requests, *, revealed_tokens: dict[uuid.UUID, str] | None = None
+    document,
+    requests,
+    *,
+    revealed_tokens: dict[uuid.UUID, str] | None = None,
+    signatures=None,
 ) -> SignatureDocumentOut:
     out = SignatureDocumentOut.model_validate(document)
-    settings = get_settings()
     revealed_tokens = revealed_tokens or {}
     outs = []
     for request in requests:
         request_out = SignatureRequestOut.model_validate(request)
         token = revealed_tokens.get(request.id)
         if token:
-            # Ссылка ведёт на страницу веб-клиента (SPA `/sign/{token}`), а не на JSON-ручку API.
-            request_out.sign_url = f"{settings.base_url.rstrip('/')}/sign/{token}"
+            request_out.sign_url = _sign_url(token)
         outs.append(request_out)
     out.requests = outs
+    out.signatures = [SignatureBrief.model_validate(sig) for sig in signatures or []]
     return out

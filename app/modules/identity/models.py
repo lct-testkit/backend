@@ -95,7 +95,7 @@ class ErasureStatus(StrEnum):
     COMPLETED = "completed"
 
 
-class Team(UuidPkMixin, TimestampMixin, SoftDeleteMixin, Base):
+class Team(UuidPkMixin, TimestampMixin, SoftDeleteMixin, VersionMixin, Base):
     """Команда. Иерархия рекурсивная: HEAD видит команды вниз по дереву."""
 
     __tablename__ = "teams"
@@ -132,6 +132,12 @@ class User(UuidPkMixin, TimestampMixin, SoftDeleteMixin, VersionMixin, Base):
         ),
         Index("ix_users_team_role", "team_id", "role"),
         Index("ix_users_status", "status", postgresql_where=text("deleted_at IS NULL")),
+        # Под запрос `identity.tasks.sweep_user_lifecycle`: блокировки со сроком.
+        Index(
+            "ix_users_auto_unblock_due",
+            "auto_unblock_at",
+            postgresql_where=text("status = 'blocked' AND auto_unblock_at IS NOT NULL"),
+        ),
         # Поиск по ФИО в админке — по триграммам, а не LIKE '%…%' по таблице.
         Index(
             "ix_users_full_name_trgm",
@@ -193,6 +199,11 @@ class User(UuidPkMixin, TimestampMixin, SoftDeleteMixin, VersionMixin, Base):
     invited_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     activated_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     blocked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Срок блокировки из `POST /admin/users/{id}/block`: по его наступлении
+    # задача `sweep_user_lifecycle` снимает блокировку. Пусто — без срока.
+    auto_unblock_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     anonymized_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

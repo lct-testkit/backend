@@ -94,11 +94,21 @@ async def generate_presigned_put(
 
 
 async def generate_presigned_get(
-    *, bucket: str, key: str, expires_seconds: int, filename: str | None = None
+    *,
+    bucket: str,
+    key: str,
+    expires_seconds: int,
+    filename: str | None = None,
+    inline: bool = False,
 ) -> str:
+    """`inline=True` — ссылка для просмотра в браузере (PDF на странице подписи):
+    без `attachment` файл открывается, а не скачивается."""
+
     def _sign() -> str:
         params: dict[str, str] = {"Bucket": bucket, "Key": key}
-        if filename:
+        if inline:
+            params["ResponseContentDisposition"] = "inline"
+        elif filename:
             params["ResponseContentDisposition"] = f'attachment; filename="{filename}"'
         return _public_client().generate_presigned_url(
             "get_object", Params=params, ExpiresIn=expires_seconds

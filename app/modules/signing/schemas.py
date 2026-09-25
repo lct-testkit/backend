@@ -150,10 +150,20 @@ class SignatureRequestOut(BaseModel):
     entity_type: str | None = None
     entity_id: uuid.UUID | None = None
     # Заполняется только в ответе `/send`, который активировал этот запрос
-    # (dop.md §10.4 фаза 2 п.6): в БД хранится только sha256 токена, поэтому
-    # это единственный момент, когда сырую ссылку вообще можно отдать —
+    # (dop.md §10.4 фаза 2 п.6), и в ответе `/reissue-link`: в БД хранится только
+    # sha256 токена, поэтому ссылку можно отдать лишь в момент выпуска токена —
     # ровно тот же приём, что `issue_invite` в identity (раздел 4.1).
     sign_url: str | None = None
+
+
+class SignatureBrief(BaseModel):
+    """Подпись в карточке документа: по `id` строится ссылка на проверку `/verify/{id}`."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    signer_display: str
+    signed_at: dt.datetime
 
 
 class SignatureDocumentOut(BaseModel):
@@ -173,7 +183,11 @@ class SignatureDocumentOut(BaseModel):
     created_at: dt.datetime
     completed_at: dt.datetime | None
     void_reason: str | None
+    # Файлы результата: копия со штампом и протокол — есть у подписанного документа.
+    signed_file_id: uuid.UUID | None = None
+    protocol_file_id: uuid.UUID | None = None
     requests: list[SignatureRequestOut] = Field(default_factory=list)
+    signatures: list[SignatureBrief] = Field(default_factory=list)
 
 
 class SignatureDocumentListResponse(BaseModel):
@@ -204,6 +218,8 @@ class SigningDocumentPreview(BaseModel):
     deadline_at: dt.datetime | None
     status: str
     preview_url: str
+    # Тот же PDF с origin приложения (без CORS и без ссылки на S3): проставляют роутеры.
+    file_url: str | None = None
 
 
 class SigningSignerPreview(BaseModel):
@@ -230,6 +246,8 @@ class ChallengeResponse(BaseModel):
     # поле всегда `None` — подписание кодом, который некуда доставить,
     # честно недоступно, а не тихо расходится с реальностью.
     debug_code: str | None = None
+    # Сколько неверных вводов выдержит этот код, прежде чем запрос заблокируется.
+    max_attempts: int | None = None
 
 
 class SignRequest(BaseModel):

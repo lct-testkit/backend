@@ -1,13 +1,18 @@
 """Публичные ручки подписания и проверки (dop.md §10.4 фаза 3-4, §10.5, §10.10).
 
 Без аутентификации: подписант-контрагент не заводит учётку ради одной
-подписи (dop.md §10.4 п.6). Каждый запрос ограничен по частоте на IP
-(`PUBLIC_SIGN_RATE_LIMIT_PER_MIN`) — dop.md §10.11 предлагает делать это на
-Caddy, но стандартная сборка Caddy без стороннего плагина (`caddy-ratelimit`,
-не подключён в `deploy/Caddyfile`) rate-limit не умеет; проверка на уровне
-приложения — тем же механизмом (`app.core.rate_limit`), которым уже
-защищены `/api/org-lookup/suggest` и форма смены пароля — реальный
-enforcement в этом развёртывании, а не бумажное требование.
+подписи (dop.md §10.4 п.6). Каждый запрос ограничен по частоте — dop.md §10.11
+предлагает делать это на Caddy, но стандартная сборка Caddy без стороннего
+плагина (`caddy-ratelimit`, не подключён в `deploy/Caddyfile`) rate-limit не
+умеет; проверка на уровне приложения — тем же механизмом
+(`app.core.rate_limit`), которым уже защищены `/api/org-lookup/suggest` и форма
+смены пароля — реальный enforcement в этом развёртывании, а не бумажное
+требование. Лимит `PUBLIC_SIGN_RATE_LIMIT_PER_MIN` считается по токену подписи:
+открытие страницы, код, неверные попытки и повторный код одного подписанта
+укладываются в его квоту, а подписанты за одним NAT (офис вуза) не мешают друг
+другу. Поверх него — мягкий общий лимит по IP (в `_IP_LIMIT_FACTOR` раз выше):
+перебор чужих токенов каждый раз начинал бы новую квоту токена, и сдерживает его
+только он.
 
 Токен не хранится в открытом виде нигде, включая логи: маршруты принимают
 его только как часть пути и сразу хэшируют (`SignatureRequestService.
@@ -18,10 +23,11 @@ get_by_token`). Коммит — на `DbSession`/`get_db_session` (раздел
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Path, Request
+from fastapi import APIRouter, Depends, Path, Request, Response
 
 from app.core.config import get_settings
 from app.core.deps import DbSession
@@ -35,21 +41,38 @@ from app.modules.signing.schemas import (
     SignRequest,
     VerifyResult,
 )
-from app.modules.signing.service import SignatureRequestService, VerifyService
+from app.modules.signing.service import (
+    SignatureRequestService,
+    VerifyService,
+    pdf_inline_headers,
+)
 
 public_signing_router = APIRouter(prefix="/sign", tags=["signing-public"])
 public_verify_router = APIRouter(prefix="/verify", tags=["signing-public"])
 
 
-async def _rate_limited(request: Request) -> None:
+# Во сколько раз общий лимит по IP мягче лимита на один токен подписи.
+_IP_LIMIT_FACTOR = 10
+
+
+async def _rate_limited(request: Request, token: Annotated[str, Path()]) -> None:
     ip = request.client.host if request.client else "unknown"
     settings = get_settings()
+    per_token = settings.public_sign_rate_limit_per_min
     await rate_limit_enforce(
         ip,
         "public:sign",
-        limit=settings.public_sign_rate_limit_per_min,
+        limit=per_token * _IP_LIMIT_FACTOR,
         window_seconds=60,
         detail="Слишком много запросов к странице подписания, повторите позже",
+    )
+    # В ключ Redis идёт хэш, а не сам токен: токен — единственный секрет ссылки.
+    await rate_limit_enforce(
+        hashlib.sha256(token.encode()).hexdigest()[:32],
+        "public:sign:token",
+        limit=per_token,
+        window_seconds=60,
+        detail="Слишком много запросов по этой ссылке, повторите через минуту",
     )
 
 
@@ -91,8 +114,30 @@ async def get_sign_page(
     signature_request = await service.get_by_token(token)
     client_ip = request.client.host if request.client else None
     user_agent = request.headers.get("User-Agent")
-    return await service.build_signing_page(
+    page = await service.build_signing_page(
         signature_request, mark_viewed=True, ip=client_ip, user_agent=user_agent
+    )
+    page.document.file_url = f"{get_settings().public_prefix}/sign/{token}/file"
+    return page
+
+
+@public_signing_router.get(
+    "/{token}/file",
+    summary="PDF документа для просмотра (внешний подписант)",
+    description=(
+        "Тот же PDF, что по `preview_url`, но с origin приложения: `inline`, без CORS и "
+        "без ссылки на хранилище. Доступ — по той же ссылке подписи, лимит — общий с ней."
+    ),
+    response_class=Response,
+    responses={200: {"content": {"application/pdf": {}}}},
+    dependencies=[Depends(_rate_limited)],
+)
+async def get_sign_file(session: DbSession, token: Annotated[str, Path()]) -> Response:
+    service = SignatureRequestService(session)
+    signature_request = await service.get_by_token(token)
+    data, filename = await service.load_document_pdf(signature_request)
+    return Response(
+        content=data, media_type="application/pdf", headers=pdf_inline_headers(filename)
     )
 
 
@@ -111,7 +156,7 @@ async def public_challenge(
     signature_request = await service.get_by_token(token)
     client_ip = request.client.host if request.client else None
     user_agent = request.headers.get("User-Agent")
-    _otp, channel, masked, debug_code = await service.challenge(
+    otp, channel, masked, debug_code = await service.challenge(
         signature_request, ip=client_ip, user_agent=user_agent
     )
     return ChallengeResponse(
@@ -119,6 +164,7 @@ async def public_challenge(
         sent_to_masked=masked,
         expires_in_seconds=get_settings().signature_otp_ttl_seconds,
         debug_code=debug_code,
+        max_attempts=otp.max_attempts,
     )
 
 

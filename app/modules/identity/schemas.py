@@ -10,10 +10,20 @@ consent_required, scopes, плюс признак требуемой смены 
 from __future__ import annotations
 
 import datetime as dt
+import re
 import uuid
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from app.modules.identity.models import Role, UserStatus
 
@@ -23,6 +33,19 @@ NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length
 ReasonStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=500)]
 
 
+def _check_phone(value: str) -> str:
+    """На телефон уходит код подтверждения подписи: строка, которую нельзя
+    набрать, оставила бы подписанта без кода."""
+    value = value.strip()
+    digits = re.sub(r"\D", "", value)
+    if not re.fullmatch(r"\+?[\d\s()\-]+", value) or not 10 <= len(digits) <= 15:
+        raise ValueError("Телефон: от 10 до 15 цифр, допустимы «+», пробелы, дефисы и скобки")
+    return value
+
+
+PhoneStr = Annotated[str, StringConstraints(max_length=32), AfterValidator(_check_phone)]
+
+
 class MeResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -30,6 +53,7 @@ class MeResponse(BaseModel):
     full_name: str
     display_name: str | None = None
     email: str | None = None
+    phone: str | None = None
     role: str
     team_id: uuid.UUID | None = None
     manager_id: uuid.UUID | None = None
@@ -45,6 +69,19 @@ class MeResponse(BaseModel):
     perm_epoch: int
     last_login_at: dt.datetime | None = None
     version: int = 1
+
+
+class RecentItemOut(BaseModel):
+    """Последний открытый объект: `type` — вид (`deal`), `id` — его идентификатор."""
+
+    type: str
+    id: uuid.UUID
+    title: str
+    opened_at: dt.datetime
+
+
+class RecentListResponse(BaseModel):
+    items: list[RecentItemOut]
 
 
 class SessionInfo(BaseModel):
@@ -150,6 +187,7 @@ class UserOut(BaseModel):
     email: str | None = None
     full_name: str
     display_name: str | None = None
+    phone: str | None = None
     position: str | None = None
     role: str
     team_id: uuid.UUID | None = None
@@ -165,6 +203,7 @@ class UserOut(BaseModel):
     invited_at: dt.datetime | None = None
     activated_at: dt.datetime | None = None
     blocked_at: dt.datetime | None = None
+    auto_unblock_at: dt.datetime | None = None
     anonymized_at: dt.datetime | None = None
     created_at: dt.datetime
     updated_at: dt.datetime
@@ -203,6 +242,7 @@ class UserPatchRequest(BaseModel):
     status: Literal["invited", "active"] | None = None
     status_reason: str | None = Field(default=None, max_length=500)
     display_name: str | None = Field(default=None, max_length=255)
+    phone: PhoneStr | None = None
     position: str | None = Field(default=None, max_length=255)
     locale: str | None = Field(default=None, max_length=8)
     timezone: str | None = Field(default=None, max_length=64)
@@ -211,6 +251,33 @@ class UserPatchRequest(BaseModel):
     def _not_empty(self) -> UserPatchRequest:
         if not self.model_fields_set:
             raise ValueError("Тело запроса не содержит изменяемых полей")
+        return self
+
+
+class MePatchRequest(BaseModel):
+    """Свой профиль: имя для отображения, часовой пояс и телефон. Роль, email,
+    статус и остальное меняет только администратор — лишние поля отклоняются,
+    а не молча игнорируются."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: (
+        Annotated[str, StringConstraints(strip_whitespace=True, max_length=255)] | None
+    ) = None
+    timezone: Annotated[str, StringConstraints(min_length=1, max_length=64)] | None = None
+    phone: PhoneStr | None = None
+
+    @field_validator("display_name")
+    @classmethod
+    def _blank_display_name_is_cleared(cls, value: str | None) -> str | None:
+        return value or None
+
+    @model_validator(mode="after")
+    def _not_empty(self) -> MePatchRequest:
+        if not self.model_fields_set:
+            raise ValueError("Тело запроса не содержит изменяемых полей")
+        if "timezone" in self.model_fields_set and self.timezone is None:
+            raise ValueError("Часовой пояс нельзя очистить")
         return self
 
 
@@ -241,6 +308,9 @@ class OffboardRequest(BaseModel):
     mode: Literal["preview", "confirm"] = "preview"
     successor_id: uuid.UUID | None = None
     reason: ReasonStr | None = None
+    # «По-сделочно» (new_spec §4.7 шаг 2): `{id сделки: id преемника}`. Эти сделки уходят
+    # названным преемникам, все остальные сделки, задачи и запросы подписи — `successor_id`.
+    deal_successors: dict[uuid.UUID, uuid.UUID] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _confirm_needs_successor(self) -> OffboardRequest:
@@ -316,14 +386,18 @@ class ErasureRequestDetail(BaseModel):
     rejection_reason: str | None = None
     executed_at: dt.datetime | None = None
     act_file_id: uuid.UUID | None = None
+    # Имя субъекта (сотрудник, контакт, ИП): у обезличенного — стабильный
+    # псевдоним, у физически удалённого — `null`.
+    subject_display: str | None = None
 
     @classmethod
-    def from_model(cls, request: Any) -> ErasureRequestDetail:
+    def from_model(cls, request: Any, subject_display: str | None = None) -> ErasureRequestDetail:
         stored = request.blockers or {}
         return cls(
             id=request.id,
             subject_type=request.subject_type,
             subject_id=request.subject_id,
+            subject_display=subject_display,
             mode=stored.get("mode"),
             status=request.status,
             reason=request.reason,
@@ -357,6 +431,8 @@ class TeamOut(BaseModel):
     head_id: uuid.UUID | None = None
     region_id: uuid.UUID | None = None
     created_at: dt.datetime
+    updated_at: dt.datetime
+    version: int
 
 
 class TeamListResponse(BaseModel):

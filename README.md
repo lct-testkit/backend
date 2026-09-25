@@ -7,7 +7,7 @@
 <sub>Команда **«Тесткит»** — [github.com/lct-testkit](https://github.com/lct-testkit)</sub>
 
 <!--STATS-->
-**181** операция API &nbsp;·&nbsp; **13** модулей &nbsp;·&nbsp; **65** таблиц &nbsp;·&nbsp; **15** миграций &nbsp;·&nbsp; **459** тестов &nbsp;·&nbsp; **11** сервисов Compose
+**193** операции API &nbsp;·&nbsp; **13** модулей &nbsp;·&nbsp; **65** таблиц &nbsp;·&nbsp; **16** миграций &nbsp;·&nbsp; **790** тестов &nbsp;·&nbsp; **11** сервисов Compose
 <!--/STATS-->
 
 [Быстрый старт](#быстрый-старт) · [Примеры](#примеры-использования) · [Как устроено](#как-устроено) · [Модули](#что-внутри) · [Настройка](#настройка) · [Разработка](#разработка) · [Безопасность](#безопасность) · [Ограничения](#ограничения-и-известные-проблемы)
@@ -25,7 +25,7 @@
 * **Закрытый контур, запуск одной командой.** `docker compose up -d --build` поднимает 11 сервисов; интернет нужен только на сборке образов. Swagger UI отдаётся из локального пакета, шрифт с кириллицей для PDF вложен в образ — CDN не нужны.
 * **BFF: токены Keycloak не покидают Redis.** Браузер получает только httpOnly-cookie сессии (`Secure` вне профиля `dev`, `SameSite=Lax`) и CSRF-cookie. Вход — OIDC с `state`, `nonce` и PKCE S256, `id_token` проверяется полностью, обновление токена идёт под локом.
 * **Идемпотентность и оптимистичные блокировки.** `Idempotency-Key` (8–255 символов, ключ живёт внутри актора) на создании сделок, организаций и контактов: тот же ключ с другим телом — `409 CRM-1003`. Изменения требуют `If-Match` с `version`, конфликт — `409 CRM-1002` с актуальными значениями.
-* **RFC 7807 везде.** Любая ошибка — `application/problem+json` с кодом из каталога `CRM-XXYY` (45 кодов) и `request_id`; стектрейсы наружу не уходят.
+* **RFC 7807 везде.** Любая ошибка — `application/problem+json` с кодом из каталога `CRM-XXYY` (50 кодов) и `request_id`; стектрейсы наружу не уходят.
 * **Неизменяемый аудит с цепочкой хэшей.** `audit_log` партиционирован по месяцам, триггеры на каждой партиции запрещают `UPDATE`, `DELETE` и `TRUNCATE`, каждая запись хранит `prev_hash` и SHA-256 `hash`; `GET /api/admin/audit/verify-chain` пересчитывает хвост цепочки. Запись идёт в той же транзакции, что и бизнес-изменение; отказы в доступе тоже попадают в журнал.
 * **ПЭП с проверкой.** Одноразовый код (6 цифр, в базе только bcrypt-хэш, 3 попытки, 5 минут), HMAC-SHA256 метка целостности, цепочка хэшей подписей, неизменяемая таблица `signatures`, доверенное время из контейнера `ntp` (рассинхрон больше 5 с блокирует подписание), публичная проверка `/public/verify/{id}` и проверка файла по хэшу.
 * **152-ФЗ и обезличивание.** Согласие на обработку ПДн хранится с версией политики и SHA-256 её текста (до принятия бизнес-ручки отвечают `403 CRM-1105`); маскирование телефонов и email; запросы на удаление или обезличивание с блокерами, отсрочкой 30 дней, подтверждением второго администратора и актом об уничтожении.
@@ -38,7 +38,7 @@
 
 <img src="docs/img/swagger.png" width="720" alt="Swagger UI: 29 групп ручек, кнопка Authorize для Bearer-токена">
 
-*Swagger UI на `/api/docs`: 181 операция в 30 группах, схема `BearerAuth` (вставьте access-токен Keycloak в Authorize). В `prod` интерактивный UI закрыт, схема `/api/openapi.json` остаётся.*
+*Swagger UI на `/api/docs`: 193 операции в 30 группах, схема `BearerAuth` (вставьте access-токен Keycloak в Authorize). В `prod` интерактивный UI закрыт, схема `/api/openapi.json` остаётся.*
 
 <img src="docs/img/keycloak-login.png" width="410" alt="Форма входа Keycloak, realm crm">
 
@@ -79,7 +79,7 @@ curl http://localhost:8080/health/ready
 | Адрес | Что это |
 |---|---|
 | http://localhost:8080/api/docs | Swagger UI (в профиле `prod` закрыт) |
-| http://localhost:8080/api/openapi.json | OpenAPI 3.0.3, 181 операция |
+| http://localhost:8080/api/openapi.json | OpenAPI 3.0.3, 193 операции |
 | http://localhost:8080/health/live | liveness |
 | http://localhost:8080/health/ready | готовность: БД, Redis, JWKS Keycloak, SeaweedFS, очередь |
 | http://localhost:8080/auth | Keycloak, realm `crm`; консоль — `/auth/admin` |
@@ -107,7 +107,7 @@ curl http://localhost:8080/health/ready
 * **Переменные.** В контейнеры `api`, `worker`, `migrate` и `seed` попадают только переменные из списка `x-api-env` в `docker-compose.yml` (`env_file` не используется): значения из `.env` для остальных настроек (лимиты, таймауты) не действуют, пока их не добавят в этот список. Подробнее — «Настройка».
 * **Код не монтируется.** Образы `api`, `worker`, `migrate`, `seed` и `sms-gateway-mock` собираются из `Dockerfile` (`COPY app`, `COPY migrations`), bind-mount нет. Правка кода требует пересборки: `docker compose up -d --build api worker`.
 
-Веб-клиент собирается из соседнего репозитория `../frontend` (нужен пакет дизайн-системы, см. [`../README.md`](../README.md)):
+Веб-клиент собирается из соседнего репозитория `../frontend` (нужен пакет дизайн-системы, см. [`README продукта`](https://github.com/lct-testkit/.github#readme)):
 
 ```bash
 docker compose --profile web up -d --build
@@ -189,7 +189,7 @@ curl -s "http://localhost:8080/api/admin/audit/verify-chain?limit=1000" -H "Auth
 curl -s http://localhost:8080/api/openapi.json -o openapi.json
 ```
 
-`openapi.json` — 3.0.3, 146 путей, 181 операция, 213 схем, единственная схема авторизации `BearerAuth`. Тот же файл — источник для генератора клиента фронтенда (`frontend/tools/gen-api.mjs`).
+`openapi.json` — 3.0.3, 155 путей, 193 операции, 226 схем, единственная схема авторизации `BearerAuth`. Тот же файл — источник для генератора клиента фронтенда (`frontend/tools/gen-api.mjs`).
 
 ### Автоподстановка и проверка ИНН
 
@@ -236,20 +236,20 @@ sequenceDiagram
 
     A->>DB: сделка + аудит + outbox_events (DEAL_CREATED)<br/>одна транзакция
     W->>DB: pending и failed, срок повтора наступил
-    W->>W: BITRIX_CONNECTOR_ENABLED и источник bitrix24 активны?
+    W->>W: BITRIX_CONNECTOR_ENABLED, источник bitrix24 и флаг bitrix_connector активны?
     W->>B: POST rest/ID/КОД/crm.item.add.json
     B-->>W: 200 OK, result.item.id
     W->>DB: external_refs + status = sent
 ```
 
-Включается тремя условиями, все обязательны: `BITRIX_CONNECTOR_ENABLED=true`, `BITRIX_WEBHOOK_URL=https://<портал>/rest/<id>/<код>` (весь URL — секрет, в БД хранится только имя переменной) и переключатель источника `bitrix24` в «Настройка → Интеграции». Флаг функции `bitrix_connector` (`feature_flags`) кодом не читается.
+Включается четырьмя условиями, все обязательны: `BITRIX_CONNECTOR_ENABLED=true`, `BITRIX_WEBHOOK_URL=https://<портал>/rest/<id>/<код>` (весь URL — секрет, в БД хранится только имя переменной), переключатель источника `bitrix24` в «Настройка → Интеграции» и флаг функции `bitrix_connector` в «Настройки»: выключенный флаг переводит события в `dead` (`last_error=feature_flag_disabled`), а отсутствие строки флага доставку не блокирует. Поле `sourceId` сделки берётся из `BITRIX_SOURCE_ID` (по умолчанию `OTHER`).
 
 ```bash
 docker compose exec -T postgres psql -U crm -d crm -x -c "SELECT event_type, target, status, attempts, last_error, created_at, sent_at FROM outbox_events WHERE target='bitrix24' ORDER BY created_at DESC LIMIT 1;"
 docker compose exec -T postgres psql -U crm -d crm -x -c "SELECT entity_type, external_id, synced_version, sync_direction, last_synced_at FROM external_refs WHERE source_code='bitrix24';"
 ```
 
-Первая команда показывает статус доставки последнего события (`sent`, число попыток, ошибка), вторая — связь «сделка ↔ id в Битриксе». Повторы: 1 с, 5 с, 30 с, 5 мин, 30 мин, 2 ч, после 8-й неудачи — `dead` (разбор вручную: `GET /api/admin/integrations/outbox-events?status=dead` или вкладка «Исходящие»). При обновлении перед `crm.item.update` читается `crm.item.get`: если в Битриксе сделку правили после нашей последней синхронизации (`updatedTime`), запись не затирается, доставка падает с «требует ручного разбора». Обратного направления реальными событиями Битрикса нет — `POST /api/v1/integrations/bitrix/webhook` принимает упрощённый собственный контракт с HMAC-подписью. URL вебхука в логи не попадает: логгеры `httpx`/`httpcore` подняты до WARNING (`app/core/logging.py`, `tests/test_logging.py`).
+Первая команда показывает статус доставки последнего события (`sent`, число попыток, ошибка), вторая — связь «сделка ↔ id в Битриксе». Повторы: 1 с, 5 с, 30 с, 5 мин, 30 мин, 2 ч, после 8-й неудачи — `dead` (разбор вручную: `GET /api/admin/integrations/outbox-events?status=dead` или вкладка «Исходящие»; вернуть событие в очередь — `POST /api/admin/integrations/outbox-events/{id}/retry`). При обновлении перед `crm.item.update` читается `crm.item.get`: если в Битриксе сделку правили после нашей последней синхронизации (`updatedTime`), запись не затирается, доставка падает с «требует ручного разбора». Обратного направления реальными событиями Битрикса нет — `POST /api/v1/integrations/bitrix/webhook` принимает упрощённый собственный контракт с HMAC-подписью. URL вебхука в логи не попадает: логгеры `httpx`/`httpcore` подняты до WARNING (`app/core/logging.py`, `tests/test_logging.py`).
 
 ## Как устроено
 
@@ -287,23 +287,23 @@ flowchart LR
 
 ## Что внутри
 
-Число операций на модуль — по тегам `GET /api/openapi.json`; 13 модулей в сумме дают 179, плюс 2 health-пробы вне модульной системы (`GET /health/live`, `/health/ready` — объявлены в `app/main.py`, ни один `app/modules/*` пакет их не владеет) — 181 всего.
+Число операций на модуль — по тегам `GET /api/openapi.json`; 13 модулей в сумме дают 191, плюс 2 health-пробы вне модульной системы (`GET /health/live`, `/health/ready` — объявлены в `app/main.py`, ни один `app/modules/*` пакет их не владеет) — 193 всего.
 
 | Модуль | Что делает | Ключевые эндпоинты · таблицы |
 |---|---|---|
 | `admin` | системные настройки, флаги, чтение/экспорт журнала аудита и проверка его цепочки | `GET/PATCH /api/admin/feature-flags`, `GET/PUT /api/admin/system-settings`, `GET /api/admin/audit`, `/export`, `/verify-chain` — 7 операций · `feature_flags`, `system_settings`, `admin_approvals`, `idempotency_keys` |
 | `audit` | сервис записи в неизменяемый журнал; своих эндпоинтов нет — вызывается всеми модулями в той же транзакции, что бизнес-изменение | 0 операций · `audit_log` (партиции по месяцам, триггеры неизменяемости на каждой) |
 | `catalog` | организации, контакты, продукты, справочники (направления, причины отказа, календарь, пользовательские поля, регионы), лицензии/договоры вуз-вендор-ПО | `GET/POST /api/organizations`, `/contacts`, `/products` + 5 справочников + `GET /api/organization-licenses` (раздел 4, Треб.1), `DELETE` у направлений и причин отказа — 32 операции · 11 таблиц (`organizations`, `contacts`, `products`, `directions`, `regions`, `organization_licenses`, …) |
-| `crm` | сделки, переходы по воронке, комментарии, задачи, участники | `GET/POST /api/deals`, `/{id}/transition`, `/reassign`, `/comments`, `/tasks` — 20 операций · 8 таблиц (`deals`, `deal_status_history`, `deal_comments`, `tasks`, …) |
+| `crm` | сделки, переходы по воронке, комментарии, задачи, участники | `GET/POST /api/deals`, `/{id}/transition`, `/reassign`, `/comments`, `/tasks`, `PUT /api/deals/{id}/products` — 21 операция · 8 таблиц (`deals`, `deal_status_history`, `deal_comments`, `tasks`, …) |
 | `files` | загрузка через presigned-URL, magic-bytes и антивирус-заглушка, вложения к сущностям | `POST /api/files/upload-intent`, `/{id}/commit`, `GET /api/attachments` — 7 операций · `files`, `attachments` |
-| `identity` | аутентификация BFF/OIDC, администрирование пользователей и команд, приглашения, согласие, обезличивание | `GET/POST /api/auth/*`, `GET /api/me`, `GET/POST /api/admin/users`, `/teams`, `/approvals` — 37 операций · 7 таблиц (`users`, `teams`, `consents`, `data_erasure_requests`, …) |
+| `identity` | аутентификация BFF/OIDC, администрирование пользователей и команд, приглашения, согласие, обезличивание | `GET/POST /api/auth/*`, `GET /api/me`, `GET/POST /api/admin/users`, `/teams`, `/approvals`, `PATCH /api/me` — 39 операций · 7 таблиц (`users`, `teams`, `consents`, `data_erasure_requests`, …) |
 | `imports` | импорт каталогов из xlsx/xls/csv: профилирование, автоподбор маппинга, dry-run, применение, откат | `POST /api/imports`, `/{id}/dry-run`, `/apply`, `/rollback`, `PUT /{id}/mapping` — 9 операций · `import_jobs`, `import_row_results`, `import_presets` |
-| `integration` | вебхуки CMS/LMS/Bitrix24 с HMAC-подписью, исходящий outbox с backoff, административный контур источников | `POST /api/v1/integrations/{cms,lms,bitrix}/*`, `GET/PATCH /api/admin/integrations/sources` — 8 операций · 6 таблиц (`integration_sources`, `inbound_messages`, `outbox_events`, …) |
-| `notification` | уведомления (in-app, заглушки email/telegram), шаблоны Jinja2, настройки получателя | `GET /api/notifications`, `/read`, `GET/PUT /api/me/notification-prefs`, `GET/POST/DELETE /api/admin/notification-templates` — 8 операций · 4 таблицы |
+| `integration` | вебхуки CMS/LMS/Bitrix24 с HMAC-подписью, исходящий outbox с backoff, административный контур источников | `POST /api/v1/integrations/{cms,lms,bitrix}/*`, `GET/PATCH /api/admin/integrations/sources`, `POST /api/admin/integrations/outbox-events/{id}/retry` — 9 операций · 6 таблиц (`integration_sources`, `inbound_messages`, `outbox_events`, …) |
+| `notification` | уведомления (in-app, заглушки email/telegram), шаблоны Jinja2, настройки получателя | `GET /api/notifications`, `/read`, `GET/PUT /api/me/notification-prefs`, `GET/POST/DELETE /api/admin/notification-templates`, `GET /api/notifications/unread-count`, `/event-codes`, `POST /api/admin/notification-templates/preview` — 11 операций · 4 таблицы |
 | `registry` | автоподстановка и проверка ИНН/ОГРН, локальный реестр ЕГРЮЛ, сверка реквизитов (drift) | `GET /api/org-lookup/suggest`, `POST /validate`, `POST /api/admin/registry/import`, `DELETE /api/admin/registry/versions/{id}` — 6 операций · 4 таблицы (`registry_versions`, `egrul_entries`, …) |
 | `reporting` | 8 видов отчётов (xlsx/pdf/png через matplotlib и xhtml2pdf), дашборды с виджетами | `GET/POST /api/reports`, `/report-templates`, `GET /{id}/data` (датасет в JSON без файла), `GET/POST /api/dashboards`, `/widgets` — 15 операций · `report_templates`, `report_jobs`, `dashboards`, `dashboard_widgets` |
-| `signing` | ПЭП: документы и запросы на подпись, OTP-код, публичная страница подписания и проверки, соглашения об ЭДО | `POST /api/signature-documents`, `/send`, `POST /api/signature-requests/{id}/{challenge,sign}`, `GET /public/sign/{token}`, `POST /api/signatures/verify` — 21 операция · 6 таблиц |
-| `workflow` | конструктор воронок: статусы, переходы, DSL условий, валидация, публикация со снимком, архивирование статуса, удаление черновика | `GET/POST /api/workflows`, `PUT /{id}/graph`, `POST /{id}/publish`, `POST /{id}/statuses/{sid}/archive`, `DELETE /api/workflows/{id}` — 9 операций · `workflows`, `workflow_statuses`, `workflow_transitions`, `sla_rules`, `status_mapping_jobs` |
+| `signing` | ПЭП: документы и запросы на подпись, OTP-код, публичная страница подписания и проверки, соглашения об ЭДО | `POST /api/signature-documents`, `/send`, `POST /api/signature-requests/{id}/{challenge,sign}`, `GET /public/sign/{token}`, `POST /api/signatures/verify`, `GET /public/sign/{token}/file`, `POST /api/signature-requests/{id}/reissue-link` — 24 операции · 6 таблиц |
+| `workflow` | конструктор воронок: статусы, переходы, DSL условий, валидация, публикация со снимком, архивирование статуса, удаление черновика | `GET/POST /api/workflows`, `PUT /{id}/graph`, `POST /{id}/publish`, `POST /{id}/statuses/{sid}/archive`, `DELETE /api/workflows/{id}`, `PATCH /api/workflows/{id}`, `GET /{id}/mapping-jobs/{job_id}` — 11 операций · `workflows`, `workflow_statuses`, `workflow_transitions`, `sla_rules`, `status_mapping_jobs` |
 
 ```
 app/
@@ -329,7 +329,7 @@ deploy/                  Caddyfile, entrypoint.sh, keycloak/realm-crm.json, post
 
 Полный список переменных — `.env.example`; код читает их в `app/core/config.py` (`Settings`, pydantic-settings) и в `docker-compose.yml`. Приложение не стартует без `APP_PROFILE` и строк подключения — падение на старте лучше, чем работа с половиной конфига.
 
-**Важная оговорка про Docker.** В контейнеры `api`, `worker`, `migrate` и `seed` попадают только переменные из явного списка `x-api-env` в `docker-compose.yml` (34 имени) — `env_file` не используется совсем. Значения `.env`, которых нет в этом списке (лимиты файлов, TTL сессии/CSRF/идемпотентности, параметры ПЭП, импорта, приглашений, 152-ФЗ и другие), в контейнерах не действуют: работает дефолт из `Settings`, даже если в `.env` записано другое.
+**Важная оговорка про Docker.** В контейнеры `api`, `worker`, `migrate` и `seed` попадают только переменные из явного списка `x-api-env` в `docker-compose.yml` (35 имён) — `env_file` не используется совсем. Значения `.env`, которых нет в этом списке (лимиты файлов, TTL сессии/CSRF/идемпотентности, параметры ПЭП, импорта, приглашений, 152-ФЗ и другие), в контейнерах не действуют: работает дефолт из `Settings`, даже если в `.env` записано другое.
 
 | Переменная | Значение по умолчанию | Зачем |
 |---|---|---|
@@ -461,7 +461,7 @@ locust -f loadtest/locustfile_transition.py --headless -u 50 -r 25 -t 60s --host
 * **RBAC на трёх уровнях.** 5 ролей (`KAM`, `HEAD`, `ADMIN`, `AUDITOR`, `INTEGRATION`), 40 прав (`app/core/permissions.py`); маршрут (`require_permission`), объект (проверка в сервисах) и SQL-скоуп списка (`deal_scope_clause`: свои сделки / команда рекурсивно по `teams.parent_id` через `WITH RECURSIVE` / всё / только источник / пусто для AUDITOR).
 * **«Четыре глаза».** Создание администратора и исполнение запроса на обезличивание требуют подтверждения вторым администратором (`ApprovalService.require`, отказ — `CRM-1902`); подтверждающий не может быть тем же администратором, что инициировал операцию, подтверждение привязано к хэшу конкретных параметров операции.
 * **Лимиты и проверка загрузок.** По умолчанию 50 МБ на обычный файл, 500 МБ на вложение сделки (проверено: запрос на 100 МБ PDF отклонён `413 CRM-1402`); SVG запрещён жёстко, независимо от списка расширений (XSS-вектор, проверено `415 CRM-1401`); реальное содержимое сверяется по magic bytes с заявленным расширением — расхождение переводит файл в статус `infected` и блокирует скачивание. Отдельного карантинного потока нет: статус `quarantined` объявлен в модели, но код его не присваивает — антивирус — заглушка `NullAntivirusScanner`, всегда возвращающая «чисто».
-* **Блокировка после неудачных попыток.** Keycloak: `bruteForceProtected`, 5 попыток, ожидание до 900 с (`deploy/keycloak/realm-crm.json`). Собственная защита — rate-limit на смену пароля (5 попыток → блок 15 минут), на попытки OTP ПЭП (3 на запрос, плюс лимит частоты отправки кода), на публичные страницы подписания (10 запросов/мин на IP) и на проверку токена приглашения.
+* **Блокировка после неудачных попыток.** Keycloak: `bruteForceProtected`, 5 попыток, ожидание до 900 с (`deploy/keycloak/realm-crm.json`). Собственная защита — rate-limit на смену пароля (5 попыток → блок 15 минут), на попытки OTP ПЭП (3 на запрос, плюс лимит частоты отправки кода), на публичные страницы подписания (10 запросов/мин на токен подписи плюс мягкий общий лимит по IP) и на проверку токена приглашения.
 * **Политика паролей — не короче 12 символов.** На стороне Keycloak realm: `length(12) and upperCase(1) and lowerCase(1) and digits(1) and notUsername and notEmail and passwordHistory(5)`; на стороне API — та же граница в схеме смены пароля (`Field(min_length=12)`).
 * **Эпоха прав.** `perm_epoch` — атрибут пользователя, попадает в access-токен протокол-мэппером Keycloak; понижение роли или блокировка увеличивают эпоху, и токен со старой эпохой отвергается (`CRM-1103`) до истечения собственного TTL (5 минут) — без этого блокировка ждала бы, пока истечёт уже выданный токен.
 * **Секреты не логируются.** `app/core/masking.py`: фиксированный список ключей (`password`, `token`, `client_secret`, `authorization`, `cookie`, …) вырезается из логов и аудита целиком; ПДн (телефон, email, ФИО при обезличивании) маскируются по формату, а не вырезаются.
@@ -469,28 +469,28 @@ locust -f loadtest/locustfile_transition.py --headless -u 50 -r 25 -t 60s --host
 
 ## Ограничения и известные проблемы
 
-Список найденных при интеграции проблем ведёт фронтенд-репозиторий — [`../frontend/docs/backend-issues.md`](../frontend/docs/backend-issues.md), 96 пунктов трёх областей (B — настройка и справочники, 34; A — CRM, 34; C — доступы/подпись, 28), каждый привязан к файлу и строке. Ниже — самое существенное для эксплуатации, кратким изложением, не копией.
+Список найденных при интеграции проблем ведёт фронтенд-репозиторий — [`frontend/docs/backend-issues.md`](https://github.com/lct-testkit/frontend/blob/main/docs/backend-issues.md), 101 пункт трёх областей (B — настройка и справочники, 34; A — CRM, 39; C — доступы/подпись, 28), 61 из них исправлен полностью или частично, каждый привязан к файлу и строке. Ниже — самое существенное для эксплуатации, кратким изложением, не копией.
 
 | Проблема | Как обходится / статус |
 |---|---|
 | `GET /api/admin/audit/verify-chain` на широких выборках (`limit≥100`) нашёл разрывы цепочки на этом стенде | узкие недавние окна (`limit≤20`) в тот же момент были целыми — похоже на след параллельной активности нескольких сессий на общем стенде за время его жизни; полной трассировки причины не делалось, стоит проверить на выделенном стенде перед сдачей |
-| `PUT /workflows/{id}/graph` раньше удалял и создавал заново все статусы и переходы → `500`, как только по переходу прошла хотя бы одна сделка (внешний ключ истории) | исправлено в рабочей копии (не закоммичено): переходы сопоставляются по паре статусов и обновляются на месте, занятый статус/переход даёт `422` вместо `500` |
+| `PUT /workflows/{id}/graph` раньше удалял и создавал заново все статусы и переходы → `500`, как только по переходу прошла хотя бы одна сделка (внешний ключ истории) | исправлено: переходы обновляются по `id`; исчезнувший, но использованный в истории — `409 CRM-1209`, статус со сделками — `409 CRM-1208`, а не `500` (тесты `TestSaveGraphWithDeals`) |
 | `GET /api/auth/login?next=…` был открытым редиректом | исправлено: `safe_next_path` принимает только путь внутри сайта, проверено тестами и живым запросом (см. «Безопасность») |
 | Сиды `reporting`/`notification`/`integration` не входят в `entrypoint.sh seed` (только воронки) | запускаются вручную, идемпотентны (см. «Разработка»); на этом стенде уже применены |
 | Автоподстановка по ИНН не имеет реального внешнего провайдера | цепочка «локальный реестр → подтверждённые организации → мок» — мок работает только вне `prod`; в `prod` доступен только локальный реестр и уже подтверждённые организации |
 | Мастер передачи дел (offboard) принимает только одного преемника, «по-сделочно» нет | точечное распределение — через отдельную массовую ручку `POST /deals/bulk/reassign` |
 
-Остальные пункты — несогласованные коды ошибок для лимита отчётов, отсутствующая `DELETE`-ручка у производственного календаря (остальные справочники и воронки её уже получили, см. выше), N+1 запросы карточек без денормализованных имён, отсутствие пагинации у части списков — в [`../frontend/docs/backend-issues.md`](../frontend/docs/backend-issues.md), с привязкой к файлу и строке. Данные отчёта в JSON, не только файлом, — `GET /api/reports/{report_id}/data`.
+Открытыми остаются: отсутствующая `DELETE`-ручка у производственного календаря (остальные справочники и воронки её получили), построчные результаты и причина сбоя импорта, запись аудита на каждый вызов `POST /workflows/{id}/validate`, вход по приглашению в закрытом контуре (оценка — около дня работы бэкенда), удаление сделки, отдельная ручка архивации воронки целиком — в [`frontend/docs/backend-issues.md`](https://github.com/lct-testkit/frontend/blob/main/docs/backend-issues.md), с привязкой к файлу и строке. Данные отчёта в JSON, не только файлом, — `GET /api/reports/{report_id}/data`.
 
 | Документ | Что внутри |
 |---|---|
 | [`_spec/spec.txt`](_spec/spec.txt) | исходная спецификация — источник приоритета при расхождениях |
-| [`../new_spec.md`](../new_spec.md) | паспорт проекта и ТЗ — второй по приоритету источник |
-| [`../dop.md`](../dop.md) | дополнения: ПЭП, автоподстановка по ИНН и ЕГРЮЛ, дизайн-система |
-| [`../README.md`](../README.md) | обзор всего проекта: состав репозиториев, быстрый старт демо- и prod-версии клиента, адреса и порты всего стека |
-| [`../frontend/README.md`](../frontend/README.md) | веб-клиент: стек, сборка, режимы demo/prod |
-| [`../frontend/docs/api-endpoints.md`](../frontend/docs/api-endpoints.md) | те же 181 операция API, сгенерированный список по тегам |
-| [`../frontend/docs/backend-issues.md`](../frontend/docs/backend-issues.md) | 96 несоответствий бэкенда, найденных на живом стенде, с привязкой к файлу и строке |
+| [`new_spec.md`](https://github.com/lct-testkit/.github/blob/main/docs/new_spec.md) | паспорт проекта и ТЗ — второй по приоритету источник |
+| [`dop.md`](https://github.com/lct-testkit/.github/blob/main/docs/dop.md) | дополнения: ПЭП, автоподстановка по ИНН и ЕГРЮЛ, дизайн-система |
+| [`README продукта`](https://github.com/lct-testkit/.github#readme) | обзор всего проекта: состав репозиториев, быстрый старт демо- и prod-версии клиента, адреса и порты всего стека |
+| [`frontend/README.md`](https://github.com/lct-testkit/frontend#readme) | веб-клиент: стек, сборка, режимы demo/prod |
+| [`frontend/docs/api-endpoints.md`](https://github.com/lct-testkit/frontend/blob/main/docs/api-endpoints.md) | те же 193 операции API, сгенерированный список по тегам |
+| [`frontend/docs/backend-issues.md`](https://github.com/lct-testkit/frontend/blob/main/docs/backend-issues.md) | 101 несоответствие бэкенда, найденных на живом стенде, с привязкой к файлу и строке |
 | [`loadtest/README.md`](loadtest/README.md) | нагрузочное тестирование: методика, зафиксированный прогон, интерпретация результатов |
-| [`../deploy/README.md`](../deploy/README.md) | инфраструктурный репозиторий: манифест образов, CI/CD, состояние по фазам |
+| [`deploy/README.md`](https://github.com/lct-testkit/deploy#readme) | инфраструктурный репозиторий: манифест образов, CI/CD, состояние по фазам |
 
