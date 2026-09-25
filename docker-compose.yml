@@ -149,7 +149,7 @@ services:
 
   seaweedfs:
     # S3-совместимое хранилище. Спецификация прямо запрещает замену на MinIO.
-    image: chrislusf/seaweedfs:3.68
+    image: chrislusf/seaweedfs:4.47
     restart: unless-stopped
     # -master.volumePreallocate=false: без него SeaweedFS при создании тома сразу резервирует на диске весь
     # volumeSizeLimitMB (1 ГБ на том, по 7 томов на каждый из 5 бакетов): пустой стенд занимал 20–36 ГБ. С флагом место
