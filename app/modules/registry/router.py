@@ -127,9 +127,8 @@ async def start_registry_import(
 async def list_registry_versions(
     session: DbSession, page: Pagination, _: RegistryImportPerm
 ) -> RegistryVersionListResponse:
-    stmt = (
-        (await RegistryImportService(session).list_query())
-        .order_by(RegistryVersion.created_at.desc(), RegistryVersion.id.desc())
+    stmt = (await RegistryImportService(session).list_query()).order_by(
+        RegistryVersion.created_at.desc(), RegistryVersion.id.desc()
     )
     cursor = page.decoded_cursor
     if cursor:

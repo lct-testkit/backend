@@ -102,14 +102,21 @@ def _create_signature_templates() -> None:
             server_default=sa.text("'[]'::jsonb"),
             nullable=False,
         ),
-        sa.Column("default_deadline_days", sa.Integer(), server_default=sa.text("7"), nullable=False),
+        sa.Column(
+            "default_deadline_days", sa.Integer(), server_default=sa.text("7"), nullable=False
+        ),
         sa.Column("output_format", sa.String(8), server_default=sa.text("'pdf'"), nullable=False),
         sa.Column("is_active", sa.Boolean(), server_default=sa.text("true"), nullable=False),
         sa.Column("version", sa.Integer(), server_default=sa.text("1"), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(),
-            onupdate=sa.func.now(), nullable=False,
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            onupdate=sa.func.now(),
+            nullable=False,
         ),
         sa.PrimaryKeyConstraint("id", name="pk_signature_templates"),
         sa.UniqueConstraint("code", name="uq_signature_templates_code"),
@@ -141,19 +148,28 @@ def _create_edm_agreements() -> None:
         sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("revoke_reason", sa.Text(), nullable=True),
         sa.Column("created_by", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(),
-            onupdate=sa.func.now(), nullable=False,
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            onupdate=sa.func.now(),
+            nullable=False,
         ),
         sa.PrimaryKeyConstraint("id", name="pk_edm_agreements"),
         sa.ForeignKeyConstraint(
-            ["agreement_file_id"], ["files.id"],
-            name="fk_edm_agreements_agreement_file_id_files", ondelete="RESTRICT",
+            ["agreement_file_id"],
+            ["files.id"],
+            name="fk_edm_agreements_agreement_file_id_files",
+            ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
-            ["created_by"], ["users.id"],
-            name="fk_edm_agreements_created_by_users", ondelete="RESTRICT",
+            ["created_by"],
+            ["users.id"],
+            name="fk_edm_agreements_created_by_users",
+            ondelete="RESTRICT",
         ),
         sa.CheckConstraint(
             "party_type IN ('organization','contact','user')",
@@ -173,7 +189,9 @@ def _create_edm_agreements() -> None:
         ),
     )
     op.create_index("ix_edm_agreements_created_at", "edm_agreements", ["created_at"])
-    op.create_index("ix_edm_agreements_party", "edm_agreements", ["party_type", "party_id", "status"])
+    op.create_index(
+        "ix_edm_agreements_party", "edm_agreements", ["party_type", "party_id", "status"]
+    )
 
 
 def _create_signature_documents() -> None:
@@ -190,11 +208,15 @@ def _create_signature_documents() -> None:
         sa.Column("signed_file_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("protocol_file_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("manifest", postgresql.JSONB(), nullable=True),
-        sa.Column("signing_order", sa.String(16), server_default=sa.text("'sequential'"), nullable=False),
+        sa.Column(
+            "signing_order", sa.String(16), server_default=sa.text("'sequential'"), nullable=False
+        ),
         sa.Column("status", sa.String(24), server_default=sa.text("'draft'"), nullable=False),
         sa.Column("deadline_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_by", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("void_reason", sa.Text(), nullable=True),
         sa.Column("voided_by", postgresql.UUID(as_uuid=True), nullable=True),
@@ -202,20 +224,28 @@ def _create_signature_documents() -> None:
         sa.Column("on_expired", sa.String(32), nullable=True),
         sa.PrimaryKeyConstraint("id", name="pk_signature_documents"),
         sa.ForeignKeyConstraint(
-            ["created_by"], ["users.id"],
-            name="fk_signature_documents_created_by_users", ondelete="RESTRICT",
+            ["created_by"],
+            ["users.id"],
+            name="fk_signature_documents_created_by_users",
+            ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
-            ["file_id"], ["files.id"],
-            name="fk_signature_documents_file_id_files", ondelete="RESTRICT",
+            ["file_id"],
+            ["files.id"],
+            name="fk_signature_documents_file_id_files",
+            ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
-            ["signed_file_id"], ["files.id"],
-            name="fk_signature_documents_signed_file_id_files", ondelete="RESTRICT",
+            ["signed_file_id"],
+            ["files.id"],
+            name="fk_signature_documents_signed_file_id_files",
+            ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
-            ["protocol_file_id"], ["files.id"],
-            name="fk_signature_documents_protocol_file_id_files", ondelete="RESTRICT",
+            ["protocol_file_id"],
+            ["files.id"],
+            name="fk_signature_documents_protocol_file_id_files",
+            ondelete="RESTRICT",
         ),
         sa.CheckConstraint(
             "doc_type IN ('kp','act','consent','erasure_act','offer','custom')",
@@ -271,23 +301,33 @@ def _create_signature_requests() -> None:
         sa.Column("decided_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("reject_reason", sa.Text(), nullable=True),
         sa.Column("edm_agreement_id", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_signature_requests"),
         sa.ForeignKeyConstraint(
-            ["document_id"], ["signature_documents.id"],
-            name="fk_signature_requests_document_id_signature_documents", ondelete="CASCADE",
+            ["document_id"],
+            ["signature_documents.id"],
+            name="fk_signature_requests_document_id_signature_documents",
+            ondelete="CASCADE",
         ),
         sa.ForeignKeyConstraint(
-            ["signer_user_id"], ["users.id"],
-            name="fk_signature_requests_signer_user_id_users", ondelete="RESTRICT",
+            ["signer_user_id"],
+            ["users.id"],
+            name="fk_signature_requests_signer_user_id_users",
+            ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
-            ["signer_contact_id"], ["contacts.id"],
-            name="fk_signature_requests_signer_contact_id_contacts", ondelete="RESTRICT",
+            ["signer_contact_id"],
+            ["contacts.id"],
+            name="fk_signature_requests_signer_contact_id_contacts",
+            ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
-            ["edm_agreement_id"], ["edm_agreements.id"],
-            name="fk_signature_requests_edm_agreement_id_edm_agreements", ondelete="RESTRICT",
+            ["edm_agreement_id"],
+            ["edm_agreements.id"],
+            name="fk_signature_requests_edm_agreement_id_edm_agreements",
+            ondelete="RESTRICT",
         ),
         sa.CheckConstraint(
             "signer_type IN ('internal','external')",
@@ -306,7 +346,9 @@ def _create_signature_requests() -> None:
     op.create_index(
         "ix_signature_requests_document", "signature_requests", ["document_id", "sign_order"]
     )
-    op.create_index("ix_signature_requests_user", "signature_requests", ["signer_user_id", "status"])
+    op.create_index(
+        "ix_signature_requests_user", "signature_requests", ["signer_user_id", "status"]
+    )
     op.create_index(
         "ix_signature_requests_contact", "signature_requests", ["signer_contact_id", "status"]
     )
@@ -329,7 +371,9 @@ def _create_signatures() -> None:
         sa.Column("method", sa.String(16), nullable=False),
         sa.Column("signer_display", sa.String(255), nullable=False),
         sa.Column("signature_value", sa.Text(), nullable=False),
-        sa.Column("algorithm", sa.String(32), server_default=sa.text("'HMAC-SHA256'"), nullable=False),
+        sa.Column(
+            "algorithm", sa.String(32), server_default=sa.text("'HMAC-SHA256'"), nullable=False
+        ),
         sa.Column("key_version", sa.Integer(), server_default=sa.text("1"), nullable=False),
         sa.Column("evidence", postgresql.JSONB(), nullable=False),
         sa.Column("signed_at", sa.DateTime(timezone=True), nullable=False),
@@ -340,15 +384,21 @@ def _create_signatures() -> None:
         sa.Column("is_disputed", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("prev_hash", sa.String(64), nullable=True),
         sa.Column("hash", sa.String(64), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_signatures"),
         sa.ForeignKeyConstraint(
-            ["request_id"], ["signature_requests.id"],
-            name="fk_signatures_request_id_signature_requests", ondelete="RESTRICT",
+            ["request_id"],
+            ["signature_requests.id"],
+            name="fk_signatures_request_id_signature_requests",
+            ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
-            ["document_id"], ["signature_documents.id"],
-            name="fk_signatures_document_id_signature_documents", ondelete="RESTRICT",
+            ["document_id"],
+            ["signature_documents.id"],
+            name="fk_signatures_document_id_signature_documents",
+            ondelete="RESTRICT",
         ),
         sa.CheckConstraint(
             "method IN ('pep_otp','pep_session','unep','ukep')",
@@ -373,18 +423,24 @@ def _create_signature_otp_codes() -> None:
         sa.Column("max_attempts", sa.SmallInteger(), server_default=sa.text("3"), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("consumed_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_signature_otp_codes"),
         sa.ForeignKeyConstraint(
-            ["request_id"], ["signature_requests.id"],
-            name="fk_signature_otp_codes_request_id_signature_requests", ondelete="CASCADE",
+            ["request_id"],
+            ["signature_requests.id"],
+            name="fk_signature_otp_codes_request_id_signature_requests",
+            ondelete="CASCADE",
         ),
         sa.CheckConstraint(
             "channel IN ('sms','email','telegram')",
             name="ck_signature_otp_codes_signature_otp_channel_valid",
         ),
     )
-    op.create_index("ix_signature_otp_codes_request", "signature_otp_codes", ["request_id", "created_at"])
+    op.create_index(
+        "ix_signature_otp_codes_request", "signature_otp_codes", ["request_id", "created_at"]
+    )
 
 
 def _add_cross_module_foreign_keys() -> None:
@@ -392,23 +448,36 @@ def _add_cross_module_foreign_keys() -> None:
     UUID с тех спринтов, где появились сами таблицы, — `signatures`/
     `signature_documents` тогда не существовали (см. docstring модуля)."""
     op.create_foreign_key(
-        "fk_consents_signature_id_signatures", "consents", "signatures",
-        ["signature_id"], ["id"], ondelete="SET NULL",
+        "fk_consents_signature_id_signatures",
+        "consents",
+        "signatures",
+        ["signature_id"],
+        ["id"],
+        ondelete="SET NULL",
     )
     op.create_foreign_key(
         "fk_data_erasure_requests_act_signature_id_signatures",
-        "data_erasure_requests", "signatures",
-        ["act_signature_id"], ["id"], ondelete="RESTRICT",
+        "data_erasure_requests",
+        "signatures",
+        ["act_signature_id"],
+        ["id"],
+        ondelete="RESTRICT",
     )
     op.create_foreign_key(
         "fk_data_erasure_requests_act_file_id_files",
-        "data_erasure_requests", "files",
-        ["act_file_id"], ["id"], ondelete="RESTRICT",
+        "data_erasure_requests",
+        "files",
+        ["act_file_id"],
+        ["id"],
+        ondelete="RESTRICT",
     )
     op.create_foreign_key(
         "fk_deals_active_signature_document_id_signature_documents",
-        "deals", "signature_documents",
-        ["active_signature_document_id"], ["id"], ondelete="SET NULL",
+        "deals",
+        "signature_documents",
+        ["active_signature_document_id"],
+        ["id"],
+        ondelete="SET NULL",
     )
 
 

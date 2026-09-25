@@ -39,124 +39,175 @@ logger = structlog.get_logger(__name__)
 # (code, channel, subject, body)
 _DEFAULT_TEMPLATES: list[tuple[str, str, str | None, str]] = [
     (
-        "USER_PASSWORD_CHANGED", "in_app", None,
+        "USER_PASSWORD_CHANGED",
+        "in_app",
+        None,
         "Пароль вашей учётной записи изменён {{ changed_at }}"
         "{% if ip %} (IP {{ ip }}){% endif %}. Если это были не вы — "
         "свяжитесь с администратором.",
     ),
     (
-        "USER_PASSWORD_CHANGED", "email", "Пароль вашей учётной записи изменён",
+        "USER_PASSWORD_CHANGED",
+        "email",
+        "Пароль вашей учётной записи изменён",
         "Пароль изменён {{ changed_at }}{% if ip %}, IP {{ ip }}{% endif %}. "
         "Если это были не вы — свяжитесь с администратором. Ссылка на "
         "самостоятельный откат не предоставляется в целях безопасности.",
     ),
     (
-        "USER_PASSWORD_RESET", "in_app", None,
+        "USER_PASSWORD_RESET",
+        "in_app",
+        None,
         "Администратор сбросил пароль вашей учётной записи. Причина: "
         "{{ reason }}. Требуется повторный вход.",
     ),
     (
-        "USER_PASSWORD_RESET", "email", "Пароль вашей учётной записи сброшен",
+        "USER_PASSWORD_RESET",
+        "email",
+        "Пароль вашей учётной записи сброшен",
         "Пароль вашей учётной записи сброшен администратором. Причина: "
         "{{ reason }}. Все сессии завершены, потребуется вход заново.",
     ),
     (
-        "USER_ACCOUNT_BLOCKED", "in_app", None,
+        "USER_ACCOUNT_BLOCKED",
+        "in_app",
+        None,
         "Ваша учётная запись заблокирована. Причина: {{ reason }}.",
     ),
     (
-        "USER_ACCOUNT_BLOCKED", "email", "Учётная запись заблокирована",
+        "USER_ACCOUNT_BLOCKED",
+        "email",
+        "Учётная запись заблокирована",
         "Ваша учётная запись заблокирована. Причина: {{ reason }}. По "
         "вопросам обращайтесь к руководителю.",
     ),
     (
-        "USER_ACCOUNT_UNBLOCKED", "in_app", None,
+        "USER_ACCOUNT_UNBLOCKED",
+        "in_app",
+        None,
         "Ваша учётная запись разблокирована. {{ reason }}",
     ),
     (
-        "USER_ROLE_CHANGED", "in_app", None,
+        "USER_ROLE_CHANGED",
+        "in_app",
+        None,
         "Ваша роль изменена: {{ old_role }} → {{ new_role }}.",
     ),
     (
-        "USER_OFFBOARD_SUCCESSOR", "in_app", None,
+        "USER_OFFBOARD_SUCCESSOR",
+        "in_app",
+        None,
         "Вам переданы сделки уволенного сотрудника"
         "{% if deals %} ({{ deals|length }} шт.){% endif %}.",
     ),
     (
-        "ERASURE_REQUEST_BLOCKED", "in_app", None,
+        "ERASURE_REQUEST_BLOCKED",
+        "in_app",
+        None,
         "Запрос на удаление/обезличивание данных заблокирован"
         "{% if blockers %}: {{ blockers|join(', ') }}{% endif %}.",
     ),
     (
-        "ERASURE_COMPLETED", "in_app", None,
+        "ERASURE_COMPLETED",
+        "in_app",
+        None,
         "Запрос на удаление/обезличивание исполнен (режим: {{ mode }}). "
         "Акт об уничтожении ПДн доступен в карточке запроса.",
     ),
     (
-        "SIGNATURE_REQUESTED", "in_app", None,
-        "Вам направлен документ на подпись"
-        "{% if template %} (шаблон «{{ template }}»){% endif %}.",
+        "SIGNATURE_REQUESTED",
+        "in_app",
+        None,
+        "Вам направлен документ на подпись{% if template %} (шаблон «{{ template }}»){% endif %}.",
     ),
     (
-        "SIGNATURE_DOCUMENT_SIGNED", "in_app", None,
+        "SIGNATURE_DOCUMENT_SIGNED",
+        "in_app",
+        None,
         "Документ подписан всеми участниками.",
     ),
     (
-        "SIGNATURE_DOCUMENT_REJECTED", "in_app", None,
+        "SIGNATURE_DOCUMENT_REJECTED",
+        "in_app",
+        None,
         "Подписание документа отклонено.{% if reason %} Причина: {{ reason }}.{% endif %}",
     ),
     (
-        "SIGNATURE_DOCUMENT_EXPIRED", "in_app", None,
+        "SIGNATURE_DOCUMENT_EXPIRED",
+        "in_app",
+        None,
         "Истёк срок запроса на подпись документа. Требуется пересоздать запрос.",
     ),
     (
-        "SIGNATURE_OTP_LOCKED", "in_app", None,
+        "SIGNATURE_OTP_LOCKED",
+        "in_app",
+        None,
         "Подписант трижды ввёл неверный код подтверждения — запрос на подпись заблокирован.",
     ),
     (
-        "EDM_AGREEMENT_MISSING", "in_app", None,
+        "EDM_AGREEMENT_MISSING",
+        "in_app",
+        None,
         "Подписание документа заблокировано: у контрагента нет действующего "
         "соглашения об ЭДО. Оформите соглашение и повторите отправку.",
     ),
     (
-        "ORG_REQUISITES_DRIFT_DETECTED", "in_app", None,
+        "ORG_REQUISITES_DRIFT_DETECTED",
+        "in_app",
+        None,
         "У организации изменились реквизиты"
         "{% if fields %}: {{ fields|join(', ') }}{% endif %}. Проверьте карточку организации.",
     ),
     (
-        "ORG_DRIFT_APPLIED", "in_app", None,
+        "ORG_DRIFT_APPLIED",
+        "in_app",
+        None,
         "Изменения реквизитов организации применены из реестра ЕГРЮЛ.",
     ),
     (
-        "ORG_LIQUIDATION_DETECTED", "in_app", None,
+        "ORG_LIQUIDATION_DETECTED",
+        "in_app",
+        None,
         "Организация контрагента по этой сделке переходит в статус ликвидации. "
         "Требуется юридическая проверка перед дальнейшими действиями.",
     ),
     (
-        "ORG_LIQUIDATION_DETECTED", "email", "Требуется юридическая проверка контрагента",
+        "ORG_LIQUIDATION_DETECTED",
+        "email",
+        "Требуется юридическая проверка контрагента",
         "Организация контрагента по вашей сделке меняет статус на "
         "«ликвидируется/ликвидирована». Подписание документов с таким "
         "контрагентом — юридический риск: проверьте карточку сделки.",
     ),
     (
-        "DEAL_SLA_WARNING", "in_app", None,
+        "DEAL_SLA_WARNING",
+        "in_app",
+        None,
         "По сделке истекает срок SLA текущего статуса — осталось меньше 25% времени.",
     ),
     (
-        "DEAL_SLA_BREACHED", "in_app", None,
+        "DEAL_SLA_BREACHED",
+        "in_app",
+        None,
         "SLA по сделке нарушен: срок текущего статуса истёк.",
     ),
     (
-        "DEAL_SLA_BREACHED", "email", "SLA по сделке нарушен",
+        "DEAL_SLA_BREACHED",
+        "email",
+        "SLA по сделке нарушен",
         "Срок текущего статуса сделки истёк без перехода. Требуется внимание "
         "ответственного или руководителя.",
     ),
     (
-        "DEAL_REASSIGNED", "in_app", None,
+        "DEAL_REASSIGNED",
+        "in_app",
+        None,
         "Вам назначена сделка в качестве ответственного.",
     ),
     (
-        "DEAL_EVENT", "in_app", None,
+        "DEAL_EVENT",
+        "in_app",
+        None,
         "Событие по сделке — подробности в карточке сделки.",
     ),
 ]

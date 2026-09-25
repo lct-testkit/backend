@@ -92,9 +92,7 @@ class Base(DeclarativeBase):
 class UuidPkMixin:
     """UUIDv7 как первичный ключ. Автоинкременты наружу запрещены."""
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid7
-    )
+    id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid7)
 
 
 class TimestampMixin:
@@ -113,9 +111,7 @@ class SoftDeleteMixin:
     """Мягкое удаление. Уникальность проверяется частичным индексом
     `WHERE deleted_at IS NULL`, иначе удалённая запись блокирует создание новой."""
 
-    deleted_at: Mapped[dt.datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    deleted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     @property
     def is_deleted(self) -> bool:
@@ -125,6 +121,4 @@ class SoftDeleteMixin:
 class VersionMixin:
     """Оптимистичная блокировка через `If-Match` / `version` (раздел 2)."""
 
-    version: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, server_default=text("1")
-    )
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))

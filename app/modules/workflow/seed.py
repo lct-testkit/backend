@@ -118,15 +118,24 @@ def _linear_funnel(
 
     statuses += [
         StatusSpec(
-            code="won", name="Успешно закрыта", type=StatusType.WON.value,
-            required_fields=["amount", "expected_close_date"], sort_order=1000,
+            code="won",
+            name="Успешно закрыта",
+            type=StatusType.WON.value,
+            required_fields=["amount", "expected_close_date"],
+            sort_order=1000,
         ),
         StatusSpec(
-            code="lost", name="Отказ", type=StatusType.LOST.value,
-            required_fields=["loss_reason_id"], sort_order=1010,
+            code="lost",
+            name="Отказ",
+            type=StatusType.LOST.value,
+            required_fields=["loss_reason_id"],
+            sort_order=1010,
         ),
         StatusSpec(
-            code="parked", name="Заморожена", type=StatusType.PARKED.value, sort_order=1020,
+            code="parked",
+            name="Заморожена",
+            type=StatusType.PARKED.value,
+            sort_order=1020,
         ),
     ]
 
@@ -136,29 +145,41 @@ def _linear_funnel(
             next_code, next_name = steps[index + 1]
             transitions.append(
                 TransitionSpec(
-                    from_code=code, to_code=next_code,
-                    name=f"Перейти к статусу «{next_name}»", sort_order=10,
+                    from_code=code,
+                    to_code=next_code,
+                    name=f"Перейти к статусу «{next_name}»",
+                    sort_order=10,
                 )
             )
         if index > 0:
             prev_code, prev_name = steps[index - 1]
             transitions.append(
                 TransitionSpec(
-                    from_code=code, to_code=prev_code,
+                    from_code=code,
+                    to_code=prev_code,
                     name=f"Вернуться к статусу «{prev_name}»",
-                    requires_comment=True, sort_order=20,
+                    requires_comment=True,
+                    sort_order=20,
                 )
             )
         transitions.append(
             TransitionSpec(
-                from_code=code, to_code="lost", name="Отказ",
-                requires_comment=True, conditions=_LOST_CONDITION, sort_order=30,
+                from_code=code,
+                to_code="lost",
+                name="Отказ",
+                requires_comment=True,
+                conditions=_LOST_CONDITION,
+                sort_order=30,
             )
         )
         transitions.append(
             TransitionSpec(
-                from_code=code, to_code="parked", name="Заморозить",
-                requires_comment=True, conditions=_PARK_CONDITION, sort_order=40,
+                from_code=code,
+                to_code="parked",
+                name="Заморозить",
+                requires_comment=True,
+                conditions=_PARK_CONDITION,
+                sort_order=40,
             )
         )
 
@@ -187,7 +208,8 @@ def _b2b_spec() -> WorkflowSpec:
         # Раздел 7: вход в kp_approval запускает ПЭП-согласование КП
         # руководителем; отклонение возвращает сделку в kp_preparation.
         TransitionSpec(
-            from_code="kp_preparation", to_code="kp_approval",
+            from_code="kp_preparation",
+            to_code="kp_approval",
             name="Отправить КП на согласование",
             actions=[
                 {
@@ -205,7 +227,8 @@ def _b2b_spec() -> WorkflowSpec:
         # Юридическое согласование — задача юристу (в системе нет отдельной
         # роли LAWYER, поэтому задача ставится HEAD, который её делегирует).
         TransitionSpec(
-            from_code="kp_approval", to_code="legal_approval",
+            from_code="kp_approval",
+            to_code="legal_approval",
             name="Передать на юридическое согласование",
             actions=[
                 {
@@ -221,7 +244,8 @@ def _b2b_spec() -> WorkflowSpec:
         # Выйти из подписания можно только когда договор подписан ПЭП или
         # приложен подписанный скан с административным подтверждением.
         TransitionSpec(
-            from_code="contract_signing", to_code="lms_transfer",
+            from_code="contract_signing",
+            to_code="lms_transfer",
             name="Передать материалы в LMS",
             conditions={
                 "any": [
@@ -238,18 +262,20 @@ def _b2b_spec() -> WorkflowSpec:
             sort_order=10,
         ),
         TransitionSpec(
-            from_code="lms_transfer", to_code="training_launch",
+            from_code="lms_transfer",
+            to_code="training_launch",
             name="Запустить обучение",
-            actions=[
-                {"type": "integration_event", "event_code": "LEARNING_ENROLLMENT_SENT"}
-            ],
+            actions=[{"type": "integration_event", "event_code": "LEARNING_ENROLLMENT_SENT"}],
             sort_order=10,
         ),
         # monitoring — обычный шаг воронки: forward/backward-переходы для него
         # уже строит `_linear_funnel`, здесь только переход в терминальный won.
         TransitionSpec(
-            from_code="closing_prolongation", to_code="won",
-            name="Закрыть сделку успешно", conditions=_WON_CONDITION, sort_order=10,
+            from_code="closing_prolongation",
+            to_code="won",
+            name="Закрыть сделку успешно",
+            conditions=_WON_CONDITION,
+            sort_order=10,
         ),
     ]
 
@@ -261,9 +287,7 @@ def _b2b_spec() -> WorkflowSpec:
 
     statuses, base_transitions = _linear_funnel(steps)
     forward_and_backward = [
-        t
-        for t in base_transitions
-        if (t.from_code, t.to_code) not in overridden_pairs
+        t for t in base_transitions if (t.from_code, t.to_code) not in overridden_pairs
     ]
     transitions = forward_and_backward + extra
     return WorkflowSpec(
@@ -287,13 +311,15 @@ def _b2c_spec() -> WorkflowSpec:
 
     extra = [
         TransitionSpec(
-            from_code="contact_verification", to_code="consultation",
+            from_code="contact_verification",
+            to_code="consultation",
             name="Подтвердить контакт",
             conditions={"field": "custom_fields.contact_verified", "op": "eq", "value": True},
             sort_order=10,
         ),
         TransitionSpec(
-            from_code="payment_contract", to_code="lms_enrollment",
+            from_code="payment_contract",
+            to_code="lms_enrollment",
             name="Зачислить в LMS",
             conditions={
                 "any": [
@@ -305,8 +331,11 @@ def _b2c_spec() -> WorkflowSpec:
             sort_order=10,
         ),
         TransitionSpec(
-            from_code="training_completed", to_code="won",
-            name="Закрыть сделку успешно", conditions=_WON_CONDITION, sort_order=10,
+            from_code="training_completed",
+            to_code="won",
+            name="Закрыть сделку успешно",
+            conditions=_WON_CONDITION,
+            sort_order=10,
         ),
     ]
     overridden_pairs = {(t.from_code, t.to_code) for t in extra}
@@ -386,9 +415,7 @@ async def seed_workflow(session: AsyncSession, spec: WorkflowSpec) -> Workflow |
 
     errors, warnings = _validate_graph_data(statuses, transitions)
     if errors:
-        raise RuntimeError(
-            f"Сид {spec.code!r} не проходит валидацию графа: {'; '.join(errors)}"
-        )
+        raise RuntimeError(f"Сид {spec.code!r} не проходит валидацию графа: {'; '.join(errors)}")
     for warning in warnings:
         logger.warning("workflow_seed_warning", code=spec.code, warning=warning)
 
@@ -406,11 +433,15 @@ async def seed_workflow(session: AsyncSession, spec: WorkflowSpec) -> Workflow |
 
     audit = AuditService(session)
     await audit.record(
-        AuditAction.WORKFLOW_CREATED, entity_type="workflow", entity_id=workflow.id,
+        AuditAction.WORKFLOW_CREATED,
+        entity_type="workflow",
+        entity_id=workflow.id,
         changes={"code": {"old": None, "new": spec.code}},
     )
     await audit.record(
-        AuditAction.WORKFLOW_PUBLISHED, entity_type="workflow", entity_id=workflow.id,
+        AuditAction.WORKFLOW_PUBLISHED,
+        entity_type="workflow",
+        entity_id=workflow.id,
         changes={"graph_hash": {"old": None, "new": digest}},
     )
 

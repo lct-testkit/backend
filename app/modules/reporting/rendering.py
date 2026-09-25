@@ -38,9 +38,7 @@ from app.modules.reporting.models import ReportFormat
 from app.modules.signing.rendering import html_to_pdf, render_template_html
 
 CONTENT_TYPES: dict[str, str] = {
-    ReportFormat.XLSX.value: (
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    ),
+    ReportFormat.XLSX.value: ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
     ReportFormat.PDF.value: "application/pdf",
     ReportFormat.PNG.value: "image/png",
 }
@@ -143,8 +141,16 @@ _BASELINE = "#c3c2b7"
 #: светлота, светлый конец не темнее шага 250 (порог контраста ordinal-
 #: рампы на светлой поверхности, см. palette.md).
 _ORDINAL_BLUE_STEPS = [
-    "#86b6ef", "#6da7ec", "#5598e7", "#3987e5", "#2a78d6",
-    "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b",
+    "#86b6ef",
+    "#6da7ec",
+    "#5598e7",
+    "#3987e5",
+    "#2a78d6",
+    "#256abf",
+    "#1c5cab",
+    "#184f95",
+    "#104281",
+    "#0d366b",
 ]
 
 #: Категориальные слоты 1/2/3 в фиксированном порядке (palette.md) —
@@ -217,8 +223,12 @@ def _render_funnel_chart(dataset: ReportDataset) -> bytes:
 
     y_pos = list(range(len(labels)))
     ax.barh(
-        y_pos, currently_in, height=0.62, color=colors,
-        edgecolor=_SURFACE, linewidth=2,  # 2px surface-gap между соседними барами
+        y_pos,
+        currently_in,
+        height=0.62,
+        color=colors,
+        edgecolor=_SURFACE,
+        linewidth=2,  # 2px surface-gap между соседними барами
     )
     ax.set_yticks(y_pos)
     ax.set_yticklabels(labels, color=_INK_SECONDARY)
@@ -229,8 +239,13 @@ def _render_funnel_chart(dataset: ReportDataset) -> bytes:
     # бар, это не «число на каждой точке» (то правило — про линии/точки).
     for y, value in zip(y_pos, currently_in, strict=True):
         ax.text(
-            value + max_value * 0.02, y, _format_value(value),
-            va="center", ha="left", fontsize=9, color=_INK_PRIMARY,
+            value + max_value * 0.02,
+            y,
+            _format_value(value),
+            va="center",
+            ha="left",
+            fontsize=9,
+            color=_INK_PRIMARY,
         )
 
     ax.set_title(dataset.title, color=_INK_PRIMARY, fontsize=13, loc="left", pad=12)
@@ -255,9 +270,17 @@ def _render_monthly_chart(dataset: ReportDataset) -> bytes:
 
     for name, values, color in series:
         ax.plot(
-            x, values, color=color, linewidth=2, marker="o", markersize=8,
-            markerfacecolor=color, markeredgecolor=_SURFACE, markeredgewidth=2,
-            label=name, zorder=3,
+            x,
+            values,
+            color=color,
+            linewidth=2,
+            marker="o",
+            markersize=8,
+            markerfacecolor=color,
+            markeredgecolor=_SURFACE,
+            markeredgewidth=2,
+            label=name,
+            zorder=3,
         )
         # Direct end-label (marks-and-anatomy.md: «Lines → value at the
         # end») — до 4 серий подписываются и напрямую, легенда не
@@ -266,9 +289,13 @@ def _render_monthly_chart(dataset: ReportDataset) -> bytes:
         # идентичность несёт цветной маркер рядом, не сама подпись.
         if values:
             ax.annotate(
-                f"{name}: {_format_value(values[-1])}", (x[-1], values[-1]),
-                xytext=(8, 0), textcoords="offset points", va="center",
-                fontsize=9, color=_INK_SECONDARY,
+                f"{name}: {_format_value(values[-1])}",
+                (x[-1], values[-1]),
+                xytext=(8, 0),
+                textcoords="offset points",
+                va="center",
+                fontsize=9,
+                color=_INK_SECONDARY,
             )
 
     ax.set_title(dataset.title, color=_INK_PRIMARY, fontsize=13, loc="left", pad=12)
@@ -282,7 +309,10 @@ def _render_monthly_chart(dataset: ReportDataset) -> bytes:
     ax.set_axisbelow(True)
     _style_axes(ax)
     legend = ax.legend(
-        loc="upper left", frameon=False, fontsize=9, labelcolor=_INK_SECONDARY,
+        loc="upper left",
+        frameon=False,
+        fontsize=9,
+        labelcolor=_INK_SECONDARY,
     )
     for handle in legend.legend_handles:
         handle.set_markeredgecolor(_SURFACE)

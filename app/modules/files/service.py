@@ -373,9 +373,7 @@ class FileService:
         # переход, не удаляются без административного действия — здесь это
         # выражено проще: пока есть хоть одна активная ссылка, удалить нельзя.
         if file.refcount > 0:
-            raise AppError(
-                ErrorCode.VALIDATION, "Файл привязан к вложениям, сначала отвяжите их"
-            )
+            raise AppError(ErrorCode.VALIDATION, "Файл привязан к вложениям, сначала отвяжите их")
         file.status = FileStatus.DELETED.value
         file.deleted_at = dt.datetime.now(dt.UTC)
         await self._session.flush()

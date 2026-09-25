@@ -91,9 +91,7 @@ class IdempotencyGuard:
             )
 
         record = (
-            await self._session.execute(
-                select(IdempotencyKey).where(IdempotencyKey.key == key)
-            )
+            await self._session.execute(select(IdempotencyKey).where(IdempotencyKey.key == key))
         ).scalar_one_or_none()
         if record is None:
             return None
@@ -162,14 +160,10 @@ class IdempotencyGuard:
         except Exception:
             logger.warning("idempotency_redis_reserve_failed")
 
-    async def store(
-        self, *, key: str, status: int, body: dict[str, Any] | None
-    ) -> None:
+    async def store(self, *, key: str, status: int, body: dict[str, Any] | None) -> None:
         key = scoped_key(key, self._actor_id)
         record = (
-            await self._session.execute(
-                select(IdempotencyKey).where(IdempotencyKey.key == key)
-            )
+            await self._session.execute(select(IdempotencyKey).where(IdempotencyKey.key == key))
         ).scalar_one_or_none()
         if record is not None:
             record.response_status = status

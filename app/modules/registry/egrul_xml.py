@@ -170,11 +170,7 @@ def _address(elem: etree._Element) -> tuple[str | None, str | None, dict[str, An
 def _okved(elem: etree._Element) -> tuple[str | None, list[str]]:
     main_elem = _find_first(elem, "СвОКВЭДОсн")
     main_code = _attr(main_elem, "КодОКВЭД") if main_elem is not None else None
-    extra_codes = [
-        code
-        for e in _find_all(elem, "СвОКВЭДДоп")
-        if (code := _attr(e, "КодОКВЭД"))
-    ]
+    extra_codes = [code for e in _find_all(elem, "СвОКВЭДДоп") if (code := _attr(e, "КодОКВЭД"))]
     return main_code, extra_codes
 
 

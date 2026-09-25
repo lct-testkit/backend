@@ -135,9 +135,7 @@ class ApprovalService:
             if approval.expires_at <= dt.datetime.now(dt.UTC):
                 approval.status = "expired"
                 await self._session.flush()
-                raise AppError(
-                    ErrorCode.SECOND_ADMIN_REQUIRED, "Срок действия подтверждения истёк"
-                )
+                raise AppError(ErrorCode.SECOND_ADMIN_REQUIRED, "Срок действия подтверждения истёк")
             if approval.approved_by == principal.user_id:
                 # Тот же администратор не может быть и инициатором, и
                 # подтверждающим: иначе это не «четыре глаза».
@@ -349,9 +347,7 @@ class AdminUserService:
         )
 
         try:
-            await keycloak_client.set_realm_role(
-                keycloak_id, role=role, known_roles=ROLE_NAMES
-            )
+            await keycloak_client.set_realm_role(keycloak_id, role=role, known_roles=ROLE_NAMES)
 
             user = User(
                 keycloak_id=keycloak_id,
@@ -493,9 +489,7 @@ class AdminUserService:
                 )
             await self._identity.bump_perm_epoch(user)
             if user.keycloak_id:
-                await keycloak_client.set_attribute(
-                    user.keycloak_id, "perm_epoch", user.perm_epoch
-                )
+                await keycloak_client.set_attribute(user.keycloak_id, "perm_epoch", user.perm_epoch)
             await get_notification_service().notify_user(
                 self._session,
                 recipient_id=user.id,
@@ -863,9 +857,10 @@ class AdminUserService:
         """Блокеры из new_spec §4.8.3 и dop §10.7."""
         blockers: list[dict[str, Any]] = []
 
-        if user.role == Role.ADMIN.value and await self._identity.count_active_admins(
-            exclude=user.id
-        ) == 0:
+        if (
+            user.role == Role.ADMIN.value
+            and await self._identity.count_active_admins(exclude=user.id) == 0
+        ):
             blockers.append(
                 {
                     "code": "last_admin",

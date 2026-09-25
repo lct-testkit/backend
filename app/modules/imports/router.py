@@ -56,9 +56,7 @@ async def create_import_job(
     return ImportJobOut.model_validate(job)
 
 
-@import_jobs_router.get(
-    "", summary="Список заданий импорта", response_model=ImportJobListResponse
-)
+@import_jobs_router.get("", summary="Список заданий импорта", response_model=ImportJobListResponse)
 async def list_import_jobs(
     session: DbSession, page: Pagination, _: ImportRunPerm
 ) -> ImportJobListResponse:

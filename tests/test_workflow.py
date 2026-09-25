@@ -255,9 +255,7 @@ class TestGraphValidation:
     def test_condition_errors_include_transition_name_for_debugging(self) -> None:
         a = _status("a", StatusType.INITIAL.value)
         won = _status("won", StatusType.WON.value)
-        bad = _transition(
-            a, won, name="bad", conditions={"field": "nope", "op": "eq", "value": 1}
-        )
+        bad = _transition(a, won, name="bad", conditions={"field": "nope", "op": "eq", "value": 1})
         errors, _ = _validate_graph_data([a, won], [bad])
         assert any("bad" in e for e in errors)
 
@@ -273,8 +271,12 @@ class TestSeedGraphs:
         statuses: list[WorkflowStatus] = []
         for s in spec.statuses:
             row = WorkflowStatus(
-                workflow_id=workflow_id, code=s.code, name=s.name, type=s.type,
-                sort_order=s.sort_order, required_fields=s.required_fields,
+                workflow_id=workflow_id,
+                code=s.code,
+                name=s.name,
+                type=s.type,
+                sort_order=s.sort_order,
+                required_fields=s.required_fields,
             )
             row.id = uuid.uuid4()
             by_code[s.code] = row
@@ -373,8 +375,10 @@ class TestDeleteDraftWorkflow:
         create = client.post(
             "/api/workflows",
             json={
-                "code": f"wf_draft_{uuid.uuid4().hex[:8]}", "name": "Черновик на удаление",
-                "deal_type": "b2b", "is_default": False,
+                "code": f"wf_draft_{uuid.uuid4().hex[:8]}",
+                "name": "Черновик на удаление",
+                "deal_type": "b2b",
+                "is_default": False,
             },
         )
         assert create.status_code == 201, create.text
@@ -394,8 +398,10 @@ class TestDeleteDraftWorkflow:
         create = client.post(
             "/api/workflows",
             json={
-                "code": f"wf_pub_{uuid.uuid4().hex[:8]}", "name": "Уже опубликована",
-                "deal_type": "b2b", "is_default": False,
+                "code": f"wf_pub_{uuid.uuid4().hex[:8]}",
+                "name": "Уже опубликована",
+                "deal_type": "b2b",
+                "is_default": False,
             },
         )
         workflow_id = create.json()["id"]

@@ -268,9 +268,7 @@ class ContactChannel(UuidPkMixin, Base):
     value: Mapped[str] = mapped_column(String(255), nullable=False)
     is_primary: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
     is_verified: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
-    created_at: Mapped[dt.datetime] = mapped_column(
-        server_default=text("now()"), nullable=False
-    )
+    created_at: Mapped[dt.datetime] = mapped_column(server_default=text("now()"), nullable=False)
 
 
 class Direction(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteMixin, Base):

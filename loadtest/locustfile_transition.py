@@ -75,6 +75,7 @@ def _fetch_access_token() -> str:
     response.raise_for_status()
     return response.json()["access_token"]
 
+
 # Один токен на всех виртуальных пользователей. 50 одновременных password-grant'ов от одного
 # демо-КАМа срабатывают как брутфорс: Keycloak (brute-force detection, спека §4.5) временно
 # блокирует пользователя (`user_temporarily_disabled`, 401), и прогон измеряет не API, а защиту
@@ -105,9 +106,7 @@ class TransitionUser(HttpUser):
     # 50 при -u 50 в первом прогоне этого файла. constant(0) — сразу
     # следующий запрос, как только пришёл ответ; -u 50 тогда действительно
     # означает «до 50 одновременных запросов», а не «50 медленных пользователей».
-    wait_time = (
-        constant_throughput(_RPS_PER_USER) if _RPS_PER_USER > 0 else constant(0)
-    )
+    wait_time = constant_throughput(_RPS_PER_USER) if _RPS_PER_USER > 0 else constant(0)
 
     def on_start(self) -> None:
         token = _shared_token()

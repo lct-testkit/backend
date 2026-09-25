@@ -60,6 +60,7 @@ def _fetch_access_token() -> str:
     response.raise_for_status()
     return response.json()["access_token"]
 
+
 # Один токен на всех виртуальных пользователей. 50 одновременных password-grant'ов от одного
 # демо-КАМа срабатывают как брутфорс: Keycloak (brute-force detection, спека §4.5) временно
 # блокирует пользователя (`user_temporarily_disabled`, 401), и прогон измеряет не API, а защиту
@@ -87,9 +88,7 @@ def _shared_token() -> str:
 class CommentUser(HttpUser):
     # См. locustfile_transition.py: без явного wait_time RPS держится
     # заметно ниже -u.
-    wait_time = (
-        constant_throughput(_RPS_PER_USER) if _RPS_PER_USER > 0 else constant(0)
-    )
+    wait_time = constant_throughput(_RPS_PER_USER) if _RPS_PER_USER > 0 else constant(0)
 
     def on_start(self) -> None:
         token = _shared_token()

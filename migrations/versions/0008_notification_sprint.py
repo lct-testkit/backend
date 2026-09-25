@@ -59,8 +59,11 @@ def upgrade() -> None:
             "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(),
-            onupdate=sa.func.now(), nullable=False,
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            onupdate=sa.func.now(),
+            nullable=False,
         ),
         sa.PrimaryKeyConstraint("id", name="pk_notification_templates"),
         sa.UniqueConstraint("code", "channel", name="uq_notification_templates_code_channel"),
@@ -69,9 +72,7 @@ def upgrade() -> None:
             name="ck_notification_templates_notification_templates_channel_valid",
         ),
     )
-    op.create_index(
-        "ix_notification_templates_code", "notification_templates", ["code"]
-    )
+    op.create_index("ix_notification_templates_code", "notification_templates", ["code"])
     op.create_index(
         "ix_notification_templates_created_at", "notification_templates", ["created_at"]
     )
@@ -94,8 +95,10 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id", name="pk_notifications"),
         sa.ForeignKeyConstraint(
-            ["recipient_id"], ["users.id"],
-            name="fk_notifications_recipient_id_users", ondelete="RESTRICT",
+            ["recipient_id"],
+            ["users.id"],
+            name="fk_notifications_recipient_id_users",
+            ondelete="RESTRICT",
         ),
         sa.CheckConstraint(
             "priority IN ('normal','high','critical')",
@@ -106,7 +109,9 @@ def upgrade() -> None:
         "ix_notifications_recipient_created", "notifications", ["recipient_id", "created_at"]
     )
     op.create_index(
-        "ix_notifications_recipient_unread", "notifications", ["recipient_id"],
+        "ix_notifications_recipient_unread",
+        "notifications",
+        ["recipient_id"],
         postgresql_where=sa.text("is_read = false"),
     )
     op.create_index("ix_notifications_template_code", "notifications", ["template_code"])
@@ -126,8 +131,10 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id", name="pk_notification_deliveries"),
         sa.ForeignKeyConstraint(
-            ["notification_id"], ["notifications.id"],
-            name="fk_notification_deliveries_notification_id_notifications", ondelete="SET NULL",
+            ["notification_id"],
+            ["notifications.id"],
+            name="fk_notification_deliveries_notification_id_notifications",
+            ondelete="SET NULL",
         ),
         sa.CheckConstraint(
             "channel IN ('email','telegram','in_app')",
@@ -139,11 +146,14 @@ def upgrade() -> None:
         ),
     )
     op.create_index(
-        "ix_notification_deliveries_notification_id", "notification_deliveries",
+        "ix_notification_deliveries_notification_id",
+        "notification_deliveries",
         ["notification_id"],
     )
     op.create_index(
-        "ix_notification_deliveries_pending", "notification_deliveries", ["status"],
+        "ix_notification_deliveries_pending",
+        "notification_deliveries",
+        ["status"],
         postgresql_where=sa.text("status = 'pending'"),
     )
 
@@ -153,7 +163,9 @@ def upgrade() -> None:
         sa.Column("user_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("event_code", sa.String(64), nullable=False),
         sa.Column(
-            "channels", postgresql.ARRAY(sa.String(16)), server_default=sa.text("'{}'"),
+            "channels",
+            postgresql.ARRAY(sa.String(16)),
+            server_default=sa.text("'{}'"),
             nullable=False,
         ),
         sa.Column("is_enabled", sa.Boolean(), server_default=sa.text("true"), nullable=False),
@@ -163,13 +175,18 @@ def upgrade() -> None:
             "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(),
-            onupdate=sa.func.now(), nullable=False,
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            onupdate=sa.func.now(),
+            nullable=False,
         ),
         sa.PrimaryKeyConstraint("id", name="pk_user_notification_prefs"),
         sa.ForeignKeyConstraint(
-            ["user_id"], ["users.id"],
-            name="fk_user_notification_prefs_user_id_users", ondelete="RESTRICT",
+            ["user_id"],
+            ["users.id"],
+            name="fk_user_notification_prefs_user_id_users",
+            ondelete="RESTRICT",
         ),
         sa.UniqueConstraint("user_id", "event_code", name="uq_user_notification_prefs_user_event"),
     )

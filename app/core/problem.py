@@ -152,9 +152,7 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     )
 
 
-async def validation_error_handler(
-    request: Request, exc: RequestValidationError
-) -> JSONResponse:
+async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     errors = [
         FieldError(field=_loc_to_field(e["loc"]), reason=e["msg"], code=e["type"])
         for e in exc.errors()
@@ -168,9 +166,7 @@ async def validation_error_handler(
     )
 
 
-async def pydantic_error_handler(
-    request: Request, exc: PydanticValidationError
-) -> JSONResponse:
+async def pydantic_error_handler(request: Request, exc: PydanticValidationError) -> JSONResponse:
     errors = [
         FieldError(field=_loc_to_field(e["loc"]), reason=e["msg"], code=e["type"])
         for e in exc.errors()
@@ -184,9 +180,7 @@ async def pydantic_error_handler(
     )
 
 
-async def http_error_handler(
-    request: Request, exc: StarletteHTTPException
-) -> JSONResponse:
+async def http_error_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     code = _STATUS_TO_CODE.get(exc.status_code, ErrorCode.INTERNAL)
     return problem_response(
         code=code,

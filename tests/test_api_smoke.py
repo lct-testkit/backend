@@ -165,9 +165,7 @@ class TestSessionLifecycle:
         async def age_session() -> None:
             stored = await session_store.get(sid)
             assert stored is not None
-            stored.last_seen_at = (
-                dt.datetime.now(dt.UTC) - dt.timedelta(days=1)
-            ).isoformat()
+            stored.last_seen_at = (dt.datetime.now(dt.UTC) - dt.timedelta(days=1)).isoformat()
             await session_store.update(stored)
 
         run(client, age_session)

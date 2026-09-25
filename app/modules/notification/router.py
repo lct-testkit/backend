@@ -52,9 +52,7 @@ NotificationTemplateManage = Annotated[
 # =============================================================================
 
 
-@notifications_router.get(
-    "", summary="Мои уведомления", response_model=NotificationListResponse
-)
+@notifications_router.get("", summary="Мои уведомления", response_model=NotificationListResponse)
 async def list_notifications(
     session: DbSession,
     page: Pagination,

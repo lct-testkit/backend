@@ -184,18 +184,14 @@ class User(UuidPkMixin, TimestampMixin, SoftDeleteMixin, VersionMixin, Base):
     # (new_spec §4.4, ситуация B). Access-токен его не содержит, поэтому
     # признак держим локально: API обязан отвергать бизнес-запросы, пока
     # пароль не сменён, иначе действие обходится прямым вызовом API.
-    must_change_password: Mapped[bool] = mapped_column(
-        nullable=False, server_default=text("false")
-    )
+    must_change_password: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
     last_login_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     consent_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     invited_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    activated_at: Mapped[dt.datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    activated_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     blocked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     anonymized_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -288,9 +284,7 @@ class Consent(UuidPkMixin, Base):
     subject_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     policy_version: Mapped[str] = mapped_column(String(32), nullable=False)
     policy_text_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    accepted_at: Mapped[dt.datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    accepted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ip: Mapped[str | None] = mapped_column(IpAddressType(), nullable=True)
     user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -352,9 +346,7 @@ class DataErasureRequest(UuidPkMixin, TimestampMixin, Base):
     requested_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False
     )
-    deadline_at: Mapped[dt.datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    deadline_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="pending")
     rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     blockers: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
@@ -363,12 +355,8 @@ class DataErasureRequest(UuidPkMixin, TimestampMixin, Base):
     # `identity.tasks.sweep_erasure_requests` исполняет запрос, как только
     # это время наступает, и снимается — не устанавливается заново — при
     # `restore`, чем «отсрочка» отличается от `rejected` по причине отказа.
-    grace_until: Mapped[dt.datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    executed_at: Mapped[dt.datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    grace_until: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    executed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Акт об уничтожении ПДн и его ПЭП хранятся бессрочно — `RESTRICT`, не
     # `SET NULL`: ссылка на доказательство уничтожения не должна тихо
     # обнуляться. `signatures` и так `INSERT`/`SELECT`-only и никогда не

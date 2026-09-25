@@ -173,9 +173,7 @@ class TestParamParsing:
     # -- П1: период --------------------------------------------------------
 
     def test_parse_date_range_accepts_iso_dates(self) -> None:
-        date_from, date_to = _parse_date_range(
-            {"date_from": "2026-01-01", "date_to": "2026-01-31"}
-        )
+        date_from, date_to = _parse_date_range({"date_from": "2026-01-01", "date_to": "2026-01-31"})
         assert date_from.isoformat() == "2026-01-01"
         assert date_to.isoformat() == "2026-01-31"
 
@@ -238,9 +236,7 @@ class TestReportFilterClauses:
 
     def _sql(self, stmt) -> str:
         return str(
-            stmt.compile(
-                dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
-            )
+            stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
         )
 
     def test_no_filters_is_a_no_op(self) -> None:

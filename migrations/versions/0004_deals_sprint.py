@@ -85,7 +85,10 @@ def _create_deals() -> None:
         sa.Column("students_planned", sa.Integer(), nullable=True),
         sa.Column("expected_close_date", sa.Date(), nullable=True),
         sa.Column(
-            "status_changed_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "status_changed_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
         ),
         sa.Column("sla_due_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("sla_state", sa.String(16), server_default="ok", nullable=False),
@@ -99,23 +102,38 @@ def _create_deals() -> None:
         sa.Column("loss_reason_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("closed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
-            "custom_fields", postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False
+            "custom_fields",
+            postgresql.JSONB(),
+            server_default=sa.text("'{}'::jsonb"),
+            nullable=False,
         ),
         sa.Column("source", sa.String(32), nullable=True),
         sa.Column(
-            "external_ids", postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False
+            "external_ids",
+            postgresql.JSONB(),
+            server_default=sa.text("'{}'::jsonb"),
+            nullable=False,
         ),
         sa.Column("version", sa.BigInteger(), server_default=sa.text("1"), nullable=False),
-        sa.Column("owner_unavailable", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column(
+            "owner_unavailable", sa.Boolean(), server_default=sa.text("false"), nullable=False
+        ),
         sa.Column("signature_status", sa.String(20), server_default="none", nullable=False),
         sa.Column("active_signature_document_id", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id", name="pk_deals"),
         sa.UniqueConstraint("number", name="uq_deals_number"),
         sa.ForeignKeyConstraint(
-            ["workflow_id"], ["workflows.id"], name="fk_deals_workflow_id_workflows", ondelete="RESTRICT"
+            ["workflow_id"],
+            ["workflows.id"],
+            name="fk_deals_workflow_id_workflows",
+            ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
             ["status_id"],
@@ -135,10 +153,12 @@ def _create_deals() -> None:
             name="ck_deals_deals_b2b_requires_organization",
         ),
         sa.CheckConstraint(
-            "deal_type <> 'b2c' OR contact_id IS NOT NULL", name="ck_deals_deals_b2c_requires_contact"
+            "deal_type <> 'b2c' OR contact_id IS NOT NULL",
+            name="ck_deals_deals_b2c_requires_contact",
         ),
         sa.CheckConstraint(
-            "sla_state IN ('ok','warning','breached','paused')", name="ck_deals_deals_sla_state_valid"
+            "sla_state IN ('ok','warning','breached','paused')",
+            name="ck_deals_deals_sla_state_valid",
         ),
         sa.CheckConstraint(
             "priority IN ('low','normal','high','critical')", name="ck_deals_deals_priority_valid"
@@ -171,16 +191,24 @@ def _create_deal_participants() -> None:
         sa.Column("user_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("role_in_deal", sa.String(16), nullable=False),
         sa.Column("added_by", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("added_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column(
+            "added_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_deal_participants"),
         sa.ForeignKeyConstraint(
             ["deal_id"], ["deals.id"], name="fk_deal_participants_deal_id_deals", ondelete="CASCADE"
         ),
         sa.ForeignKeyConstraint(
-            ["user_id"], ["users.id"], name="fk_deal_participants_user_id_users", ondelete="RESTRICT"
+            ["user_id"],
+            ["users.id"],
+            name="fk_deal_participants_user_id_users",
+            ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
-            ["added_by"], ["users.id"], name="fk_deal_participants_added_by_users", ondelete="RESTRICT"
+            ["added_by"],
+            ["users.id"],
+            name="fk_deal_participants_added_by_users",
+            ondelete="RESTRICT",
         ),
         sa.UniqueConstraint(
             "deal_id", "user_id", "role_in_deal", name="uq_deal_participants_deal_user_role"
@@ -207,10 +235,18 @@ def _create_deal_status_history() -> None:
         sa.Column("comment", sa.Text(), nullable=True),
         sa.Column("duration_in_prev", postgresql.INTERVAL(), nullable=True),
         sa.Column("sla_state_at_change", sa.String(16), nullable=True),
-        sa.Column("changed_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column(
+            "changed_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_deal_status_history"),
         sa.ForeignKeyConstraint(
-            ["deal_id"], ["deals.id"], name="fk_deal_status_history_deal_id_deals", ondelete="CASCADE"
+            ["deal_id"],
+            ["deals.id"],
+            name="fk_deal_status_history_deal_id_deals",
+            ondelete="CASCADE",
         ),
         sa.ForeignKeyConstraint(
             ["from_status_id"],
@@ -225,7 +261,10 @@ def _create_deal_status_history() -> None:
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
-            ["changed_by"], ["users.id"], name="fk_deal_status_history_changed_by_users", ondelete="RESTRICT"
+            ["changed_by"],
+            ["users.id"],
+            name="fk_deal_status_history_changed_by_users",
+            ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
             ["transition_id"],
@@ -252,7 +291,12 @@ def _create_deal_events() -> None:
         sa.Column("event_type", sa.String(32), nullable=False),
         sa.Column("actor_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("payload", postgresql.JSONB(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_deal_events"),
         sa.ForeignKeyConstraint(
             ["deal_id"], ["deals.id"], name="fk_deal_events_deal_id_deals", ondelete="CASCADE"
@@ -281,8 +325,12 @@ def _create_deal_products() -> None:
         sa.Column("price", sa.Numeric(14, 2), nullable=True),
         sa.Column("discount_pct", sa.Numeric(5, 2), server_default=sa.text("0"), nullable=False),
         sa.Column("total", sa.Numeric(14, 2), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_deal_products"),
         sa.ForeignKeyConstraint(
             ["deal_id"], ["deals.id"], name="fk_deal_products_deal_id_deals", ondelete="CASCADE"
@@ -306,19 +354,28 @@ def _create_deal_comments() -> None:
         sa.Column("parent_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("body", sa.Text(), nullable=False),
         sa.Column("body_format", sa.String(16), server_default="plain", nullable=False),
-        sa.Column("mentions", postgresql.JSONB(), server_default=sa.text("'[]'::jsonb"), nullable=False),
+        sa.Column(
+            "mentions", postgresql.JSONB(), server_default=sa.text("'[]'::jsonb"), nullable=False
+        ),
         sa.Column("is_system", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("is_internal", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("edited_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id", name="pk_deal_comments"),
         sa.ForeignKeyConstraint(
             ["deal_id"], ["deals.id"], name="fk_deal_comments_deal_id_deals", ondelete="CASCADE"
         ),
         sa.ForeignKeyConstraint(
-            ["author_id"], ["users.id"], name="fk_deal_comments_author_id_users", ondelete="RESTRICT"
+            ["author_id"],
+            ["users.id"],
+            name="fk_deal_comments_author_id_users",
+            ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
             ["parent_id"],
@@ -327,7 +384,8 @@ def _create_deal_comments() -> None:
             ondelete="RESTRICT",
         ),
         sa.CheckConstraint(
-            "body_format IN ('plain','markdown')", name="ck_deal_comments_deal_comments_format_valid"
+            "body_format IN ('plain','markdown')",
+            name="ck_deal_comments_deal_comments_format_valid",
         ),
     )
     op.create_index("ix_deal_comments_created_at", "deal_comments", ["created_at"])
@@ -341,7 +399,9 @@ def _create_deal_comment_revisions() -> None:
         sa.Column("comment_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("body", sa.Text(), nullable=False),
         sa.Column("edited_by", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("edited_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column(
+            "edited_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_deal_comment_revisions"),
         sa.ForeignKeyConstraint(
             ["comment_id"],
@@ -374,8 +434,12 @@ def _create_tasks() -> None:
         sa.Column("status", sa.String(16), server_default="open", nullable=False),
         sa.Column("priority", sa.String(16), server_default="normal", nullable=False),
         sa.Column("auto_created_by_transition_id", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id", name="pk_tasks"),
         sa.ForeignKeyConstraint(
@@ -397,7 +461,8 @@ def _create_tasks() -> None:
             ondelete="RESTRICT",
         ),
         sa.CheckConstraint(
-            "status IN ('open','in_progress','done','cancelled')", name="ck_tasks_tasks_status_valid"
+            "status IN ('open','in_progress','done','cancelled')",
+            name="ck_tasks_tasks_status_valid",
         ),
         sa.CheckConstraint(
             "priority IN ('low','normal','high','critical')", name="ck_tasks_tasks_priority_valid"

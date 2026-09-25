@@ -78,9 +78,7 @@ class IdentityService:
 
     async def get_by_email(self, email: str) -> User | None:
         result = await self._session.execute(
-            select(User).where(
-                func.lower(User.email) == email.lower(), User.deleted_at.is_(None)
-            )
+            select(User).where(func.lower(User.email) == email.lower(), User.deleted_at.is_(None))
         )
         return result.scalar_one_or_none()
 
@@ -224,9 +222,7 @@ class IdentityService:
             cached = await get_redis().get(_POLICY_CACHE_KEY)
             if cached:
                 payload = json.loads(cached)
-                return PolicyVersion(
-                    version=payload["version"], text_hash=payload.get("text_hash")
-                )
+                return PolicyVersion(version=payload["version"], text_hash=payload.get("text_hash"))
         except Exception:  # noqa: BLE001 — кэш не источник истины
             cached = None
 

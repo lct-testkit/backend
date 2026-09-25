@@ -43,8 +43,10 @@ integrations_public_router = APIRouter(prefix="/v1/integrations", tags=["integra
 async def _rate_limited(request: Request, route: str) -> None:
     ip = request.client.host if request.client else "unknown"
     await rate_limit_enforce(
-        ip, f"integrations:{route}",
-        limit=get_settings().integration_webhook_rate_limit_per_min, window_seconds=60,
+        ip,
+        f"integrations:{route}",
+        limit=get_settings().integration_webhook_rate_limit_per_min,
+        window_seconds=60,
         detail="Слишком много запросов к вебхуку интеграции, повторите позже",
     )
 

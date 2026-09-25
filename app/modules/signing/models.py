@@ -278,9 +278,7 @@ class SignatureDocument(UuidPkMixin, Base):
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False, index=True
     )
-    completed_at: Mapped[dt.datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     void_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     voided_by: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     # Осознанное расширение сверх терсе-таблицы dop.md §10.9: DSL-действие
@@ -387,9 +385,7 @@ class SignatureOtpCode(UuidPkMixin, Base):
         SmallInteger, nullable=False, server_default=text("3")
     )
     expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    consumed_at: Mapped[dt.datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    consumed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False
     )
@@ -425,9 +421,7 @@ class Signature(UuidPkMixin, Base):
     # подписания, не FK на живой профиль.
     signer_display: Mapped[str] = mapped_column(String(255), nullable=False)
     signature_value: Mapped[str] = mapped_column(Text, nullable=False)
-    algorithm: Mapped[str] = mapped_column(
-        String(32), nullable=False, server_default="HMAC-SHA256"
-    )
+    algorithm: Mapped[str] = mapped_column(String(32), nullable=False, server_default="HMAC-SHA256")
     # Версия `SIGNATURE_SERVER_SECRET` на момент подписания (dop.md §10.11) —
     # см. docstring модуля.
     key_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))

@@ -38,9 +38,7 @@ class SignerSpec(BaseModel):
             for value in (self.role, self.user_id, self.contact_id, self.contact_role)
         ]
         if sum(provided) != 1:
-            raise ValueError(
-                "Нужно указать ровно одно из: role, user_id, contact_id, contact_role"
-            )
+            raise ValueError("Нужно указать ровно одно из: role, user_id, contact_id, contact_role")
         return self
 
 
@@ -259,9 +257,7 @@ class SignatureOut(BaseModel):
 
 # --- Проверка подписи ----------------------------------------------------------
 
-VerifyStatusLiteral = Literal[
-    "valid", "disputed", "void", "hash_mismatch", "not_found"
-]
+VerifyStatusLiteral = Literal["valid", "disputed", "void", "hash_mismatch", "not_found"]
 
 
 class VerifyResult(BaseModel):

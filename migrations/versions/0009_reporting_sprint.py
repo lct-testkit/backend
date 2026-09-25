@@ -50,15 +50,21 @@ def upgrade() -> None:
         sa.Column("description", sa.Text(), nullable=True),
         sa.Column("query_def", postgresql.JSONB(), nullable=False),
         sa.Column(
-            "allowed_roles", postgresql.ARRAY(sa.String(16)), server_default=sa.text("'{}'"),
+            "allowed_roles",
+            postgresql.ARRAY(sa.String(16)),
+            server_default=sa.text("'{}'"),
             nullable=False,
         ),
         sa.Column(
-            "default_params", postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"),
+            "default_params",
+            postgresql.JSONB(),
+            server_default=sa.text("'{}'::jsonb"),
             nullable=False,
         ),
         sa.Column(
-            "output_formats", postgresql.ARRAY(sa.String(8)), server_default=sa.text("'{}'"),
+            "output_formats",
+            postgresql.ARRAY(sa.String(8)),
+            server_default=sa.text("'{}'"),
             nullable=False,
         ),
         sa.Column("is_active", sa.Boolean(), server_default=sa.text("true"), nullable=False),
@@ -66,8 +72,11 @@ def upgrade() -> None:
             "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(),
-            onupdate=sa.func.now(), nullable=False,
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            onupdate=sa.func.now(),
+            nullable=False,
         ),
         sa.PrimaryKeyConstraint("id", name="pk_report_templates"),
         sa.UniqueConstraint("code", name="uq_report_templates_code"),
@@ -95,15 +104,18 @@ def upgrade() -> None:
         sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id", name="pk_report_jobs"),
         sa.ForeignKeyConstraint(
-            ["requested_by"], ["users.id"],
-            name="fk_report_jobs_requested_by_users", ondelete="RESTRICT",
+            ["requested_by"],
+            ["users.id"],
+            name="fk_report_jobs_requested_by_users",
+            ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
-            ["file_id"], ["files.id"], name="fk_report_jobs_file_id_files", ondelete="SET NULL",
+            ["file_id"],
+            ["files.id"],
+            name="fk_report_jobs_file_id_files",
+            ondelete="SET NULL",
         ),
-        sa.CheckConstraint(
-            "format IN ('xlsx','pdf','png')", name="ck_report_jobs_format_valid"
-        ),
+        sa.CheckConstraint("format IN ('xlsx','pdf','png')", name="ck_report_jobs_format_valid"),
         sa.CheckConstraint(
             "status IN ('queued','processing','completed','failed')",
             name="ck_report_jobs_status_valid",
@@ -115,7 +127,9 @@ def upgrade() -> None:
         "ix_report_jobs_requested_by_created", "report_jobs", ["requested_by", "created_at"]
     )
     op.create_index(
-        "ix_report_jobs_pending", "report_jobs", ["status"],
+        "ix_report_jobs_pending",
+        "report_jobs",
+        ["status"],
         postgresql_where=sa.text("status IN ('queued','processing')"),
     )
 
@@ -133,12 +147,18 @@ def upgrade() -> None:
             "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(),
-            onupdate=sa.func.now(), nullable=False,
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            onupdate=sa.func.now(),
+            nullable=False,
         ),
         sa.PrimaryKeyConstraint("id", name="pk_dashboards"),
         sa.ForeignKeyConstraint(
-            ["owner_id"], ["users.id"], name="fk_dashboards_owner_id_users", ondelete="RESTRICT",
+            ["owner_id"],
+            ["users.id"],
+            name="fk_dashboards_owner_id_users",
+            ondelete="RESTRICT",
         ),
     )
     op.create_index("ix_dashboards_owner", "dashboards", ["owner_id"])
@@ -157,13 +177,18 @@ def upgrade() -> None:
             "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(),
-            onupdate=sa.func.now(), nullable=False,
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            onupdate=sa.func.now(),
+            nullable=False,
         ),
         sa.PrimaryKeyConstraint("id", name="pk_dashboard_widgets"),
         sa.ForeignKeyConstraint(
-            ["dashboard_id"], ["dashboards.id"],
-            name="fk_dashboard_widgets_dashboard_id_dashboards", ondelete="CASCADE",
+            ["dashboard_id"],
+            ["dashboards.id"],
+            name="fk_dashboard_widgets_dashboard_id_dashboards",
+            ondelete="CASCADE",
         ),
         sa.CheckConstraint(
             "widget_type IN ('report_table','report_chart','stat_tile')",
@@ -204,8 +229,7 @@ def upgrade() -> None:
     )
     # Уникальный индекс — обязателен для REFRESH MATERIALIZED VIEW CONCURRENTLY.
     op.execute(
-        "CREATE UNIQUE INDEX ix_mv_deal_status_summary_status "
-        "ON mv_deal_status_summary (status_id)"
+        "CREATE UNIQUE INDEX ix_mv_deal_status_summary_status ON mv_deal_status_summary (status_id)"
     )
 
 

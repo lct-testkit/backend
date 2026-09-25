@@ -75,9 +75,7 @@ class TestErrorCatalog:
 
 class TestProblemDetails:
     def _request(self) -> Request:
-        return Request(
-            {"type": "http", "method": "GET", "path": "/api/test", "headers": []}
-        )
+        return Request({"type": "http", "method": "GET", "path": "/api/test", "headers": []})
 
     def test_body_has_mandatory_fields(self) -> None:
         body = build_problem(

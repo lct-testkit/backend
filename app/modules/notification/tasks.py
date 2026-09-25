@@ -58,9 +58,7 @@ async def dispatch_pending_notifications(ctx: dict[str, Any]) -> dict[str, int]:
                 skipped += 1
                 continue
             try:
-                await gateway.send(
-                    address_masked=delivery.address_masked, subject=None, body=""
-                )
+                await gateway.send(address_masked=delivery.address_masked, subject=None, body="")
             except ChannelDeliveryError as exc:
                 if exc.retryable and delivery.attempt < settings.notification_max_delivery_attempts:
                     delivery.error = str(exc)
@@ -89,7 +87,10 @@ async def dispatch_pending_notifications(ctx: dict[str, Any]) -> dict[str, int]:
     background_tasks_total.labels(task="dispatch_pending_notifications", result="success").inc()
     if deliveries:
         logger.info(
-            "notifications_dispatched", sent=sent, failed=failed, skipped=skipped,
+            "notifications_dispatched",
+            sent=sent,
+            failed=failed,
+            skipped=skipped,
             total=len(deliveries),
         )
     return {"sent": sent, "failed": failed, "skipped": skipped}

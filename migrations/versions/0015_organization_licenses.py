@@ -90,23 +90,30 @@ def upgrade() -> None:
         sa.Column("comment", sa.Text(), nullable=True),
         sa.Column("import_job_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(),
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
             nullable=False,
         ),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(),
-            onupdate=sa.func.now(), nullable=False,
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            onupdate=sa.func.now(),
+            nullable=False,
         ),
         sa.Column("version", sa.BigInteger(), server_default=sa.text("1"), nullable=False),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id", name="pk_organization_licenses"),
         sa.ForeignKeyConstraint(
-            ["organization_id"], ["organizations.id"],
+            ["organization_id"],
+            ["organizations.id"],
             name="fk_organization_licenses_organization_id_organizations",
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
-            ["import_job_id"], ["import_jobs.id"],
+            ["import_job_id"],
+            ["import_jobs.id"],
             name="fk_organization_licenses_import_job_id_import_jobs",
             ondelete="SET NULL",
         ),
@@ -116,14 +123,13 @@ def upgrade() -> None:
             name="organization_licenses_transfer_status_valid",
         ),
     )
-    op.create_index(
-        "ix_organization_licenses_created_at", "organization_licenses", ["created_at"]
-    )
+    op.create_index("ix_organization_licenses_created_at", "organization_licenses", ["created_at"])
     op.create_index(
         "ix_organization_licenses_organization", "organization_licenses", ["organization_id"]
     )
     op.create_index(
-        "ix_organization_licenses_contract_number", "organization_licenses",
+        "ix_organization_licenses_contract_number",
+        "organization_licenses",
         ["contract_number"],
     )
 

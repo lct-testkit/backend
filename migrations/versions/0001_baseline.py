@@ -65,8 +65,12 @@ def _create_identity_tables() -> None:
         sa.Column("parent_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("head_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("region_id", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id", name="pk_teams"),
         sa.ForeignKeyConstraint(
@@ -102,8 +106,12 @@ def _create_identity_tables() -> None:
         sa.Column("blocked_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("anonymized_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("version", sa.BigInteger(), server_default=sa.text("1"), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id", name="pk_users"),
         sa.ForeignKeyConstraint(
@@ -147,19 +155,34 @@ def _create_identity_tables() -> None:
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("from_user_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("to_user_id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("scope", postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False),
+        sa.Column(
+            "scope", postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False
+        ),
         sa.Column("starts_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("ends_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("created_by", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_user_delegations"),
         sa.ForeignKeyConstraint(
-            ["from_user_id"], ["users.id"], name="fk_user_delegations_from_user_id_users", ondelete="RESTRICT"
+            ["from_user_id"],
+            ["users.id"],
+            name="fk_user_delegations_from_user_id_users",
+            ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
-            ["to_user_id"], ["users.id"], name="fk_user_delegations_to_user_id_users", ondelete="RESTRICT"
+            ["to_user_id"],
+            ["users.id"],
+            name="fk_user_delegations_to_user_id_users",
+            ondelete="RESTRICT",
         ),
-        sa.CheckConstraint("ends_at > starts_at", name="ck_user_delegations_delegation_period_valid"),
+        sa.CheckConstraint(
+            "ends_at > starts_at", name="ck_user_delegations_delegation_period_valid"
+        ),
     )
     op.create_index("ix_user_delegations_from_user_id", "user_delegations", ["from_user_id"])
     op.create_index(
@@ -180,7 +203,12 @@ def _create_identity_tables() -> None:
         sa.Column("ip", postgresql.INET(), nullable=True),
         sa.Column("user_agent", sa.Text(), nullable=True),
         sa.Column("signature_id", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_consents"),
         sa.CheckConstraint(
             "subject_type IN ('user','contact')", name="ck_consents_consent_subject_valid"
@@ -199,16 +227,19 @@ def _create_identity_tables() -> None:
         sa.Column("ip", postgresql.INET(), nullable=True),
         sa.Column("user_agent", sa.Text(), nullable=True),
         sa.Column("details", postgresql.JSONB(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_security_events"),
     )
     op.create_index("ix_security_events_created_at", "security_events", ["created_at"])
     op.create_index(
         "ix_security_events_type_created", "security_events", ["event_type", "created_at"]
     )
-    op.create_index(
-        "ix_security_events_user_created", "security_events", ["user_id", "created_at"]
-    )
+    op.create_index("ix_security_events_user_created", "security_events", ["user_id", "created_at"])
 
     op.create_table(
         "data_erasure_requests",
@@ -218,7 +249,12 @@ def _create_identity_tables() -> None:
         sa.Column("reason", sa.Text(), nullable=True),
         sa.Column("legal_basis", sa.String(255), nullable=True),
         sa.Column("requested_by", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("requested_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column(
+            "requested_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
         sa.Column("deadline_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("status", sa.String(16), server_default="pending", nullable=False),
         sa.Column("rejection_reason", sa.Text(), nullable=True),
@@ -226,8 +262,12 @@ def _create_identity_tables() -> None:
         sa.Column("executed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("act_file_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("act_signature_id", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_data_erasure_requests"),
         sa.CheckConstraint(
             "status IN ('pending','blocked','approved','rejected','completed')",
@@ -260,8 +300,12 @@ def _create_system_tables() -> None:
         sa.Column("description", sa.Text(), nullable=True),
         sa.Column("rollout", sa.SmallInteger(), server_default=sa.text("100"), nullable=False),
         sa.Column("updated_by", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_feature_flags"),
         sa.UniqueConstraint("code", name="uq_feature_flags_code"),
     )
@@ -270,12 +314,18 @@ def _create_system_tables() -> None:
     op.create_table(
         "system_settings",
         sa.Column("key", sa.String(128), nullable=False),
-        sa.Column("value", postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False),
+        sa.Column(
+            "value", postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False
+        ),
         sa.Column("description", sa.Text(), nullable=True),
         sa.Column("is_secret", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("updated_by", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.PrimaryKeyConstraint("key", name="pk_system_settings"),
     )
     op.create_index("ix_system_settings_created_at", "system_settings", ["created_at"])
@@ -289,7 +339,9 @@ def _create_system_tables() -> None:
         sa.Column("actor_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("response_status", sa.Integer(), nullable=True),
         sa.Column("response_body", postgresql.JSONB(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("key", name="pk_idempotency_keys"),
     )
@@ -333,9 +385,7 @@ def _create_audit_log() -> None:
     # actor_id намеренно без внешнего ключа: запись аудита обязана переживать
     # обезличивание и удаление пользователя.
     op.execute("CREATE INDEX ix_audit_log_actor_created ON audit_log (actor_id, created_at)")
-    op.execute(
-        "CREATE INDEX ix_audit_log_entity ON audit_log (entity_type, entity_id, created_at)"
-    )
+    op.execute("CREATE INDEX ix_audit_log_entity ON audit_log (entity_type, entity_id, created_at)")
     op.execute("CREATE INDEX ix_audit_log_action_created ON audit_log (action, created_at)")
     op.execute("CREATE INDEX ix_audit_log_request_id ON audit_log (request_id)")
     op.execute("CREATE INDEX ix_audit_log_created_at ON audit_log (created_at)")

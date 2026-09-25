@@ -23,15 +23,28 @@ from pydantic import ValidationError as PydanticValidationError
 from app.modules.catalog.validators import validate_requisite
 
 FieldKind = Literal[
-    "text", "int", "decimal", "bool", "date", "email", "phone",
-    "inn", "kpp", "ogrn", "region_code", "direction_code", "org_type", "format",
+    "text",
+    "int",
+    "decimal",
+    "bool",
+    "date",
+    "email",
+    "phone",
+    "inn",
+    "kpp",
+    "ogrn",
+    "region_code",
+    "direction_code",
+    "org_type",
+    "format",
     # П3 (rtk_requiriments.md разд. 4, Треб.1): `organization_name` — тот же
     # приём FK-резолва, что `region_code`/`direction_code` (перехватывается
     # в `imports.service._extract_row` до `validate_field`, см. `_FK_TARGETS`
     # там же), только колонка поиска — `Organization.name`, а не `.code`.
     # `transfer_status` — обычное поле с фиксированным набором значений
     # (валидируется ниже, тем же приёмом, что `org_type`/`format`).
-    "organization_name", "transfer_status",
+    "organization_name",
+    "transfer_status",
 ]
 
 _EMAIL_ADAPTER: TypeAdapter[str] = TypeAdapter(EmailStr)
@@ -93,7 +106,9 @@ LICENSE_FIELDS: tuple[FieldSpec, ...] = (
 )
 
 _NATURAL_KEYS: dict[str, str] = {
-    "organization": "inn", "product": "code", "license": "contract_number",
+    "organization": "inn",
+    "product": "code",
+    "license": "contract_number",
 }
 _ENTITY_FIELDS: dict[str, tuple[FieldSpec, ...]] = {
     "organization": ORGANIZATION_FIELDS,

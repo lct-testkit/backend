@@ -37,8 +37,10 @@ async def _seed_deals(count: int) -> None:
 
     async with session_scope() as session:
         workflow = Workflow(
-            code=f"wf-{uuid.uuid4().hex[:10]}", name="Воронка для бюджета запросов",
-            deal_type="b2b", state="draft",
+            code=f"wf-{uuid.uuid4().hex[:10]}",
+            name="Воронка для бюджета запросов",
+            deal_type="b2b",
+            state="draft",
         )
         session.add(workflow)
         await session.flush()
@@ -47,7 +49,10 @@ async def _seed_deals(count: int) -> None:
         owner = User(
             keycloak_id=str(uuid.uuid4()),
             email=f"{uuid.uuid4().hex[:8]}@rt-it-school.ru",
-            full_name="Петров П.П.", role="KAM", status="active", consent_version="1.0",
+            full_name="Петров П.П.",
+            role="KAM",
+            status="active",
+            consent_version="1.0",
         )
         session.add(owner)
         await session.flush()
@@ -57,9 +62,13 @@ async def _seed_deals(count: int) -> None:
             await session.flush()
             session.add(
                 Deal(
-                    number=f"D-{uuid.uuid4().hex[:10]}", title="Сделка бюджета запросов",
-                    deal_type="b2b", workflow_id=workflow.id, status_id=status.id,
-                    organization_id=org.id, owner_id=owner.id,
+                    number=f"D-{uuid.uuid4().hex[:10]}",
+                    title="Сделка бюджета запросов",
+                    deal_type="b2b",
+                    workflow_id=workflow.id,
+                    status_id=status.id,
+                    organization_id=org.id,
+                    owner_id=owner.id,
                 )
             )
         await session.flush()
@@ -102,4 +111,3 @@ class TestListQueryBudget:
             f"{ROWS_SMALL + ROWS_LARGE}+ — вероятен N+1 (ленивая загрузка связей в цикле). "
             "Загрузите связи явно: selectinload/joinedload."
         )
-

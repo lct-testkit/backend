@@ -147,9 +147,7 @@ def _identity_changes() -> None:
     )
     # Поиск по ФИО в списке пользователей — по триграммам, а не LIKE '%...%'
     # по всей таблице.
-    op.execute(
-        "CREATE INDEX ix_users_full_name_trgm ON users USING gin (full_name gin_trgm_ops)"
-    )
+    op.execute("CREATE INDEX ix_users_full_name_trgm ON users USING gin (full_name gin_trgm_ops)")
 
 
 def _invites_and_approvals() -> None:
@@ -163,7 +161,12 @@ def _invites_and_approvals() -> None:
         sa.Column("used_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_by", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_user_invites"),
         sa.ForeignKeyConstraint(
             ["user_id"], ["users.id"], name="fk_user_invites_user_id_users", ondelete="RESTRICT"
@@ -177,7 +180,9 @@ def _invites_and_approvals() -> None:
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("operation", sa.String(64), nullable=False),
         sa.Column("request_hash", sa.String(64), nullable=False),
-        sa.Column("payload", postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False),
+        sa.Column(
+            "payload", postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False
+        ),
         sa.Column("entity_type", sa.String(64), nullable=True),
         sa.Column("entity_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("status", sa.String(16), server_default="pending", nullable=False),
@@ -186,8 +191,12 @@ def _invites_and_approvals() -> None:
         sa.Column("approved_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("reason", sa.Text(), nullable=True),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_admin_approvals"),
         # Имена даются короткими: префикс `ck_{table}_` добавит соглашение
         # об именовании из `app.db.base`. Если написать полное имя, оно
@@ -326,9 +335,7 @@ def _audit_immutability() -> None:
         """
     )
     op.execute(f"GRANT USAGE ON SCHEMA public TO {APP_ROLE}")
-    op.execute(
-        f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {APP_ROLE}"
-    )
+    op.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {APP_ROLE}")
     op.execute(f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {APP_ROLE}")
     op.execute(
         f"ALTER DEFAULT PRIVILEGES IN SCHEMA public "

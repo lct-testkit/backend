@@ -56,8 +56,11 @@ def upgrade() -> None:
             "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(),
-            onupdate=sa.func.now(), nullable=False,
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            onupdate=sa.func.now(),
+            nullable=False,
         ),
         sa.PrimaryKeyConstraint("id", name="pk_integration_sources"),
         sa.UniqueConstraint("code", name="uq_integration_sources_code"),
@@ -65,9 +68,7 @@ def upgrade() -> None:
             "code IN ('cms','lms','bitrix24')", name="ck_integration_sources_code_valid"
         ),
     )
-    op.create_index(
-        "ix_integration_sources_created_at", "integration_sources", ["created_at"]
-    )
+    op.create_index("ix_integration_sources_created_at", "integration_sources", ["created_at"])
 
     op.create_table(
         "inbound_messages",
@@ -83,7 +84,9 @@ def upgrade() -> None:
         sa.Column("resulting_entity_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("processed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
-            "received_at", sa.DateTime(timezone=True), server_default=sa.func.now(),
+            "received_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("id", name="pk_inbound_messages"),
@@ -125,7 +128,9 @@ def upgrade() -> None:
         "ix_outbox_events_aggregate", "outbox_events", ["aggregate_type", "aggregate_id"]
     )
     op.create_index(
-        "ix_outbox_events_pending_retry", "outbox_events", ["status", "next_retry_at"],
+        "ix_outbox_events_pending_retry",
+        "outbox_events",
+        ["status", "next_retry_at"],
         postgresql_where=sa.text("status IN ('pending','failed')"),
     )
 
@@ -141,7 +146,9 @@ def upgrade() -> None:
         sa.Column("sync_direction", sa.String(8), nullable=False),
         sa.PrimaryKeyConstraint("id", name="pk_external_refs"),
         sa.UniqueConstraint(
-            "source_code", "entity_type", "external_id",
+            "source_code",
+            "entity_type",
+            "external_id",
             name="uq_external_refs_source_entity_external",
         ),
         sa.UniqueConstraint(
@@ -160,8 +167,11 @@ def upgrade() -> None:
         sa.Column("resource", sa.String(64), nullable=False),
         sa.Column("cursor_value", sa.String(255), nullable=True),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(),
-            onupdate=sa.func.now(), nullable=False,
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            onupdate=sa.func.now(),
+            nullable=False,
         ),
         sa.PrimaryKeyConstraint("id", name="pk_sync_cursors"),
         sa.UniqueConstraint("source_code", "resource", name="uq_sync_cursors_source_resource"),
@@ -179,23 +189,27 @@ def upgrade() -> None:
         sa.Column("score", sa.Numeric(5, 2), nullable=True),
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_activity_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column(
-            "raw", postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False
-        ),
+        sa.Column("raw", postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False),
         sa.Column(
             "synced_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
         sa.PrimaryKeyConstraint("id", name="pk_learning_progress"),
         sa.ForeignKeyConstraint(
-            ["contact_id"], ["contacts.id"],
-            name="fk_learning_progress_contact_id_contacts", ondelete="RESTRICT",
-        ),
-        sa.ForeignKeyConstraint(
-            ["deal_id"], ["deals.id"], name="fk_learning_progress_deal_id_deals",
+            ["contact_id"],
+            ["contacts.id"],
+            name="fk_learning_progress_contact_id_contacts",
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
-            ["product_id"], ["products.id"], name="fk_learning_progress_product_id_products",
+            ["deal_id"],
+            ["deals.id"],
+            name="fk_learning_progress_deal_id_deals",
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["product_id"],
+            ["products.id"],
+            name="fk_learning_progress_product_id_products",
             ondelete="RESTRICT",
         ),
         sa.UniqueConstraint(

@@ -134,9 +134,7 @@ class WorkflowService:
             stmt = stmt.where(Workflow.state == filters.state)
         if filters.q:
             pattern = f"%{filters.q.strip()}%"
-            stmt = stmt.where(
-                Workflow.name.ilike(pattern) | Workflow.code.ilike(pattern)
-            )
+            stmt = stmt.where(Workflow.name.ilike(pattern) | Workflow.code.ilike(pattern))
         return stmt
 
     async def get_or_404(self, workflow_id: uuid.UUID) -> Workflow:
@@ -166,19 +164,21 @@ class WorkflowService:
 
     async def _load_statuses(self, workflow_id: uuid.UUID) -> dict[uuid.UUID, WorkflowStatus]:
         rows = (
-            await self._session.execute(
-                select(WorkflowStatus).where(WorkflowStatus.workflow_id == workflow_id)
+            (
+                await self._session.execute(
+                    select(WorkflowStatus).where(WorkflowStatus.workflow_id == workflow_id)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         return {row.id: row for row in rows}
 
     async def _load_transitions(self, workflow_id: uuid.UUID) -> list[WorkflowTransition]:
         return list(
             (
                 await self._session.execute(
-                    select(WorkflowTransition).where(
-                        WorkflowTransition.workflow_id == workflow_id
-                    )
+                    select(WorkflowTransition).where(WorkflowTransition.workflow_id == workflow_id)
                 )
             )
             .scalars()
@@ -187,11 +187,7 @@ class WorkflowService:
 
     async def _load_sla_rules(self, workflow_id: uuid.UUID) -> list[SlaRule]:
         return list(
-            (
-                await self._session.execute(
-                    select(SlaRule).where(SlaRule.workflow_id == workflow_id)
-                )
-            )
+            (await self._session.execute(select(SlaRule).where(SlaRule.workflow_id == workflow_id)))
             .scalars()
             .all()
         )
@@ -519,15 +515,19 @@ class WorkflowService:
 
         if workflow.is_default:
             others = (
-                await self._session.execute(
-                    select(Workflow).where(
-                        Workflow.deal_type == workflow.deal_type,
-                        Workflow.id != workflow.id,
-                        Workflow.is_default.is_(True),
-                        Workflow.state == WorkflowState.PUBLISHED.value,
+                (
+                    await self._session.execute(
+                        select(Workflow).where(
+                            Workflow.deal_type == workflow.deal_type,
+                            Workflow.id != workflow.id,
+                            Workflow.is_default.is_(True),
+                            Workflow.state == WorkflowState.PUBLISHED.value,
+                        )
                     )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             for other in others:
                 other.is_default = False
 
@@ -819,9 +819,7 @@ def _validate_graph_data(
         traps = live_ids - can_reach_terminal
         if traps:
             codes = sorted(by_id[i].code for i in traps)
-            errors.append(
-                f"Статусы без пути в терминальный статус (ловушки): {', '.join(codes)}"
-            )
+            errors.append(f"Статусы без пути в терминальный статус (ловушки): {', '.join(codes)}")
 
     live_codes = {s.code for s in live}
     for t in live_transitions:

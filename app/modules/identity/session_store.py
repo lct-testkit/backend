@@ -311,9 +311,7 @@ async def ensure_fresh_access_token(session: SessionData) -> str:
             # Refresh отозван или просрочен: сессия больше не действительна.
             logger.info("session_refresh_failed", **current.log_view())
             await session_store.delete(current.sid)
-            raise UnauthenticatedError(
-                "Сессия истекла: требуется повторный вход"
-            ) from None
+            raise UnauthenticatedError("Сессия истекла: требуется повторный вход") from None
 
         current.access_token = tokens.access_token
         current.refresh_token = tokens.refresh_token or current.refresh_token

@@ -108,9 +108,7 @@ def _make_qr_image(url: str) -> ImageReader:
     return ImageReader(buf)
 
 
-def apply_signature_stamp(
-    pdf_bytes: bytes, *, lines: list[str], verify_url: str
-) -> bytes:
+def apply_signature_stamp(pdf_bytes: bytes, *, lines: list[str], verify_url: str) -> bytes:
     """Накладывает штамп подписания на последнюю страницу (dop.md §10.4 п.20):
     «Документ подписан простой электронной подписью / ФИО / дата /
     идентификатор подписи / хэш» + QR на страницу проверки.

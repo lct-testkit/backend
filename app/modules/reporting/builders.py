@@ -212,9 +212,7 @@ def _apply_entity_filters(stmt: Any, filters: ReportFilters) -> Any:
     if filters.product_ids:
         stmt = stmt.where(
             Deal.id.in_(
-                select(DealProduct.deal_id).where(
-                    DealProduct.product_id.in_(filters.product_ids)
-                )
+                select(DealProduct.deal_id).where(DealProduct.product_id.in_(filters.product_ids))
             )
         )
     if filters.direction_ids:
@@ -228,9 +226,7 @@ def _apply_entity_filters(stmt: Any, filters: ReportFilters) -> Any:
     return stmt
 
 
-def _apply_deal_filters(
-    stmt: Any, filters: ReportFilters, *, date_column: Any = None
-) -> Any:
+def _apply_deal_filters(stmt: Any, filters: ReportFilters, *, date_column: Any = None) -> Any:
     """Период + фильтры по сущностям для запросов, у которых `Deal` — базовая
     таблица (`select(...).select_from(Deal)` либо просто `select(Deal...)`).
 
@@ -264,9 +260,7 @@ async def _scoped_deal_ids(
     return stmt
 
 
-async def _resolve_workflow_id(
-    session: AsyncSession, params: dict[str, Any]
-) -> uuid.UUID:
+async def _resolve_workflow_id(session: AsyncSession, params: dict[str, Any]) -> uuid.UUID:
     workflow_id = _parse_uuid(params, "workflow_id")
     if workflow_id is not None:
         return workflow_id
@@ -308,7 +302,11 @@ async def build_deal_funnel(
         .all()
     )
     columns = [
-        "Статус", "Сейчас в статусе", "Всего прошло", "Конверсия шага, %", "Среднее время, дн.",
+        "Статус",
+        "Сейчас в статусе",
+        "Всего прошло",
+        "Конверсия шага, %",
+        "Среднее время, дн.",
     ]
     if not statuses:
         return ReportDataset(title="Воронка по статусам", columns=columns, rows=[])
@@ -370,9 +368,7 @@ async def build_deal_funnel(
             )
         ).all()
         hist_map = {row[0]: (row[1], row[2]) for row in hist_rows}
-        stats = {
-            s.id: (current_map.get(s.id, 0), *hist_map.get(s.id, (0, None))) for s in statuses
-        }
+        stats = {s.id: (current_map.get(s.id, 0), *hist_map.get(s.id, (0, None))) for s in statuses}
 
     rows: list[list[Any]] = []
     prev_entered: int | None = None
@@ -550,7 +546,10 @@ async def build_sla_compliance(
     result = dict((await session.execute(stmt)).all())
     total = sum(result.values())
     labels = {
-        "ok": "В норме", "warning": "Под угрозой", "breached": "Нарушен", "paused": "На паузе",
+        "ok": "В норме",
+        "warning": "Под угрозой",
+        "breached": "Нарушен",
+        "paused": "На паузе",
     }
     rows = []
     for state in ("ok", "warning", "breached", "paused"):
@@ -585,9 +584,7 @@ async def build_monthly_dynamics(
         else dt.datetime.now(dt.UTC) - dt.timedelta(days=31 * months)
     )
     until = (
-        _day_start(filters.date_to) + dt.timedelta(days=1)
-        if filters.date_to is not None
-        else None
+        _day_start(filters.date_to) + dt.timedelta(days=1) if filters.date_to is not None else None
     )
 
     # `func.date_trunc("month", ...)` строится один раз в переменную и

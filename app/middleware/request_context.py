@@ -105,9 +105,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: ASGIApp) -> None:
         super().__init__(app)
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         incoming_id = request.headers.get(REQUEST_ID_HEADER)
         request_id = (
             incoming_id if incoming_id and _REQUEST_ID_RE.match(incoming_id) else new_request_id()

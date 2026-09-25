@@ -91,9 +91,7 @@ class LocalRegistryProvider:
                     or_(
                         func.similarity(EgrulEntry.short_name, query)
                         > _SUGGEST_SIMILARITY_THRESHOLD,
-                        EgrulEntry.search_vector.op("@@")(
-                            func.plainto_tsquery("russian", query)
-                        ),
+                        EgrulEntry.search_vector.op("@@")(func.plainto_tsquery("russian", query)),
                     )
                 )
                 .order_by(func.similarity(EgrulEntry.short_name, query).desc())

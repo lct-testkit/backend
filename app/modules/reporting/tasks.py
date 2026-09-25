@@ -76,13 +76,17 @@ async def sweep_report_jobs(ctx: dict[str, Any]) -> dict[str, int]:
         if capacity == 0:
             return {"processed": 0, "failed": 0}
         job_ids = (
-            await session.execute(
-                select(ReportJob.id)
-                .where(ReportJob.status == ReportJobStatus.QUEUED.value)
-                .order_by(ReportJob.created_at)
-                .limit(capacity)
+            (
+                await session.execute(
+                    select(ReportJob.id)
+                    .where(ReportJob.status == ReportJobStatus.QUEUED.value)
+                    .order_by(ReportJob.created_at)
+                    .limit(capacity)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
     processed = failed = 0
     for job_id in job_ids:
@@ -121,15 +125,19 @@ async def expire_report_files(ctx: dict[str, Any]) -> dict[str, int]:
     expired = 0
     async with session_scope() as session:
         jobs = (
-            await session.execute(
-                select(ReportJob).where(
-                    ReportJob.status == ReportJobStatus.COMPLETED.value,
-                    ReportJob.file_id.is_not(None),
-                    ReportJob.expires_at.is_not(None),
-                    ReportJob.expires_at < now,
+            (
+                await session.execute(
+                    select(ReportJob).where(
+                        ReportJob.status == ReportJobStatus.COMPLETED.value,
+                        ReportJob.file_id.is_not(None),
+                        ReportJob.expires_at.is_not(None),
+                        ReportJob.expires_at < now,
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         for job in jobs:
             file = await session.get(File, job.file_id)
             if file is not None and file.status == FileStatus.READY.value:

@@ -106,10 +106,14 @@ async def upsert_progress(session: AsyncSession, row: dict[str, Any]) -> Learnin
         return None
 
     product_id = (
-        await session.execute(
-            select(DealProduct.product_id).where(DealProduct.deal_id == deal.id).limit(1)
+        (
+            await session.execute(
+                select(DealProduct.product_id).where(DealProduct.deal_id == deal.id).limit(1)
+            )
         )
-    ).scalars().first()
+        .scalars()
+        .first()
+    )
 
     existing = (
         await session.execute(

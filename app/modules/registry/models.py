@@ -81,8 +81,7 @@ _EDUCATIONAL_OKVED_PREFIXES: tuple[str, ...] = ("85",)
 def is_educational_okved(main: str | None, extra: list[str] | None) -> bool:
     codes = [main, *(extra or [])]
     return any(
-        code and code.replace(".", "").startswith(_EDUCATIONAL_OKVED_PREFIXES)
-        for code in codes
+        code and code.replace(".", "").startswith(_EDUCATIONAL_OKVED_PREFIXES) for code in codes
     )
 
 
@@ -229,6 +228,4 @@ class OrgLookupLog(UuidPkMixin, Base):
     result_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     matched_inn: Mapped[str | None] = mapped_column(String(12), nullable=True)
     response_ms: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
-    created_at: Mapped[dt.datetime] = mapped_column(
-        server_default=text("now()"), nullable=False
-    )
+    created_at: Mapped[dt.datetime] = mapped_column(server_default=text("now()"), nullable=False)

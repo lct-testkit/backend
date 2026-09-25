@@ -202,9 +202,10 @@ class TestSchemas:
             OffboardRequest(mode="confirm")
         with pytest.raises(ValueError):
             OffboardRequest(mode="confirm", successor_id=uuid.uuid4())
-        assert OffboardRequest(
-            mode="confirm", successor_id=uuid.uuid4(), reason="увольнение"
-        ).mode == "confirm"
+        assert (
+            OffboardRequest(mode="confirm", successor_id=uuid.uuid4(), reason="увольнение").mode
+            == "confirm"
+        )
 
     def test_preview_needs_nothing(self) -> None:
         assert OffboardRequest().mode == "preview"

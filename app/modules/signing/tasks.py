@@ -89,7 +89,9 @@ async def sweep_signature_deadlines(ctx: dict[str, Any]) -> dict[str, int]:
                 if deal is not None:
                     deal.signature_status = DealSignatureStatus.EXPIRED.value
                     await _apply_deal_signature_outcome(
-                        session, deal, rule=document.on_expired,
+                        session,
+                        deal,
+                        rule=document.on_expired,
                         note=f"Истёк срок подписания документа «{document.title}»",
                     )
             expired += 1
