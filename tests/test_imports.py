@@ -245,9 +245,16 @@ class TestLicenseFields:
 
     def test_ten_fields_in_case_order(self) -> None:
         assert [f.target for f in LICENSE_FIELDS] == [
-            "organization_name", "vendor", "product_name", "contract_number",
-            "license_signed_at", "license_valid_year", "transfer_status",
-            "manager_full_name", "responsible_contacts", "comment",
+            "organization_name",
+            "vendor",
+            "product_name",
+            "contract_number",
+            "license_signed_at",
+            "license_valid_year",
+            "transfer_status",
+            "manager_full_name",
+            "responsible_contacts",
+            "comment",
         ]
 
     def test_natural_key_is_contract_number(self) -> None:
@@ -291,16 +298,28 @@ class TestLicenseImportEndToEnd:
     )
 
     _HEADERS = [
-        "Название ВУЗа", "Вендор", "ПО", "Номер договора", "Подписание лицензии",
-        "Срок действия лицензии (год)", "Статус по передаче", "ФИО Менеджера",
-        "Ответственные от ВУЗа", "Комментарий",
+        "Название ВУЗа",
+        "Вендор",
+        "ПО",
+        "Номер договора",
+        "Подписание лицензии",
+        "Срок действия лицензии (год)",
+        "Статус по передаче",
+        "ФИО Менеджера",
+        "Ответственные от ВУЗа",
+        "Комментарий",
     ]
     _MAPPING = {
-        "Название ВУЗа": "organization_name", "Вендор": "vendor", "ПО": "product_name",
-        "Номер договора": "contract_number", "Подписание лицензии": "license_signed_at",
+        "Название ВУЗа": "organization_name",
+        "Вендор": "vendor",
+        "ПО": "product_name",
+        "Номер договора": "contract_number",
+        "Подписание лицензии": "license_signed_at",
         "Срок действия лицензии (год)": "license_valid_year",
-        "Статус по передаче": "transfer_status", "ФИО Менеджера": "manager_full_name",
-        "Ответственные от ВУЗа": "responsible_contacts", "Комментарий": "comment",
+        "Статус по передаче": "transfer_status",
+        "ФИО Менеджера": "manager_full_name",
+        "Ответственные от ВУЗа": "responsible_contacts",
+        "Комментарий": "comment",
     }
 
     def _xlsx_bytes(self, rows: list[list[str]]) -> bytes:
@@ -355,9 +374,7 @@ class TestLicenseImportEndToEnd:
                 storage_key="test/license-import.xlsx",
                 bucket="imports",
                 original_filename="license-import.xlsx",
-                mime_type=(
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                ),
+                mime_type=("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
                 size_bytes=len(content),
                 sha256=hashlib.sha256(content).hexdigest(),
                 status=FileStatus.READY.value,
@@ -373,12 +390,28 @@ class TestLicenseImportEndToEnd:
         org_name = f"Тестовый университет П3 {uuid.uuid4().hex[:8]}"
         rows = [
             [
-                org_name, "ВендорА", "ПродуктА", "TU-001", "2026-01-10",
-                "3", "transferred", "Иванов И.И.", "Петров П.П.", "первая строка",
+                org_name,
+                "ВендорА",
+                "ПродуктА",
+                "TU-001",
+                "2026-01-10",
+                "3",
+                "transferred",
+                "Иванов И.И.",
+                "Петров П.П.",
+                "первая строка",
             ],
             [
-                "", "ВендорБ", "ПродуктБ", "TU-002", "2026-02-01", "1", "not_started",
-                "", "", "без названия вуза — должна дать ошибку",
+                "",
+                "ВендорБ",
+                "ПродуктБ",
+                "TU-002",
+                "2026-02-01",
+                "1",
+                "not_started",
+                "",
+                "",
+                "без названия вуза — должна дать ошибку",
             ],
         ]
         content = self._xlsx_bytes(rows)
@@ -392,16 +425,16 @@ class TestLicenseImportEndToEnd:
         create_resp = client.post(
             "/api/imports",
             json={
-                "file_id": str(file_id), "entity_type": "license", "mode": "upsert",
+                "file_id": str(file_id),
+                "entity_type": "license",
+                "mode": "upsert",
                 "source_format": "xlsx",
             },
         )
         assert create_resp.status_code == 201, create_resp.text
         job_id = create_resp.json()["id"]
 
-        map_resp = client.put(
-            f"/api/imports/{job_id}/mapping", json={"mapping": self._MAPPING}
-        )
+        map_resp = client.put(f"/api/imports/{job_id}/mapping", json={"mapping": self._MAPPING})
         assert map_resp.status_code == 200, map_resp.text
 
         dry_resp = client.post(f"/api/imports/{job_id}/dry-run")
@@ -444,15 +477,21 @@ class TestLicenseImportEndToEnd:
 
         rows = [
             [
-                org_name, "ВендорА", "ПродуктА", contract_number, "2026-01-10",
-                "3", "not_started", "Иванов И.И.", "Петров П.П.", "исходная запись",
+                org_name,
+                "ВендорА",
+                "ПродуктА",
+                contract_number,
+                "2026-01-10",
+                "3",
+                "not_started",
+                "Иванов И.И.",
+                "Петров П.П.",
+                "исходная запись",
             ],
         ]
         content = self._xlsx_bytes(rows)
         self._stub_storage(monkeypatch, content)
-        _org_id, file_id = run(
-            client, self._seed_organization_and_file, org_name, content
-        )
+        _org_id, file_id = run(client, self._seed_organization_and_file, org_name, content)
 
         head = run(client, _make_user, "HEAD")
         csrf = authenticate(client, head)
@@ -461,7 +500,9 @@ class TestLicenseImportEndToEnd:
         job_id = client.post(
             "/api/imports",
             json={
-                "file_id": str(file_id), "entity_type": "license", "mode": "upsert",
+                "file_id": str(file_id),
+                "entity_type": "license",
+                "mode": "upsert",
                 "source_format": "xlsx",
             },
         ).json()["id"]
@@ -473,12 +514,16 @@ class TestLicenseImportEndToEnd:
         async def _count_and_fetch():
             async with session_scope() as session:
                 rows = (
-                    await session.execute(
-                        select(OrganizationLicense).where(
-                            OrganizationLicense.contract_number == contract_number
+                    (
+                        await session.execute(
+                            select(OrganizationLicense).where(
+                                OrganizationLicense.contract_number == contract_number
+                            )
                         )
                     )
-                ).scalars().all()
+                    .scalars()
+                    .all()
+                )
                 return [(r.id, r.vendor, r.comment, r.version) for r in rows]
 
         first_pass = run(client, _count_and_fetch)
@@ -492,21 +537,28 @@ class TestLicenseImportEndToEnd:
         # — должен ОБНОВИТЬ существующую запись (не создать вторую).
         rows_v2 = [
             [
-                org_name, "ВендорБ-обновлённый", "ПродуктА", contract_number,
-                "2026-01-10", "3", "transferred", "Иванов И.И.", "Петров П.П.",
+                org_name,
+                "ВендорБ-обновлённый",
+                "ПродуктА",
+                contract_number,
+                "2026-01-10",
+                "3",
+                "transferred",
+                "Иванов И.И.",
+                "Петров П.П.",
                 "обновлённая запись",
             ],
         ]
         content_v2 = self._xlsx_bytes(rows_v2)
         self._stub_storage(monkeypatch, content_v2)
-        _org_id2, file_id_v2 = run(
-            client, self._seed_organization_and_file, org_name, content_v2
-        )
+        _org_id2, file_id_v2 = run(client, self._seed_organization_and_file, org_name, content_v2)
 
         job_id_v2 = client.post(
             "/api/imports",
             json={
-                "file_id": str(file_id_v2), "entity_type": "license", "mode": "upsert",
+                "file_id": str(file_id_v2),
+                "entity_type": "license",
+                "mode": "upsert",
                 "source_format": "xlsx",
             },
         ).json()["id"]

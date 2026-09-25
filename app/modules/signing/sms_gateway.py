@@ -36,9 +36,7 @@ async def send_sms(*, to: str, message: str, base_url: str | None = None) -> str
     url = base_url if base_url is not None else get_settings().sms_gateway_url
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            response = await client.post(
-                f"{url}/send", json={"to": to, "message": message}
-            )
+            response = await client.post(f"{url}/send", json={"to": to, "message": message})
             response.raise_for_status()
             return response.json().get("id")
     except httpx.HTTPError as exc:

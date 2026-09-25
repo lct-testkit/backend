@@ -167,9 +167,7 @@ async def put_system_setting(
 
     is_new = setting is None
     before = (
-        {}
-        if is_new
-        else {"value": setting.value, "is_secret": setting.is_secret}  # type: ignore[union-attr]
+        {} if is_new else {"value": setting.value, "is_secret": setting.is_secret}  # type: ignore[union-attr]
     )
 
     if setting is None:
@@ -321,9 +319,7 @@ async def export_audit(
         },
     )
 
-    body = "\n".join(
-        AuditEntryOut.model_validate(row).model_dump_json() for row in rows
-    )
+    body = "\n".join(AuditEntryOut.model_validate(row).model_dump_json() for row in rows)
     return Response(
         content=body,
         media_type="application/x-ndjson",

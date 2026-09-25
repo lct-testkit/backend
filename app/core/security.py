@@ -195,9 +195,7 @@ async def decode_access_token(token: str) -> TokenClaims:
         # Частая причина — не назначенный клиенту client scope `basic`:
         # начиная с Keycloak 24 именно он добавляет в токен claim `sub`.
         logger.warning("token_missing_claim", claim=exc.claim)
-        raise UnauthenticatedError(
-            f"В токене отсутствует обязательный claim {exc.claim}"
-        ) from exc
+        raise UnauthenticatedError(f"В токене отсутствует обязательный claim {exc.claim}") from exc
     except jwt.InvalidSignatureError as exc:
         raise UnauthenticatedError("Подпись токена недействительна") from exc
     except jwt.PyJWTError as exc:

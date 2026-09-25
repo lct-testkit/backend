@@ -52,9 +52,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute("DROP TRIGGER IF EXISTS egrul_entries_search_vector_update ON egrul_entries")
 
-    op.drop_constraint(
-        "fk_products_import_job_id_import_jobs", "products", type_="foreignkey"
-    )
+    op.drop_constraint("fk_products_import_job_id_import_jobs", "products", type_="foreignkey")
     op.drop_constraint(
         "fk_organizations_registry_version_id_registry_versions",
         "organizations",
@@ -86,7 +84,9 @@ def _create_registry_versions() -> None:
         sa.Column("imported_by", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("checksum", sa.String(64), nullable=True),
         sa.Column("error", sa.Text(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
@@ -96,7 +96,9 @@ def _create_registry_versions() -> None:
         ),
         sa.PrimaryKeyConstraint("id", name="pk_registry_versions"),
         sa.ForeignKeyConstraint(
-            ["imported_by"], ["users.id"], name="fk_registry_versions_imported_by_users",
+            ["imported_by"],
+            ["users.id"],
+            name="fk_registry_versions_imported_by_users",
             ondelete="RESTRICT",
         ),
         sa.CheckConstraint(
@@ -136,7 +138,9 @@ def _create_egrul_entries() -> None:
         sa.Column("registry_version_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("raw", postgresql.JSONB(), nullable=True),
         sa.Column("search_vector", postgresql.TSVECTOR(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
@@ -146,7 +150,8 @@ def _create_egrul_entries() -> None:
         ),
         sa.PrimaryKeyConstraint("inn", name="pk_egrul_entries"),
         sa.ForeignKeyConstraint(
-            ["registry_version_id"], ["registry_versions.id"],
+            ["registry_version_id"],
+            ["registry_versions.id"],
             name="fk_egrul_entries_registry_version_id_registry_versions",
             ondelete="SET NULL",
         ),
@@ -196,7 +201,8 @@ def _create_university_registry() -> None:
         ),
         sa.PrimaryKeyConstraint("inn", name="pk_university_registry"),
         sa.ForeignKeyConstraint(
-            ["registry_version_id"], ["registry_versions.id"],
+            ["registry_version_id"],
+            ["registry_versions.id"],
             name="fk_university_registry_registry_version_id_registry_versions",
             ondelete="SET NULL",
         ),
@@ -213,7 +219,9 @@ def _create_org_lookup_log() -> None:
         sa.Column("result_count", sa.Integer(), server_default=sa.text("0"), nullable=False),
         sa.Column("matched_inn", sa.String(12), nullable=True),
         sa.Column("response_ms", sa.Integer(), server_default=sa.text("0"), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_org_lookup_log"),
         sa.ForeignKeyConstraint(
             ["user_id"], ["users.id"], name="fk_org_lookup_log_user_id_users", ondelete="SET NULL"
@@ -229,7 +237,9 @@ def _create_import_jobs() -> None:
         sa.Column("file_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("entity_type", sa.String(16), nullable=False),
         sa.Column("mode", sa.String(16), nullable=False),
-        sa.Column("mapping", postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False),
+        sa.Column(
+            "mapping", postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False
+        ),
         sa.Column("status", sa.String(24), server_default=sa.text("'uploaded'"), nullable=False),
         sa.Column("total_rows", sa.Integer(), server_default=sa.text("0"), nullable=False),
         sa.Column("ok_rows", sa.Integer(), server_default=sa.text("0"), nullable=False),
@@ -240,9 +250,13 @@ def _create_import_jobs() -> None:
         sa.Column("source_format", sa.String(8), nullable=False),
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("rollback_available", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column(
+            "rollback_available", sa.Boolean(), server_default=sa.text("false"), nullable=False
+        ),
         sa.Column("rolled_back_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
@@ -252,7 +266,9 @@ def _create_import_jobs() -> None:
         ),
         sa.PrimaryKeyConstraint("id", name="pk_import_jobs"),
         sa.ForeignKeyConstraint(
-            ["initiated_by"], ["users.id"], name="fk_import_jobs_initiated_by_users",
+            ["initiated_by"],
+            ["users.id"],
+            name="fk_import_jobs_initiated_by_users",
             ondelete="RESTRICT",
         ),
         sa.CheckConstraint(
@@ -282,13 +298,21 @@ def _create_import_row_results() -> None:
         sa.Column("status", sa.String(16), nullable=False),
         sa.Column("entity_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("before_snapshot", postgresql.JSONB(), nullable=True),
-        sa.Column("row_data", postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False),
-        sa.Column("errors", postgresql.JSONB(), server_default=sa.text("'[]'::jsonb"), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "row_data", postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False
+        ),
+        sa.Column(
+            "errors", postgresql.JSONB(), server_default=sa.text("'[]'::jsonb"), nullable=False
+        ),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_import_row_results"),
         sa.ForeignKeyConstraint(
-            ["import_job_id"], ["import_jobs.id"],
-            name="fk_import_row_results_import_job_id_import_jobs", ondelete="CASCADE",
+            ["import_job_id"],
+            ["import_jobs.id"],
+            name="fk_import_row_results_import_job_id_import_jobs",
+            ondelete="CASCADE",
         ),
         sa.CheckConstraint(
             "status IN ('ok','warn','error','skipped','rolled_back','rollback_blocked')",
@@ -318,7 +342,9 @@ def _create_import_presets() -> None:
         sa.Column("entity_type", sa.String(16), nullable=False),
         sa.Column("mapping", postgresql.JSONB(), nullable=False),
         sa.Column("created_by", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
@@ -328,7 +354,9 @@ def _create_import_presets() -> None:
         ),
         sa.PrimaryKeyConstraint("id", name="pk_import_presets"),
         sa.ForeignKeyConstraint(
-            ["created_by"], ["users.id"], name="fk_import_presets_created_by_users",
+            ["created_by"],
+            ["users.id"],
+            name="fk_import_presets_created_by_users",
             ondelete="RESTRICT",
         ),
     )

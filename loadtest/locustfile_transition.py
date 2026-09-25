@@ -24,11 +24,18 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from collections import deque
 from pathlib import Path
 
 import requests
-from locust import HttpUser, constant, task
+from gevent.lock import Semaphore
+from locust import HttpUser, constant, constant_throughput, task
+
+# Фиксированная нагрузка: LOADTEST_RPS_PER_USER=1 при -u 50 даёт ровно 50 RPS
+# (критерий спеки — «p95 ≤ 300 мс при 50 RPS»). Без переменной — constant(0):
+# каждый пользователь шлёт следующий запрос сразу после ответа (максимум).
+_RPS_PER_USER = float(os.environ.get("LOADTEST_RPS_PER_USER", "0"))
 
 KEYCLOAK_TOKEN_URL = os.environ.get(
     "LOADTEST_KEYCLOAK_TOKEN_URL",
@@ -69,16 +76,40 @@ def _fetch_access_token() -> str:
     return response.json()["access_token"]
 
 
+# Один токен на всех виртуальных пользователей. 50 одновременных password-grant'ов от одного
+# демо-КАМа срабатывают как брутфорс: Keycloak (brute-force detection, спека §4.5) временно
+# блокирует пользователя (`user_temporarily_disabled`, 401), и прогон измеряет не API, а защиту
+# IdP. Токен живёт 5 минут (`ACCESS_TOKEN_TTL`) — кэшируем на 240 с, этого хватает на любой
+# сценарий из README.
+_TOKEN_CACHE: dict[str, float | str] = {"value": "", "fetched_at": 0.0}
+_TOKEN_MAX_AGE_S = 240.0
+
+
+# Без блокировки все пользователи при старте одновременно видят пустой кэш и снова шлют
+# N параллельных password-grant'ов (gevent переключается на сетевом вводе-выводе прямо
+# внутри _fetch_access_token).
+_TOKEN_LOCK = Semaphore()
+
+
+def _shared_token() -> str:
+    with _TOKEN_LOCK:
+        age = time.monotonic() - float(_TOKEN_CACHE["fetched_at"])
+        if not _TOKEN_CACHE["value"] or age > _TOKEN_MAX_AGE_S:
+            _TOKEN_CACHE["value"] = _fetch_access_token()
+            _TOKEN_CACHE["fetched_at"] = time.monotonic()
+        return str(_TOKEN_CACHE["value"])
+
+
 class TransitionUser(HttpUser):
     # Без явного wait_time Locust ждёт между задачами (версии 2.x — не 0 по
     # умолчанию) — на практике это удержало реальный RPS втрое ниже целевых
     # 50 при -u 50 в первом прогоне этого файла. constant(0) — сразу
     # следующий запрос, как только пришёл ответ; -u 50 тогда действительно
     # означает «до 50 одновременных запросов», а не «50 медленных пользователей».
-    wait_time = constant(0)
+    wait_time = constant_throughput(_RPS_PER_USER) if _RPS_PER_USER > 0 else constant(0)
 
     def on_start(self) -> None:
-        token = _fetch_access_token()
+        token = _shared_token()
         self.client.headers.update({"Authorization": f"Bearer {token}"})
 
     @task

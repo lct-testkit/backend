@@ -134,3 +134,19 @@ def authenticate(client, user) -> str:
     client.cookies.set("crm_sid", sid)
     client.cookies.set("crm_csrf", csrf)
     return csrf
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """`REQUIRE_NO_SKIPS=1` (CI): любой пропущенный тест = красный прогон.
+
+    Тесты со сквозной БД пропускаются через `skipif(not TEST_DATABASE_URL)`,
+    поэтому в CI без сервиса Postgres они молча превращались бы в «зелёные».
+    Переменная в CI гарантирует, что набор реально выполнился целиком.
+    """
+    if os.getenv("REQUIRE_NO_SKIPS") != "1":
+        return
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    skipped = reporter.stats.get("skipped", []) if reporter else []
+    if skipped:
+        print(f"\nREQUIRE_NO_SKIPS=1, но пропущено тестов: {len(skipped)}")
+        session.exitstatus = 1

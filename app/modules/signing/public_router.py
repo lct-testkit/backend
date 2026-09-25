@@ -45,7 +45,10 @@ async def _rate_limited(request: Request) -> None:
     ip = request.client.host if request.client else "unknown"
     settings = get_settings()
     await rate_limit_enforce(
-        ip, "public:sign", limit=settings.public_sign_rate_limit_per_min, window_seconds=60,
+        ip,
+        "public:sign",
+        limit=settings.public_sign_rate_limit_per_min,
+        window_seconds=60,
         detail="Слишком много запросов к странице подписания, повторите позже",
     )
 
@@ -64,7 +67,10 @@ async def _rate_limited_verify(request: Request) -> None:
     ip = request.client.host if request.client else "unknown"
     settings = get_settings()
     await rate_limit_enforce(
-        ip, "public:verify", limit=settings.public_sign_rate_limit_per_min, window_seconds=60,
+        ip,
+        "public:verify",
+        limit=settings.public_sign_rate_limit_per_min,
+        window_seconds=60,
         detail="Слишком много запросов проверки подписи, повторите позже",
     )
 
@@ -109,8 +115,10 @@ async def public_challenge(
         signature_request, ip=client_ip, user_agent=user_agent
     )
     return ChallengeResponse(
-        channel=channel, sent_to_masked=masked,
-        expires_in_seconds=get_settings().signature_otp_ttl_seconds, debug_code=debug_code,
+        channel=channel,
+        sent_to_masked=masked,
+        expires_in_seconds=get_settings().signature_otp_ttl_seconds,
+        debug_code=debug_code,
     )
 
 

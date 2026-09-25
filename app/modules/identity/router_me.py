@@ -90,9 +90,7 @@ async def build_me(session, user: User) -> MeResponse:
     response_model=MeResponse,
 )
 async def get_me(principal: CurrentUser, session: DbSession) -> MeResponse:
-    user = (
-        await session.execute(select(User).where(User.id == principal.user_id))
-    ).scalar_one()
+    user = (await session.execute(select(User).where(User.id == principal.user_id))).scalar_one()
     return await build_me(session, user)
 
 
@@ -209,9 +207,7 @@ async def delete_session(
 async def accept_consent(
     payload: ConsentRequest, principal: CurrentUser, session: DbSession
 ) -> ConsentResponse:
-    user = (
-        await session.execute(select(User).where(User.id == principal.user_id))
-    ).scalar_one()
+    user = (await session.execute(select(User).where(User.id == principal.user_id))).scalar_one()
     consent = await IdentityService(session).accept_consent(
         user,
         policy_version=payload.policy_version,
@@ -247,9 +243,7 @@ async def change_password(
 ) -> PasswordChangeResponse:
     settings = get_settings()
     identity = IdentityService(session)
-    user = (
-        await session.execute(select(User).where(User.id == principal.user_id))
-    ).scalar_one()
+    user = (await session.execute(select(User).where(User.id == principal.user_id))).scalar_one()
 
     if not user.keycloak_id or not user.email:
         raise AppError(
@@ -267,9 +261,7 @@ async def change_password(
     )
 
     try:
-        await keycloak_client.password_grant(
-            username=user.email, password=payload.current_password
-        )
+        await keycloak_client.password_grant(username=user.email, password=payload.current_password)
     except AppError:
         await identity.record_security_event(
             SecurityEventType.LOGIN_FAILED,
@@ -301,9 +293,7 @@ async def change_password(
 
     # Keycloak сам refresh-токены не инвалидирует — делаем это явно.
     await keycloak_client.logout_all_sessions(user.keycloak_id)
-    terminated = await session_store.delete_all_for_user(
-        user.id, except_sid=principal.session_id
-    )
+    terminated = await session_store.delete_all_for_user(user.id, except_sid=principal.session_id)
 
     voided = await get_signing_service().void_pending_for_user(
         session, user.id, reason=VOID_REASON_CREDENTIALS_CHANGED

@@ -182,7 +182,9 @@ class TestDeleteNotificationTemplate:
         create = client.post(
             "/api/admin/notification-templates",
             json={
-                "code": code, "channel": "email", "body_template": "Текст письма",
+                "code": code,
+                "channel": "email",
+                "body_template": "Текст письма",
                 "is_active": True,
             },
         )
@@ -195,9 +197,10 @@ class TestDeleteNotificationTemplate:
         assert body["ok"] is True
         assert "единственный активный" in body["detail"]
 
-        assert client.get(
-            "/api/admin/notification-templates", params={"code": code}
-        ).json()["items"] == []
+        assert (
+            client.get("/api/admin/notification-templates", params={"code": code}).json()["items"]
+            == []
+        )
 
     def test_deleting_an_already_inactive_template_does_not_warn(self, client) -> None:
         # `uq_notification_templates_code_channel` не даёт двум шаблонам
@@ -209,7 +212,9 @@ class TestDeleteNotificationTemplate:
         create = client.post(
             "/api/admin/notification-templates",
             json={
-                "code": code, "channel": "email", "body_template": "Черновик письма",
+                "code": code,
+                "channel": "email",
+                "body_template": "Черновик письма",
                 "is_active": False,
             },
         )
@@ -228,7 +233,9 @@ class TestDeleteNotificationTemplate:
         keep = client.post(
             "/api/admin/notification-templates",
             json={
-                "code": keep_code, "channel": "email", "body_template": "Оставить",
+                "code": keep_code,
+                "channel": "email",
+                "body_template": "Оставить",
                 "is_active": True,
             },
         ).json()
@@ -236,7 +243,9 @@ class TestDeleteNotificationTemplate:
         gone = client.post(
             "/api/admin/notification-templates",
             json={
-                "code": gone_code, "channel": "email", "body_template": "Удалить",
+                "code": gone_code,
+                "channel": "email",
+                "body_template": "Удалить",
                 "is_active": True,
             },
         ).json()

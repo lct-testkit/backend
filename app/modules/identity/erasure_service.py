@@ -353,9 +353,7 @@ class ErasureExecutionService:
         if request.subject_type == SubjectType.ORGANIZATION.value:
             organization = await self._session.get(Organization, request.subject_id)
             if organization is None:
-                return [
-                    {"code": "subject_missing", "detail": "Организация не найдена", "count": 1}
-                ]
+                return [{"code": "subject_missing", "detail": "Организация не найдена", "count": 1}]
             return await OrganizationService(self._session).collect_erasure_blockers(organization)
         contact = await self._session.get(Contact, request.subject_id)
         if contact is None:
@@ -481,7 +479,12 @@ class ErasureExecutionService:
             subject_type="user",
             subject_display=subject_display,
             categories_erased=[
-                "ФИО", "email", "телефон", "должность", "аватар", "учётная запись Keycloak",
+                "ФИО",
+                "email",
+                "телефон",
+                "должность",
+                "аватар",
+                "учётная запись Keycloak",
             ],
             categories_retained=[_RETAINED_BUSINESS_HISTORY],
         )
@@ -508,7 +511,11 @@ class ErasureExecutionService:
                 subject_type="contact",
                 subject_display=subject_display,
                 categories_erased=[
-                    "ФИО", "email", "телефон", "каналы связи", "запись контакта целиком",
+                    "ФИО",
+                    "email",
+                    "телефон",
+                    "каналы связи",
+                    "запись контакта целиком",
                 ],
                 categories_retained=[],
             )
@@ -561,7 +568,10 @@ class ErasureExecutionService:
                 subject_type="organization",
                 subject_display=subject_display,
                 categories_erased=[
-                    "ФИО (наименование ИП)", "адрес регистрации", "телефон", "email",
+                    "ФИО (наименование ИП)",
+                    "адрес регистрации",
+                    "телефон",
+                    "email",
                     "запись организации целиком",
                 ],
                 categories_retained=[],

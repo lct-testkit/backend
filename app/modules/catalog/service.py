@@ -296,7 +296,8 @@ class OrganizationService:
             registry_entry = await self._lookup_registry(inn)
 
         organization = Organization(
-            name=payload.name or (registry_entry.full_name if registry_entry else None)
+            name=payload.name
+            or (registry_entry.full_name if registry_entry else None)
             or f"Организация (ИНН {inn})",
             short_name=payload.short_name
             or (registry_entry.short_name if registry_entry else None),
@@ -796,10 +797,14 @@ class ContactService:
 
     async def channels(self, contact_id: uuid.UUID) -> list[ContactChannel]:
         rows = (
-            await self._session.execute(
-                select(ContactChannel).where(ContactChannel.contact_id == contact_id)
+            (
+                await self._session.execute(
+                    select(ContactChannel).where(ContactChannel.contact_id == contact_id)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         return list(rows)
 
     async def reveal(self, contact: Contact, principal: Principal) -> list[ContactChannel]:

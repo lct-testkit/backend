@@ -95,8 +95,12 @@ def _create_regions() -> None:
         sa.Column("federal_district", sa.String(64), nullable=True),
         sa.Column("timezone", sa.String(64), nullable=True),
         sa.Column("code", sa.String(16), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_regions"),
         sa.UniqueConstraint("code", name="uq_regions_code"),
     )
@@ -121,7 +125,10 @@ def _create_organizations() -> None:
         sa.Column("main_email", sa.String(255), nullable=True),
         sa.Column("students_count", sa.Integer(), nullable=True),
         sa.Column(
-            "external_ids", postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False
+            "external_ids",
+            postgresql.JSONB(),
+            server_default=sa.text("'{}'::jsonb"),
+            nullable=False,
         ),
         sa.Column("owner_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("source", sa.String(32), nullable=True),
@@ -129,7 +136,10 @@ def _create_organizations() -> None:
         sa.Column("search_vector", postgresql.TSVECTOR(), nullable=True),
         sa.Column("created_by", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column(
-            "custom_fields", postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False
+            "custom_fields",
+            postgresql.JSONB(),
+            server_default=sa.text("'{}'::jsonb"),
+            nullable=False,
         ),
         sa.Column("verified_source", sa.String(32), nullable=True),
         sa.Column("verified_at", sa.DateTime(timezone=True), nullable=True),
@@ -139,11 +149,16 @@ def _create_organizations() -> None:
         sa.Column("registry_checked_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("requisites_drift", postgresql.JSONB(), nullable=True),
         sa.Column(
-            "manual_overrides", postgresql.JSONB(), server_default=sa.text("'[]'::jsonb"), nullable=False
+            "manual_overrides",
+            postgresql.JSONB(),
+            server_default=sa.text("'[]'::jsonb"),
+            nullable=False,
         ),
         sa.Column("is_accredited", sa.Boolean(), nullable=True),
         sa.Column("accreditation_until", sa.Date(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
@@ -155,13 +170,19 @@ def _create_organizations() -> None:
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id", name="pk_organizations"),
         sa.ForeignKeyConstraint(
-            ["region_id"], ["regions.id"], name="fk_organizations_region_id_regions", ondelete="RESTRICT"
+            ["region_id"],
+            ["regions.id"],
+            name="fk_organizations_region_id_regions",
+            ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
             ["owner_id"], ["users.id"], name="fk_organizations_owner_id_users", ondelete="RESTRICT"
         ),
         sa.ForeignKeyConstraint(
-            ["created_by"], ["users.id"], name="fk_organizations_created_by_users", ondelete="RESTRICT"
+            ["created_by"],
+            ["users.id"],
+            name="fk_organizations_created_by_users",
+            ondelete="RESTRICT",
         ),
         sa.CheckConstraint(
             "org_type IN ('university','college','company','individual_entrepreneur')",
@@ -187,8 +208,7 @@ def _create_organizations() -> None:
         "ix_organizations_search_vector", "organizations", ["search_vector"], postgresql_using="gin"
     )
     op.execute(
-        "CREATE INDEX ix_organizations_name_trgm ON organizations "
-        "USING gin (name gin_trgm_ops)"
+        "CREATE INDEX ix_organizations_name_trgm ON organizations USING gin (name gin_trgm_ops)"
     )
 
 
@@ -200,7 +220,9 @@ def _create_organization_branches() -> None:
         sa.Column("name", sa.String(512), nullable=False),
         sa.Column("address", sa.Text(), nullable=True),
         sa.Column("parent_id", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
@@ -234,7 +256,9 @@ def _create_directions() -> None:
         sa.Column("code", sa.String(64), nullable=False),
         sa.Column("name", sa.String(255), nullable=False),
         sa.Column("parent_id", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
@@ -247,7 +271,10 @@ def _create_directions() -> None:
         sa.PrimaryKeyConstraint("id", name="pk_directions"),
         sa.UniqueConstraint("code", name="uq_directions_code"),
         sa.ForeignKeyConstraint(
-            ["parent_id"], ["directions.id"], name="fk_directions_parent_id_directions", ondelete="RESTRICT"
+            ["parent_id"],
+            ["directions.id"],
+            name="fk_directions_parent_id_directions",
+            ondelete="RESTRICT",
         ),
     )
     op.create_index("ix_directions_created_at", "directions", ["created_at"])
@@ -264,15 +291,22 @@ def _create_contacts() -> None:
         sa.Column("position", sa.String(255), nullable=True),
         sa.Column("email", sa.String(255), nullable=True),
         sa.Column("phone", sa.String(32), nullable=True),
-        sa.Column("is_decision_maker", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column(
+            "is_decision_maker", sa.Boolean(), server_default=sa.text("false"), nullable=False
+        ),
         sa.Column("is_anonymized", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("anonymized_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("consent_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("source", sa.String(32), nullable=True),
         sa.Column(
-            "external_ids", postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False
+            "external_ids",
+            postgresql.JSONB(),
+            server_default=sa.text("'{}'::jsonb"),
+            nullable=False,
         ),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
@@ -290,7 +324,10 @@ def _create_contacts() -> None:
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
-            ["consent_id"], ["consents.id"], name="fk_contacts_consent_id_consents", ondelete="RESTRICT"
+            ["consent_id"],
+            ["consents.id"],
+            name="fk_contacts_consent_id_consents",
+            ondelete="RESTRICT",
         ),
     )
     op.create_index("ix_contacts_created_at", "contacts", ["created_at"])
@@ -307,10 +344,18 @@ def _create_contact_channels() -> None:
         sa.Column("value", sa.String(255), nullable=False),
         sa.Column("is_primary", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("is_verified", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_contact_channels"),
         sa.ForeignKeyConstraint(
-            ["contact_id"], ["contacts.id"], name="fk_contact_channels_contact_id_contacts", ondelete="CASCADE"
+            ["contact_id"],
+            ["contacts.id"],
+            name="fk_contact_channels_contact_id_contacts",
+            ondelete="CASCADE",
         ),
         sa.CheckConstraint(
             "type IN ('telegram','whatsapp','phone_extra','email_extra')",
@@ -337,9 +382,14 @@ def _create_products() -> None:
         sa.Column("valid_to", sa.Date(), nullable=True),
         sa.Column("import_job_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column(
-            "custom_fields", postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False
+            "custom_fields",
+            postgresql.JSONB(),
+            server_default=sa.text("'{}'::jsonb"),
+            nullable=False,
         ),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
@@ -352,7 +402,10 @@ def _create_products() -> None:
         sa.PrimaryKeyConstraint("id", name="pk_products"),
         sa.UniqueConstraint("code", name="uq_products_code"),
         sa.ForeignKeyConstraint(
-            ["direction_id"], ["directions.id"], name="fk_products_direction_id_directions", ondelete="RESTRICT"
+            ["direction_id"],
+            ["directions.id"],
+            name="fk_products_direction_id_directions",
+            ondelete="RESTRICT",
         ),
         sa.CheckConstraint(
             "format IS NULL OR format IN ('online','offline','blended')",
@@ -372,7 +425,9 @@ def _create_loss_reasons() -> None:
         sa.Column("category", sa.String(16), nullable=False),
         sa.Column("is_active", sa.Boolean(), server_default=sa.text("true"), nullable=False),
         sa.Column("sort_order", sa.Integer(), server_default=sa.text("0"), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
@@ -398,7 +453,9 @@ def _create_holidays() -> None:
         sa.Column("date", sa.Date(), nullable=False),
         sa.Column("name", sa.String(255), nullable=False),
         sa.Column("is_working_day", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
@@ -427,7 +484,9 @@ def _create_custom_field_defs() -> None:
         sa.Column("workflow_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("sort_order", sa.Integer(), server_default=sa.text("0"), nullable=False),
         sa.Column("is_active", sa.Boolean(), server_default=sa.text("true"), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
@@ -472,7 +531,12 @@ def _create_files() -> None:
         sa.Column("scanned_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("contains_pd", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("uploaded_by", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id", name="pk_files"),
         sa.ForeignKeyConstraint(
@@ -498,14 +562,22 @@ def _create_attachments() -> None:
         sa.Column("category", sa.String(24), nullable=False),
         sa.Column("description", sa.Text(), nullable=True),
         sa.Column("uploaded_by", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id", name="pk_attachments"),
         sa.ForeignKeyConstraint(
             ["file_id"], ["files.id"], name="fk_attachments_file_id_files", ondelete="RESTRICT"
         ),
         sa.ForeignKeyConstraint(
-            ["uploaded_by"], ["users.id"], name="fk_attachments_uploaded_by_users", ondelete="RESTRICT"
+            ["uploaded_by"],
+            ["users.id"],
+            name="fk_attachments_uploaded_by_users",
+            ondelete="RESTRICT",
         ),
         sa.CheckConstraint(
             "category IN ('contract','presentation','act','license','report',"

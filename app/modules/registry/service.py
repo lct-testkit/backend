@@ -60,9 +60,7 @@ class OrgLookupService:
         self._session = session
         self._audit = AuditService(session)
 
-    async def suggest(
-        self, principal: Principal, *, query: str, limit: int
-    ) -> SuggestResult:
+    async def suggest(self, principal: Principal, *, query: str, limit: int) -> SuggestResult:
         settings = get_settings()
         await rate_limit.enforce(
             str(principal.user_id),

@@ -85,10 +85,14 @@ async def main() -> None:
         if workflow is None:
             raise SystemExit("Воронка b2b_university_v1 не найдена — сиды применены?")
         statuses = (
-            await session.execute(
-                select(WorkflowStatus).where(WorkflowStatus.workflow_id == workflow.id)
+            (
+                await session.execute(
+                    select(WorkflowStatus).where(WorkflowStatus.workflow_id == workflow.id)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         by_code = {s.code: s for s in statuses}
         from_status = by_code["identification"]
         to_status = by_code["first_contact"]

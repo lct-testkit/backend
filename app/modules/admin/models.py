@@ -33,17 +33,11 @@ class FeatureFlag(UuidPkMixin, TimestampMixin, Base):
     __tablename__ = "feature_flags"
 
     code: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
-    is_enabled: Mapped[bool] = mapped_column(
-        nullable=False, server_default=text("false")
-    )
+    is_enabled: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Процент раскатки 0..100 для постепенного включения.
-    rollout: Mapped[int] = mapped_column(
-        SmallInteger, nullable=False, server_default=text("100")
-    )
-    updated_by: Mapped[uuid.UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), nullable=True
-    )
+    rollout: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default=text("100"))
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
 
 
 class SystemSetting(TimestampMixin, Base):
@@ -57,9 +51,7 @@ class SystemSetting(TimestampMixin, Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Секретные значения не отдаются наружу в открытом виде (раздел 6.12).
     is_secret: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
-    updated_by: Mapped[uuid.UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), nullable=True
-    )
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
 
 
 class AdminApproval(UuidPkMixin, TimestampMixin, Base):
@@ -90,9 +82,7 @@ class AdminApproval(UuidPkMixin, TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="pending")
     requested_by: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     approved_by: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
-    approved_at: Mapped[dt.datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    approved_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

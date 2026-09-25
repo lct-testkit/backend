@@ -257,8 +257,7 @@ async def update_organization(
     "/{organization_id}/apply-drift",
     summary="Принять изменения реквизитов",
     description=(
-        "Применяет выбранные (или все) поля из requisites_drift, "
-        "найденные при сверке с ЕГРЮЛ."
+        "Применяет выбранные (или все) поля из requisites_drift, найденные при сверке с ЕГРЮЛ."
     ),
     response_model=OrganizationOut,
 )
@@ -385,9 +384,7 @@ async def update_contact(
 ) -> ContactOut:
     service = ContactService(session)
     contact = await service.get_or_404(contact_id, principal)
-    contact = await service.update(
-        contact, payload, principal=principal, expected_version=if_match
-    )
+    contact = await service.update(contact, payload, principal=principal, expected_version=if_match)
     return ContactOut.from_model(contact)
 
 
@@ -436,8 +433,10 @@ async def list_products(
     filters = ProductFilters(
         direction_id=direction_id, code=code, is_active=is_active, format=product_format, q=q
     )
-    stmt = ProductService(session).list_query(filters).order_by(
-        Product.created_at.desc(), Product.id.desc()
+    stmt = (
+        ProductService(session)
+        .list_query(filters)
+        .order_by(Product.created_at.desc(), Product.id.desc())
     )
     cursor = page.decoded_cursor
     if cursor:
@@ -485,8 +484,10 @@ async def list_directions(
     q: Annotated[str | None, Query()] = None,
 ) -> DirectionListResponse:
     filters = DirectionFilters(q=q, parent_id=parent_id)
-    stmt = DirectionService(session).list_query(filters).order_by(
-        Direction.created_at.desc(), Direction.id.desc()
+    stmt = (
+        DirectionService(session)
+        .list_query(filters)
+        .order_by(Direction.created_at.desc(), Direction.id.desc())
     )
     cursor = page.decoded_cursor
     if cursor:
@@ -556,8 +557,10 @@ async def list_loss_reasons(
     is_active: Annotated[bool | None, Query()] = None,
 ) -> LossReasonListResponse:
     rows = (
-        await session.execute(LossReasonService(session).list_query(is_active=is_active))
-    ).scalars().all()
+        (await session.execute(LossReasonService(session).list_query(is_active=is_active)))
+        .scalars()
+        .all()
+    )
     return LossReasonListResponse(items=[LossReasonOut.model_validate(r) for r in rows])
 
 
@@ -622,10 +625,14 @@ async def list_holidays(
     parsed_from = dt.date.fromisoformat(date_from) if date_from else None
     parsed_to = dt.date.fromisoformat(date_to) if date_to else None
     rows = (
-        await session.execute(
-            HolidayService(session).list_query(date_from=parsed_from, date_to=parsed_to)
+        (
+            await session.execute(
+                HolidayService(session).list_query(date_from=parsed_from, date_to=parsed_to)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return HolidayListResponse(items=[HolidayOut.model_validate(r) for r in rows])
 
 
@@ -673,10 +680,16 @@ async def list_custom_field_defs(
     is_active: Annotated[bool | None, Query()] = None,
 ) -> CustomFieldDefListResponse:
     rows = (
-        await session.execute(
-            CustomFieldDefService(session).list_query(entity_type=entity_type, is_active=is_active)
+        (
+            await session.execute(
+                CustomFieldDefService(session).list_query(
+                    entity_type=entity_type, is_active=is_active
+                )
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return CustomFieldDefListResponse(items=[CustomFieldDefOut.model_validate(r) for r in rows])
 
 
@@ -741,9 +754,11 @@ async def list_organization_licenses(
     principal: CatalogRead,
     organization_id: Annotated[uuid.UUID | None, Query()] = None,
 ) -> OrganizationLicenseListResponse:
-    stmt = OrganizationLicenseService(session).list_query(
-        organization_id=organization_id
-    ).order_by(OrganizationLicense.created_at.desc(), OrganizationLicense.id.desc())
+    stmt = (
+        OrganizationLicenseService(session)
+        .list_query(organization_id=organization_id)
+        .order_by(OrganizationLicense.created_at.desc(), OrganizationLicense.id.desc())
+    )
     cursor = page.decoded_cursor
     if cursor:
         stmt = stmt.where(

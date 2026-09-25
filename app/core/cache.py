@@ -73,9 +73,7 @@ async def set_principal_cache(entry: CachedPrincipal) -> None:
         logger.warning("principal_cache_write_failed")
 
 
-async def invalidate_principal(
-    user_id: uuid.UUID | str, *, keycloak_id: str | None = None
-) -> None:
+async def invalidate_principal(user_id: uuid.UUID | str, *, keycloak_id: str | None = None) -> None:
     """Вызывается при смене роли, команды, статуса, эпохи прав и выходе."""
     try:
         redis = get_redis()

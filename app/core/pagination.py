@@ -101,9 +101,7 @@ class Page(BaseModel, Generic[T]):
         next_cursor: str | None = None
         if has_more and visible:
             last = visible[-1]
-            value = (
-                cursor_value(last) if callable(cursor_value) else last.created_at
-            )
+            value = cursor_value(last) if callable(cursor_value) else last.created_at
             next_cursor = Cursor(value=value, id=last.id).encode()
 
         items = [serializer(row) for row in visible] if callable(serializer) else visible

@@ -87,11 +87,7 @@ async def list_external_refs(
     entity_type: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(le=200)] = 50,
 ) -> list[ExternalRefOut]:
-    stmt = (
-        select(ExternalRef)
-        .order_by(ExternalRef.last_synced_at.desc().nulls_last())
-        .limit(limit)
-    )
+    stmt = select(ExternalRef).order_by(ExternalRef.last_synced_at.desc().nulls_last()).limit(limit)
     if source_code:
         stmt = stmt.where(ExternalRef.source_code == source_code)
     if entity_type:

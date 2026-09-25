@@ -104,9 +104,7 @@ class IntegrationSource(UuidPkMixin, TimestampMixin, Base):
     __tablename__ = "integration_sources"
     __table_args__ = (
         UniqueConstraint("code", name="uq_integration_sources_code"),
-        CheckConstraint(
-            "code IN ('cms','lms','bitrix24')", name="integration_sources_code_valid"
-        ),
+        CheckConstraint("code IN ('cms','lms','bitrix24')", name="integration_sources_code_valid"),
     )
 
     code: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -126,9 +124,7 @@ class IntegrationSource(UuidPkMixin, TimestampMixin, Base):
 class InboundMessage(UuidPkMixin, Base):
     __tablename__ = "inbound_messages"
     __table_args__ = (
-        UniqueConstraint(
-            "source_code", "external_id", name="uq_inbound_messages_source_external"
-        ),
+        UniqueConstraint("source_code", "external_id", name="uq_inbound_messages_source_external"),
         Index("ix_inbound_messages_received_at", "received_at"),
         CheckConstraint(
             "status IN ('received','processed','failed','duplicate')",
@@ -200,11 +196,15 @@ class ExternalRef(UuidPkMixin, Base):
     __tablename__ = "external_refs"
     __table_args__ = (
         UniqueConstraint(
-            "source_code", "entity_type", "external_id",
+            "source_code",
+            "entity_type",
+            "external_id",
             name="uq_external_refs_source_entity_external",
         ),
         UniqueConstraint(
-            "source_code", "entity_type", "entity_id",
+            "source_code",
+            "entity_type",
+            "entity_id",
             name="uq_external_refs_source_entity_our",
         ),
         CheckConstraint(
@@ -243,9 +243,7 @@ class SyncCursor(UuidPkMixin, Base):
 class LearningProgress(UuidPkMixin, Base):
     __tablename__ = "learning_progress"
     __table_args__ = (
-        UniqueConstraint(
-            "deal_id", "external_course_id", name="uq_learning_progress_deal_course"
-        ),
+        UniqueConstraint("deal_id", "external_course_id", name="uq_learning_progress_deal_course"),
         Index("ix_learning_progress_contact", "contact_id"),
         CheckConstraint(
             "progress_pct IS NULL OR (progress_pct >= 0 AND progress_pct <= 100)",

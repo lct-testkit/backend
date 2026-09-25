@@ -202,7 +202,9 @@ class TestDeleteRegistryVersion:
 
         async with session_scope() as session:
             version = RegistryVersion(
-                source="fns_egrul", file_id=uuid.uuid4(), status=status,
+                source="fns_egrul",
+                file_id=uuid.uuid4(),
+                status=status,
             )
             session.add(version)
             await session.flush()

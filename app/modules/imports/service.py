@@ -124,9 +124,7 @@ class ImportService:
         source_format: str,
     ) -> ImportJob:
         if entity_type not in _MODEL_BY_ENTITY:
-            raise AppError(
-                ErrorCode.VALIDATION, f"Импорт типа {entity_type!r} не поддерживается"
-            )
+            raise AppError(ErrorCode.VALIDATION, f"Импорт типа {entity_type!r} не поддерживается")
         await self._get_ready_file(file_id)
 
         job = ImportJob(
@@ -245,9 +243,7 @@ class ImportService:
 
     async def dry_run(self, job: ImportJob) -> ImportJob:
         if job.status not in (ImportJobStatus.MAPPED.value, ImportJobStatus.VALIDATED.value):
-            raise AppError(
-                ErrorCode.IMPORT_MAPPING_INCOMPLETE, "Сначала сохраните маппинг колонок"
-            )
+            raise AppError(ErrorCode.IMPORT_MAPPING_INCOMPLETE, "Сначала сохраните маппинг колонок")
 
         fields_by_target = {f.target: f for f in fields_for(job.entity_type)}
         natural_key = natural_key_for(job.entity_type)
@@ -267,9 +263,7 @@ class ImportService:
             for header, target in job.mapping.items()
             if header in header_index and target in fields_by_target
         ]
-        key_col_idx = next(
-            (idx for idx, spec in column_map if spec.target == natural_key), None
-        )
+        key_col_idx = next((idx for idx, spec in column_map if spec.target == natural_key), None)
         if key_col_idx is None:
             raise AppError(
                 ErrorCode.IMPORT_MAPPING_INCOMPLETE,
@@ -301,8 +295,14 @@ class ImportService:
         egrul_map: dict[str, EgrulEntry] = {}
         if job.entity_type == ImportEntityType.ORGANIZATION.value and raw_keys:
             entries = (
-                await self._session.execute(select(EgrulEntry).where(EgrulEntry.inn.in_(raw_keys)))
-            ).scalars().all()
+                (
+                    await self._session.execute(
+                        select(EgrulEntry).where(EgrulEntry.inn.in_(raw_keys))
+                    )
+                )
+                .scalars()
+                .all()
+            )
             egrul_map = {e.inn: e for e in entries}
 
         await self._session.execute(
@@ -640,8 +640,19 @@ class ImportService:
             return
 
         before: dict[str, Any] = {}
-        for field in ("name", "short_name", "kpp", "ogrn", "legal_address", "actual_address",
-                      "website", "main_phone", "main_email", "students_count", "region_id"):
+        for field in (
+            "name",
+            "short_name",
+            "kpp",
+            "ogrn",
+            "legal_address",
+            "actual_address",
+            "website",
+            "main_phone",
+            "main_email",
+            "students_count",
+            "region_id",
+        ):
             if field not in data:
                 continue
             new_value = uuid.UUID(data[field]) if field == "region_id" else data[field]
@@ -692,8 +703,15 @@ class ImportService:
             return
 
         before: dict[str, Any] = {}
-        for field in ("name", "description", "direction_id", "duration_hours", "format",
-                      "base_price", "currency"):
+        for field in (
+            "name",
+            "description",
+            "direction_id",
+            "duration_hours",
+            "format",
+            "base_price",
+            "currency",
+        ):
             if field not in data:
                 continue
             if field == "direction_id":
@@ -762,9 +780,15 @@ class ImportService:
 
         before: dict[str, Any] = {}
         for field in (
-            "organization_id", "vendor", "product_name", "license_signed_at",
-            "license_valid_year", "transfer_status", "manager_full_name",
-            "responsible_contacts", "comment",
+            "organization_id",
+            "vendor",
+            "product_name",
+            "license_signed_at",
+            "license_valid_year",
+            "transfer_status",
+            "manager_full_name",
+            "responsible_contacts",
+            "comment",
         ):
             if field not in data:
                 continue
@@ -881,9 +905,9 @@ class ImportService:
 
             return bool(
                 await self._session.scalar(
-                    select(Deal.id).where(
-                        Deal.organization_id == entity_id, Deal.deleted_at.is_(None)
-                    ).limit(1)
+                    select(Deal.id)
+                    .where(Deal.organization_id == entity_id, Deal.deleted_at.is_(None))
+                    .limit(1)
                 )
             )
         if entity_type == ImportEntityType.PRODUCT.value:

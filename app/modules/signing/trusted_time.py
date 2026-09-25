@@ -55,7 +55,9 @@ async def get_trusted_time() -> tuple[dt.datetime, str, int | None]:
     try:
         offset_seconds = await asyncio.wait_for(
             asyncio.to_thread(
-                _query_offset_seconds, settings.ntp_host, settings.ntp_port,
+                _query_offset_seconds,
+                settings.ntp_host,
+                settings.ntp_port,
                 settings.ntp_timeout_seconds,
             ),
             timeout=settings.ntp_timeout_seconds + 1,
@@ -67,7 +69,9 @@ async def get_trusted_time() -> tuple[dt.datetime, str, int | None]:
     drift_ms = round(offset_seconds * 1000)
     if abs(drift_ms) > settings.signature_max_clock_drift_ms:
         logger.warning(
-            "ntp_drift_exceeded", host=settings.ntp_host, drift_ms=drift_ms,
+            "ntp_drift_exceeded",
+            host=settings.ntp_host,
+            drift_ms=drift_ms,
             max_drift_ms=settings.signature_max_clock_drift_ms,
         )
         raise AppError(

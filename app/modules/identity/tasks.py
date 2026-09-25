@@ -69,7 +69,5 @@ async def sweep_erasure_requests(ctx: dict[str, Any]) -> dict[str, int]:
 
     background_tasks_total.labels(task="sweep_erasure_requests", result="success").inc()
     if executed or blocked or failed:
-        logger.info(
-            "erasure_sweep_completed", executed=executed, blocked=blocked, failed=failed
-        )
+        logger.info("erasure_sweep_completed", executed=executed, blocked=blocked, failed=failed)
     return {"executed": executed, "blocked": blocked, "failed": failed}

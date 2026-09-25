@@ -43,18 +43,22 @@ async def sweep_outbox_events(ctx: dict[str, Any]) -> dict[str, int]:
     async with session_scope() as session:
         now = dt.datetime.now(dt.UTC)
         rows = (
-            await session.execute(
-                select(OutboxEvent)
-                .where(
-                    OutboxEvent.status.in_(
-                        [OutboxStatus.PENDING.value, OutboxStatus.FAILED.value]
-                    ),
-                    (OutboxEvent.next_retry_at.is_(None)) | (OutboxEvent.next_retry_at <= now),
+            (
+                await session.execute(
+                    select(OutboxEvent)
+                    .where(
+                        OutboxEvent.status.in_(
+                            [OutboxStatus.PENDING.value, OutboxStatus.FAILED.value]
+                        ),
+                        (OutboxEvent.next_retry_at.is_(None)) | (OutboxEvent.next_retry_at <= now),
+                    )
+                    .order_by(OutboxEvent.created_at)
+                    .limit(200)
                 )
-                .order_by(OutboxEvent.created_at)
-                .limit(200)
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
         sources = {
             row.code: row

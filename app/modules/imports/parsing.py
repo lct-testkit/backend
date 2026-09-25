@@ -77,9 +77,7 @@ def parse_csv(content: bytes) -> ParsedTable:
 
 def parse_xlsx(content: bytes) -> ParsedTable:
     try:
-        workbook = openpyxl.load_workbook(
-            io.BytesIO(content), read_only=True, data_only=True
-        )
+        workbook = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
     except Exception as exc:  # noqa: BLE001 — любая ошибка формата -> понятный CRM-код
         raise AppError(
             ErrorCode.IMPORT_BAD_FORMAT, f"Файл повреждён или не является .xlsx: {exc}"

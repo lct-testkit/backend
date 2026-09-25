@@ -395,14 +395,18 @@ class NotificationQueryService:
         if not codes:
             return {}
         rows = (
-            await self._session.execute(
-                select(NotificationTemplate).where(
-                    NotificationTemplate.code.in_(codes),
-                    NotificationTemplate.channel == NotificationChannel.IN_APP.value,
-                    NotificationTemplate.is_active.is_(True),
+            (
+                await self._session.execute(
+                    select(NotificationTemplate).where(
+                        NotificationTemplate.code.in_(codes),
+                        NotificationTemplate.channel == NotificationChannel.IN_APP.value,
+                        NotificationTemplate.is_active.is_(True),
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         return {t.code: t for t in rows}
 
     def render_for_display(
@@ -470,9 +474,7 @@ class NotificationPrefService:
             .all()
         )
 
-    async def upsert(
-        self, user_id: uuid.UUID, items: list[Any]
-    ) -> list[UserNotificationPref]:
+    async def upsert(self, user_id: uuid.UUID, items: list[Any]) -> list[UserNotificationPref]:
         result: list[UserNotificationPref] = []
         for item in items:
             pref = await self._session.scalar(

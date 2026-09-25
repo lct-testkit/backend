@@ -243,9 +243,7 @@ async def view_request(
     client = get_client()
     ip = client.ip if client else None
     user_agent = client.user_agent if client else None
-    return await service.build_signing_page(
-        request, mark_viewed=True, ip=ip, user_agent=user_agent
-    )
+    return await service.build_signing_page(request, mark_viewed=True, ip=ip, user_agent=user_agent)
 
 
 @signature_requests_router.post(
@@ -265,8 +263,10 @@ async def challenge_request(
         request, ip=client.ip if client else None, user_agent=client.user_agent if client else None
     )
     return ChallengeResponse(
-        channel=channel, sent_to_masked=masked,
-        expires_in_seconds=get_settings().signature_otp_ttl_seconds, debug_code=debug_code,
+        channel=channel,
+        sent_to_masked=masked,
+        expires_in_seconds=get_settings().signature_otp_ttl_seconds,
+        debug_code=debug_code,
     )
 
 
@@ -285,7 +285,9 @@ async def sign_request(
     request = await service.get_for_internal_signer(request_id, principal)
     client = get_client()
     signature = await service.sign(
-        request, otp_code=payload.otp, ip=client.ip if client else None,
+        request,
+        otp_code=payload.otp,
+        ip=client.ip if client else None,
         user_agent=client.user_agent if client else None,
     )
     return SignatureOut.model_validate(signature)
@@ -306,7 +308,9 @@ async def reject_request(
     request = await service.get_for_internal_signer(request_id, principal)
     client = get_client()
     request = await service.reject(
-        request, reason=payload.reason, ip=client.ip if client else None,
+        request,
+        reason=payload.reason,
+        ip=client.ip if client else None,
         user_agent=client.user_agent if client else None,
     )
     return SignatureRequestOut.model_validate(request)

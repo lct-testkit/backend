@@ -56,11 +56,17 @@ def _create_workflows() -> None:
         sa.Column("graph_hash", sa.String(64), nullable=True),
         sa.Column("published_graph", postgresql.JSONB(), nullable=True),
         sa.Column("version", sa.BigInteger(), server_default=sa.text("1"), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_workflows"),
         sa.UniqueConstraint("code", name="uq_workflows_code"),
-        sa.CheckConstraint("deal_type IN ('b2b','b2c')", name="ck_workflows_workflows_deal_type_valid"),
+        sa.CheckConstraint(
+            "deal_type IN ('b2b','b2c')", name="ck_workflows_workflows_deal_type_valid"
+        ),
         sa.CheckConstraint(
             "state IN ('draft','published','archived')", name="ck_workflows_workflows_state_valid"
         ),
@@ -91,13 +97,20 @@ def _create_workflow_statuses() -> None:
         sa.Column("color", sa.String(16), nullable=True),
         sa.Column("sort_order", sa.Integer(), server_default=sa.text("0"), nullable=False),
         sa.Column(
-            "required_fields", postgresql.JSONB(), server_default=sa.text("'[]'::jsonb"), nullable=False
+            "required_fields",
+            postgresql.JSONB(),
+            server_default=sa.text("'[]'::jsonb"),
+            nullable=False,
         ),
         sa.Column("is_archived", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("archived_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("replaced_by_status_id", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_workflow_statuses"),
         sa.ForeignKeyConstraint(
             ["workflow_id"],
@@ -111,9 +124,7 @@ def _create_workflow_statuses() -> None:
             name="fk_workflow_statuses_replaced_by_status_id_workflow_statuses",
             ondelete="RESTRICT",
         ),
-        sa.UniqueConstraint(
-            "workflow_id", "code", name="uq_workflow_statuses_workflow_id_code"
-        ),
+        sa.UniqueConstraint("workflow_id", "code", name="uq_workflow_statuses_workflow_id_code"),
         sa.CheckConstraint(
             "type IN ('initial','intermediate','won','lost','parked')",
             name="ck_workflow_statuses_workflow_statuses_type_valid",
@@ -150,16 +161,27 @@ def _create_workflow_transitions() -> None:
         sa.Column("to_status_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("name", sa.String(255), nullable=False),
         sa.Column(
-            "allowed_roles", postgresql.JSONB(), server_default=sa.text("'[]'::jsonb"), nullable=False
+            "allowed_roles",
+            postgresql.JSONB(),
+            server_default=sa.text("'[]'::jsonb"),
+            nullable=False,
         ),
         sa.Column(
             "conditions", postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False
         ),
-        sa.Column("actions", postgresql.JSONB(), server_default=sa.text("'[]'::jsonb"), nullable=False),
-        sa.Column("requires_comment", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column(
+            "actions", postgresql.JSONB(), server_default=sa.text("'[]'::jsonb"), nullable=False
+        ),
+        sa.Column(
+            "requires_comment", sa.Boolean(), server_default=sa.text("false"), nullable=False
+        ),
         sa.Column("sort_order", sa.Integer(), server_default=sa.text("0"), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_workflow_transitions"),
         sa.ForeignKeyConstraint(
             ["workflow_id"],
@@ -191,9 +213,7 @@ def _create_workflow_transitions() -> None:
         ),
     )
     op.create_index("ix_workflow_transitions_created_at", "workflow_transitions", ["created_at"])
-    op.create_index(
-        "ix_workflow_transitions_workflow_id", "workflow_transitions", ["workflow_id"]
-    )
+    op.create_index("ix_workflow_transitions_workflow_id", "workflow_transitions", ["workflow_id"])
     op.create_index("ix_workflow_transitions_from", "workflow_transitions", ["from_status_id"])
 
 
@@ -204,7 +224,9 @@ def _create_sla_rules() -> None:
         sa.Column("workflow_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("status_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("max_duration", postgresql.INTERVAL(), nullable=False),
-        sa.Column("warn_threshold_pct", sa.SmallInteger(), server_default=sa.text("80"), nullable=False),
+        sa.Column(
+            "warn_threshold_pct", sa.SmallInteger(), server_default=sa.text("80"), nullable=False
+        ),
         sa.Column("escalate_to_role", sa.String(32), nullable=True),
         sa.Column("escalate_to_user_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column(
@@ -213,13 +235,22 @@ def _create_sla_rules() -> None:
             server_default=sa.text("'[\"in_app\"]'::jsonb"),
             nullable=False,
         ),
-        sa.Column("count_business_days", sa.Boolean(), server_default=sa.text("true"), nullable=False),
+        sa.Column(
+            "count_business_days", sa.Boolean(), server_default=sa.text("true"), nullable=False
+        ),
         sa.Column("is_active", sa.Boolean(), server_default=sa.text("true"), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_sla_rules"),
         sa.ForeignKeyConstraint(
-            ["workflow_id"], ["workflows.id"], name="fk_sla_rules_workflow_id_workflows", ondelete="CASCADE"
+            ["workflow_id"],
+            ["workflows.id"],
+            name="fk_sla_rules_workflow_id_workflows",
+            ondelete="CASCADE",
         ),
         sa.ForeignKeyConstraint(
             ["status_id"],
@@ -253,7 +284,10 @@ def _create_status_mapping_jobs() -> None:
         sa.Column("workflow_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("from_status_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column(
-            "mapping_rules", postgresql.JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False
+            "mapping_rules",
+            postgresql.JSONB(),
+            server_default=sa.text("'{}'::jsonb"),
+            nullable=False,
         ),
         sa.Column("affected_count", sa.Integer(), server_default=sa.text("0"), nullable=False),
         sa.Column("processed_count", sa.Integer(), server_default=sa.text("0"), nullable=False),
@@ -264,7 +298,12 @@ def _create_status_mapping_jobs() -> None:
         sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("report", postgresql.JSONB(), nullable=True),
         sa.Column("error", sa.Text(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
         sa.PrimaryKeyConstraint("id", name="pk_status_mapping_jobs"),
         sa.ForeignKeyConstraint(
             ["workflow_id"],

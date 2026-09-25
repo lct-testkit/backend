@@ -368,11 +368,10 @@ async def offboard_user(
         )
 
     if payload.mode == "preview":
-        return OffboardResponse(
-            mode="preview", user_id=user.id, workload=items, warnings=warnings
-        )
+        return OffboardResponse(mode="preview", user_id=user.id, workload=items, warnings=warnings)
 
-    assert payload.successor_id is not None and payload.reason is not None
+    # Сужение типов: для mode="confirm" схема уже потребовала оба поля.
+    assert payload.successor_id is not None and payload.reason is not None  # noqa: S101
     result = await service.offboard_confirm(
         user=user,
         principal=principal,
@@ -651,9 +650,7 @@ async def list_approvals(
     _: AdminRead,
     approval_status: Annotated[str | None, Query(alias="status")] = "pending",
 ) -> ApprovalListResponse:
-    stmt = select(AdminApproval).order_by(
-        AdminApproval.created_at.desc(), AdminApproval.id.desc()
-    )
+    stmt = select(AdminApproval).order_by(AdminApproval.created_at.desc(), AdminApproval.id.desc())
     if approval_status:
         stmt = stmt.where(AdminApproval.status == approval_status)
     cursor = page.decoded_cursor
@@ -696,9 +693,7 @@ async def reject_operation(
     principal: AdminWrite,
     approval_id: Annotated[uuid.UUID, Path()],
 ) -> ApprovalOut:
-    approval = await ApprovalService(session).reject(
-        approval_id, principal, reason=payload.reason
-    )
+    approval = await ApprovalService(session).reject(approval_id, principal, reason=payload.reason)
     return ApprovalOut.model_validate(approval)
 
 
@@ -708,10 +703,7 @@ async def reject_operation(
 @router.get(
     "/teams",
     summary="Список команд",
-    description=(
-        "Иерархия команд: на ней строится рекурсивный скоуп руководителя. "
-        "Роль: ADMIN."
-    ),
+    description=("Иерархия команд: на ней строится рекурсивный скоуп руководителя. Роль: ADMIN."),
     response_model=TeamListResponse,
 )
 async def list_teams(
@@ -786,9 +778,7 @@ async def patch_team(
     _: AdminWrite,
     team_id: Annotated[uuid.UUID, Path()],
 ) -> TeamOut:
-    team = (
-        await session.execute(select(Team).where(Team.id == team_id))
-    ).scalar_one_or_none()
+    team = (await session.execute(select(Team).where(Team.id == team_id))).scalar_one_or_none()
     if team is None or team.deleted_at is not None:
         raise NotFoundError("Команда", team_id)
 

@@ -569,8 +569,10 @@ async def list_tasks(
         overdue=overdue,
     )
     scope_clause = await deal_scope_clause(session, principal)
-    stmt = TaskService(session).list_query(filters, scope_clause).order_by(
-        Task.created_at.desc(), Task.id.desc()
+    stmt = (
+        TaskService(session)
+        .list_query(filters, scope_clause)
+        .order_by(Task.created_at.desc(), Task.id.desc())
     )
     cursor = page.decoded_cursor
     if cursor:

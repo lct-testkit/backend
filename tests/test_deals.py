@@ -79,18 +79,14 @@ class TestSlaBusinessDays:
 
     def test_business_day_mode_fits_in_same_day(self) -> None:
         start = dt.datetime(2026, 1, 2, 10, 0, tzinfo=dt.UTC)  # пятница
-        due = crm_service.compute_sla_due_at(
-            start, dt.timedelta(hours=8), count_business_days=True
-        )
+        due = crm_service.compute_sla_due_at(start, dt.timedelta(hours=8), count_business_days=True)
         assert due == dt.datetime(2026, 1, 2, 18, 0, tzinfo=dt.UTC)
 
     def test_business_day_mode_freezes_across_weekend(self) -> None:
         # Пятница 22:00, остаток срока «замирает» на выходных и продолжается
         # с понедельника 00:00.
         start = dt.datetime(2026, 1, 2, 22, 0, tzinfo=dt.UTC)
-        due = crm_service.compute_sla_due_at(
-            start, dt.timedelta(hours=4), count_business_days=True
-        )
+        due = crm_service.compute_sla_due_at(start, dt.timedelta(hours=4), count_business_days=True)
         assert due == dt.datetime(2026, 1, 5, 2, 0, tzinfo=dt.UTC)
 
     def test_zero_duration_returns_start(self) -> None:
@@ -274,4 +270,4 @@ class TestSeedConditionsAgainstDealContext:
 
 class TestModelConstants:
     def test_open_task_statuses(self) -> None:
-        assert OPEN_TASK_STATUSES == {TaskStatus.OPEN.value, TaskStatus.IN_PROGRESS.value}
+        assert {TaskStatus.OPEN.value, TaskStatus.IN_PROGRESS.value} == OPEN_TASK_STATUSES

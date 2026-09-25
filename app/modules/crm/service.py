@@ -117,9 +117,7 @@ class UserWorkload:
 
 @runtime_checkable
 class OwnershipService(Protocol):
-    async def collect_workload(
-        self, session: AsyncSession, user_id: uuid.UUID
-    ) -> UserWorkload: ...
+    async def collect_workload(self, session: AsyncSession, user_id: uuid.UUID) -> UserWorkload: ...
 
     async def reassign_all(
         self,
@@ -266,9 +264,7 @@ class RealOwnershipService:
 
         changed_ids: list[uuid.UUID] = []
         for deal in deals:
-            if await _reassign_owner(
-                session, deal, successor_id, reason=reason, actor_id=user_id
-            ):
+            if await _reassign_owner(session, deal, successor_id, reason=reason, actor_id=user_id):
                 changed_ids.append(deal.id)
                 # new_spec §4.7 шаг 4: «в каждую сделку добавляется системный
                 # комментарий «Ответственный изменён: Петров → Иванов
@@ -439,9 +435,7 @@ class DealStatusService(Protocol):
 
 
 class NullDealStatusService:
-    async def status_workload(
-        self, session: AsyncSession, status_id: uuid.UUID
-    ) -> StatusWorkload:
+    async def status_workload(self, session: AsyncSession, status_id: uuid.UUID) -> StatusWorkload:
         return StatusWorkload(supported=False)
 
     async def migrate_batch(
@@ -480,9 +474,7 @@ def _field_present(deal: Deal, field_name: str) -> bool:
 class RealDealStatusService:
     """Реализация контракта `DealStatusService` для мастера сопоставления."""
 
-    async def status_workload(
-        self, session: AsyncSession, status_id: uuid.UUID
-    ) -> StatusWorkload:
+    async def status_workload(self, session: AsyncSession, status_id: uuid.UUID) -> StatusWorkload:
         active_count = await session.scalar(
             select(func.count())
             .select_from(Deal)
@@ -979,9 +971,7 @@ class DealService:
 
     # --- Создание ------------------------------------------------------------
 
-    async def _resolve_workflow(
-        self, deal_type: str, workflow_id: uuid.UUID | None
-    ) -> Workflow:
+    async def _resolve_workflow(self, deal_type: str, workflow_id: uuid.UUID | None) -> Workflow:
         if workflow_id is not None:
             workflow = await self._session.get(Workflow, workflow_id)
             if workflow is None:
@@ -1054,9 +1044,7 @@ class DealService:
                 "Для сделки, создаваемой интеграцией, обязательны source и external_ids",
                 [
                     FieldError(field="source", reason="обязателен для источника INTEGRATION"),
-                    FieldError(
-                        field="external_ids", reason="обязателен для источника INTEGRATION"
-                    ),
+                    FieldError(field="external_ids", reason="обязателен для источника INTEGRATION"),
                 ],
             )
 
@@ -1470,9 +1458,7 @@ class DealService:
                 return owner.manager_id
         return None
 
-    async def _run_notify(
-        self, deal: Deal, action: dict[str, Any], principal: Principal
-    ) -> None:
+    async def _run_notify(self, deal: Deal, action: dict[str, Any], principal: Principal) -> None:
         recipients = action.get("recipients") or ["owner"]
         resolved: set[uuid.UUID] = set()
         for recipient in recipients:
@@ -1492,10 +1478,16 @@ class DealService:
                         resolved.add(team.head_id)
             elif recipient == "participants":
                 rows = (
-                    await self._session.execute(
-                        select(DealParticipant.user_id).where(DealParticipant.deal_id == deal.id)
+                    (
+                        await self._session.execute(
+                            select(DealParticipant.user_id).where(
+                                DealParticipant.deal_id == deal.id
+                            )
+                        )
                     )
-                ).scalars().all()
+                    .scalars()
+                    .all()
+                )
                 resolved.update(rows)
             # "contact" пропускаем: контакты — каталог спринта 4.
 
@@ -1512,7 +1504,12 @@ class DealService:
     # --- Назначение ответственного ------------------------------------------
 
     async def reassign(
-        self, deal: Deal, principal: Principal, *, owner_id: uuid.UUID, reason: str,
+        self,
+        deal: Deal,
+        principal: Principal,
+        *,
+        owner_id: uuid.UUID,
+        reason: str,
         expected_version: int,
     ) -> Deal:
         if deal.version != expected_version:
@@ -1600,9 +1597,7 @@ class DealService:
 
     # --- История ---------------------------------------------------------
 
-    async def history(
-        self, deal_id: uuid.UUID
-    ) -> tuple[list[DealStatusHistory], list[DealEvent]]:
+    async def history(self, deal_id: uuid.UUID) -> tuple[list[DealStatusHistory], list[DealEvent]]:
         statuses = (
             (
                 await self._session.execute(
@@ -1631,10 +1626,10 @@ class DealService:
 
     async def load_products(self, deal_id: uuid.UUID) -> list[DealProduct]:
         rows = (
-            await self._session.execute(
-                select(DealProduct).where(DealProduct.deal_id == deal_id)
-            )
-        ).scalars().all()
+            (await self._session.execute(select(DealProduct).where(DealProduct.deal_id == deal_id)))
+            .scalars()
+            .all()
+        )
         return list(rows)
 
     async def counters(self, deal_id: uuid.UUID) -> tuple[int, int]:
@@ -1671,12 +1666,16 @@ class ParticipantService:
 
     async def list(self, deal_id: uuid.UUID) -> list[DealParticipant]:
         rows = (
-            await self._session.execute(
-                select(DealParticipant)
-                .where(DealParticipant.deal_id == deal_id)
-                .order_by(DealParticipant.added_at)
+            (
+                await self._session.execute(
+                    select(DealParticipant)
+                    .where(DealParticipant.deal_id == deal_id)
+                    .order_by(DealParticipant.added_at)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         return list(rows)
 
     async def add(
@@ -1744,12 +1743,16 @@ class CommentService:
 
     async def list(self, deal_id: uuid.UUID) -> list[DealComment]:
         rows = (
-            await self._session.execute(
-                select(DealComment)
-                .where(DealComment.deal_id == deal_id, DealComment.deleted_at.is_(None))
-                .order_by(DealComment.created_at)
+            (
+                await self._session.execute(
+                    select(DealComment)
+                    .where(DealComment.deal_id == deal_id, DealComment.deleted_at.is_(None))
+                    .order_by(DealComment.created_at)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         return list(rows)
 
     async def get_or_404(self, comment_id: uuid.UUID) -> DealComment:

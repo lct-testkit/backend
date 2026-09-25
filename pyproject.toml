@@ -31,7 +31,7 @@ dependencies = [
     "prometheus-client==0.21.1",
     "arq==0.26.3",
     # Trivy: CVE-2026-24486/CVE-2026-42561/CVE-2026-53539.
-    "python-multipart==0.0.30",
+    "python-multipart==0.0.31",
     "swagger-ui-bundle==1.1.0",
     # Presigned PUT/GET к SeaweedFS (раздел 9): boto3/botocore чистый Python,
     # версии CPython их не касаются.
@@ -96,6 +96,11 @@ dev = [
     # никогда реально не запускались.
     "fakeredis==2.38.0",
     "ruff==0.8.6",
+    # Гейты качества CI (см. .github/workflows/ci.yml).
+    "mypy==1.14.1",
+    "import-linter==2.1",
+    "pytest-cov==6.0.0",
+    "pip-audit==2.8.0",
     # Нагрузочное тестирование (new_spec §0/§9 шаг 10) — `loadtest/`.
     # Не рантайм-зависимость приложения, поэтому в dev, а не в основной список.
     "locust==2.46.6",
@@ -113,14 +118,89 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "ASYNC"]
+# S — bandit (безопасность), SIM/C4 — упрощения, PT — pytest-стиль, RUF — прочее.
+select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "SIM", "C4", "PT", "RUF"]
+ignore = [
+    # Кодовая база на русском: «ambiguous unicode» (кириллица в строках,
+    # комментариях и докстрингах) — это норма, а не ошибка.
+    "RUF001", "RUF002", "RUF003",
+    # Исторические `# noqa: BLE001` и т.п. для правил, которые не включены.
+    "RUF100",
+    # Намеренные best-effort блоки (`except Exception: pass` вокруг
+    # уведомлений/метрик): падение вторичного канала не должно ронять запрос.
+    "S110", "SIM105",
+    # arq.WorkerSettings — обычные атрибуты класса, требуемые библиотекой.
+    "RUF012",
+    # Стилистика pytest, не влияющая на корректность.
+    "PT011", "PT018",
+    # Ложные срабатывания на константы-коды ошибок/событий ("TOKEN_STALE",
+    # "PASSWORD_CHANGED"). Настоящие захардкоженные секреты ловит сканер
+    # секретов в CI (Trivy secret scan).
+    "S105", "S106",
+]
 
 [tool.ruff.lint.per-file-ignores]
 # В миграциях длинные строки — это DDL и SQL-литералы: разрыв по 100 символов
 # делает их менее читаемыми, чем исходный SQL.
-"migrations/versions/*.py" = ["E501"]
+"migrations/versions/*.py" = ["E501", "S608"]
+# assert и псевдослучайные значения — норма для тестов и нагрузочных сценариев.
+"tests/*" = ["S101", "S311"]
+"loadtest/*" = ["S101", "S311"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["app"]
+ignore_missing_imports = true
+warn_unused_configs = true
+warn_redundant_casts = true
+# Плагин pydantic для корректных типов моделей.
+plugins = ["pydantic.mypy"]
+
+# «Храповик»: новые и чистые модули проверяются строго; перечисленные ниже
+# модули несут накопленный долг типизации (93 ошибки на момент включения
+# mypy в CI). Исправили модуль — удалите его из списка, и он навсегда
+# останется чистым. Список не должен расти.
+[[tool.mypy.overrides]]
+module = [
+    "app.core.problem",
+    "app.modules.catalog.router",
+    "app.modules.catalog.service",
+    "app.modules.crm.router",
+    "app.modules.crm.service",
+    "app.modules.crm.tasks",
+    "app.modules.files.router",
+    "app.modules.identity.erasure_service",
+    "app.modules.identity.router_auth",
+    "app.modules.identity.session_store",
+    "app.modules.imports.service",
+    "app.modules.integration.tasks",
+    "app.modules.notification.router",
+    "app.modules.notification.service",
+    "app.modules.registry.providers",
+    "app.modules.reporting.builders",
+    "app.modules.reporting.rendering",
+    "app.modules.reporting.router",
+    "app.modules.reporting.service",
+    "app.modules.reporting.tasks",
+    "app.modules.signing.service",
+    "app.modules.signing.tasks",
+    "app.modules.workflow.dsl",
+    "app.modules.workflow.router",
+    "app.modules.workflow.service",
+    "app.worker.main",
+]
+ignore_errors = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["app"]
+
+[tool.coverage.report]
+# Порог выставлен по измеренной базе (58% со сквозными тестами на Postgres)
+# с запасом; поднимайте по мере роста покрытия, не опускайте.
+fail_under = 55
+skip_covered = true

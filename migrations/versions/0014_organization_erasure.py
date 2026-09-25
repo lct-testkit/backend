@@ -32,18 +32,10 @@ _NEW_CHECK = "subject_type IN ('user','contact','organization')"
 
 
 def upgrade() -> None:
-    op.drop_constraint(
-        "erasure_subject_valid", "data_erasure_requests", type_="check"
-    )
-    op.create_check_constraint(
-        "erasure_subject_valid", "data_erasure_requests", _NEW_CHECK
-    )
+    op.drop_constraint("erasure_subject_valid", "data_erasure_requests", type_="check")
+    op.create_check_constraint("erasure_subject_valid", "data_erasure_requests", _NEW_CHECK)
 
 
 def downgrade() -> None:
-    op.drop_constraint(
-        "erasure_subject_valid", "data_erasure_requests", type_="check"
-    )
-    op.create_check_constraint(
-        "erasure_subject_valid", "data_erasure_requests", _OLD_CHECK
-    )
+    op.drop_constraint("erasure_subject_valid", "data_erasure_requests", type_="check")
+    op.create_check_constraint("erasure_subject_valid", "data_erasure_requests", _OLD_CHECK)

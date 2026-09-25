@@ -261,8 +261,7 @@ def _validate_field_name(
         return []
 
     return [
-        f"{path}.field: поле {field_name!r} не разрешено в условиях; "
-        "список полей закрыт (раздел 8)"
+        f"{path}.field: поле {field_name!r} не разрешено в условиях; список полей закрыт (раздел 8)"
     ]
 
 
@@ -438,8 +437,7 @@ def signature_actions(actions: Any) -> list[Mapping[str, Any]]:
     return [
         action
         for action in actions
-        if isinstance(action, Mapping)
-        and action.get("type") == ActionType.REQUEST_SIGNATURE.value
+        if isinstance(action, Mapping) and action.get("type") == ActionType.REQUEST_SIGNATURE.value
     ]
 
 

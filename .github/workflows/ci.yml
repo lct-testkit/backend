@@ -1,50 +1,78 @@
 name: ci
 
+# Гейты качества на каждый PR и push в main. Образ api публикуется ТОЛЬКО с
+# main и ТОЛЬКО после зелёных lint/test/security (общий конвейер живёт в
+# lct-testkit/deploy: локальная сборка → Trivy → push → SBOM/provenance →
+# cosign → dispatch в deploy).
 on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch: {}
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
+env:
+  PYTHON_VERSION: "3.12"
+  UV_VERSION: "0.12.18"
+  HADOLINT_IMAGE: hadolint/hadolint:v2.12.0
+  # import-linter читает .importlinter (кириллица в названиях контрактов).
+  PYTHONUTF8: "1"
+  PYTHONPATH: .
+
 jobs:
   lint:
-    name: ruff
+    name: lint · types · architecture · contract
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
-      - run: pip install -e ".[dev]"
-      - run: ruff check app tests
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+
+      - name: Установить зависимости (строго из lock, с проверкой хэшей)
+        run: pip install --require-hashes -r requirements-dev.lock
+
+      - name: ruff check
+        run: ruff check app tests tools loadtest migrations
+
+      - name: ruff format (весь репозиторий)
+        run: ruff format --check .
+
+      - name: mypy (храповик — долг перечислен в pyproject.toml)
+        run: mypy
+
+      - name: import-linter (границы модулей)
+        run: lint-imports
+
+      - name: Контракт API не разошёлся с кодом (openapi.json)
+        run: python tools/export_openapi.py --check
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Lock-файлы соответствуют pyproject.toml
+        run: |
+          bash tools/lock.sh
+          git diff --exit-code -- requirements.lock requirements-dev.lock
 
   test:
-    name: pytest (офлайн)
+    name: pytest + миграции (Postgres)
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install -e ".[dev]"
-      # Settings обязателен app_profile/database_url/redis_url и т.д. —
-      # без .env падает даже офлайн-набор (get_settings() дергается из
-      # CSRF/permissions helpers), реальные БД/Redis/Keycloak не нужны.
-      - run: cp .env.example .env
-      - run: pytest -q
-
-  smoke:
-    name: pytest (со сквозными тестами)
-    runs-on: ubuntu-latest
+    timeout-minutes: 30
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
         env:
           POSTGRES_USER: crm
           POSTGRES_PASSWORD: crm
@@ -56,24 +84,97 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://crm:crm@localhost:5432/crm_test
+      TEST_DATABASE_URL: postgresql+asyncpg://crm:crm@localhost:5432/crm_test
+      # Любой пропущенный тест = красный прогон (иначе сквозные тесты с БД
+      # молча превращались бы в skip).
+      REQUIRE_NO_SKIPS: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
-      - run: pip install -e ".[dev]"
-      # Тот же приём, что уже применяет job `test` выше: Settings требует
-      # app_profile/redis_url/keycloak_*/s3_*/signature_server_secret и
-      # т.д. (раздел 17), без .env падает уже на импорте `migrations/env.py`
-      # (get_settings() дёргается до подключения к БД). DATABASE_URL ниже
-      # переопределяет значение из .env.example настоящим адресом сервиса.
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+
+      - run: pip install --require-hashes -r requirements-dev.lock
+
+      # Settings требует app_profile/redis_url/keycloak_*/s3_*/… (get_settings()
+      # вызывается ещё до подключения к БД, в т.ч. из migrations/env.py).
       - run: cp .env.example .env
-      - name: Миграции
-        env:
-          DATABASE_URL: postgresql+asyncpg://crm:crm@localhost:5432/crm_test
-        run: python -m alembic upgrade head
-      - name: pytest
-        env:
-          DATABASE_URL: postgresql+asyncpg://crm:crm@localhost:5432/crm_test
-          TEST_DATABASE_URL: postgresql+asyncpg://crm:crm@localhost:5432/crm_test
-        run: pytest -q
+
+      - name: Миграции — одна голова
+        run: |
+          heads="$(alembic heads | grep -c '(head)')"
+          echo "голов миграций: ${heads}"
+          test "${heads}" -eq 1
+
+      - name: Миграции — upgrade head
+        run: alembic upgrade head
+
+      - name: Миграции — модели не разошлись со схемой (alembic check)
+        run: alembic check
+
+      - name: Миграции — round-trip последней ревизии (downgrade -1 → upgrade head)
+        run: |
+          alembic downgrade -1
+          alembic upgrade head
+
+      - name: pytest (покрытие, без пропусков)
+        run: pytest -q --cov=app --cov-report=term --cov-report=xml
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          retention-days: 7
+
+  security:
+    name: зависимости · секреты · Dockerfile
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+
+      - run: pip install --require-hashes -r requirements-dev.lock
+
+      # Аудит только runtime-зависимостей: то, что попадает в образ.
+      - name: pip-audit (runtime lock)
+        run: pip-audit -r requirements.lock --require-hashes --disable-pip
+
+      - name: Trivy fs (уязвимости, секреты, misconfig)
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          scan-type: fs
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          skip-dirs: tests,loadtest,_spec,docs
+          trivyignores: .trivyignore
+
+      - name: hadolint
+        run: docker run --rm -i "${HADOLINT_IMAGE}" hadolint --failure-threshold warning - < Dockerfile
+
+  publish:
+    name: publish образа api
+    needs: [lint, test, security]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    uses: lct-testkit/deploy/.github/workflows/docker-publish.yml@main
+    with:
+      image: api
+      event-type: backend-image-built
+    secrets: inherit

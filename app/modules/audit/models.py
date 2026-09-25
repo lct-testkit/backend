@@ -43,18 +43,14 @@ class AuditLog(Base):
     )
 
     # Ключ партиционирования обязан входить в первичный ключ.
-    id: Mapped[uuid.UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid7
-    )
+    id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid7)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), primary_key=True, server_default=func.now(), nullable=False
     )
 
     actor_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     actor_role: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    impersonated_by: Mapped[uuid.UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), nullable=True
-    )
+    impersonated_by: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
 
     action: Mapped[str] = mapped_column(String(64), nullable=False)
     entity_type: Mapped[str | None] = mapped_column(String(64), nullable=True)

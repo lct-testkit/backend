@@ -86,7 +86,9 @@ class TestStampAndProtocol:
 
     def test_stamp_rejects_empty_document(self) -> None:
         with pytest.raises(RenderError):
-            apply_signature_stamp(b"", lines=["x"], verify_url="https://example.local/public/verify/x")
+            apply_signature_stamp(
+                b"", lines=["x"], verify_url="https://example.local/public/verify/x"
+            )
 
     def test_protocol_pdf_is_valid(self) -> None:
         pdf_bytes = render_protocol_pdf(
@@ -112,31 +114,43 @@ class TestHashChainAndHmac:
             prev_hash=None, signature_value="v", content_hash="c", request_id="r", signed_at_iso="t"
         )
         h2 = compute_chain_hash(
-            prev_hash=GENESIS_HASH, signature_value="v", content_hash="c",
-            request_id="r", signed_at_iso="t",
+            prev_hash=GENESIS_HASH,
+            signature_value="v",
+            content_hash="c",
+            request_id="r",
+            signed_at_iso="t",
         )
         assert h1 == h2
 
     def test_chain_hash_changes_with_prev_hash(self) -> None:
-        base = dict(signature_value="v", content_hash="c", request_id="r", signed_at_iso="t")
+        base = {
+            "signature_value": "v",
+            "content_hash": "c",
+            "request_id": "r",
+            "signed_at_iso": "t",
+        }
         assert compute_chain_hash(prev_hash="a" * 64, **base) != compute_chain_hash(
             prev_hash="b" * 64, **base
         )
 
     def test_signature_value_is_deterministic(self) -> None:
-        kwargs = dict(
-            secret="s3cr3t", content_hash="c", signer_id="u1", signed_at_iso="t", nonce="n"
-        )
+        kwargs = {
+            "secret": "s3cr3t",
+            "content_hash": "c",
+            "signer_id": "u1",
+            "signed_at_iso": "t",
+            "nonce": "n",
+        }
         assert compute_signature_value(**kwargs) == compute_signature_value(**kwargs)
 
     def test_signature_value_changes_with_nonce(self) -> None:
-        base = dict(secret="s3cr3t", content_hash="c", signer_id="u1", signed_at_iso="t")
+        base = {"secret": "s3cr3t", "content_hash": "c", "signer_id": "u1", "signed_at_iso": "t"}
         value1 = compute_signature_value(**base, nonce="n1")
         value2 = compute_signature_value(**base, nonce="n2")
         assert value1 != value2
 
     def test_signature_value_requires_correct_secret(self) -> None:
-        base = dict(content_hash="c", signer_id="u1", signed_at_iso="t", nonce="n")
+        base = {"content_hash": "c", "signer_id": "u1", "signed_at_iso": "t", "nonce": "n"}
         assert compute_signature_value(secret="right", **base) != compute_signature_value(
             secret="wrong", **base
         )
@@ -205,9 +219,7 @@ class TestSignatureDocumentCreateValidation:
         SignatureDocumentCreateRequest(**self._base, template_code="kp_approval")
 
     def test_file_id_alone_accepted(self) -> None:
-        SignatureDocumentCreateRequest(
-            **self._base, file_id="00000000-0000-0000-0000-000000000002"
-        )
+        SignatureDocumentCreateRequest(**self._base, file_id="00000000-0000-0000-0000-000000000002")
 
 
 class TestPermissionMatrix:
@@ -274,7 +286,9 @@ class TestSmsGatewayClient:
     async def test_connection_failure_degrades_to_none(self) -> None:
         # Порт 9 (discard) в этом окружении — надёжный «мгновенный отказ
         # соединения» (см. tests/test_integration.py, tests/test_api_smoke.py).
-        message_id = await send_sms(to="+79991234567", message="123456", base_url="http://127.0.0.1:9")
+        message_id = await send_sms(
+            to="+79991234567", message="123456", base_url="http://127.0.0.1:9"
+        )
         assert message_id is None
 
     async def test_gateway_error_response_degrades_to_none(self) -> None:

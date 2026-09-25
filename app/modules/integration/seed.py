@@ -48,9 +48,7 @@ async def seed_integration_sources(session: AsyncSession) -> int:
     created = 0
     for code, name in _SOURCES:
         existing = (
-            await session.execute(
-                select(IntegrationSource).where(IntegrationSource.code == code)
-            )
+            await session.execute(select(IntegrationSource).where(IntegrationSource.code == code))
         ).scalar_one_or_none()
         if existing is not None:
             continue
@@ -64,8 +62,10 @@ async def seed_integration_sources(session: AsyncSession) -> int:
 
 async def seed_integration_account(session: AsyncSession) -> User:
     existing = (
-        await session.execute(select(User).where(User.role == Role.INTEGRATION.value))
-    ).scalars().first()
+        (await session.execute(select(User).where(User.role == Role.INTEGRATION.value)))
+        .scalars()
+        .first()
+    )
     if existing is not None:
         logger.info("integration_account_seed_skip_existing", user_id=str(existing.id))
         return existing

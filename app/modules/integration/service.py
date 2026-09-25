@@ -126,8 +126,14 @@ class IntegrationSourceService:
 
     async def list_all(self) -> list[IntegrationSource]:
         rows = (
-            await self._session.execute(select(IntegrationSource).order_by(IntegrationSource.code))
-        ).scalars().all()
+            (
+                await self._session.execute(
+                    select(IntegrationSource).order_by(IntegrationSource.code)
+                )
+            )
+            .scalars()
+            .all()
+        )
         return list(rows)
 
     async def get_by_code(self, code: str) -> IntegrationSource:
@@ -188,8 +194,10 @@ async def get_integration_principal(session: AsyncSession) -> Principal:
 
     if user is None:
         user = (
-            await session.execute(select(User).where(User.role == Role.INTEGRATION.value))
-        ).scalars().first()
+            (await session.execute(select(User).where(User.role == Role.INTEGRATION.value)))
+            .scalars()
+            .first()
+        )
         if user is None:
             raise AppError(
                 ErrorCode.DEPENDENCY_UNAVAILABLE,

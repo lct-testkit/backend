@@ -246,8 +246,10 @@ class SignatureTemplateService:
         self._session = session
 
     async def list_active(self) -> list[SignatureTemplate]:
-        stmt = select(SignatureTemplate).where(SignatureTemplate.is_active.is_(True)).order_by(
-            SignatureTemplate.code
+        stmt = (
+            select(SignatureTemplate)
+            .where(SignatureTemplate.is_active.is_(True))
+            .order_by(SignatureTemplate.code)
         )
         return list((await self._session.execute(stmt)).scalars().all())
 
@@ -385,8 +387,14 @@ async def _resolve_signers(
                 raise NotFoundError("Подписант (пользователь)", user_id)
             resolved.append(
                 ResolvedSigner(
-                    SignerType.INTERNAL.value, user.id, None, role, user.effective_name,
-                    mask_phone(user.phone) or mask_email(user.email), user.phone, user.email,
+                    SignerType.INTERNAL.value,
+                    user.id,
+                    None,
+                    role,
+                    user.effective_name,
+                    mask_phone(user.phone) or mask_email(user.email),
+                    user.phone,
+                    user.email,
                 )
             )
             continue
@@ -405,8 +413,14 @@ async def _resolve_signers(
                 )
             resolved.append(
                 ResolvedSigner(
-                    SignerType.INTERNAL.value, user.id, None, role, user.effective_name,
-                    mask_phone(user.phone) or mask_email(user.email), user.phone, user.email,
+                    SignerType.INTERNAL.value,
+                    user.id,
+                    None,
+                    role,
+                    user.effective_name,
+                    mask_phone(user.phone) or mask_email(user.email),
+                    user.phone,
+                    user.email,
                 )
             )
             continue
@@ -426,8 +440,14 @@ async def _resolve_signers(
 def _contact_to_signer(contact: Contact, role_code: str | None) -> ResolvedSigner:
     name = f"{contact.last_name} {contact.first_name} {contact.middle_name or ''}".strip()
     return ResolvedSigner(
-        SignerType.EXTERNAL.value, None, contact.id, role_code, name,
-        mask_phone(contact.phone) or mask_email(contact.email), contact.phone, contact.email,
+        SignerType.EXTERNAL.value,
+        None,
+        contact.id,
+        role_code,
+        name,
+        mask_phone(contact.phone) or mask_email(contact.email),
+        contact.phone,
+        contact.email,
     )
 
 
@@ -637,7 +657,8 @@ class SignatureDocumentService:
             # в `SignatureRequestService.challenge`).
             logger.warning(
                 "external_signer_token_undeliverable_from_workflow_action",
-                document_id=str(document.id), request_ids=[str(k) for k in revealed],
+                document_id=str(document.id),
+                request_ids=[str(k) for k in revealed],
             )
         return document
 
@@ -690,8 +711,10 @@ class SignatureDocumentService:
         return file_id
 
     def _requests_query(self, document_id: uuid.UUID):
-        return select(SignatureRequest).where(SignatureRequest.document_id == document_id).order_by(
-            SignatureRequest.sign_order
+        return (
+            select(SignatureRequest)
+            .where(SignatureRequest.document_id == document_id)
+            .order_by(SignatureRequest.sign_order)
         )
 
     async def list_requests(self, document_id: uuid.UUID) -> list[SignatureRequest]:
@@ -859,7 +882,9 @@ class SignatureDocumentService:
             raise NotFoundError("Файл протокола", document.protocol_file_id)
         ttl = self._settings.reports_link_ttl_minutes * 60
         url = await generate_presigned_get(
-            bucket=file.bucket, key=file.storage_key, expires_seconds=ttl,
+            bucket=file.bucket,
+            key=file.storage_key,
+            expires_seconds=ttl,
             filename=file.original_filename,
         )
         return url, dt.datetime.now(dt.UTC) + dt.timedelta(seconds=ttl)
@@ -938,7 +963,9 @@ class SignatureRequestService:
 
         file = await self._session.get(File, document.file_id)
         preview_url = await generate_presigned_get(
-            bucket=file.bucket, key=file.storage_key, expires_seconds=600,
+            bucket=file.bucket,
+            key=file.storage_key,
+            expires_seconds=600,
             filename=file.original_filename,
         )
         siblings = await SignatureDocumentService(self._session).list_requests(document.id)
@@ -1002,7 +1029,10 @@ class SignatureRequestService:
                 ErrorCode.SIGNATURE_OTP_INVALID, "Превышен лимит отправок кода на этот запрос"
             )
         await rate_limit_enforce(
-            str(request.id), "signature:otp:send", limit=1, window_seconds=60,
+            str(request.id),
+            "signature:otp:send",
+            limit=1,
+            window_seconds=60,
             detail="Код уже отправлен — повторная отправка возможна через минуту",
         )
 
@@ -1046,7 +1076,10 @@ class SignatureRequestService:
         if channel == "sms":
             await send_sms(to=destination, message=f"Код подтверждения: {code}")
         logger.info(
-            "signature_otp_dispatch", request_id=str(request.id), channel=channel, sent_to=masked,
+            "signature_otp_dispatch",
+            request_id=str(request.id),
+            channel=channel,
+            sent_to=masked,
         )
 
         await self._audit.record(
@@ -1201,8 +1234,11 @@ class SignatureRequestService:
         nonce = secrets.token_hex(16)
         secret = self._settings.signature_server_secret.get_secret_value()
         signature_value = compute_signature_value(
-            secret=secret, content_hash=document.content_hash, signer_id=str(signer_id),
-            signed_at_iso=now.isoformat(), nonce=nonce,
+            secret=secret,
+            content_hash=document.content_hash,
+            signer_id=str(signer_id),
+            signed_at_iso=now.isoformat(),
+            nonce=nonce,
         )
 
         dwell_seconds = (
@@ -1263,9 +1299,11 @@ class SignatureRequestService:
             prev_hash=prev_hash,
         )
         signature.hash = compute_chain_hash(
-            prev_hash=prev_hash, signature_value=signature_value,
+            prev_hash=prev_hash,
+            signature_value=signature_value,
             content_hash=document.content_hash,
-            request_id=str(request.id), signed_at_iso=now.isoformat(),
+            request_id=str(request.id),
+            signed_at_iso=now.isoformat(),
         )
         self._session.add(signature)
 
@@ -1295,7 +1333,8 @@ class SignatureRequestService:
                     # `create_from_workflow_action` (см. комментарий там).
                     logger.warning(
                         "external_signer_token_undeliverable_mid_chain",
-                        document_id=str(document.id), request_ids=[str(k) for k in revealed],
+                        document_id=str(document.id),
+                        request_ids=[str(k) for k in revealed],
                     )
             await self._session.flush()
         else:
@@ -1357,12 +1396,16 @@ class SignatureRequestService:
         verify_url = f"{settings.base_url.rstrip('/')}/verify/{{sig_id}}"
         last_signature = signatures[-1] if signatures else None
         final_sig_id = str(last_signature.id) if last_signature else document.id
-        stamp_lines = [
-            "Документ подписан простой электронной подписью",
-        ] + [
-            f"{sig.signer_display} / {sig.signed_at.strftime('%d.%m.%Y %H:%M')} UTC"
-            for sig in signatures
-        ] + [f"Хэш: {document.content_hash[:16]}…"]
+        stamp_lines = (
+            [
+                "Документ подписан простой электронной подписью",
+            ]
+            + [
+                f"{sig.signer_display} / {sig.signed_at.strftime('%d.%m.%Y %H:%M')} UTC"
+                for sig in signatures
+            ]
+            + [f"Хэш: {document.content_hash[:16]}…"]
+        )
         stamped_bytes = apply_signature_stamp(
             original_bytes,
             lines=stamp_lines,
@@ -1488,7 +1531,8 @@ class SignatureRequestService:
                     )
                 )
                 await _apply_deal_signature_outcome(
-                    self._session, deal,
+                    self._session,
+                    deal,
                     rule=document.on_rejected,
                     note=f"Подписант отклонил документ «{document.title}»: {reason}",
                 )
@@ -1674,12 +1718,9 @@ class RealSigningService:
     async def void_pending_for_user(
         self, session: AsyncSession, user_id: uuid.UUID, *, reason: str
     ) -> int:
-        stmt = (
-            select(SignatureRequest)
-            .where(
-                SignatureRequest.signer_user_id == user_id,
-                SignatureRequest.status.in_([s.value for s in OPEN_REQUEST_STATUSES]),
-            )
+        stmt = select(SignatureRequest).where(
+            SignatureRequest.signer_user_id == user_id,
+            SignatureRequest.status.in_([s.value for s in OPEN_REQUEST_STATUSES]),
         )
         requests = list((await session.execute(stmt)).scalars().all())
         for request in requests:

@@ -78,9 +78,7 @@ class Workflow(UuidPkMixin, TimestampMixin, VersionMixin, Base):
         ),
         Index("ix_workflows_deal_type_state", "deal_type", "state"),
         CheckConstraint("deal_type IN ('b2b','b2c')", name="workflows_deal_type_valid"),
-        CheckConstraint(
-            "state IN ('draft','published','archived')", name="workflows_state_valid"
-        ),
+        CheckConstraint("state IN ('draft','published','archived')", name="workflows_state_valid"),
         # Опубликованная воронка обязана иметь снимок графа и его хэш.
         CheckConstraint(
             "state <> 'published' OR (published_graph IS NOT NULL AND graph_hash IS NOT NULL)",
@@ -94,9 +92,7 @@ class Workflow(UuidPkMixin, TimestampMixin, VersionMixin, Base):
     state: Mapped[str] = mapped_column(String(16), nullable=False, server_default="draft")
     is_default: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
 
-    published_at: Mapped[dt.datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     published_by: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     # sha256 канонизированного снимка: по нему фронтенд и сделки понимают,
     # что правила изменились.
@@ -143,9 +139,7 @@ class WorkflowStatus(UuidPkMixin, TimestampMixin, Base):
         JSONB, nullable=False, server_default=text("'[]'::jsonb")
     )
     is_archived: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
-    archived_at: Mapped[dt.datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    archived_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Куда переехали сделки при архивировании — нужно для чтения истории.
     replaced_by_status_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("workflow_statuses.id", ondelete="RESTRICT"), nullable=True
@@ -162,9 +156,7 @@ class WorkflowTransition(UuidPkMixin, TimestampMixin, Base):
             name="uq_workflow_transitions_workflow_id_from_status_id_to_status_id",
         ),
         Index("ix_workflow_transitions_from", "from_status_id"),
-        CheckConstraint(
-            "from_status_id <> to_status_id", name="workflow_transitions_no_self_loop"
-        ),
+        CheckConstraint("from_status_id <> to_status_id", name="workflow_transitions_no_self_loop"),
     )
 
     workflow_id: Mapped[uuid.UUID] = mapped_column(
@@ -225,9 +217,7 @@ class SlaRule(UuidPkMixin, TimestampMixin, Base):
     channels: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[\"in_app\"]'::jsonb")
     )
-    count_business_days: Mapped[bool] = mapped_column(
-        nullable=False, server_default=text("true")
-    )
+    count_business_days: Mapped[bool] = mapped_column(nullable=False, server_default=text("true"))
     is_active: Mapped[bool] = mapped_column(nullable=False, server_default=text("true"))
 
 
@@ -273,9 +263,7 @@ class StatusMappingJob(UuidPkMixin, Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="pending")
     initiated_by: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     started_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    finished_at: Mapped[dt.datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    finished_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     report: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(

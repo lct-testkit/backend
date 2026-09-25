@@ -310,7 +310,8 @@ class TestDeleteDirection:
         client.post(
             "/api/directions",
             json={
-                "code": f"dir-child-{uuid.uuid4().hex[:8]}", "name": "Потомок",
+                "code": f"dir-child-{uuid.uuid4().hex[:8]}",
+                "name": "Потомок",
                 "parent_id": parent["id"],
             },
         )
@@ -359,13 +360,17 @@ class TestDeleteLossReason:
 
             async with session_scope() as session:
                 workflow = Workflow(
-                    code=f"wf-{uuid7().hex[:8]}", name="Тестовая воронка",
-                    deal_type="b2b", state="draft",
+                    code=f"wf-{uuid7().hex[:8]}",
+                    name="Тестовая воронка",
+                    deal_type="b2b",
+                    state="draft",
                 )
                 session.add(workflow)
                 await session.flush()
                 wf_status = WorkflowStatus(
-                    workflow_id=workflow.id, code="new", name="Новая",
+                    workflow_id=workflow.id,
+                    code="new",
+                    name="Новая",
                 )
                 session.add(wf_status)
                 org = Organization(name="Тестовый вуз для П4", org_type="university")
@@ -373,15 +378,21 @@ class TestDeleteLossReason:
                 owner = User(
                     keycloak_id=str(uuid.uuid4()),
                     email=f"{uuid.uuid4().hex[:8]}@rt-it-school.ru",
-                    full_name="Сидоров С.С.", role="KAM", status="active",
+                    full_name="Сидоров С.С.",
+                    role="KAM",
+                    status="active",
                     consent_version="1.0",
                 )
                 session.add(owner)
                 await session.flush()
                 deal = Deal(
-                    number=f"D-{uuid.uuid4().hex[:10]}", title="Сделка для П4",
-                    deal_type="b2b", workflow_id=workflow.id, status_id=wf_status.id,
-                    organization_id=org.id, owner_id=owner.id,
+                    number=f"D-{uuid.uuid4().hex[:10]}",
+                    title="Сделка для П4",
+                    deal_type="b2b",
+                    workflow_id=workflow.id,
+                    status_id=wf_status.id,
+                    organization_id=org.id,
+                    owner_id=owner.id,
                     loss_reason_id=uuid.UUID(reason_id),
                 )
                 session.add(deal)

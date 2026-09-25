@@ -125,16 +125,24 @@ class CmsLeadService:
         contact = None
         if phone:
             contact = (
-                await self._session.execute(
-                    select(Contact).where(Contact.phone == phone, Contact.deleted_at.is_(None))
+                (
+                    await self._session.execute(
+                        select(Contact).where(Contact.phone == phone, Contact.deleted_at.is_(None))
+                    )
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
         if contact is None and email:
             contact = (
-                await self._session.execute(
-                    select(Contact).where(Contact.email == email, Contact.deleted_at.is_(None))
+                (
+                    await self._session.execute(
+                        select(Contact).where(Contact.email == email, Contact.deleted_at.is_(None))
+                    )
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
 
         if contact is not None:
             # dop.md-стиль дедупликации (раздел 11.6, применённый здесь к
@@ -142,15 +150,19 @@ class CmsLeadService:
             # писал нам — не плодим вторую сделку, если по нему уже есть
             # незакрытая B2C-сделка того же типа продукта.
             open_deal = (
-                await self._session.execute(
-                    select(Deal).where(
-                        Deal.contact_id == contact.id,
-                        Deal.deal_type == "b2c",
-                        Deal.closed_at.is_(None),
-                        Deal.deleted_at.is_(None),
+                (
+                    await self._session.execute(
+                        select(Deal).where(
+                            Deal.contact_id == contact.id,
+                            Deal.deal_type == "b2c",
+                            Deal.closed_at.is_(None),
+                            Deal.deleted_at.is_(None),
+                        )
                     )
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
             if open_deal is not None:
                 return open_deal, True
         else:

@@ -99,9 +99,7 @@ class ImportJob(UuidPkMixin, TimestampMixin, Base):
     source_format: Mapped[str] = mapped_column(String(8), nullable=False)
     started_at: Mapped[dt.datetime | None] = mapped_column(nullable=True)
     finished_at: Mapped[dt.datetime | None] = mapped_column(nullable=True)
-    rollback_available: Mapped[bool] = mapped_column(
-        nullable=False, server_default=text("false")
-    )
+    rollback_available: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
     rolled_back_at: Mapped[dt.datetime | None] = mapped_column(nullable=True)
 
 
@@ -139,16 +137,12 @@ class ImportRowResult(UuidPkMixin, Base):
     errors: Mapped[list[Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb")
     )
-    created_at: Mapped[dt.datetime] = mapped_column(
-        server_default=text("now()"), nullable=False
-    )
+    created_at: Mapped[dt.datetime] = mapped_column(server_default=text("now()"), nullable=False)
 
 
 class ImportPreset(UuidPkMixin, TimestampMixin, Base):
     __tablename__ = "import_presets"
-    __table_args__ = (
-        Index("ix_import_presets_entity_type", "entity_type"),
-    )
+    __table_args__ = (Index("ix_import_presets_entity_type", "entity_type"),)
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     entity_type: Mapped[str] = mapped_column(String(16), nullable=False)

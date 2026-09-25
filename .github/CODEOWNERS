@@ -1,0 +1,5 @@
+# Владельцы кода. Замените команду на реальную (Settings → Teams) и включите
+# «Require review from Code Owners» (require_code_owner_review в
+# deploy/scripts/apply_repo_settings.sh). Пока команды нет, файл носит справочный характер.
+*                    @lct-testkit/maintainers
+/.github/            @lct-testkit/maintainers

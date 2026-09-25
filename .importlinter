@@ -1,0 +1,456 @@
+# Контракты слоёв модульного монолита (new_spec §2.2):
+# «кросс-модульные вызовы — только через публичные сервисные интерфейсы,
+# запрещены импорты чужих репозиториев/роутеров».
+#
+# Запуск: `lint-imports` (в CI — job `architecture`).
+[importlinter]
+root_package = app
+include_external_packages = False
+
+# 1. Внутри модуля зависимости идут строго вниз: router/tasks → service → models.
+[importlinter:contract:layers-in-module]
+name = Слои внутри модулей: router/tasks → service → models
+type = layers
+containers =
+    app.modules.admin
+    app.modules.audit
+    app.modules.catalog
+    app.modules.crm
+    app.modules.files
+    app.modules.identity
+    app.modules.imports
+    app.modules.integration
+    app.modules.notification
+    app.modules.registry
+    app.modules.reporting
+    app.modules.signing
+    app.modules.workflow
+layers =
+    (router) | (tasks)
+    (service)
+    (models)
+
+# 2. Инфраструктурные пакеты не знают о точках входа приложения.
+[importlinter:contract:infra-not-entrypoints]
+name = core/db/middleware не импортируют main и worker
+type = forbidden
+source_modules =
+    app.core
+    app.db
+    app.middleware
+forbidden_modules =
+    app.main
+    app.worker
+
+# 3. Модули не тянут точки входа приложения.
+[importlinter:contract:modules-not-entrypoints]
+name = Модули не импортируют app.main и app.worker
+type = forbidden
+source_modules =
+    app.modules
+forbidden_modules =
+    app.main
+    app.worker
+
+[importlinter:contract:no-foreign-entrypoints-admin]
+name = admin: не импортирует роутеры и tasks других модулей
+type = forbidden
+source_modules =
+    app.modules.admin
+forbidden_modules =
+    app.modules.catalog.router
+    app.modules.crm.router
+    app.modules.crm.tasks
+    app.modules.files.router
+    app.modules.identity.router_admin
+    app.modules.identity.router_auth
+    app.modules.identity.router_directory
+    app.modules.identity.router_me
+    app.modules.identity.tasks
+    app.modules.imports.router
+    app.modules.imports.tasks
+    app.modules.integration.public_router
+    app.modules.integration.router
+    app.modules.integration.tasks
+    app.modules.notification.router
+    app.modules.notification.tasks
+    app.modules.registry.router
+    app.modules.registry.tasks
+    app.modules.reporting.router
+    app.modules.reporting.tasks
+    app.modules.signing.public_router
+    app.modules.signing.router
+    app.modules.signing.tasks
+    app.modules.workflow.router
+    app.modules.workflow.tasks
+
+[importlinter:contract:no-foreign-entrypoints-audit]
+name = audit: не импортирует роутеры и tasks других модулей
+type = forbidden
+source_modules =
+    app.modules.audit
+forbidden_modules =
+    app.modules.admin.router
+    app.modules.catalog.router
+    app.modules.crm.router
+    app.modules.crm.tasks
+    app.modules.files.router
+    app.modules.identity.router_admin
+    app.modules.identity.router_auth
+    app.modules.identity.router_directory
+    app.modules.identity.router_me
+    app.modules.identity.tasks
+    app.modules.imports.router
+    app.modules.imports.tasks
+    app.modules.integration.public_router
+    app.modules.integration.router
+    app.modules.integration.tasks
+    app.modules.notification.router
+    app.modules.notification.tasks
+    app.modules.registry.router
+    app.modules.registry.tasks
+    app.modules.reporting.router
+    app.modules.reporting.tasks
+    app.modules.signing.public_router
+    app.modules.signing.router
+    app.modules.signing.tasks
+    app.modules.workflow.router
+    app.modules.workflow.tasks
+
+[importlinter:contract:no-foreign-entrypoints-catalog]
+name = catalog: не импортирует роутеры и tasks других модулей
+type = forbidden
+source_modules =
+    app.modules.catalog
+forbidden_modules =
+    app.modules.admin.router
+    app.modules.crm.router
+    app.modules.crm.tasks
+    app.modules.files.router
+    app.modules.identity.router_admin
+    app.modules.identity.router_auth
+    app.modules.identity.router_directory
+    app.modules.identity.router_me
+    app.modules.identity.tasks
+    app.modules.imports.router
+    app.modules.imports.tasks
+    app.modules.integration.public_router
+    app.modules.integration.router
+    app.modules.integration.tasks
+    app.modules.notification.router
+    app.modules.notification.tasks
+    app.modules.registry.router
+    app.modules.registry.tasks
+    app.modules.reporting.router
+    app.modules.reporting.tasks
+    app.modules.signing.public_router
+    app.modules.signing.router
+    app.modules.signing.tasks
+    app.modules.workflow.router
+    app.modules.workflow.tasks
+
+[importlinter:contract:no-foreign-entrypoints-crm]
+name = crm: не импортирует роутеры и tasks других модулей
+type = forbidden
+source_modules =
+    app.modules.crm
+forbidden_modules =
+    app.modules.admin.router
+    app.modules.catalog.router
+    app.modules.files.router
+    app.modules.identity.router_admin
+    app.modules.identity.router_auth
+    app.modules.identity.router_directory
+    app.modules.identity.router_me
+    app.modules.identity.tasks
+    app.modules.imports.router
+    app.modules.imports.tasks
+    app.modules.integration.public_router
+    app.modules.integration.router
+    app.modules.integration.tasks
+    app.modules.notification.router
+    app.modules.notification.tasks
+    app.modules.registry.router
+    app.modules.registry.tasks
+    app.modules.reporting.router
+    app.modules.reporting.tasks
+    app.modules.signing.public_router
+    app.modules.signing.router
+    app.modules.signing.tasks
+    app.modules.workflow.router
+    app.modules.workflow.tasks
+
+[importlinter:contract:no-foreign-entrypoints-files]
+name = files: не импортирует роутеры и tasks других модулей
+type = forbidden
+source_modules =
+    app.modules.files
+forbidden_modules =
+    app.modules.admin.router
+    app.modules.catalog.router
+    app.modules.crm.router
+    app.modules.crm.tasks
+    app.modules.identity.router_admin
+    app.modules.identity.router_auth
+    app.modules.identity.router_directory
+    app.modules.identity.router_me
+    app.modules.identity.tasks
+    app.modules.imports.router
+    app.modules.imports.tasks
+    app.modules.integration.public_router
+    app.modules.integration.router
+    app.modules.integration.tasks
+    app.modules.notification.router
+    app.modules.notification.tasks
+    app.modules.registry.router
+    app.modules.registry.tasks
+    app.modules.reporting.router
+    app.modules.reporting.tasks
+    app.modules.signing.public_router
+    app.modules.signing.router
+    app.modules.signing.tasks
+    app.modules.workflow.router
+    app.modules.workflow.tasks
+
+[importlinter:contract:no-foreign-entrypoints-identity]
+name = identity: не импортирует роутеры и tasks других модулей
+type = forbidden
+source_modules =
+    app.modules.identity
+forbidden_modules =
+    app.modules.admin.router
+    app.modules.catalog.router
+    app.modules.crm.router
+    app.modules.crm.tasks
+    app.modules.files.router
+    app.modules.imports.router
+    app.modules.imports.tasks
+    app.modules.integration.public_router
+    app.modules.integration.router
+    app.modules.integration.tasks
+    app.modules.notification.router
+    app.modules.notification.tasks
+    app.modules.registry.router
+    app.modules.registry.tasks
+    app.modules.reporting.router
+    app.modules.reporting.tasks
+    app.modules.signing.public_router
+    app.modules.signing.router
+    app.modules.signing.tasks
+    app.modules.workflow.router
+    app.modules.workflow.tasks
+
+[importlinter:contract:no-foreign-entrypoints-imports]
+name = imports: не импортирует роутеры и tasks других модулей
+type = forbidden
+source_modules =
+    app.modules.imports
+forbidden_modules =
+    app.modules.admin.router
+    app.modules.catalog.router
+    app.modules.crm.router
+    app.modules.crm.tasks
+    app.modules.files.router
+    app.modules.identity.router_admin
+    app.modules.identity.router_auth
+    app.modules.identity.router_directory
+    app.modules.identity.router_me
+    app.modules.identity.tasks
+    app.modules.integration.public_router
+    app.modules.integration.router
+    app.modules.integration.tasks
+    app.modules.notification.router
+    app.modules.notification.tasks
+    app.modules.registry.router
+    app.modules.registry.tasks
+    app.modules.reporting.router
+    app.modules.reporting.tasks
+    app.modules.signing.public_router
+    app.modules.signing.router
+    app.modules.signing.tasks
+    app.modules.workflow.router
+    app.modules.workflow.tasks
+
+[importlinter:contract:no-foreign-entrypoints-integration]
+name = integration: не импортирует роутеры и tasks других модулей
+type = forbidden
+source_modules =
+    app.modules.integration
+forbidden_modules =
+    app.modules.admin.router
+    app.modules.catalog.router
+    app.modules.crm.router
+    app.modules.crm.tasks
+    app.modules.files.router
+    app.modules.identity.router_admin
+    app.modules.identity.router_auth
+    app.modules.identity.router_directory
+    app.modules.identity.router_me
+    app.modules.identity.tasks
+    app.modules.imports.router
+    app.modules.imports.tasks
+    app.modules.notification.router
+    app.modules.notification.tasks
+    app.modules.registry.router
+    app.modules.registry.tasks
+    app.modules.reporting.router
+    app.modules.reporting.tasks
+    app.modules.signing.public_router
+    app.modules.signing.router
+    app.modules.signing.tasks
+    app.modules.workflow.router
+    app.modules.workflow.tasks
+
+[importlinter:contract:no-foreign-entrypoints-notification]
+name = notification: не импортирует роутеры и tasks других модулей
+type = forbidden
+source_modules =
+    app.modules.notification
+forbidden_modules =
+    app.modules.admin.router
+    app.modules.catalog.router
+    app.modules.crm.router
+    app.modules.crm.tasks
+    app.modules.files.router
+    app.modules.identity.router_admin
+    app.modules.identity.router_auth
+    app.modules.identity.router_directory
+    app.modules.identity.router_me
+    app.modules.identity.tasks
+    app.modules.imports.router
+    app.modules.imports.tasks
+    app.modules.integration.public_router
+    app.modules.integration.router
+    app.modules.integration.tasks
+    app.modules.registry.router
+    app.modules.registry.tasks
+    app.modules.reporting.router
+    app.modules.reporting.tasks
+    app.modules.signing.public_router
+    app.modules.signing.router
+    app.modules.signing.tasks
+    app.modules.workflow.router
+    app.modules.workflow.tasks
+
+[importlinter:contract:no-foreign-entrypoints-registry]
+name = registry: не импортирует роутеры и tasks других модулей
+type = forbidden
+source_modules =
+    app.modules.registry
+forbidden_modules =
+    app.modules.admin.router
+    app.modules.catalog.router
+    app.modules.crm.router
+    app.modules.crm.tasks
+    app.modules.files.router
+    app.modules.identity.router_admin
+    app.modules.identity.router_auth
+    app.modules.identity.router_directory
+    app.modules.identity.router_me
+    app.modules.identity.tasks
+    app.modules.imports.router
+    app.modules.imports.tasks
+    app.modules.integration.public_router
+    app.modules.integration.router
+    app.modules.integration.tasks
+    app.modules.notification.router
+    app.modules.notification.tasks
+    app.modules.reporting.router
+    app.modules.reporting.tasks
+    app.modules.signing.public_router
+    app.modules.signing.router
+    app.modules.signing.tasks
+    app.modules.workflow.router
+    app.modules.workflow.tasks
+
+[importlinter:contract:no-foreign-entrypoints-reporting]
+name = reporting: не импортирует роутеры и tasks других модулей
+type = forbidden
+source_modules =
+    app.modules.reporting
+forbidden_modules =
+    app.modules.admin.router
+    app.modules.catalog.router
+    app.modules.crm.router
+    app.modules.crm.tasks
+    app.modules.files.router
+    app.modules.identity.router_admin
+    app.modules.identity.router_auth
+    app.modules.identity.router_directory
+    app.modules.identity.router_me
+    app.modules.identity.tasks
+    app.modules.imports.router
+    app.modules.imports.tasks
+    app.modules.integration.public_router
+    app.modules.integration.router
+    app.modules.integration.tasks
+    app.modules.notification.router
+    app.modules.notification.tasks
+    app.modules.registry.router
+    app.modules.registry.tasks
+    app.modules.signing.public_router
+    app.modules.signing.router
+    app.modules.signing.tasks
+    app.modules.workflow.router
+    app.modules.workflow.tasks
+
+[importlinter:contract:no-foreign-entrypoints-signing]
+name = signing: не импортирует роутеры и tasks других модулей
+type = forbidden
+source_modules =
+    app.modules.signing
+forbidden_modules =
+    app.modules.admin.router
+    app.modules.catalog.router
+    app.modules.crm.router
+    app.modules.crm.tasks
+    app.modules.files.router
+    app.modules.identity.router_admin
+    app.modules.identity.router_auth
+    app.modules.identity.router_directory
+    app.modules.identity.router_me
+    app.modules.identity.tasks
+    app.modules.imports.router
+    app.modules.imports.tasks
+    app.modules.integration.public_router
+    app.modules.integration.router
+    app.modules.integration.tasks
+    app.modules.notification.router
+    app.modules.notification.tasks
+    app.modules.registry.router
+    app.modules.registry.tasks
+    app.modules.reporting.router
+    app.modules.reporting.tasks
+    app.modules.workflow.router
+    app.modules.workflow.tasks
+
+[importlinter:contract:no-foreign-entrypoints-workflow]
+name = workflow: не импортирует роутеры и tasks других модулей
+type = forbidden
+source_modules =
+    app.modules.workflow
+forbidden_modules =
+    app.modules.admin.router
+    app.modules.catalog.router
+    app.modules.crm.router
+    app.modules.crm.tasks
+    app.modules.files.router
+    app.modules.identity.router_admin
+    app.modules.identity.router_auth
+    app.modules.identity.router_directory
+    app.modules.identity.router_me
+    app.modules.identity.tasks
+    app.modules.imports.router
+    app.modules.imports.tasks
+    app.modules.integration.public_router
+    app.modules.integration.router
+    app.modules.integration.tasks
+    app.modules.notification.router
+    app.modules.notification.tasks
+    app.modules.registry.router
+    app.modules.registry.tasks
+    app.modules.reporting.router
+    app.modules.reporting.tasks
+    app.modules.signing.public_router
+    app.modules.signing.router
+    app.modules.signing.tasks

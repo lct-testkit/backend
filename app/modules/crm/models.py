@@ -175,9 +175,7 @@ class Deal(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteMixin, Base):
     status_changed_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False
     )
-    sla_due_at: Mapped[dt.datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    sla_due_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     sla_state: Mapped[str] = mapped_column(String(16), nullable=False, server_default="ok")
     # Накопленное время в статусах типа parked — не таймер, а счётчик для
     # отчётности (new_spec §4.10): «сколько мы в сумме прождали вуз».
@@ -199,9 +197,7 @@ class Deal(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteMixin, Base):
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
     owner_unavailable: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
-    signature_status: Mapped[str] = mapped_column(
-        String(20), nullable=False, server_default="none"
-    )
+    signature_status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="none")
     # Модуль ПЭП (спринт 6) — FK на `signature_documents`, а не на живой
     # `signature_status` guard-условия: документ может быть voided/expired,
     # пока `signature_status` ещё отражает последнее известное состояние.
@@ -314,9 +310,7 @@ class DealProduct(UuidPkMixin, TimestampMixin, Base):
         Index("ix_deal_products_deal", "deal_id"),
         Index("ix_deal_products_product", "product_id"),
         CheckConstraint("quantity > 0", name="deal_products_quantity_positive"),
-        CheckConstraint(
-            "discount_pct BETWEEN 0 AND 100", name="deal_products_discount_valid"
-        ),
+        CheckConstraint("discount_pct BETWEEN 0 AND 100", name="deal_products_discount_valid"),
     )
 
     deal_id: Mapped[uuid.UUID] = mapped_column(
@@ -337,9 +331,7 @@ class DealComment(UuidPkMixin, TimestampMixin, SoftDeleteMixin, Base):
     __tablename__ = "deal_comments"
     __table_args__ = (
         Index("ix_deal_comments_deal_created", "deal_id", "created_at"),
-        CheckConstraint(
-            "body_format IN ('plain','markdown')", name="deal_comments_format_valid"
-        ),
+        CheckConstraint("body_format IN ('plain','markdown')", name="deal_comments_format_valid"),
     )
 
     deal_id: Mapped[uuid.UUID] = mapped_column(
@@ -416,9 +408,7 @@ class Task(UuidPkMixin, TimestampMixin, SoftDeleteMixin, Base):
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
     )
     due_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    completed_at: Mapped[dt.datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
     )

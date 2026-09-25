@@ -61,9 +61,7 @@ def _state_key(state: str) -> str:
 def _pkce_pair() -> tuple[str, str]:
     verifier = secrets.token_urlsafe(64)
     challenge = (
-        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
-        .decode()
-        .rstrip("=")
+        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
     )
     return verifier, challenge
 
@@ -153,9 +151,7 @@ async def _complete_login(
     # Верификатор из Redis — источник истины; параметр принимается только
     # если BFF хранит его у себя и в Redis его нет.
     verifier = stored_state.get("code_verifier") or code_verifier
-    resolved_redirect = (
-        stored_state.get("redirect_uri") or redirect_uri or _default_redirect_uri()
-    )
+    resolved_redirect = stored_state.get("redirect_uri") or redirect_uri or _default_redirect_uri()
 
     tokens = await keycloak_client.exchange_code(
         code=code, redirect_uri=resolved_redirect, code_verifier=verifier
@@ -290,9 +286,7 @@ async def logout(
     clear_csrf_cookie(response)
 
     if stored:
-        set_actor(
-            ActorContext(user_id=uuid.UUID(stored.user_id), role=None, session_id=sid)
-        )
+        set_actor(ActorContext(user_id=uuid.UUID(stored.user_id), role=None, session_id=sid))
         if not payload.local_only and stored.refresh_token:
             await keycloak_client.logout(stored.refresh_token)
         # Раздел 16: кэш прав сбрасывается в том числе при выходе.
@@ -332,15 +326,11 @@ async def check_invite(
     )
 
     invite = (
-        await session.execute(
-            select(UserInvite).where(UserInvite.token_hash == hash_token(token))
-        )
+        await session.execute(select(UserInvite).where(UserInvite.token_hash == hash_token(token)))
     ).scalar_one_or_none()
     if invite is None or not invite.is_active:
         # Единый ответ: ручка не подсказывает, существовал ли токен вообще.
-        raise AppError(
-            ErrorCode.NOT_FOUND, "Приглашение не найдено или срок его действия истёк"
-        )
+        raise AppError(ErrorCode.NOT_FOUND, "Приглашение не найдено или срок его действия истёк")
 
     user = (
         await session.execute(select(User).where(User.id == invite.user_id))

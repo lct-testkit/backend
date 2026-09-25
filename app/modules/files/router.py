@@ -105,9 +105,7 @@ async def get_download_url(
             file_id=file_id, entity_type=entity_type, entity_id=entity_id
         )
         if not attached:
-            raise AppError(
-                ErrorCode.FILE_ACCESS_DENIED, "Файл не привязан к указанной сущности"
-            )
+            raise AppError(ErrorCode.FILE_ACCESS_DENIED, "Файл не привязан к указанной сущности")
     url, expires_at = await service.download_url(file)
     return DownloadUrlResponse(download_url=url, expires_at=expires_at)
 

@@ -75,11 +75,7 @@ async def _upsert_batch(session: AsyncSession, batch: list[ParsedEntry], version
         for e in batch
     ]
     stmt = pg_insert(EgrulEntry).values(rows)
-    update_cols = {
-        col: getattr(stmt.excluded, col)
-        for col in rows[0]
-        if col != "inn"
-    }
+    update_cols = {col: getattr(stmt.excluded, col) for col in rows[0] if col != "inn"}
     stmt = stmt.on_conflict_do_update(index_elements=[EgrulEntry.inn], set_=update_cols)
     await session.execute(stmt)
 
@@ -222,8 +218,7 @@ async def _handle_liquidation(session: AsyncSession, organization: Organization)
 
     for deal in deals:
         title = (
-            f"Юридическая проверка: {organization.name} — "
-            f"статус «{organization.registry_status}»"
+            f"Юридическая проверка: {organization.name} — статус «{organization.registry_status}»"
         )
         session.add(
             DealTask(

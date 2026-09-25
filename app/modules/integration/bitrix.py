@@ -129,8 +129,9 @@ class BitrixClient:
 
         data = response.json()
         if "error" in data:
-            raise RuntimeError(f"bitrix24 {method} error: {data['error']}: "
-                                f"{data.get('error_description', '')}")
+            raise RuntimeError(
+                f"bitrix24 {method} error: {data['error']}: {data.get('error_description', '')}"
+            )
         return data
 
     async def add_deal(self, fields: dict[str, Any]) -> dict[str, Any]:

@@ -29,9 +29,7 @@ class RateLimitResult:
         self.retry_after = retry_after
 
 
-async def hit(
-    subject: str, route: str, *, limit: int, window_seconds: int
-) -> RateLimitResult:
+async def hit(subject: str, route: str, *, limit: int, window_seconds: int) -> RateLimitResult:
     """Инкрементирует счётчик окна и сообщает, не превышен ли лимит."""
     key = key_rate_limit(subject, route)
     try:

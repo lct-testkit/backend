@@ -39,53 +39,91 @@ logger = structlog.get_logger(__name__)
 # (code, name, description, kind, allowed_roles, default_params, output_formats)
 _DEFAULT_TEMPLATES: list[tuple[str, str, str, str, list[str], dict[str, Any], list[str]]] = [
     (
-        "deal_funnel", "Воронка по статусам",
+        "deal_funnel",
+        "Воронка по статусам",
         "Конверсия и среднее время между шагами воронки (раздел 4.13).",
-        "deal_funnel", [], {"deal_type": "b2b"}, ["xlsx", "pdf", "png"],
+        "deal_funnel",
+        [],
+        {"deal_type": "b2b"},
+        ["xlsx", "pdf", "png"],
     ),
     (
-        "kam_summary", "Сводка по КАМам",
+        "kam_summary",
+        "Сводка по КАМам",
         "Сравнение КАМов: сделки в работе/выиграно/проиграно, сумма, средний цикл.",
-        "kam_summary", ["HEAD", "ADMIN"], {}, ["xlsx", "pdf"],
+        "kam_summary",
+        ["HEAD", "ADMIN"],
+        {},
+        ["xlsx", "pdf"],
     ),
     (
-        "region_summary", "По регионам",
+        "region_summary",
+        "По регионам",
         "Сделки и выигранная сумма в разрезе регионов организаций.",
-        "region_summary", [], {}, ["xlsx", "pdf"],
+        "region_summary",
+        [],
+        {},
+        ["xlsx", "pdf"],
     ),
     (
-        "loss_reasons", "Причины отказов",
+        "loss_reasons",
+        "Причины отказов",
         "Распределение проигранных сделок по справочнику причин.",
-        "loss_reasons", [], {}, ["xlsx", "pdf"],
+        "loss_reasons",
+        [],
+        {},
+        ["xlsx", "pdf"],
     ),
     (
-        "sla_compliance", "Соблюдение SLA",
+        "sla_compliance",
+        "Соблюдение SLA",
         "Доля сделок в норме/под угрозой/с нарушением SLA.",
-        "sla_compliance", [], {}, ["xlsx", "pdf"],
+        "sla_compliance",
+        [],
+        {},
+        ["xlsx", "pdf"],
     ),
     (
-        "monthly_dynamics", "Динамика по месяцам",
+        "monthly_dynamics",
+        "Динамика по месяцам",
         "Создано/выиграно/проиграно сделок и выигранная сумма по месяцам.",
-        "monthly_dynamics", [], {"months": 12}, ["xlsx", "pdf", "png"],
+        "monthly_dynamics",
+        [],
+        {"months": 12},
+        ["xlsx", "pdf", "png"],
     ),
     (
-        "stuck_deals", "Зависшие сделки",
+        "stuck_deals",
+        "Зависшие сделки",
         "Сделки с нарушенным SLA — листинг, не агрегат.",
-        "stuck_deals", [], {"limit": 500}, ["xlsx", "pdf"],
+        "stuck_deals",
+        [],
+        {"limit": 500},
+        ["xlsx", "pdf"],
     ),
     (
-        "learning_progress", "Прогресс обучения",
+        "learning_progress",
+        "Прогресс обучения",
         "Данные из LMS. Интеграция не реализована — отчёт пуст (new_spec §4.14).",
-        "learning_progress", [], {}, ["xlsx", "pdf"],
+        "learning_progress",
+        [],
+        {},
+        ["xlsx", "pdf"],
     ),
 ]
 
 
 async def seed_report_templates(session: AsyncSession) -> int:
     created = 0
-    for code, name, description, kind, allowed_roles, default_params, output_formats in (
-        _DEFAULT_TEMPLATES
-    ):
+    for (
+        code,
+        name,
+        description,
+        kind,
+        allowed_roles,
+        default_params,
+        output_formats,
+    ) in _DEFAULT_TEMPLATES:
         existing = await session.scalar(
             select(ReportTemplate.id).where(ReportTemplate.code == code)
         )
@@ -136,17 +174,12 @@ _DEMO_REQUESTER_EMAIL = "demo-reports@system.local"
 
 async def _demo_requester(session: AsyncSession) -> uuid.UUID:
     existing_admin = await session.scalar(
-        select(User.id)
-        .where(User.role == Role.ADMIN.value)
-        .order_by(User.created_at)
-        .limit(1)
+        select(User.id).where(User.role == Role.ADMIN.value).order_by(User.created_at).limit(1)
     )
     if existing_admin is not None:
         return existing_admin
 
-    existing_demo = await session.scalar(
-        select(User.id).where(User.email == _DEMO_REQUESTER_EMAIL)
-    )
+    existing_demo = await session.scalar(select(User.id).where(User.email == _DEMO_REQUESTER_EMAIL))
     if existing_demo is not None:
         return existing_demo
 
