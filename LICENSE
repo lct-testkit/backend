@@ -1,0 +1,32 @@
+Copyright (c) 2026 Команда «Тесткит» (lct-testkit). Все права защищены.
+Copyright (c) 2026 Team "Testkit" (lct-testkit). All rights reserved.
+
+ИСХОДНЫЙ КОД, ДОСТУПНЫЙ ДЛЯ ОЗНАКОМЛЕНИЯ (source-available)
+
+1. Организаторам, членам жюри и экспертам хакатона, в рамках которого создан проект,
+   а также лицам, которым правообладатель явно предоставил доступ к репозиторию,
+   разрешается бесплатно просматривать исходный код, запускать проект и проводить
+   его тестирование и оценку исключительно в целях экспертизы и оценки работы.
+
+2. Любое иное использование — копирование, распространение, публикация,
+   модификация, использование в коммерческих или собственных проектах, создание
+   производных произведений — без письменного согласия правообладателя запрещено.
+
+3. Материалы третьих лиц не входят в эту лицензию и принадлежат их правообладателям:
+   шрифт Rostelecom Basis, фирменные ассеты, эталонные стили и материалы дизайн-системы
+   Ростелекома, а также сторонние зависимости (на них действуют их собственные лицензии).
+
+4. Программное обеспечение предоставляется «как есть», без каких-либо гарантий.
+   Правообладатель не несёт ответственности за убытки, связанные с его использованием.
+
+---
+
+Permission is granted to the organisers, judges and reviewers of the hackathon this
+project was created for, and to anyone the copyright holder has explicitly given access
+to this repository, to view the source code, run the project and test it, solely for the
+purpose of assessing this work. Any other use (copying, distribution, publication,
+modification, use in other projects, creation of derivative works) requires the prior
+written permission of the copyright holder. Third-party materials (the Rostelecom Basis
+font, brand assets, reference styles of the Rostelecom design system, third-party
+dependencies) are not covered by this licence. The software is provided "as is", without
+warranty of any kind.
