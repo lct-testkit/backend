@@ -16,7 +16,7 @@
 # Обновление lock-файлов: tools/lock.sh
 
 # ---- builder -----------------------------------------------------------------------------------------------
-FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9 AS builder
+FROM python:3.14-slim@sha256:caaf356f40667c496d405780745b9ac25771c189a51dfcc42430d531ea09f8a2 AS builder
 
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -33,7 +33,7 @@ COPY requirements.lock ./
 RUN pip --python /opt/venv/bin/python install --require-hashes -r requirements.lock
 
 # ---- runtime -----------------------------------------------------------------------------------------------
-FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9 AS runtime
+FROM python:3.14-slim@sha256:caaf356f40667c496d405780745b9ac25771c189a51dfcc42430d531ea09f8a2 AS runtime
 
 LABEL org.opencontainers.image.source="https://github.com/lct-testkit/backend" \
       org.opencontainers.image.title="rtk-crm-api" \
