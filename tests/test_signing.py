@@ -118,25 +118,34 @@ class TestHashChainAndHmac:
         assert h1 == h2
 
     def test_chain_hash_changes_with_prev_hash(self) -> None:
-        base = dict(signature_value="v", content_hash="c", request_id="r", signed_at_iso="t")
+        base = {
+            "signature_value": "v",
+            "content_hash": "c",
+            "request_id": "r",
+            "signed_at_iso": "t",
+        }
         assert compute_chain_hash(prev_hash="a" * 64, **base) != compute_chain_hash(
             prev_hash="b" * 64, **base
         )
 
     def test_signature_value_is_deterministic(self) -> None:
-        kwargs = dict(
-            secret="s3cr3t", content_hash="c", signer_id="u1", signed_at_iso="t", nonce="n"
-        )
+        kwargs = {
+            "secret": "s3cr3t",
+            "content_hash": "c",
+            "signer_id": "u1",
+            "signed_at_iso": "t",
+            "nonce": "n",
+        }
         assert compute_signature_value(**kwargs) == compute_signature_value(**kwargs)
 
     def test_signature_value_changes_with_nonce(self) -> None:
-        base = dict(secret="s3cr3t", content_hash="c", signer_id="u1", signed_at_iso="t")
+        base = {"secret": "s3cr3t", "content_hash": "c", "signer_id": "u1", "signed_at_iso": "t"}
         value1 = compute_signature_value(**base, nonce="n1")
         value2 = compute_signature_value(**base, nonce="n2")
         assert value1 != value2
 
     def test_signature_value_requires_correct_secret(self) -> None:
-        base = dict(content_hash="c", signer_id="u1", signed_at_iso="t", nonce="n")
+        base = {"content_hash": "c", "signer_id": "u1", "signed_at_iso": "t", "nonce": "n"}
         assert compute_signature_value(secret="right", **base) != compute_signature_value(
             secret="wrong", **base
         )

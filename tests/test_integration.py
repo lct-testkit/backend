@@ -93,7 +93,7 @@ class TestOutboxBackoffSchedule:
         assert _MAX_ATTEMPTS == 8
 
     def test_known_targets_are_lms_and_bitrix24(self) -> None:
-        assert _KNOWN_TARGETS == frozenset({"lms", "bitrix24"})
+        assert frozenset({"lms", "bitrix24"}) == _KNOWN_TARGETS
 
 
 class TestBitrixFieldMapping:

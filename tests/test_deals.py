@@ -274,4 +274,4 @@ class TestSeedConditionsAgainstDealContext:
 
 class TestModelConstants:
     def test_open_task_statuses(self) -> None:
-        assert OPEN_TASK_STATUSES == {TaskStatus.OPEN.value, TaskStatus.IN_PROGRESS.value}
+        assert {TaskStatus.OPEN.value, TaskStatus.IN_PROGRESS.value} == OPEN_TASK_STATUSES

@@ -337,8 +337,10 @@ deploy/                  Caddyfile, entrypoint.sh, keycloak/realm-crm.json, post
 ```bash
 python -m venv .venv
 .venv\Scripts\activate            # Windows
-pip install -e ".[dev]"
+pip install --require-hashes -r requirements-dev.lock   # ровно те версии, что в CI (с проверкой хэшей)
 ```
+
+Зависимости объявлены в `pyproject.toml` (все закреплены `==`), транзитивные версии фиксируют lock-файлы `requirements.lock` (рантайм, из него собирается образ) и `requirements-dev.lock` — с хэшами. После правки `pyproject.toml` выполните `bash tools/lock.sh` (нужен `uv`) и закоммитьте изменения lock-файлов: job `lint` в CI падает, если они разошлись. Обновления присылает Dependabot.
 
 **Тесты.** `pytest.ini_options` в `pyproject.toml` — `testpaths = ["tests"]`, `asyncio_mode = "auto"`. Офлайновая часть (15 файлов, 417 тестов) не поднимает ни БД, ни Redis, ни Keycloak, но требует существующий `.env` — `Settings()` дёргается уже при импорте (CSRF/permissions-хелперы), поэтому `.env.example` копируется даже для чисто офлайнового прогона:
 
@@ -347,7 +349,7 @@ cp .env.example .env
 pytest -q
 ```
 
-Сквозные тесты (`tests/test_api_smoke.py`, 13 из 417) поднимают приложение целиком и включаются только при заданном `TEST_DATABASE_URL` — без него модуль пропускается целиком (`pytest.mark.skipif`), Redis подменяется `fakeredis` (`pytest.importorskip`), Keycloak — подставным декодером токена:
+Сквозные тесты (часть модулей `tests/`, в т.ч. `test_api_smoke.py`, `test_query_budget.py`) поднимают приложение целиком и включаются только при заданном `TEST_DATABASE_URL` — без него они пропускаются (`pytest.mark.skipif`), Redis подменяется `fakeredis`, Keycloak — подставным декодером токена. **В CI пропуски запрещены**: `REQUIRE_NO_SKIPS=1` (см. `tests/conftest.py`) превращает любой skip в красный прогон, иначе сквозные тесты молча «зеленели» бы без БД:
 
 ```bash
 createdb crm_test
@@ -355,16 +357,26 @@ DATABASE_URL=postgresql+asyncpg://crm@127.0.0.1:5432/crm_test alembic upgrade he
 TEST_DATABASE_URL=postgresql+asyncpg://crm@127.0.0.1:5432/crm_test pytest -q
 ```
 
-**Линтер.** `ruff` (`[tool.ruff]` в `pyproject.toml`): `line-length = 100`, `target-version = "py312"`, правила `E, F, I, UP, B, ASYNC`; для `migrations/versions/*.py` отдельно отключён `E501` (DDL и SQL-литералы читаются хуже с разрывом строк). `ruff check app tests` в CI (`.github/workflows/ci.yml`, джоб `lint`) обязателен для прохождения PR.
+**Статические проверки** (все обязательны в CI, `.github/workflows/ci.yml`, джоб `lint`):
 
 ```bash
-ruff check app tests
+ruff check app tests tools loadtest migrations   # E,F,I,UP,B,ASYNC + S (bandit), SIM, C4, PT, RUF
+ruff format --check <изменённые файлы>            # формат — только на изменённых в PR файлах
+mypy                                              # «храповик»: долг типизации перечислен в pyproject.toml
+lint-imports                                      # границы модулей (.importlinter)
+python tools/export_openapi.py --check            # контракт API: openapi.json не разошёлся с кодом
 ```
 
-**Миграции.** Alembic, `migrations/env.py` берёт URL из `Settings().database_url` (или `MIGRATIONS_DATABASE_URL` при локальном запуске вне Docker — та же ограниченная роль `crm_app` не имеет DDL-прав, см. «Аудит»). 14 линейных ревизий, от `0001_baseline` до `0014_organization_erasure`.
+* `mypy` проверяет всю кодовую базу, кроме модулей из `[[tool.mypy.overrides]]` (накопленный долг, 93 ошибки на момент включения) — список не должен расти; исправили модуль — удалите его из списка.
+* `import-linter` держит слои внутри модулей (`router`/`tasks` → `service` → `models`) и запрещает импортировать роутеры/`tasks` чужих модулей (спека §2.2).
+* `openapi.json` в корне — контракт с фронтендом (`frontend/tools/gen-api.mjs` строит из него типы). Изменили API — перегенерируйте: `python tools/export_openapi.py`.
+* Исключения ruff (кириллица, `S105/S106` на константы-коды и т.п.) и их причины — в `[tool.ruff.lint]`.
+
+**Миграции.** Alembic, `migrations/env.py` берёт URL из `Settings().database_url` (или `MIGRATIONS_DATABASE_URL` при локальном запуске вне Docker — та же ограниченная роль `crm_app` не имеет DDL-прав, см. «Аудит»). 15 линейных ревизий, от `0001_baseline` до `0015_organization_licenses`. В CI проверяются: ровно одна голова, `upgrade head`, **`alembic check`** (модели не разошлись со схемой) и round-trip последней ревизии (`downgrade -1` → `upgrade head`). Таблицы транспортного слоя интеграций, созданные только SQL-миграциями, перечислены в `migrations/env.py` (`_MIGRATION_ONLY_TABLES`) — новые таблицы описывайте моделью.
 
 ```bash
 alembic upgrade head
+alembic check
 alembic revision --autogenerate -m "описание"
 ```
 
@@ -380,9 +392,14 @@ docker compose exec api python -m app.modules.integration.seed     # источ�
 
 На этом стенде все три уже применены (проверено `GET /api/report-templates` → 8 записей, `GET /api/admin/notification-templates` → 27, `GET /api/admin/integrations/sources` → 3 записи `is_active: false`).
 
-**Нагрузочные тесты.** `loadtest/` — Locust: `provision.py` создаёт в БД напрямую (минуя API, через опубликованный порт `5433`) организацию-фикстуру и пул сделок; `locustfile_transition.py` и `locustfile_comment.py` гоняют `POST /api/deals/{id}/transition` и `POST /api/deals/{id}/comments` под прямым password-grant токеном Keycloak. Цель — `new_spec §0`: p95 ≤ 300 мс при 50 RPS; `loadtest/README.md` содержит зафиксированный прогон (p95 79 мс на переходах, 49 мс на комментариях, 3 реплики `api`).
+**Нагрузочные тесты.** `loadtest/` — Locust: `provision.py` создаёт в БД напрямую (минуя API, через опубликованный порт `5433`) организацию-фикстуру и пул сделок; `locustfile_transition.py` и `locustfile_comment.py` гоняют `POST /api/deals/{id}/transition` и `POST /api/deals/{id}/comments` под прямым password-grant токеном Keycloak. Цель — `new_spec §0`: p95 ≤ 300 мс при 50 RPS; `loadtest/README.md` содержит зафиксированный прогон (p95 79 мс на переходах, 49 мс на комментариях, 3 реплики `api`). Спека называет инструмент k6, в репозитории Locust — осознанное отклонение (сценарии на Python уже написаны и отлажены); критерий и пороги те же.
+
+**Автоматический гейт:** `loadtest/assert_slo.py` превращает CSV Locust в «проходит/не проходит» (p95 ≤ 300 мс, ошибок ≤ 1%, достигнутый RPS ≥ 90% цели), `loadtest/run_ci.sh` прогоняет оба сценария при фиксированных 50 RPS (`LOADTEST_RPS_PER_USER`), а `.github/workflows/loadtest.yml` запускает это ночью, вручную и на PR с меткой `perf` — на стеке, собранном из исходников PR.
 
 ```bash
+docker compose up -d --build --wait
+bash loadtest/run_ci.sh                     # провижининг → transition → comment → проверка SLO
+# или вручную:
 python loadtest/provision.py --count 4000 --comment-pool-size 100
 locust -f loadtest/locustfile_transition.py --headless -u 50 -r 25 -t 60s --host=http://localhost:8080
 ```
@@ -392,6 +409,19 @@ locust -f loadtest/locustfile_transition.py --headless -u 50 -r 25 -t 60s --host
 **Логи.** `structlog` + stdlib в одном конвейере (`app/core/logging.py`), JSON по умолчанию (`LOG_JSON=true`); `request_id` попадает в каждую запись через contextvars.
 
 **Метрики.** Prometheus на `GET /metrics` — только внутри docker-сети (`api:8000/metrics`), через Caddy отвечает `404` (проверено). RED-метрики (`crm_http_requests_total`, `crm_http_request_duration_seconds`, `crm_http_errors_total`), плюс `crm_queue_depth`, `crm_sla_violations_total`, `crm_sla_breaching_deals`, `crm_import_duration_seconds`, `crm_cache_requests_total`, `crm_audit_records_total`, `crm_dependency_up` — полный список в `app/core/metrics.py`.
+
+## CI/CD
+
+`.github/workflows/`:
+
+| Workflow | Когда | Что делает |
+|---|---|---|
+| `ci.yml` | PR, push в `main` | Три параллельных гейта — `lint · types · architecture · contract` (ruff, mypy, import-linter, `openapi.json`, lock-файлы), `pytest + миграции (Postgres)` (одна голова, `upgrade`, `alembic check`, round-trip, тесты с покрытием ≥ 55% и **без пропусков**), `зависимости · секреты · Dockerfile` (`pip-audit`, Trivy fs: уязвимости+секреты+misconfig, hadolint). С `main` после зелёных гейтов — публикация образа |
+| публикация образа | `ci.yml`, только `main` | Общий конвейер из `lct-testkit/deploy`: сборка → **Trivy до push** → push в GHCR → SBOM + provenance → подпись cosign → dispatch в `deploy` (без токена — падает, а не молчит) |
+| `loadtest.yml` | ночью, вручную, PR с меткой `perf` | Locust против стека из исходников, SLO p95 ≤ 300 мс при 50 RPS |
+| `codeql.yml` | PR, `main`, раз в неделю | SAST (CodeQL, Python, `security-extended`) |
+
+Образ собирается multi-stage из `requirements.lock` (`pip --require-hashes`), базовый образ закреплён по digest, в рантайме нет pip/setuptools; `.trivyignore` пуст намеренно. Настройки репозитория (защита `main`, обязательные проверки) — `deploy/docs/REPO-SETTINGS.md`.
 
 ## Безопасность
 

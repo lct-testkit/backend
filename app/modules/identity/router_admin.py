@@ -372,7 +372,8 @@ async def offboard_user(
             mode="preview", user_id=user.id, workload=items, warnings=warnings
         )
 
-    assert payload.successor_id is not None and payload.reason is not None
+    # Сужение типов: для mode="confirm" схема уже потребовала оба поля.
+    assert payload.successor_id is not None and payload.reason is not None  # noqa: S101
     result = await service.offboard_confirm(
         user=user,
         principal=principal,

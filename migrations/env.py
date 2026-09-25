@@ -37,10 +37,39 @@ config.set_main_option(
 )
 
 
+# Объекты, которые существуют только в SQL-миграциях и не описаны ORM-моделями
+# (таблицы транспортного слоя интеграций и служебные индексы). Без этого списка
+# `alembic check` в CI видел бы их как «лишние» и не мог бы служить гейтом на
+# НОВЫЙ дрейф между моделями и схемой. Список не должен расти: новую таблицу
+# описывайте моделью.
+_MIGRATION_ONLY_TABLES = frozenset(
+    {
+        "inbound_messages",
+        "learning_progress",
+        "external_refs",
+        "outbox_events",
+        "integration_sources",
+        "sync_cursors",
+    }
+)
+_MIGRATION_ONLY_INDEXES = frozenset(
+    {
+        "ix_data_erasure_requests_grace_due",
+        "ix_organizations_name_trgm",
+    }
+)
+
+
 def include_object(obj, name, type_, reflected, compare_to) -> bool:
-    """Секции партиций audit_log не должны попадать в автогенерацию."""
-    if type_ == "table" and name.startswith("audit_log_"):
-        return False
+    """Что сравнивает автогенерация: без партиций audit_log и migration-only объектов."""
+    if type_ == "table":
+        return not (name.startswith("audit_log_") or name in _MIGRATION_ONLY_TABLES)
+    if type_ == "index":
+        table = getattr(obj, "table", None)
+        if name in _MIGRATION_ONLY_INDEXES:
+            return False
+        if table is not None and table.name in _MIGRATION_ONLY_TABLES:
+            return False
     return True
 
 

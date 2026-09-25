@@ -10,10 +10,31 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import SecretStr, field_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 AppProfile = Literal["dev", "demo", "prod"]
+
+# Демо-значения из .env.example / docker-compose / realm-crm.json. В prod их
+# наличие означает, что оператор забыл сменить секреты: приложение обязано не
+# стартовать, а не работать с публично известными ключами.
+_DEMO_SECRET_VALUES = frozenset(
+    {
+        "change-me-in-prod",
+        "crm-bff-secret",
+        "crm-admin-secret",
+        "crm_access",
+        "crm_secret_key",
+        "crm_sign_access",
+        "crm_sign_secret_key",
+        "crm_app",
+        "crm",
+        "admin",
+        "secret",
+        "password",
+    }
+)
+_MIN_PROD_SECRET_LENGTH = 16
 
 
 class Settings(BaseSettings):
@@ -218,6 +239,37 @@ class Settings(BaseSettings):
         if value and value.startswith("postgresql://"):
             return value.replace("postgresql://", "postgresql+asyncpg://", 1)
         return value
+
+    @model_validator(mode="after")
+    def _reject_demo_secrets_in_prod(self) -> Settings:
+        """`APP_PROFILE=prod` не стартует с демо-секретами и короткими ключами."""
+        if self.app_profile != "prod":
+            return self
+        secrets: dict[str, str] = {
+            "SIGNATURE_SERVER_SECRET": self.signature_server_secret.get_secret_value(),
+            "KEYCLOAK_CLIENT_SECRET": self.keycloak_client_secret.get_secret_value(),
+            "S3_ACCESS_KEY": self.s3_access_key.get_secret_value(),
+            "S3_SECRET_KEY": self.s3_secret_key.get_secret_value(),
+            "CRM_APP_PASSWORD": self.crm_app_password.get_secret_value(),
+        }
+        if self.keycloak_admin_client_secret is not None:
+            secrets["KEYCLOAK_ADMIN_CLIENT_SECRET"] = (
+                self.keycloak_admin_client_secret.get_secret_value()
+            )
+        problems = [
+            f"{name}: демо-значение"
+            if value in _DEMO_SECRET_VALUES
+            else f"{name}: слишком короткий"
+            for name, value in secrets.items()
+            if value in _DEMO_SECRET_VALUES or len(value) < _MIN_PROD_SECRET_LENGTH
+        ]
+        if problems:
+            raise ValueError(
+                "APP_PROFILE=prod отвергает небезопасные секреты — "
+                + "; ".join(problems)
+                + ". Сгенерируйте значения (deploy/scripts/gen_env.sh)."
+            )
+        return self
 
     @property
     def is_prod(self) -> bool:

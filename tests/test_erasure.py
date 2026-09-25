@@ -35,26 +35,26 @@ from app.modules.signing.rendering import render_erasure_act_pdf
 
 
 def _fake_request(**overrides: object) -> SimpleNamespace:
-    base = dict(
-        id=uuid.uuid4(),
-        subject_type="user",
-        subject_id=uuid.uuid4(),
-        status="blocked",
-        reason="увольнение",
-        legal_basis="ст. 21 152-ФЗ",
-        requested_by=uuid.uuid4(),
-        requested_at=dt.datetime(2026, 9, 18, tzinfo=dt.UTC),
-        deadline_at=None,
-        grace_until=None,
-        blockers={
+    base = {
+        "id": uuid.uuid4(),
+        "subject_type": "user",
+        "subject_id": uuid.uuid4(),
+        "status": "blocked",
+        "reason": "увольнение",
+        "legal_basis": "ст. 21 152-ФЗ",
+        "requested_by": uuid.uuid4(),
+        "requested_at": dt.datetime(2026, 9, 18, tzinfo=dt.UTC),
+        "deadline_at": None,
+        "grace_until": None,
+        "blockers": {
             "mode": "anonymize",
             "comment": None,
             "items": [{"code": "active_deals", "detail": "Есть активные сделки", "count": 2}],
         },
-        rejection_reason=None,
-        executed_at=None,
-        act_file_id=None,
-    )
+        "rejection_reason": None,
+        "executed_at": None,
+        "act_file_id": None,
+    }
     base.update(overrides)
     return SimpleNamespace(**base)
 
