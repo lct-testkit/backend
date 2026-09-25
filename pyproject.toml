@@ -9,40 +9,40 @@ dependencies = [
     # <0.51.0 — фикс только в 1.x, поэтому апгрейд starlette требует
     # апгрейда самого fastapi.
     "fastapi==0.141.1",
-    "uvicorn[standard]==0.34.0",
+    "uvicorn[standard]==0.53.0",
     # pydantic 2.10.4 pins pydantic-core 2.27.2, которая не публикует колёса
     # для CPython 3.14 (PyO3 в этой версии не знает о нём) — сборка из
     # исходников падает на `maturin`. 2.13.5 подтянет pydantic-core 2.46.5,
     # у которой колёса под 3.14 уже есть.
     "pydantic==2.13.5",
-    "pydantic-settings==2.7.1",
+    "pydantic-settings==2.15.0",
     # EmailStr в схемах администрирования пользователей.
-    "email-validator==2.2.0",
+    "email-validator==2.3.0",
     # Аналогично pydantic: 2.0.36 не публикует колёса под 3.14, 2.0.54 — публикует.
     "sqlalchemy[asyncio]==2.0.54",
     # 0.30.0 не публикует колёса под 3.14, 0.31.0 — публикует.
     "asyncpg==0.31.0",
-    "alembic==1.14.0",
+    "alembic==1.20.0",
     "redis==5.2.1",
     "httpx==0.28.1",
     # Trivy: CVE-2026-48526 (обход аутентификации через подделанный JWT).
-    "pyjwt[crypto]==2.13.0",
+    "pyjwt[crypto]==2.14.0",
     "structlog==24.4.0",
-    "prometheus-client==0.21.1",
-    "arq==0.26.3",
+    "prometheus-client==0.26.0",
+    "arq==0.28.0",
     # Trivy: CVE-2026-24486/CVE-2026-42561/CVE-2026-53539.
-    "python-multipart==0.0.31",
+    "python-multipart==0.0.32",
     "swagger-ui-bundle==1.1.0",
     # Presigned PUT/GET к SeaweedFS (раздел 9): boto3/botocore чистый Python,
     # версии CPython их не касаются.
-    "boto3==1.43.96",
+    "boto3==1.43.99",
     # Импорт каталогов и локальный реестр ЕГРЮЛ (раздел 5.11/§4.12, спринт 5).
     # xlsx — read_only/write_only openpyxl (стриминг, константная память).
     "openpyxl==3.1.5",
     # xls (устаревший бинарный формат) — только этим и читается.
-    "xlrd==2.0.1",
+    "xlrd==2.0.2",
     # Детект кодировки (CP1251/UTF-8-BOM) для .csv — dop.md явно требует.
-    "charset-normalizer==3.4.1",
+    "charset-normalizer==3.5.1",
     # lxml==5.3.0 не публикует колёса под cp314 и падает на сборке из
     # исходников без dev-пакетов libxml2/libxslt в контейнере — 6.1.3 их
     # публикует (тот же приём, что уже применён к pydantic/sqlalchemy/asyncpg
@@ -95,12 +95,12 @@ dev = [
     # молча пропускал весь модуль без этой зависимости — сквозные тесты
     # никогда реально не запускались.
     "fakeredis==2.38.0",
-    "ruff==0.8.6",
+    "ruff==0.16.8",
     # Гейты качества CI (см. .github/workflows/ci.yml).
     "mypy==1.14.1",
-    "import-linter==2.1",
+    "import-linter==2.15",
     "pytest-cov==6.0.0",
-    "pip-audit==2.8.0",
+    "pip-audit==2.10.1",
     # Нагрузочное тестирование (new_spec §0/§9 шаг 10) — `loadtest/`.
     # Не рантайм-зависимость приложения, поэтому в dev, а не в основной список.
     "locust==2.46.6",
