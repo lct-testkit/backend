@@ -631,7 +631,9 @@ async def _event(event_id: uuid.UUID):
 @needs_db
 class TestOutboxDelivery:
     @pytest.fixture(autouse=True)
-    def _bitrix_on(self, monkeypatch):
+    def _bitrix_on(self, client, monkeypatch):
+        # `client` — чтобы приложение уже стартовало: оно пересоздаёт настройки, и флаг,
+        # включённый раньше, терялся. В CI коннектор выключен (`.env.example`), локально — нет.
         from app.core.config import get_settings
 
         monkeypatch.setattr(get_settings(), "bitrix_connector_enabled", True)
