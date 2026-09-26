@@ -73,7 +73,7 @@ class OrgLookupService:
         started = time.perf_counter()
         provider_name = "none"
         items: list[OrgSuggestion] = []
-        for provider in resolve_chain(self._session):
+        for provider in await resolve_chain(self._session):
             found = await provider.suggest(query, limit)
             if found:
                 items, provider_name = found, provider.name
@@ -101,7 +101,7 @@ class OrgLookupService:
         started = time.perf_counter()
         details: OrgDetails | None = None
         provider_name = "none"
-        for provider in resolve_chain(self._session):
+        for provider in await resolve_chain(self._session):
             details = await provider.get_by_inn(inn)
             if details is not None:
                 provider_name = provider.name
