@@ -7,10 +7,10 @@
 <sub>Команда **«Тесткит»** — [github.com/lct-testkit](https://github.com/lct-testkit)</sub>
 
 <!--STATS-->
-**193** операции API &nbsp;·&nbsp; **13** модулей &nbsp;·&nbsp; **65** таблиц &nbsp;·&nbsp; **16** миграций &nbsp;·&nbsp; **790** тестов &nbsp;·&nbsp; **11** сервисов Compose
+**203** операции API &nbsp;·&nbsp; **13** модулей &nbsp;·&nbsp; **67** таблиц &nbsp;·&nbsp; **19** миграций &nbsp;·&nbsp; **1992** теста &nbsp;·&nbsp; **11** сервисов Compose
 <!--/STATS-->
 
-[Быстрый старт](#быстрый-старт) · [Примеры](#примеры-использования) · [Как устроено](#как-устроено) · [Модули](#что-внутри) · [Настройка](#настройка) · [Разработка](#разработка) · [Безопасность](#безопасность) · [Ограничения](#ограничения-и-известные-проблемы)
+[Быстрый старт](#быстрый-старт) · [Примеры](#примеры-использования) · [Приём данных](#приём-данных-вендоры-оплаты-учащиеся) · [Как устроено](#как-устроено) · [Модули](#что-внутри) · [Настройка](#настройка) · [Разработка](#разработка) · [Безопасность](#безопасность) · [Ограничения](#ограничения-и-известные-проблемы)
 
 | <img src="docs/img/swagger.png" width="410" alt="Swagger UI на /api/docs: контракт OpenAPI, схема авторизации Bearer"> | <img src="docs/img/keycloak-login.png" width="410" alt="Страница входа Keycloak, realm crm"> |
 |:-:|:-:|
@@ -36,9 +36,9 @@
 
 > Картинки этого файла — `docs/img/swagger.png` и `docs/img/keycloak-login.png`: оба экрана открываются на http://localhost:8080 после запуска стека.
 
-<img src="docs/img/swagger.png" width="720" alt="Swagger UI: 29 групп ручек, кнопка Authorize для Bearer-токена">
+<img src="docs/img/swagger.png" width="720" alt="Swagger UI: 30 групп ручек, кнопка Authorize для Bearer-токена">
 
-*Swagger UI на `/api/docs`: 193 операции в 30 группах, схема `BearerAuth` (вставьте access-токен Keycloak в Authorize). В `prod` интерактивный UI закрыт, схема `/api/openapi.json` остаётся.*
+*Swagger UI на `/api/docs`: 203 операции в 30 группах, схема `BearerAuth` (вставьте access-токен Keycloak в Authorize). В `prod` интерактивный UI закрыт, схема `/api/openapi.json` остаётся.*
 
 <img src="docs/img/keycloak-login.png" width="410" alt="Форма входа Keycloak, realm crm">
 
@@ -79,7 +79,7 @@ curl http://localhost:8080/health/ready
 | Адрес | Что это |
 |---|---|
 | http://localhost:8080/api/docs | Swagger UI (в профиле `prod` закрыт) |
-| http://localhost:8080/api/openapi.json | OpenAPI 3.0.3, 193 операции |
+| http://localhost:8080/api/openapi.json | OpenAPI 3.0.3, 203 операции |
 | http://localhost:8080/health/live | liveness |
 | http://localhost:8080/health/ready | готовность: БД, Redis, JWKS Keycloak, SeaweedFS, очередь |
 | http://localhost:8080/auth | Keycloak, realm `crm`; консоль — `/auth/admin` |
@@ -189,7 +189,7 @@ curl -s "http://localhost:8080/api/admin/audit/verify-chain?limit=1000" -H "Auth
 curl -s http://localhost:8080/api/openapi.json -o openapi.json
 ```
 
-`openapi.json` — 3.0.3, 155 путей, 193 операции, 226 схем, единственная схема авторизации `BearerAuth`. Тот же файл — источник для генератора клиента фронтенда (`frontend/tools/gen-api.mjs`).
+`openapi.json` — 3.0.3, 162 путей, 203 операции, 241 схем, единственная схема авторизации `BearerAuth`. Тот же файл — источник для генератора клиента фронтенда (`frontend/tools/gen-api.mjs`).
 
 ### Автоподстановка и проверка ИНН
 
@@ -251,6 +251,26 @@ docker compose exec -T postgres psql -U crm -d crm -x -c "SELECT entity_type, ex
 
 Первая команда показывает статус доставки последнего события (`sent`, число попыток, ошибка), вторая — связь «сделка ↔ id в Битриксе». Повторы: 1 с, 5 с, 30 с, 5 мин, 30 мин, 2 ч, после 8-й неудачи — `dead` (разбор вручную: `GET /api/admin/integrations/outbox-events?status=dead` или вкладка «Исходящие»; вернуть событие в очередь — `POST /api/admin/integrations/outbox-events/{id}/retry`). При обновлении перед `crm.item.update` читается `crm.item.get`: если в Битриксе сделку правили после нашей последней синхронизации (`updatedTime`), запись не затирается, доставка падает с «требует ручного разбора». Обратного направления реальными событиями Битрикса нет — `POST /api/v1/integrations/bitrix/webhook` принимает упрощённый собственный контракт с HMAC-подписью. URL вебхука в логи не попадает: логгеры `httpx`/`httpcore` подняты до WARNING (`app/core/logging.py`, `tests/test_logging.py`).
 
+## Приём данных: вендоры, оплаты, учащиеся
+
+Три файла заказчика попадают в систему одним мастером импорта (`/api/imports`): загрузка файла → профиль колонок → сопоставление → dry-run → применение → откат. Тип задания (`entity_type`) выбирает набор полей, синонимы заголовков и правила проверки; список типов с полями и подсказками — `GET /api/imports/entity-types`.
+
+| Файл | `entity_type` | Формат | Что создаётся |
+|---|---|---|---|
+| «Вендоры» | `vendor_contact` | xlsx / xls / csv / json | организация-вендор → продукты (несколько в одной ячейке) → контакт-ответственный → связи «контакт — продукт» |
+| «Данные оплат» | `payment` | json (массив объектов, `null`-элементы пропускаются) / xlsx / csv | контакт (B2C) → продукт → сделка в статусе «Оплата и договор оферты» с номером заявки и потоком |
+| «Загрузка пользователей» (шаблон LMS) | `learner` | xlsx / xls / csv | контакт + профиль учащегося (СНИЛС, паспорт, адрес регистрации, диплом) |
+
+Что гарантирует импорт:
+
+* **Один человек — одна карточка.** Совпал email (без учёта регистра) — тот же контакт; совпал телефон (любая запись: `+7 (999) …`, `8 999 …`, число из ячейки Excel приводятся к E.164) и фамилия — тот же; только телефон при другой фамилии — не дубль (общий номер кафедры). У найденного контакта заполняются лишь пустые поля, значения не перезаписываются.
+* **Повторная загрузка не плодит записи.** Сделка по оплате ищется по `Номер заявки` (уникален на уровне БД), поэтому тот же заказ из файла и из вебхука сайта — одна сделка; вендоры и продукты ищутся по названию без учёта кавычек, регистра и «ё».
+* **Строка — атомарна.** Каждая строка выполняется в своём SAVEPOINT: ошибка в одной не отменяет остальные, причина видна в `GET /api/imports/{id}/rows` (значения ПДн маскированы).
+* **Откат по эффектам.** Строка, создавшая несколько записей (вендор + продукт + контакт + связь), откатывается целиком и в обратном порядке; записи, на которые уже опирается живая сделка, откат не удаляет и помечает как заблокированные (`completed_with_errors`).
+* **ПДн учащегося не попадают в журнал и логи.** В аудит уходят имена изменённых полей; профиль отдаётся маскированным, полные значения — только `POST /api/contacts/{id}/learner-profile/reveal` с записью `PII_REVEALED`.
+
+Выгрузка обратно в LMS — отчёт `lms_users_upload` (роли HEAD и ADMIN): xlsx в точности по шаблону заказчика, 30 колонок, справочники «Пол» и «Образование» на втором листе.
+
 ## Как устроено
 
 ```mermaid
@@ -287,21 +307,21 @@ flowchart LR
 
 ## Что внутри
 
-Число операций на модуль — по тегам `GET /api/openapi.json`; 13 модулей в сумме дают 191, плюс 2 health-пробы вне модульной системы (`GET /health/live`, `/health/ready` — объявлены в `app/main.py`, ни один `app/modules/*` пакет их не владеет) — 193 всего.
+Число операций на модуль — по тегам `GET /api/openapi.json`; 13 модулей в сумме дают 201, плюс 2 health-пробы вне модульной системы (`GET /health/live`, `/health/ready` — объявлены в `app/main.py`, ни один `app/modules/*` пакет их не владеет) — 203 всего.
 
 | Модуль | Что делает | Ключевые эндпоинты · таблицы |
 |---|---|---|
-| `admin` | системные настройки, флаги, чтение/экспорт журнала аудита и проверка его цепочки | `GET/PATCH /api/admin/feature-flags`, `GET/PUT /api/admin/system-settings`, `GET /api/admin/audit`, `/export`, `/verify-chain` — 7 операций · `feature_flags`, `system_settings`, `admin_approvals`, `idempotency_keys` |
+| `admin` | системные настройки, флаги, чтение/экспорт журнала аудита и проверка его цепочки | `GET/POST/PATCH /api/admin/feature-flags`, `GET/PUT /api/admin/system-settings`, `GET /api/admin/audit`, `/export`, `/verify-chain` — 8 операций · `feature_flags`, `system_settings`, `admin_approvals`, `idempotency_keys` |
 | `audit` | сервис записи в неизменяемый журнал; своих эндпоинтов нет — вызывается всеми модулями в той же транзакции, что бизнес-изменение | 0 операций · `audit_log` (партиции по месяцам, триггеры неизменяемости на каждой) |
-| `catalog` | организации, контакты, продукты, справочники (направления, причины отказа, календарь, пользовательские поля, регионы), лицензии/договоры вуз-вендор-ПО | `GET/POST /api/organizations`, `/contacts`, `/products` + 5 справочников + `GET /api/organization-licenses` (раздел 4, Треб.1), `DELETE` у направлений и причин отказа — 32 операции · 11 таблиц (`organizations`, `contacts`, `products`, `directions`, `regions`, `organization_licenses`, …) |
+| `catalog` | организации, контакты, продукты, справочники (направления, причины отказа, календарь, пользовательские поля, регионы), лицензии/договоры вуз-вендор-ПО | `GET/POST /api/organizations`, `/contacts`, `/products` + 5 справочников + `GET /api/organization-licenses` (раздел 4, Треб.1), `DELETE` у направлений и причин отказа, связи контакт — продукт (`/contacts/{id}/products`, `/products/{id}/contacts`) и профиль учащегося (`/contacts/{id}/learner-profile`, `/reveal`) — 39 операций · 13 таблиц (`organizations`, `contacts`, `products`, `directions`, `regions`, `organization_licenses`, …) |
 | `crm` | сделки, переходы по воронке, комментарии, задачи, участники | `GET/POST /api/deals`, `/{id}/transition`, `/reassign`, `/comments`, `/tasks`, `PUT /api/deals/{id}/products` — 21 операция · 8 таблиц (`deals`, `deal_status_history`, `deal_comments`, `tasks`, …) |
 | `files` | загрузка через presigned-URL, magic-bytes и антивирус-заглушка, вложения к сущностям | `POST /api/files/upload-intent`, `/{id}/commit`, `GET /api/attachments` — 7 операций · `files`, `attachments` |
 | `identity` | аутентификация BFF/OIDC, администрирование пользователей и команд, приглашения, согласие, обезличивание | `GET/POST /api/auth/*`, `GET /api/me`, `GET/POST /api/admin/users`, `/teams`, `/approvals`, `PATCH /api/me` — 39 операций · 7 таблиц (`users`, `teams`, `consents`, `data_erasure_requests`, …) |
-| `imports` | импорт каталогов из xlsx/xls/csv: профилирование, автоподбор маппинга, dry-run, применение, откат | `POST /api/imports`, `/{id}/dry-run`, `/apply`, `/rollback`, `PUT /{id}/mapping` — 9 операций · `import_jobs`, `import_row_results`, `import_presets` |
+| `imports` | импорт из xlsx/xls/csv/json: профилирование, автоподбор маппинга под тип данных (организации, продукты, лицензии, вендоры, оплаты, учащиеся LMS), dry-run, применение по строкам, откат по эффектам | `POST /api/imports`, `GET /entity-types`, `/{id}/rows`, `/{id}/dry-run`, `/apply`, `/rollback`, `PUT /{id}/mapping` — 11 операций · `import_jobs`, `import_row_results`, `import_presets` |
 | `integration` | вебхуки CMS/LMS/Bitrix24 с HMAC-подписью, исходящий outbox с backoff, административный контур источников | `POST /api/v1/integrations/{cms,lms,bitrix}/*`, `GET/PATCH /api/admin/integrations/sources`, `POST /api/admin/integrations/outbox-events/{id}/retry` — 9 операций · 6 таблиц (`integration_sources`, `inbound_messages`, `outbox_events`, …) |
 | `notification` | уведомления (in-app, заглушки email/telegram), шаблоны Jinja2, настройки получателя | `GET /api/notifications`, `/read`, `GET/PUT /api/me/notification-prefs`, `GET/POST/DELETE /api/admin/notification-templates`, `GET /api/notifications/unread-count`, `/event-codes`, `POST /api/admin/notification-templates/preview` — 11 операций · 4 таблицы |
 | `registry` | автоподстановка и проверка ИНН/ОГРН, локальный реестр ЕГРЮЛ, сверка реквизитов (drift) | `GET /api/org-lookup/suggest`, `POST /validate`, `POST /api/admin/registry/import`, `DELETE /api/admin/registry/versions/{id}` — 6 операций · 4 таблицы (`registry_versions`, `egrul_entries`, …) |
-| `reporting` | 8 видов отчётов (xlsx/pdf/png через matplotlib и xhtml2pdf), дашборды с виджетами | `GET/POST /api/reports`, `/report-templates`, `GET /{id}/data` (датасет в JSON без файла), `GET/POST /api/dashboards`, `/widgets` — 15 операций · `report_templates`, `report_jobs`, `dashboards`, `dashboard_widgets` |
+| `reporting` | 9 видов отчётов (xlsx/pdf/png через matplotlib и xhtml2pdf; `lms_users_upload` — выгрузка учащихся по шаблону LMS), дашборды с виджетами | `GET/POST /api/reports`, `/report-templates`, `GET /{id}/data` (датасет в JSON без файла), `GET/POST /api/dashboards`, `/widgets` — 15 операций · `report_templates`, `report_jobs`, `dashboards`, `dashboard_widgets` |
 | `signing` | ПЭП: документы и запросы на подпись, OTP-код, публичная страница подписания и проверки, соглашения об ЭДО | `POST /api/signature-documents`, `/send`, `POST /api/signature-requests/{id}/{challenge,sign}`, `GET /public/sign/{token}`, `POST /api/signatures/verify`, `GET /public/sign/{token}/file`, `POST /api/signature-requests/{id}/reissue-link` — 24 операции · 6 таблиц |
 | `workflow` | конструктор воронок: статусы, переходы, DSL условий, валидация, публикация со снимком, архивирование статуса, удаление черновика | `GET/POST /api/workflows`, `PUT /{id}/graph`, `POST /{id}/publish`, `POST /{id}/statuses/{sid}/archive`, `DELETE /api/workflows/{id}`, `PATCH /api/workflows/{id}`, `GET /{id}/mapping-jobs/{job_id}` — 11 операций · `workflows`, `workflow_statuses`, `workflow_transitions`, `sla_rules`, `status_mapping_jobs` |
 
@@ -319,8 +339,8 @@ app/
 │                        integration, notification, registry, reporting, signing, workflow
 ├── assets/fonts/        DejaVu Sans — кириллица в PDF (xhtml2pdf) и графиках (matplotlib)
 └── worker/main.py       arq: воркер и планировщик периодических задач
-migrations/versions/     14 миграций Alembic: 0001_baseline … 0014_organization_erasure
-tests/                   15 файлов, 417 тестов (офлайн + сквозные с TEST_DATABASE_URL)
+migrations/versions/     19 миграций Alembic: 0001_baseline … 0019_audit_sla_hardening
+tests/                   76 файлов, 1992 теста (офлайн + сквозные с TEST_DATABASE_URL)
 loadtest/                Locust: provision.py + 2 locustfile, README со своими результатами
 deploy/                  Caddyfile, entrypoint.sh, keycloak/realm-crm.json, postgres/, seaweedfs/
 ```
@@ -329,7 +349,7 @@ deploy/                  Caddyfile, entrypoint.sh, keycloak/realm-crm.json, post
 
 Полный список переменных — `.env.example`; код читает их в `app/core/config.py` (`Settings`, pydantic-settings) и в `docker-compose.yml`. Приложение не стартует без `APP_PROFILE` и строк подключения — падение на старте лучше, чем работа с половиной конфига.
 
-**Важная оговорка про Docker.** В контейнеры `api`, `worker`, `migrate` и `seed` попадают только переменные из явного списка `x-api-env` в `docker-compose.yml` (35 имён) — `env_file` не используется совсем. Значения `.env`, которых нет в этом списке (лимиты файлов, TTL сессии/CSRF/идемпотентности, параметры ПЭП, импорта, приглашений, 152-ФЗ и другие), в контейнерах не действуют: работает дефолт из `Settings`, даже если в `.env` записано другое.
+**Важная оговорка про Docker.** В контейнеры `api`, `worker`, `migrate` и `seed` попадают только переменные из явного списка `x-api-env` в `docker-compose.yml` (32 имени) — `env_file` не используется совсем. Значения `.env`, которых нет в этом списке (лимиты файлов, TTL сессии/CSRF/идемпотентности, параметры ПЭП, импорта, приглашений, 152-ФЗ и другие), в контейнерах не действуют: работает дефолт из `Settings`, даже если в `.env` записано другое.
 
 | Переменная | Значение по умолчанию | Зачем |
 |---|---|---|
@@ -371,7 +391,7 @@ pip install --require-hashes -r requirements-dev.lock   # ровно те вер
 
 Зависимости объявлены в `pyproject.toml` (все закреплены `==`), транзитивные версии фиксируют lock-файлы `requirements.lock` (рантайм, из него собирается образ) и `requirements-dev.lock` — с хэшами. После правки `pyproject.toml` выполните `bash tools/lock.sh` (нужен `uv`) и закоммитьте изменения lock-файлов: job `lint` в CI падает, если они разошлись. Обновления присылает Dependabot.
 
-**Тесты.** `pytest.ini_options` в `pyproject.toml` — `testpaths = ["tests"]`, `asyncio_mode = "auto"`. Офлайновая часть (15 файлов, 417 тестов) не поднимает ни БД, ни Redis, ни Keycloak, но требует существующий `.env` — `Settings()` дёргается уже при импорте (CSRF/permissions-хелперы), поэтому `.env.example` копируется даже для чисто офлайнового прогона:
+**Тесты.** `pytest.ini_options` в `pyproject.toml` — `testpaths = ["tests"]`, `asyncio_mode = "auto"`. Офлайновая часть (чистые функции: нормализация, парсеры, DSL, маскирование) не поднимает ни БД, ни Redis, ни Keycloak, но требует существующий `.env` — `Settings()` дёргается уже при импорте (CSRF/permissions-хелперы), поэтому `.env.example` копируется даже для чисто офлайнового прогона:
 
 ```bash
 cp .env.example .env
@@ -401,7 +421,7 @@ python tools/export_openapi.py --check            # контракт API: openap
 * `openapi.json` в корне — контракт с фронтендом (`frontend/tools/gen-api.mjs` строит из него типы). Изменили API — перегенерируйте: `python tools/export_openapi.py`.
 * Исключения ruff (кириллица, `S105/S106` на константы-коды и т.п.) и их причины — в `[tool.ruff.lint]`.
 
-**Миграции.** Alembic, `migrations/env.py` берёт URL из `Settings().database_url` (или `MIGRATIONS_DATABASE_URL` при локальном запуске вне Docker — та же ограниченная роль `crm_app` не имеет DDL-прав, см. «Аудит»). 15 линейных ревизий, от `0001_baseline` до `0015_organization_licenses`. В CI проверяются: ровно одна голова, `upgrade head`, **`alembic check`** (модели не разошлись со схемой) и round-trip последней ревизии (`downgrade -1` → `upgrade head`). Таблицы транспортного слоя интеграций, созданные только SQL-миграциями, перечислены в `migrations/env.py` (`_MIGRATION_ONLY_TABLES`) — новые таблицы описывайте моделью.
+**Миграции.** Alembic, `migrations/env.py` берёт URL из `Settings().database_url` (или `MIGRATIONS_DATABASE_URL` при локальном запуске вне Docker — та же ограниченная роль `crm_app` не имеет DDL-прав, см. «Аудит»). 19 линейных ревизий, от `0001_baseline` до `0019_audit_sla_hardening`. В CI проверяются: ровно одна голова, `upgrade head`, **`alembic check`** (модели не разошлись со схемой) и round-trip последней ревизии (`downgrade -1` → `upgrade head`). Таблицы транспортного слоя интеграций, созданные только SQL-миграциями, перечислены в `migrations/env.py` (`_MIGRATION_ONLY_TABLES`) — новые таблицы описывайте моделью.
 
 ```bash
 alembic upgrade head
@@ -414,12 +434,12 @@ alembic revision --autogenerate -m "описание"
 **Сидинг.** Единая точка входа контейнера — `deploy/entrypoint.sh` (`api`\|`worker`\|`migrate`\|`seed`\|`sms-gateway-mock`\|`shell`). Режим `seed` запускает только `python -m app.modules.workflow.seed` (две демо-воронки); сиды отчётов, уведомлений и интеграций в контейнер не входят и запускаются вручную (все идемпотентны):
 
 ```bash
-docker compose exec api python -m app.modules.reporting.seed       # 8 шаблонов отчётов
-docker compose exec api python -m app.modules.notification.seed    # 27 шаблонов уведомлений
+docker compose exec api python -m app.modules.reporting.seed       # 9 шаблонов отчётов
+docker compose exec api python -m app.modules.notification.seed    # 28 шаблонов уведомлений
 docker compose exec api python -m app.modules.integration.seed     # источники интеграций (заведены is_active=false)
 ```
 
-На этом стенде все три уже применены (проверено `GET /api/report-templates` → 8 записей, `GET /api/admin/notification-templates` → 27, `GET /api/admin/integrations/sources` → 3 записи `is_active: false`).
+На чистой базе сиды дают 9 шаблонов отчётов, 28 шаблонов уведомлений и 3 источника интеграций (`is_active: false`, кроме `cms` при заданном `CMS_WEBHOOK_SECRET_REF`).
 
 **Нагрузочные тесты.** `loadtest/` — Locust: `provision.py` создаёт в БД напрямую (минуя API, через опубликованный порт `5433`) организацию-фикстуру и пул сделок; `locustfile_transition.py` и `locustfile_comment.py` гоняют `POST /api/deals/{id}/transition` и `POST /api/deals/{id}/comments` под прямым password-grant токеном Keycloak. Цель — `new_spec §0`: p95 ≤ 300 мс при 50 RPS; `loadtest/README.md` содержит зафиксированный прогон (p95 79 мс на переходах, 49 мс на комментариях, 3 реплики `api`). Спека называет инструмент k6, в репозитории Locust — осознанное отклонение (сценарии на Python уже написаны и отлажены); критерий и пороги те же.
 
@@ -433,7 +453,7 @@ python loadtest/provision.py --count 4000 --comment-pool-size 100
 locust -f loadtest/locustfile_transition.py --headless -u 50 -r 25 -t 60s --host=http://localhost:8080
 ```
 
-**Очередь arq.** `app/worker/main.py`: 16 функций, из них 15 — периодические задачи по cron (партиции аудита раз в сутки, чистка идемпотентных ключей раз в час, эскалация SLA и просроченные подписи раз в 15 минут, доставка outbox и уведомлений раз в минуту, обновление материализованных представлений отчётов раз в 5 минут, и другие — расписание закомментировано построчно в коде). Healthcheck воркера — не HTTP, а `arq app.worker.main.WorkerSettings --check` (heartbeat в Redis).
+**Очередь arq.** `app/worker/main.py`: 17 функций, все — периодические задачи по cron (партиции аудита раз в сутки, чистка идемпотентных ключей раз в час, эскалация SLA и просроченные подписи раз в 15 минут, доставка outbox и уведомлений раз в минуту, обновление материализованных представлений отчётов раз в 5 минут, и другие — расписание закомментировано построчно в коде). Healthcheck воркера — не HTTP, а `arq app.worker.main.WorkerSettings --check` (heartbeat в Redis).
 
 **Логи.** `structlog` + stdlib в одном конвейере (`app/core/logging.py`), JSON по умолчанию (`LOG_JSON=true`); `request_id` попадает в каждую запись через contextvars.
 
@@ -465,6 +485,10 @@ locust -f loadtest/locustfile_transition.py --headless -u 50 -r 25 -t 60s --host
 * **Политика паролей — не короче 12 символов.** На стороне Keycloak realm: `length(12) and upperCase(1) and lowerCase(1) and digits(1) and notUsername and notEmail and passwordHistory(5)`; на стороне API — та же граница в схеме смены пароля (`Field(min_length=12)`).
 * **Эпоха прав.** `perm_epoch` — атрибут пользователя, попадает в access-токен протокол-мэппером Keycloak; понижение роли или блокировка увеличивают эпоху, и токен со старой эпохой отвергается (`CRM-1103`) до истечения собственного TTL (5 минут) — без этого блокировка ждала бы, пока истечёт уже выданный токен.
 * **Секреты не логируются.** `app/core/masking.py`: фиксированный список ключей (`password`, `token`, `client_secret`, `authorization`, `cookie`, …) вырезается из логов и аудита целиком; ПДн (телефон, email, ФИО при обезличивании) маскируются по формату, а не вырезаются.
+* **Приём данных не ломает то, что уже есть.** Импорт и вебхук сайта ищут человека по email и телефону в E.164, оплату — по номеру заявки (уникален в БД), вендора и продукт — по названию без кавычек и регистра; откат снимает только то, что создал сам импорт, и не трогает записи, на которые уже опирается живая сделка.
+* **Объектные права, а не только маршрутные.** Сделка не привязывает чужую организацию и контакт; участников меняют ответственный, руководитель и администратор; наблюдатель только читает; чужой комментарий удаляет только администратор; массовая передача дел трогает лишь открытые сделки и активного преемника из своей команды.
+* **SECURITY DEFINER-функции закрыты.** `EXECUTE` у `PUBLIC` отозван (миграция 0018): приложение не может одним вызовом снять с любой таблицы права и повесить триггеры, а `audit_log_attach_guards` принимает только таблицы `audit_log*`.
+* **Токены не попадают в логи.** В журнале запросов токены подписания и приглашений закрыты `***`; профиль учащегося (СНИЛС, паспорт, адрес, диплом) вырезается из логов и аудита, а секретные системные настройки можно хранить зашифрованными (`SETTINGS_ENCRYPTION_KEY`, Fernet).
 * **Идемпотентность в границах актора.** `Idempotency-Key` скоупится по `actor_id` (или по источнику интеграции для анонимных вызовов) — угаданный ключ другого пользователя не возвращает чужой сохранённый ответ.
 
 ## Ограничения и известные проблемы
@@ -473,7 +497,7 @@ locust -f loadtest/locustfile_transition.py --headless -u 50 -r 25 -t 60s --host
 
 | Проблема | Как обходится / статус |
 |---|---|
-| `GET /api/admin/audit/verify-chain` на широких выборках (`limit≥100`) нашёл разрывы цепочки на этом стенде | узкие недавние окна (`limit≤20`) в тот же момент были целыми — похоже на след параллельной активности нескольких сессий на общем стенде за время его жизни; полной трассировки причины не делалось, стоит проверить на выделенном стенде перед сдачей |
+| `GET /api/admin/audit/verify-chain` находил разрывы цепочки при параллельных записях | причина найдена и исправлена: время записи бралось как начало транзакции (`now()`), а не момент захвата замка цепочки; теперь `clock_timestamp()` под замком, порядок хэшей и времени совпадает (тест `test_audit_chain_concurrency.py` падал на старом коде); хэш версионирован (`audit_log.hash_version`: v2 покрывает роль, подмену личности, IP и User-Agent), старые записи проверяются по-старому |
 | `PUT /workflows/{id}/graph` раньше удалял и создавал заново все статусы и переходы → `500`, как только по переходу прошла хотя бы одна сделка (внешний ключ истории) | исправлено: переходы обновляются по `id`; исчезнувший, но использованный в истории — `409 CRM-1209`, статус со сделками — `409 CRM-1208`, а не `500` (тесты `TestSaveGraphWithDeals`) |
 | `GET /api/auth/login?next=…` был открытым редиректом | исправлено: `safe_next_path` принимает только путь внутри сайта, проверено тестами и живым запросом (см. «Безопасность») |
 | Сиды `reporting`/`notification`/`integration` не входят в `entrypoint.sh seed` (только воронки) | запускаются вручную, идемпотентны (см. «Разработка»); на этом стенде уже применены |
@@ -489,7 +513,7 @@ locust -f loadtest/locustfile_transition.py --headless -u 50 -r 25 -t 60s --host
 | [`dop.md`](https://github.com/lct-testkit/.github/blob/main/docs/dop.md) | дополнения: ПЭП, автоподстановка по ИНН и ЕГРЮЛ, дизайн-система |
 | [`README продукта`](https://github.com/lct-testkit/.github#readme) | обзор всего проекта: состав репозиториев, быстрый старт демо- и prod-версии клиента, адреса и порты всего стека |
 | [`frontend/README.md`](https://github.com/lct-testkit/frontend#readme) | веб-клиент: стек, сборка, режимы demo/prod |
-| [`frontend/docs/api-endpoints.md`](https://github.com/lct-testkit/frontend/blob/main/docs/api-endpoints.md) | те же 193 операции API, сгенерированный список по тегам |
+| [`frontend/docs/api-endpoints.md`](https://github.com/lct-testkit/frontend/blob/main/docs/api-endpoints.md) | те же 203 операции API, сгенерированный список по тегам |
 | [`frontend/docs/backend-issues.md`](https://github.com/lct-testkit/frontend/blob/main/docs/backend-issues.md) | 101 несоответствие бэкенда, найденных на живом стенде, с привязкой к файлу и строке |
 | [`loadtest/README.md`](loadtest/README.md) | нагрузочное тестирование: методика, зафиксированный прогон, интерпретация результатов |
 | [`deploy/README.md`](https://github.com/lct-testkit/deploy#readme) | инфраструктурный репозиторий: манифест образов, CI/CD, состояние по фазам |

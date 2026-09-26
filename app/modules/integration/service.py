@@ -27,14 +27,16 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.context import ActorContext, set_actor
-from app.core.errors import AppError, ErrorCode, NotFoundError
+from app.core.errors import AppError, ErrorCode, FieldError, NotFoundError, ValidationError
 from app.core.security import Principal, TokenClaims
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService, diff_changes
 from app.modules.crm.models import Deal
 from app.modules.identity.models import Role, User
 from app.modules.integration.models import IntegrationSource, OutboxEvent, OutboxStatus
+from app.modules.integration.security import check_outbound_url_resolved
 
 logger = structlog.get_logger(__name__)
 
@@ -150,6 +152,17 @@ class IntegrationSourceService:
     async def update(self, code: str, payload: Any) -> IntegrationSource:
         source = await self.get_by_code(code)
         updates = payload.model_dump(exclude_unset=True)
+        if updates.get("base_url") is not None:
+            # Адрес, к которому воркер пойдёт сам (и, у LMS, с токеном): SSRF и утечка токена.
+            try:
+                updates["base_url"] = await check_outbound_url_resolved(
+                    updates["base_url"], strict=get_settings().is_prod
+                )
+            except ValueError as exc:
+                raise ValidationError(
+                    "Адрес внешней системы не принят",
+                    [FieldError(field="base_url", reason=str(exc))],
+                ) from exc
         changes: dict[str, Any] = {}
         for field, new_value in updates.items():
             old_value = getattr(source, field)

@@ -188,8 +188,12 @@ async def list_notification_templates(
     channel: Annotated[str | None, Query()] = None,
 ) -> NotificationTemplateListResponse:
     service = NotificationTemplateService(session)
-    stmt = service.list_query(code=code, channel=channel).order_by(
-        NotificationTemplate.created_at.desc(), NotificationTemplate.id.desc()
+    # `order_by(None)` сбрасывает сортировку `list_query` (код, канал): `order_by` дописывал бы
+    # к ней ключ курсора, и страницы шли бы по одному ключу, а курсор резал бы по другому.
+    stmt = (
+        service.list_query(code=code, channel=channel)
+        .order_by(None)
+        .order_by(NotificationTemplate.created_at.desc(), NotificationTemplate.id.desc())
     )
     cursor = page.decoded_cursor
     if cursor:

@@ -44,6 +44,7 @@ class _Contact:
         self.position = "Проректор"
         self.email = "ivanov@university.ru"
         self.phone = "+79991234567"
+        self.contact_methods: list[str] = []
         self.is_decision_maker = True
         self.is_anonymized = False
         self.source = None

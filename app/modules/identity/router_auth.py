@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import base64
+import datetime as dt
 import hashlib
 import json
 import secrets
@@ -19,7 +20,7 @@ from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 
-from app.core.cache import invalidate_principal
+from app.core.cache import invalidate_principal, invalidate_principal_after_commit
 from app.core.config import get_settings
 from app.core.context import ActorContext, get_client, set_actor
 from app.core.csrf import clear_csrf_cookie, new_csrf_token, set_csrf_cookie
@@ -129,6 +130,26 @@ async def login(
     return RedirectResponse(url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
 
+async def _sync_password_requirement(session: DbSession, user: User) -> None:
+    """Снимает локальный флаг обязательной смены пароля, если пароль уже сменили в самом Keycloak.
+
+    Флаг ставится при создании учётки и сбросе пароля, а снимался только при смене через CRM
+    (`POST /me/password`). Пользователь, выполнивший `UPDATE_PASSWORD` на странице Keycloak (там
+    его и отправляют письмом), входил снова и упирался в CRM-1106 навсегда. Источник истины —
+    список обязательных действий в Keycloak; недоступность Admin API вход не ломает."""
+    try:
+        kc_user = await keycloak_client.get_user(user.keycloak_id)  # type: ignore[arg-type]
+    except Exception:  # noqa: BLE001 — вход важнее сверки
+        logger.warning("password_requirement_sync_failed", user_id=str(user.id))
+        return
+    if kc_user is None or "UPDATE_PASSWORD" in (kc_user.get("requiredActions") or []):
+        return
+    user.must_change_password = False
+    user.password_changed_at = dt.datetime.now(dt.UTC)
+    await session.flush()
+    invalidate_principal_after_commit(session, user.id, keycloak_id=user.keycloak_id)
+
+
 async def _complete_login(
     *,
     session: DbSession,
@@ -173,6 +194,8 @@ async def _complete_login(
 
     user = await identity.provision_from_claims(claims)
     await identity.mark_login(user)
+    if user.must_change_password and user.keycloak_id:
+        await _sync_password_requirement(session, user)
 
     # Актор нужен до записи аудита, иначе событие входа будет анонимным.
     set_actor(ActorContext(user_id=user.id, role=user.role))

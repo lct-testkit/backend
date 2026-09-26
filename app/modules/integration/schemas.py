@@ -31,9 +31,14 @@ class IntegrationSourceOut(BaseModel):
 
 class IntegrationSourceUpdateRequest(BaseModel):
     name: str | None = Field(default=None, max_length=255)
-    base_url: str | None = None
-    auth_type: str | None = None
-    credentials_ref: str | None = None
+    # Длины — как у колонок: длиннее значение давало ошибку БД (500), а не 422. Проверка самого
+    # адреса (схема, учётные данные, внутренние сети) — в `IntegrationSourceService.update`.
+    base_url: str | None = Field(default=None, max_length=512)
+    auth_type: str | None = Field(default=None, max_length=16)
+    # Имя переменной окружения, не значение и не произвольная строка.
+    credentials_ref: str | None = Field(
+        default=None, max_length=128, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$"
+    )
     is_active: bool | None = None
     config: dict[str, Any] | None = None
 
@@ -81,6 +86,22 @@ class InboundMessageOut(BaseModel):
     resulting_entity_id: uuid.UUID | None
     processed_at: dt.datetime | None
     received_at: dt.datetime
+
+
+class CmsLeadResponse(BaseModel):
+    """Ответ `POST /api/v1/integrations/cms/leads`: чем закончилась доставка."""
+
+    status: str = Field(
+        description=(
+            "`processed` — заявка принята и создала сделку; `duplicate` — такая заявка уже есть "
+            "(открытая сделка того же человека и продукта либо заказ с тем же номером), новая "
+            "сделка не заводилась; при повторе доставки с тем же `Idempotency-Key` возвращается "
+            "статус первой обработки"
+        )
+    )
+    inbound_message_id: uuid.UUID = Field(description="Запись в журнале входящих сообщений")
+    deal_id: uuid.UUID | None = Field(default=None, description="Сделка по заявке")
+    contact_id: uuid.UUID | None = Field(default=None, description="Контакт (клиент) сделки")
 
 
 class LmsProgressPushRequest(BaseModel):

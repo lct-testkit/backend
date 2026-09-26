@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.core.normalize import is_ascii_digits
+
 _INN10_WEIGHTS = (2, 4, 10, 3, 5, 9, 4, 6, 8)
 _INN12_WEIGHTS_11 = (7, 2, 4, 10, 3, 5, 9, 4, 6, 8)
 _INN12_WEIGHTS_12 = (3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8)
@@ -33,7 +35,7 @@ def _valid_region_code(digits: str) -> bool:
 
 
 def validate_inn(value: str | None) -> RequisiteCheck:
-    if not value or not value.isdigit():
+    if not value or not is_ascii_digits(value):
         return RequisiteCheck(False, "ИНН должен состоять только из цифр")
     if len(value) not in (10, 12):
         return RequisiteCheck(False, "ИНН должен содержать 10 или 12 цифр")
@@ -56,13 +58,13 @@ def validate_inn(value: str | None) -> RequisiteCheck:
 
 
 def validate_kpp(value: str | None) -> RequisiteCheck:
-    if not value or not value.isdigit() or len(value) != 9:
+    if not value or not is_ascii_digits(value) or len(value) != 9:
         return RequisiteCheck(False, "КПП должен состоять из 9 цифр")
     return RequisiteCheck(True)
 
 
 def validate_ogrn(value: str | None) -> RequisiteCheck:
-    if not value or not value.isdigit() or len(value) != 13:
+    if not value or not is_ascii_digits(value) or len(value) != 13:
         return RequisiteCheck(False, "ОГРН должен состоять из 13 цифр")
     expected = (int(value[:12]) % 11) % 10
     if expected != int(value[12]):
@@ -71,7 +73,7 @@ def validate_ogrn(value: str | None) -> RequisiteCheck:
 
 
 def validate_ogrnip(value: str | None) -> RequisiteCheck:
-    if not value or not value.isdigit() or len(value) != 15:
+    if not value or not is_ascii_digits(value) or len(value) != 15:
         return RequisiteCheck(False, "ОГРНИП должен состоять из 15 цифр")
     expected = (int(value[:14]) % 13) % 10
     if expected != int(value[14]):

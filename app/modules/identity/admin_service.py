@@ -25,10 +25,12 @@ import structlog
 from sqlalchemy import Select, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.cache import invalidate_principal
+from app.core.cache import invalidate_principal_after_commit
 from app.core.config import get_settings
+from app.core.dependents import restrict_dependents
 from app.core.errors import AppError, ErrorCode, FieldError, NotFoundError, VersionConflictError
 from app.core.masking import mask_email
+from app.core.optimistic import claim_version
 from app.core.security import Principal
 from app.modules.admin.models import AdminApproval
 from app.modules.audit.actions import AuditAction
@@ -75,6 +77,9 @@ TOTP_ACTION = "CONFIGURE_TOTP"
 INVITE_EXPIRED_REASON = "invite_expired"
 
 OPERATION_CREATE_ADMIN = "user.create_admin"
+# Повышение существующей учётки до ADMIN — тот же риск, что создание нового администратора, но
+# раньше `PATCH role=ADMIN` обходил «четыре глаза»: один администратор делал другого без второго.
+OPERATION_PROMOTE_ADMIN = "user.promote_admin"
 OPERATION_ERASURE = "user.erasure"
 
 
@@ -237,10 +242,15 @@ class ApprovalService:
             raise NotFoundError("Подтверждение", approval_id)
         if approval.status not in ("pending", "approved"):
             raise AppError(ErrorCode.VALIDATION, "Заявка уже обработана")
+        # Инициатор может отозвать собственную заявку. Записывать его в `approved_by` нельзя:
+        # CHECK `requested_by <> approved_by` (принцип «четырёх глаз») отклонял такую запись, и
+        # отзыв давал 500. У отозванной заявки нет подтвердившего — решение читается по `status`
+        # и `reason`.
+        withdrawn = approval.requested_by == principal.user_id
         approval.status = "rejected"
-        approval.approved_by = principal.user_id
-        approval.approved_at = dt.datetime.now(dt.UTC)
-        approval.reason = reason
+        approval.approved_by = None if withdrawn else principal.user_id
+        approval.approved_at = None if withdrawn else dt.datetime.now(dt.UTC)
+        approval.reason = reason or ("Отозвана инициатором" if withdrawn else None)
         await self._session.flush()
         await self._audit.record(
             AuditAction.ADMIN_APPROVAL_REJECTED,
@@ -433,6 +443,7 @@ class AdminUserService:
         principal: Principal,
         expected_version: int,
         updates: dict[str, Any],
+        approval_id: uuid.UUID | None = None,
     ) -> User:
         if user.version != expected_version:
             raise VersionConflictError(
@@ -499,9 +510,28 @@ class AdminUserService:
             manager_id=updates.get("manager_id", user.manager_id),
         )
 
+        if new_role == Role.ADMIN.value and user.role != Role.ADMIN.value:
+            # Заявка открывается только после проверок выше — как при создании администратора:
+            # иначе второй администратор подтверждал бы операцию, которая заведомо не пройдёт.
+            await self._approvals.require(
+                operation=OPERATION_PROMOTE_ADMIN,
+                payload={"user_id": str(user.id), "role": new_role},
+                principal=principal,
+                approval_id=approval_id,
+                entity_type="user",
+                entity_id=user.id,
+            )
+
         for field_name, value in updates.items():
             setattr(user, field_name, value)
-        user.version += 1
+        # Версия занимается одним UPDATE ... WHERE version = :expected (а не проверкой в Python):
+        # две параллельные правки с одной версией не проходят обе.
+        await claim_version(
+            self._session,
+            user,
+            expected_version,
+            conflicting={"role": user.role, "status": user.status},
+        )
         await self._session.flush()
 
         if new_role and new_role != before["role"]:
@@ -533,7 +563,7 @@ class AdminUserService:
             "timezone": user.timezone,
         }
         changes = diff_changes(before, after)
-        await invalidate_principal(user.id, keycloak_id=user.keycloak_id)
+        invalidate_principal_after_commit(self._session, user.id, keycloak_id=user.keycloak_id)
         await self._audit.record(
             AuditAction.USER_ROLE_CHANGED if new_role else AuditAction.USER_UPDATED,
             entity_type="user",
@@ -549,6 +579,14 @@ class AdminUserService:
     ) -> int:
         if user.id == principal.user_id:
             raise AppError(ErrorCode.VALIDATION, "Нельзя заблокировать собственную учётную запись")
+        if user.status in (UserStatus.TERMINATED.value, UserStatus.ANONYMIZED.value):
+            # Блокировка уволенного превращала его статус в `blocked`, а разблокировка — в
+            # `active`: цепочка «уволен → заблокирован → разблокирован» оживляла учётку.
+            raise AppError(
+                ErrorCode.VALIDATION,
+                "Учётная запись уволенного или обезличенного пользователя не блокируется",
+                extra={"status": user.status},
+            )
         await self._identity.ensure_not_last_admin(user)
 
         old_status = user.status
@@ -556,14 +594,14 @@ class AdminUserService:
         user.status_reason = reason
         user.blocked_at = dt.datetime.now(dt.UTC)
         user.auto_unblock_at = _utc(auto_unblock_at)
-        user.version += 1
+        await claim_version(self._session, user)
         await self._session.flush()
 
         if user.keycloak_id:
             await keycloak_client.set_enabled(user.keycloak_id, enabled=False)
             await keycloak_client.logout_all_sessions(user.keycloak_id)
         terminated = await session_store.delete_all_for_user(user.id)
-        await invalidate_principal(user.id, keycloak_id=user.keycloak_id)
+        invalidate_principal_after_commit(self._session, user.id, keycloak_id=user.keycloak_id)
 
         # Сделки не переназначаются, но помечаются как «требуют внимания».
         await get_ownership_service().mark_owner_unavailable(
@@ -603,16 +641,23 @@ class AdminUserService:
                 "Разблокировать можно только заблокированную учётную запись",
                 extra={"status": user.status},
             )
+        if user.anonymized_at is not None or user.deleted_at is not None:
+            # Уже обезличенную или удалённую учётку разблокировкой не вернуть (см. `block`).
+            raise AppError(
+                ErrorCode.VALIDATION,
+                "Учётная запись обезличена или удалена и не восстанавливается",
+                extra={"status": user.status},
+            )
         user.status = UserStatus.ACTIVE.value
         user.status_reason = reason
         user.blocked_at = None
         user.auto_unblock_at = None
-        user.version += 1
+        await claim_version(self._session, user)
         await self._session.flush()
 
         if user.keycloak_id:
             await keycloak_client.set_enabled(user.keycloak_id, enabled=True)
-        await invalidate_principal(user.id, keycloak_id=user.keycloak_id)
+        invalidate_principal_after_commit(self._session, user.id, keycloak_id=user.keycloak_id)
         await get_ownership_service().mark_owner_unavailable(
             self._session, user.id, unavailable=False
         )
@@ -648,10 +693,10 @@ class AdminUserService:
         user.status = UserStatus.BLOCKED.value
         user.status_reason = INVITE_EXPIRED_REASON
         user.blocked_at = dt.datetime.now(dt.UTC)
-        user.version += 1
+        await claim_version(self._session, user)
         await self._session.flush()
         await self._identity.revoke_invites(user.id)
-        await invalidate_principal(user.id, keycloak_id=user.keycloak_id)
+        invalidate_principal_after_commit(self._session, user.id, keycloak_id=user.keycloak_id)
         await self._audit.record(
             AuditAction.USER_INVITE_EXPIRED,
             entity_type="user",
@@ -692,9 +737,9 @@ class AdminUserService:
         user.status = UserStatus.INVITED.value
         user.status_reason = None
         user.blocked_at = None
-        user.version += 1
+        await claim_version(self._session, user)
         await self._session.flush()
-        await invalidate_principal(user.id, keycloak_id=user.keycloak_id)
+        invalidate_principal_after_commit(self._session, user.id, keycloak_id=user.keycloak_id)
 
     # --- Сброс пароля ----------------------------------------------------
 
@@ -703,8 +748,10 @@ class AdminUserService:
     ) -> dict[str, int]:
         """Принудительный сброс: все сессии завершаются без исключений."""
         if user.keycloak_id:
-            await keycloak_client.set_required_actions(
-                user.keycloak_id, INVITE_REQUIRED_ACTIONS[:1]
+            # Добавляем `UPDATE_PASSWORD`, не заменяя список: иначе пропадало бы, например,
+            # требование настроить TOTP.
+            await keycloak_client.update_required_actions(
+                user.keycloak_id, add=INVITE_REQUIRED_ACTIONS[:1]
             )
             await keycloak_client.execute_actions_email(
                 user.keycloak_id,
@@ -717,7 +764,7 @@ class AdminUserService:
         await self._session.flush()
 
         terminated = await session_store.delete_all_for_user(user.id)
-        await invalidate_principal(user.id, keycloak_id=user.keycloak_id)
+        invalidate_principal_after_commit(self._session, user.id, keycloak_id=user.keycloak_id)
 
         signing = get_signing_service()
         voided = await signing.void_pending_for_user(
@@ -802,14 +849,14 @@ class AdminUserService:
 
         user.status = UserStatus.TERMINATED.value
         user.status_reason = reason
-        user.version += 1
+        await claim_version(self._session, user)
         await self._session.flush()
 
         if user.keycloak_id:
             await keycloak_client.set_enabled(user.keycloak_id, enabled=False)
             await keycloak_client.logout_all_sessions(user.keycloak_id)
         terminated = await session_store.delete_all_for_user(user.id)
-        await invalidate_principal(user.id, keycloak_id=user.keycloak_id)
+        invalidate_principal_after_commit(self._session, user.id, keycloak_id=user.keycloak_id)
         await self._identity.revoke_invites(user.id)
 
         await get_notification_service().notify_user(
@@ -971,30 +1018,18 @@ class AdminUserService:
             )
         return request, blockers
 
+    async def hard_delete_blockers(self, user: User) -> list[dict[str, Any]]:
+        """Записи, ссылающиеся на пользователя внешним ключом без каскада (`ON DELETE RESTRICT`):
+        они не дают физически удалить строку (new_spec §4.8.2, режим C: «явным подсчётом, а не
+        надеждой на ON DELETE»). Таблицы берутся из метаданных ORM (`core.dependents`): раньше
+        проверялись пять таблиц при трёх десятках внешних ключей на `users.id`, остальные
+        обнаруживались уже на `DELETE`."""
+        return await restrict_dependents(self._session, User.__tablename__, user.id)
+
     async def hard_delete_eligible(self, user: User) -> bool:
-        """new_spec §4.8.2, режим C: «разрешён только если у сущности нет ни
-
-        одной зависимой записи (проверяется явным подсчётом, а не надеждой
-        на ON DELETE)». `collect_erasure_blockers` уже проверяет активные
-        сделки/задачи/подписи — здесь строже: и завершённые тоже, потому что
-        `ON DELETE RESTRICT` не различает «активная» и «закрытая» запись, и
-        руководство другим пользователем (`users.manager_id`), которое
-        обезличивание не блокирует, а жёсткое удаление — обязано.
-        """
-        from app.modules.crm.models import Deal, DealComment, Task
-        from app.modules.signing.models import SignatureRequest
-
-        checks = (
-            select(Deal.id).where((Deal.owner_id == user.id) | (Deal.created_by == user.id)),
-            select(DealComment.id).where(DealComment.author_id == user.id),
-            select(Task.id).where(Task.assignee_id == user.id),
-            select(SignatureRequest.id).where(SignatureRequest.signer_user_id == user.id),
-            select(User.id).where(User.manager_id == user.id),
-        )
-        for stmt in checks:
-            if (await self._session.scalar(stmt.limit(1))) is not None:
-                return False
-        return True
+        """Режим C: разрешён, только если на пользователя нет ссылок вообще (и завершённых
+        записей тоже — RESTRICT не различает «активную» и «закрытую»)."""
+        return not await self.hard_delete_blockers(user)
 
     async def collect_erasure_blockers(self, user: User) -> list[dict[str, Any]]:
         """Блокеры из new_spec §4.8.3 и dop §10.7."""

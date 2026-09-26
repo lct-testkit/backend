@@ -20,7 +20,7 @@ import uuid
 
 import structlog
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logger = structlog.get_logger(__name__)
 
@@ -28,8 +28,10 @@ app = FastAPI(title="sms-gateway-mock", docs_url=None, redoc_url=None, openapi_u
 
 
 class SendRequest(BaseModel):
-    to: str
-    message: str
+    # Границы, как у настоящего агрегатора: получатель пишется в лог, и неограниченная строка
+    # раздувала бы его; сообщение — короткий код, а не произвольный текст.
+    to: str = Field(max_length=32)
+    message: str = Field(max_length=500)
 
 
 class SendResponse(BaseModel):

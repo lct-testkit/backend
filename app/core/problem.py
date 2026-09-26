@@ -12,7 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError as PydanticValidationError
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DataError, DBAPIError, IntegrityError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.context import get_request_id
@@ -48,11 +48,19 @@ _STATUS_TO_CODE: dict[int, ErrorCode] = {
     503: ErrorCode.DEPENDENCY_UNAVAILABLE,
 }
 
-# SQLSTATE нарушений, которые вызвал сам клиент запросом: ссылка на связанные данные и дубль
-# по уникальному индексу. NOT NULL и CHECK сюда не входят — это дыра в валидации или баг
-# сервиса, и такая ошибка остаётся внутренней (500), а не маскируется под конфликт.
+# SQLSTATE нарушений, которые вызвал сам клиент запросом: ссылка на связанные данные, дубль
+# по уникальному индексу, пустое обязательное поле и значение вне CHECK. Последние два — дыра
+# в валидации на границе API (сервис должен был ответить 422 с полем сам), но отвечать на них
+# «Внутренняя ошибка» нечестно: виноват запрос, а не сервер, и клиенту нужно знать, что править.
 _PG_FOREIGN_KEY_VIOLATION = "23503"
 _PG_UNIQUE_VIOLATION = "23505"
+_PG_NOT_NULL_VIOLATION = "23502"
+_PG_CHECK_VIOLATION = "23514"
+
+# Ошибки, после которых запрос можно повторить: взаимная блокировка, сбой сериализации,
+# таймаут ожидания блокировки и отмена по statement_timeout. Это состояние БД, а не дефект
+# запроса, поэтому 503 с `Retry-After`, а не 500.
+_PG_RETRYABLE = frozenset({"40P01", "40001", "55P03", "57014"})
 
 
 def build_problem(
@@ -215,13 +223,21 @@ async def unhandled_error_handler(request: Request, exc: Exception) -> JSONRespo
     )
 
 
+def _pg_cause(exc: DBAPIError) -> object | None:
+    """Исходное исключение драйвера (у asyncpg — с `column_name`, `constraint_name`)."""
+    return getattr(exc.orig, "__cause__", None)
+
+
 async def integrity_error_handler(request: Request, exc: IntegrityError) -> JSONResponse:
     """Страховка для нарушений ограничений БД, которые не перехватил сервис:
-    дубль и ссылка на связанные данные — 409, а не «Внутренняя ошибка». Сервис
-    по-прежнему обязан проверять сам и отвечать точнее (404/422 с полем): здесь
-    только последний рубеж. Имя ограничения и значения ключа уходят в лог, но не в
-    ответ — в них бывают ПДн и устройство схемы."""
+    дубль и ссылка на связанные данные — 409, пустое обязательное поле и значение вне CHECK —
+    422, а не «Внутренняя ошибка». Сервис по-прежнему обязан проверять сам и отвечать точнее
+    (404/422 с полем): здесь только последний рубеж. Имя ограничения и значения ключа уходят
+    в лог, но не в ответ — в них бывают ПДн и устройство схемы (имя колонки NOT NULL — это
+    имя поля запроса, его клиенту показать можно)."""
     sqlstate = getattr(exc.orig, "pgcode", None)
+    cause = _pg_cause(exc)
+    errors: list[FieldError] | None = None
     if sqlstate == _PG_UNIQUE_VIOLATION:
         code, detail = ErrorCode.DUPLICATE, "Запись с такими данными уже существует"
     elif sqlstate == _PG_FOREIGN_KEY_VIOLATION:
@@ -230,10 +246,16 @@ async def integrity_error_handler(request: Request, exc: IntegrityError) -> JSON
             detail = "Объект используется в других записях и не может быть удалён"
         else:
             detail = "Запись ссылается на несуществующий объект"
+    elif sqlstate == _PG_NOT_NULL_VIOLATION:
+        code, detail = ErrorCode.VALIDATION, "Обязательное поле не заполнено"
+        column = getattr(cause, "column_name", None)
+        if column:
+            errors = [FieldError(field=str(column), reason="обязательное поле, не может быть null")]
+    elif sqlstate == _PG_CHECK_VIOLATION:
+        code, detail = ErrorCode.VALIDATION, "Значение не допускается правилами данных"
     else:
         return await unhandled_error_handler(request, exc)
 
-    cause = getattr(exc.orig, "__cause__", None)
     logger.warning(
         "integrity_conflict",
         sqlstate=sqlstate,
@@ -242,8 +264,43 @@ async def integrity_error_handler(request: Request, exc: IntegrityError) -> JSON
         method=request.method,
     )
     return problem_response(
-        code=code, detail=detail, instance=str(request.url.path), request=request
+        code=code, detail=detail, instance=str(request.url.path), errors=errors, request=request
     )
+
+
+async def data_error_handler(request: Request, exc: DataError) -> JSONResponse:
+    """Значение не влезло в колонку или не разобралось (слишком длинная строка, число вне
+    диапазона, битая дата): вина запроса, а не сервера — 422, как и на границе схемы."""
+    logger.warning(
+        "data_error",
+        sqlstate=getattr(exc.orig, "pgcode", None),
+        path=request.url.path,
+        method=request.method,
+    )
+    return problem_response(
+        code=ErrorCode.VALIDATION,
+        detail="Значение поля не подходит по длине, диапазону или формату",
+        instance=str(request.url.path),
+        request=request,
+    )
+
+
+async def database_error_handler(request: Request, exc: DBAPIError) -> JSONResponse:
+    """Остальные ошибки БД: временные (взаимная блокировка, ожидание блокировки) — 503 с
+    просьбой повторить, прочие — обычный необработанный сбой."""
+    sqlstate = getattr(exc.orig, "pgcode", None) or getattr(exc.orig, "sqlstate", None)
+    if sqlstate in _PG_RETRYABLE:
+        logger.warning(
+            "database_retryable", sqlstate=sqlstate, path=request.url.path, method=request.method
+        )
+        return problem_response(
+            code=ErrorCode.DEPENDENCY_UNAVAILABLE,
+            detail="База данных временно занята другими операциями, повторите запрос",
+            instance=str(request.url.path),
+            headers={"Retry-After": "1"},
+            request=request,
+        )
+    return await unhandled_error_handler(request, exc)
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -252,4 +309,6 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(PydanticValidationError, pydantic_error_handler)  # type: ignore[arg-type]
     app.add_exception_handler(StarletteHTTPException, http_error_handler)  # type: ignore[arg-type]
     app.add_exception_handler(IntegrityError, integrity_error_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(DataError, data_error_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(DBAPIError, database_error_handler)  # type: ignore[arg-type]
     app.add_exception_handler(Exception, unhandled_error_handler)

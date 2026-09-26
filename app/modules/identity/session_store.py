@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import secrets
 import time
@@ -56,10 +57,19 @@ class SessionData:
     access_expires_at: int | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def public_id(self) -> str:
+        """Публичный идентификатор сессии для списка и `DELETE /me/sessions/{id}`.
+
+        Сам `sid` — это значение session-cookie: отдай его в списке, и любой скрипт с доступом
+        к ответу (XSS, лог, расширение) мог бы войти под этой сессией. Наружу идёт необратимая
+        свёртка; по ней сессию находят среди сессий самого пользователя."""
+        return hashlib.sha256(f"crm-session-ref:{self.sid}".encode()).hexdigest()[:32]
+
     def public_view(self) -> dict[str, Any]:
-        """Для GET /api/me/sessions: без токенов."""
+        """Для GET /api/me/sessions: без токенов и без значения cookie."""
         return {
-            "sid": self.sid,
+            "sid": self.public_id,
             "device": self.device,
             "ip": self.ip,
             "user_agent": self.user_agent,

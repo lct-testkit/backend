@@ -24,6 +24,7 @@ from typing import Any
 
 import jinja2
 import qrcode
+from jinja2.sandbox import SandboxedEnvironment
 from pypdf import PdfReader, PdfWriter
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
@@ -72,9 +73,13 @@ def _deny_external_resources(uri: str, _rel: str) -> str:
 def render_template_html(body_template: str, context: Mapping[str, Any]) -> str:
     """Jinja2 → HTML. `autoescape=True`: данные сделки/организации приходят от
     пользователей и не должны интерпретироваться как разметка."""
-    env = jinja2.Environment(autoescape=True)
-    template = env.from_string(body_template)
-    body = template.render(**context)
+    # Песочница: шаблон лежит в БД (сидом или прямой правкой), а данные сделки — ввод
+    # пользователей; доступ к атрибутам-«внутренностям» Python из шаблона закрыт.
+    env = SandboxedEnvironment(autoescape=True)
+    try:
+        body = env.from_string(body_template).render(**context)
+    except jinja2.TemplateError as exc:
+        raise RenderError(f"Шаблон документа не отрисовался: {exc}") from exc
     return f"<html><head><style>{_font_face_css()}</style></head><body>{body}</body></html>"
 
 
@@ -106,6 +111,23 @@ def _make_qr_image(url: str) -> ImageReader:
     img.save(buf, format="PNG")
     buf.seek(0)
     return ImageReader(buf)
+
+
+def validate_pdf(pdf_bytes: bytes) -> None:
+    """Файл читается как PDF и в нём есть хотя бы одна страница — то же, что потребуется штампу
+    в конце подписания; иначе `RenderError`. Дёшево, а битый документ отсекается на создании, а
+    не у последнего подписанта."""
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        if not reader.pages:
+            raise RenderError("Документ не содержит страниц")
+        last_page = reader.pages[-1]
+        float(last_page.mediabox.width)
+        float(last_page.mediabox.height)
+    except RenderError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — любая ошибка чтения PDF считается одной и той же
+        raise RenderError(f"Не удалось прочитать PDF: {exc}") from exc
 
 
 def apply_signature_stamp(pdf_bytes: bytes, *, lines: list[str], verify_url: str) -> bytes:

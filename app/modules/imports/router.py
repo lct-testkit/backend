@@ -10,11 +10,20 @@ from fastapi import APIRouter, Depends, Path, Query, status
 from sqlalchemy import select
 
 from app.core.deps import DbSession, Pagination, require_permission
-from app.core.pagination import Page, keyset_before
+from app.core.masking import mask_mapping
+from app.core.pagination import Page, keyset_after, keyset_before
 from app.core.permissions import Permission
 from app.core.security import Principal
-from app.modules.imports.models import ImportJob, ImportPreset
+from app.modules.imports.fields import (
+    ENTITY_TYPE_LABELS,
+    fields_for,
+    requirements_for,
+)
+from app.modules.imports.models import ImportJob, ImportPreset, ImportRowResult
 from app.modules.imports.schemas import (
+    ImportEntityTypeListResponse,
+    ImportEntityTypeOut,
+    ImportFieldOut,
     ImportJobCreateRequest,
     ImportJobListResponse,
     ImportJobOut,
@@ -22,6 +31,8 @@ from app.modules.imports.schemas import (
     ImportPresetListResponse,
     ImportPresetOut,
     ImportProfileResponse,
+    ImportRowListResponse,
+    ImportRowOut,
 )
 from app.modules.imports.service import ImportService
 
@@ -54,6 +65,39 @@ async def create_import_job(
         source_format=payload.source_format,
     )
     return ImportJobOut.model_validate(job)
+
+
+@import_jobs_router.get(
+    "/entity-types",
+    summary="Типы импорта и их поля",
+    description=(
+        "Что можно импортировать: для каждого типа — поля для сопоставления колонок, допустимые "
+        "форматы файла и то, что обязательно должно быть в маппинге. Окно сопоставления строится "
+        "по этому ответу, списки полей на клиенте не хранятся."
+    ),
+    response_model=ImportEntityTypeListResponse,
+)
+async def list_import_entity_types(_: ImportRunPerm) -> ImportEntityTypeListResponse:
+    return ImportEntityTypeListResponse(
+        items=[
+            ImportEntityTypeOut(
+                code=code,
+                label=label,
+                source_formats=["xlsx", "xls", "csv", "json"],
+                fields=[
+                    ImportFieldOut(
+                        target=field.target,
+                        label=field.label,
+                        kind=field.kind,
+                        required=field.required,
+                    )
+                    for field in fields_for(code)
+                ],
+                requirements=requirements_for(code),
+            )
+            for code, label in ENTITY_TYPE_LABELS.items()
+        ]
+    )
 
 
 @import_jobs_router.get("", summary="Список заданий импорта", response_model=ImportJobListResponse)
@@ -99,7 +143,54 @@ async def profile_import_job(
         sample_rows=result.sample_rows,
         suggested_mapping=result.suggested_mapping,
         total_rows=result.total_rows,
+        applied_preset=result.applied_preset,
     )
+
+
+@import_jobs_router.get(
+    "/{job_id}/rows",
+    summary="Результаты по строкам",
+    description=(
+        "Построчный итог проверки и применения: статус, причины, разобранные значения. Значения "
+        "ПДн (телефон, email, СНИЛС, паспорт) замаскированы. Фильтр `status` — `ok`, `warn`, "
+        "`error`, `skipped`, `rolled_back`, `rollback_blocked`."
+    ),
+    response_model=ImportRowListResponse,
+)
+async def list_import_rows(
+    session: DbSession,
+    page: Pagination,
+    _: ImportRunPerm,
+    job_id: Annotated[uuid.UUID, Path()],
+    status_filter: Annotated[str | None, Query(alias="status")] = None,
+) -> ImportRowListResponse:
+    await ImportService(session).get_or_404(job_id)
+    stmt = (
+        select(ImportRowResult)
+        .where(ImportRowResult.import_job_id == job_id)
+        .order_by(ImportRowResult.row_number, ImportRowResult.id)
+    )
+    if status_filter:
+        stmt = stmt.where(ImportRowResult.status == status_filter)
+    cursor = page.decoded_cursor
+    if cursor:
+        stmt = stmt.where(keyset_after(ImportRowResult.row_number, ImportRowResult.id, cursor))
+    rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
+
+    def _serialize(row: ImportRowResult) -> ImportRowOut:
+        return ImportRowOut(
+            id=row.id,
+            row_number=row.row_number,
+            status=row.status,
+            entity_id=row.entity_id,
+            errors=[str(e) for e in row.errors or []],
+            row_data=mask_mapping(row.row_data or {}),  # type: ignore[arg-type]
+        )
+
+    built: Page = Page.build(
+        rows, limit=page.limit, cursor_value=lambda r: r.row_number, serializer=_serialize
+    )
+    return ImportRowListResponse(items=built.items, next_cursor=built.next_cursor)
 
 
 @import_jobs_router.put(

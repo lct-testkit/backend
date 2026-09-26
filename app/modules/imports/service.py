@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import hashlib
 import io
@@ -21,12 +22,15 @@ from decimal import Decimal
 from typing import Any
 
 import openpyxl
-from sqlalchemy import Select, delete, func, select
+import structlog
+from sqlalchemy import Select, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.context import ActorContext, set_actor
 from app.core.errors import AppError, ErrorCode, NotFoundError
 from app.core.ids import uuid7
+from app.core.normalize import parse_contact_methods, split_full_name
 from app.core.security import Principal
 from app.core.storage import (
     download_object_bytes,
@@ -38,7 +42,16 @@ from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
 from app.modules.catalog.models import Direction, Organization, OrganizationLicense, Product, Region
 from app.modules.files.models import Attachment, File, FileStatus
-from app.modules.imports.fields import FieldSpec, fields_for, natural_key_for, validate_field
+from app.modules.identity.models import User
+from app.modules.imports.fields import (
+    HANDLED_ENTITY_TYPES,
+    FieldSpec,
+    fields_for,
+    missing_mapping_labels,
+    natural_key_for,
+    validate_field,
+)
+from app.modules.imports.handlers import HANDLERS, Batch, RowCheck, rollback_effects
 from app.modules.imports.mapping import suggest_mapping
 from app.modules.imports.models import (
     ImportEntityType,
@@ -51,6 +64,17 @@ from app.modules.imports.models import (
 )
 from app.modules.imports.parsing import ParsedTable, parse_table, sanitize_formula
 from app.modules.registry.models import EgrulEntry
+
+logger = structlog.get_logger(__name__)
+
+# Задание, зависшее из-за «отравленной» строки, раньше вешало весь тик воркера; теперь строка
+# помечается ошибкой, а причина в отчёте — понятная, без текста исключения (в нём бывает SQL).
+_GENERIC_ROW_ERROR = "Не удалось применить строку из-за внутренней ошибки (подробности в журнале)"
+_EDITABLE_MAPPING_STATUSES = (
+    ImportJobStatus.UPLOADED.value,
+    ImportJobStatus.MAPPED.value,
+    ImportJobStatus.VALIDATED.value,
+)
 
 # kind -> (модель, целевое поле в row_data, колонка поиска по значению из
 # файла). Третий элемент раньше был неявно `model.code` — П3 добавляет
@@ -86,6 +110,7 @@ class ProfileResult:
     sample_rows: list[list[str]]
     suggested_mapping: dict[str, str]
     total_rows: int
+    applied_preset: str | None = None
 
 
 class ImportService:
@@ -123,9 +148,14 @@ class ImportService:
         mode: str,
         source_format: str,
     ) -> ImportJob:
-        if entity_type not in _MODEL_BY_ENTITY:
+        if entity_type not in _MODEL_BY_ENTITY and entity_type not in HANDLED_ENTITY_TYPES:
             raise AppError(ErrorCode.VALIDATION, f"Импорт типа {entity_type!r} не поддерживается")
-        await self._get_ready_file(file_id)
+        file = await self._get_ready_file(file_id)
+        # Профиль файла отдаёт его первые строки; без этой проверки руководитель мог «импортировать»
+        # любой готовый файл системы (чужое вложение сделки) и читать его превью. Чужой файл для
+        # него — «не найден», как и несуществующий: наличие файла не раскрывается.
+        if not principal.is_admin and file.uploaded_by != principal.user_id:
+            raise NotFoundError("Файл", file_id)
 
         job = ImportJob(
             file_id=file_id,
@@ -167,22 +197,26 @@ class ImportService:
     async def profile(self, job: ImportJob) -> ProfileResult:
         table = await self._load_table(job)
         fields = fields_for(job.entity_type)
-        mapping = suggest_mapping(table.headers, list(fields))
+        mapping = suggest_mapping(table.headers, list(fields), job.entity_type)
 
         # dop.md §4.12, фаза 3: «второй импорт того же реестра не требует
         # ручной работы» — точное совпадение заголовка с уже сохранённым
         # пресетом важнее нечёткого угадывания по словарю синонимов.
         preset = await self._latest_preset(job.entity_type)
+        applied_preset: str | None = None
         if preset is not None:
+            allowed = {f.target for f in fields}
             for header, target in preset.mapping.items():
-                if header in table.headers:
+                if header in table.headers and target in allowed:
                     mapping[header] = target
+                    applied_preset = preset.name
 
         return ProfileResult(
             headers=table.headers,
             sample_rows=table.rows[:100],
             suggested_mapping=mapping,
             total_rows=len(table.rows),
+            applied_preset=applied_preset,
         )
 
     async def _latest_preset(self, entity_type: str) -> ImportPreset | None:
@@ -203,6 +237,14 @@ class ImportService:
         principal: Principal,
         save_as_preset: str | None,
     ) -> ImportJob:
+        # Раньше маппинг перезаписывался в любом статусе: `PUT` на применяемое или завершённое
+        # задание сбрасывало его в `mapped` и стирало основу для отката.
+        if job.status not in _EDITABLE_MAPPING_STATUSES:
+            raise AppError(
+                ErrorCode.IMPORT_NOT_APPLICABLE,
+                "Маппинг можно менять только до применения импорта",
+                extra={"status": job.status},
+            )
         fields_by_target = {f.target: f for f in fields_for(job.entity_type)}
         unknown = [target for target in mapping.values() if target not in fields_by_target]
         if unknown:
@@ -210,11 +252,19 @@ class ImportService:
                 ErrorCode.IMPORT_MAPPING_INCOMPLETE,
                 f"Неизвестные целевые поля в маппинге: {', '.join(unknown)}",
             )
-        natural_key = natural_key_for(job.entity_type)
-        if natural_key not in mapping.values():
+        repeated = sorted({t for t in mapping.values() if list(mapping.values()).count(t) > 1})
+        if repeated:
             raise AppError(
                 ErrorCode.IMPORT_MAPPING_INCOMPLETE,
-                f"Маппинг должен включать ключевое поле «{fields_by_target[natural_key].label}»",
+                "Одно поле указано для нескольких колонок: "
+                + ", ".join(fields_by_target[t].label for t in repeated),
+            )
+        missing = missing_mapping_labels(job.entity_type, set(mapping.values()))
+        if missing:
+            raise AppError(
+                ErrorCode.IMPORT_MAPPING_INCOMPLETE,
+                "В маппинге не хватает обязательных полей: " + ", ".join(missing),
+                extra={"missing": missing},
             )
 
         job.mapping = mapping
@@ -246,8 +296,6 @@ class ImportService:
             raise AppError(ErrorCode.IMPORT_MAPPING_INCOMPLETE, "Сначала сохраните маппинг колонок")
 
         fields_by_target = {f.target: f for f in fields_for(job.entity_type)}
-        natural_key = natural_key_for(job.entity_type)
-        key_spec = fields_by_target[natural_key]
 
         table = await self._load_table(job)
         settings = get_settings()
@@ -257,12 +305,17 @@ class ImportService:
                 f"Слишком много строк: {len(table.rows)} > {settings.import_max_rows}",
             )
 
-        header_index = {h: i for i, h in enumerate(table.headers)}
+        header_index = {h: i for i, h in enumerate(table.headers) if h}
         column_map: list[tuple[int, FieldSpec]] = [
             (header_index[header], fields_by_target[target])
             for header, target in job.mapping.items()
             if header in header_index and target in fields_by_target
         ]
+        if job.entity_type in HANDLED_ENTITY_TYPES:
+            return await self._dry_run_handled(job, table, column_map)
+
+        natural_key = natural_key_for(job.entity_type)
+        key_spec = fields_by_target[natural_key]
         key_col_idx = next((idx for idx, spec in column_map if spec.target == natural_key), None)
         if key_col_idx is None:
             raise AppError(
@@ -287,10 +340,29 @@ class ImportService:
         # organization/product.
         key_column = getattr(model, natural_key)
         existing_map: dict[str, uuid.UUID] = {}
+        license_orgs: dict[str, uuid.UUID] = {}
         if raw_keys:
-            key_stmt = select(key_column, model.id).where(key_column.in_(raw_keys))
+            # Мягко удалённые записи не считаются существующими: иначе строка объявляла «уже есть»
+            # запись, которой пользователь не видит, а применение находило бы её же и «обновляло».
+            key_stmt = select(key_column, model.id).where(
+                key_column.in_(raw_keys), model.deleted_at.is_(None)
+            )
             rows = (await self._session.execute(key_stmt)).all()
             existing_map = dict(rows)
+            if job.entity_type == ImportEntityType.LICENSE.value:
+                license_orgs = dict(
+                    (
+                        await self._session.execute(
+                            select(
+                                OrganizationLicense.contract_number,
+                                OrganizationLicense.organization_id,
+                            ).where(
+                                OrganizationLicense.contract_number.in_(raw_keys),
+                                OrganizationLicense.deleted_at.is_(None),
+                            )
+                        )
+                    ).all()
+                )
 
         egrul_map: dict[str, EgrulEntry] = {}
         if job.entity_type == ImportEntityType.ORGANIZATION.value and raw_keys:
@@ -314,8 +386,9 @@ class ImportService:
         report_rows: list[tuple[list[str], str]] = []
 
         for row_number, row in enumerate(table.rows, start=1):
-            row_data, field_errors = self._extract_row(row, column_map, fk_lookup)
-            notes: list[str] = list(field_errors)
+            row_warnings: list[str] = []
+            row_data, field_errors = self._extract_row(row, column_map, fk_lookup, row_warnings)
+            notes: list[str] = [*field_errors, *row_warnings]
             key_value = row_data.get(natural_key)
 
             if not key_value:
@@ -335,7 +408,18 @@ class ImportService:
                 elif existing_id is None and job.mode == ImportMode.UPDATE.value:
                     notes.append("Запись для обновления не найдена")
                     status = ImportRowStatus.ERROR.value
+                if (
+                    existing_id is not None
+                    and job.entity_type == ImportEntityType.LICENSE.value
+                    and str(license_orgs.get(key_value)) != row_data.get("organization_id")
+                ):
+                    # Ключ — только номер договора; без этой проверки upsert переносил лицензию
+                    # чужой организации на организацию из файла.
+                    notes.append("Номер договора уже относится к другой организации")
+                    status = ImportRowStatus.ERROR.value
 
+                if row_warnings and status == ImportRowStatus.OK.value:
+                    status = ImportRowStatus.WARN.value
                 if field_errors:
                     status = ImportRowStatus.ERROR.value
 
@@ -401,6 +485,9 @@ class ImportService:
                 resolved[kind] = {}
                 continue
             code_stmt = select(lookup_column, model.id).where(lookup_column.in_(codes))
+            deleted_at = getattr(model, "deleted_at", None)
+            if deleted_at is not None:
+                code_stmt = code_stmt.where(deleted_at.is_(None))
             rows_found = (await self._session.execute(code_stmt)).all()
             # `dict(rows_found)`: при неуникальном значении колонки поиска
             # (например, два вуза с совпадающим `name` — в отличие от
@@ -417,9 +504,11 @@ class ImportService:
         row: list[str],
         column_map: list[tuple[int, FieldSpec]],
         fk_lookup: dict[str, dict[str, uuid.UUID]],
+        warnings: list[str] | None = None,
     ) -> tuple[dict[str, Any], list[str]]:
         row_data: dict[str, Any] = {}
         errors: list[str] = []
+        full_name: tuple[str | None, str | None, str | None] | None = None
         for col_idx, spec in column_map:
             raw = row[col_idx] if col_idx < len(row) else ""
             if spec.kind in _FK_TARGETS:
@@ -444,9 +533,100 @@ class ImportService:
             if err:
                 errors.append(err)
                 continue
-            if value is not None:
-                row_data[spec.target] = _json_safe(value)
+            if value is None:
+                continue
+            if spec.kind == "person_name":
+                # «ФИО» одной ячейкой раскладывается на три поля; явные колонки «Фамилия»/«Имя»/
+                # «Отчество» сильнее — см. слияние ниже.
+                last, first, middle = split_full_name(value)
+                if not last or not first:
+                    errors.append(f"«{spec.label}»: укажите фамилию и имя")
+                else:
+                    full_name = (last, first, middle)
+                continue
+            if spec.kind == "contact_methods" and warnings is not None:
+                _known, unknown = parse_contact_methods(raw)
+                if unknown:
+                    warnings.append(f"«{spec.label}»: не распознано — {', '.join(unknown)}")
+            row_data[spec.target] = _json_safe(value)
+        if full_name is not None:
+            for key, part in zip(
+                ("last_name", "first_name", "middle_name"), full_name, strict=True
+            ):
+                if part and not row_data.get(key):
+                    row_data[key] = part
         return row_data, errors
+
+    async def _dry_run_handled(
+        self, job: ImportJob, table: ParsedTable, column_map: list[tuple[int, FieldSpec]]
+    ) -> ImportJob:
+        """Проверка типов, строка которых порождает несколько записей (`imports.handlers`)."""
+        handler = HANDLERS[job.entity_type]
+        parsed: list[tuple[dict[str, Any], list[str], list[str]]] = []
+        for row in table.rows:
+            warnings: list[str] = []
+            row_data, field_errors = self._extract_row(row, column_map, {}, warnings)
+            parsed.append((row_data, field_errors, warnings))
+        context = await handler.prepare(self._session, [data for data, _e, _w in parsed])
+
+        await self._session.execute(
+            delete(ImportRowResult).where(ImportRowResult.import_job_id == job.id)
+        )
+        seen_keys: set[str] = set()
+        ok = warn = error = 0
+        report_rows: list[tuple[list[str], str]] = []
+        for row_number, (row, (row_data, field_errors, warnings)) in enumerate(
+            zip(table.rows, parsed, strict=True), start=1
+        ):
+            check: RowCheck = handler.check_row(row_data, context, job.mode)
+            errors = [*field_errors, *check.errors]
+            notes = [*warnings, *check.warnings]
+            if handler.dedupe_in_file and check.key:
+                if check.key in seen_keys:
+                    notes.append("Повтор внутри файла — применится после предыдущей строки")
+                seen_keys.add(check.key)
+
+            if errors:
+                status = ImportRowStatus.ERROR.value
+                error += 1
+            elif notes:
+                status = ImportRowStatus.WARN.value
+                warn += 1
+            else:
+                status = ImportRowStatus.OK.value
+                ok += 1
+
+            self._session.add(
+                ImportRowResult(
+                    import_job_id=job.id,
+                    row_number=row_number,
+                    status=status,
+                    row_data=row_data,
+                    errors=[*errors, *notes],
+                )
+            )
+            if status != ImportRowStatus.OK.value:
+                report_rows.append((row, "; ".join([*errors, *notes])))
+        await self._session.flush()
+
+        job.total_rows = len(table.rows)
+        job.processed_rows = 0
+        job.ok_rows, job.warn_rows, job.error_rows = ok, warn, error
+        job.status = ImportJobStatus.VALIDATED.value
+        job.result_file_id = await self._write_error_report(job, table.headers, report_rows)
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.IMPORT_VALIDATED,
+            entity_type="import_job",
+            entity_id=job.id,
+            changes={
+                "total_rows": {"old": None, "new": job.total_rows},
+                "ok_rows": {"old": None, "new": ok},
+                "warn_rows": {"old": None, "new": warn},
+                "error_rows": {"old": None, "new": error},
+            },
+        )
+        return job
 
     @staticmethod
     def _enrich_organization_row(row_data: dict[str, Any], entry: EgrulEntry) -> None:
@@ -571,22 +751,96 @@ class ImportService:
         if not pending:
             return 0
 
+        await self._set_actor(job)
+        handler = HANDLERS.get(job.entity_type)
+        batch = Batch(self._session, job) if handler is not None else None
         for row in pending:
-            if job.entity_type == ImportEntityType.ORGANIZATION.value:
-                await self._apply_organization_row(job, row)
-            elif job.entity_type == ImportEntityType.PRODUCT.value:
-                await self._apply_product_row(job, row)
-            else:
-                await self._apply_license_row(job, row)
+            previous_status, previous_errors = row.status, list(row.errors or [])
+            try:
+                # Каждая строка — в своём SAVEPOINT: «отравленная» строка (несмапленное поле,
+                # слишком длинное значение, нарушение уникальности) откатывает только себя.
+                # Раньше исключение обрывало партию, строка оставалась в очереди, и задание
+                # зависало навсегда.
+                async with self._session.begin_nested():
+                    if handler is not None and batch is not None:
+                        self._record_outcome(row, await handler.apply_row(batch, row))
+                    elif job.entity_type == ImportEntityType.ORGANIZATION.value:
+                        await self._apply_organization_row(job, row)
+                    elif job.entity_type == ImportEntityType.PRODUCT.value:
+                        await self._apply_product_row(job, row)
+                    else:
+                        await self._apply_license_row(job, row)
+            except Exception as exc:  # noqa: BLE001 — любая ошибка строки -> ошибка строки, не задания
+                if batch is not None:
+                    batch.invalidate()
+                self._fail_row(job, row, exc, previous_status, previous_errors)
+        job.processed_rows += len(pending)
         await self._session.flush()
         return len(pending)
+
+    async def _set_actor(self, job: ImportJob) -> None:
+        """Записи аудита, которые пишет фоновая задача, принадлежат инициатору импорта, а не
+        «никому»: иначе в журнале не видно, кто создал сотни контактов."""
+        if job.initiated_by is None:
+            return
+        user = await self._session.get(User, job.initiated_by)
+        set_actor(ActorContext(user_id=job.initiated_by, role=user.role if user else None))
+
+    @staticmethod
+    def _record_outcome(row: ImportRowResult, outcome: Any) -> None:
+        row.effects = outcome.effects
+        if outcome.skipped:
+            row.status = ImportRowStatus.SKIPPED.value
+            row.errors = [*(row.errors or []), *outcome.notes]
+            return
+        row.entity_id = outcome.entity_id
+        row.before_snapshot = None
+        if outcome.notes:
+            row.errors = [*(row.errors or []), *outcome.notes]
+
+    @staticmethod
+    def _row_error_text(exc: Exception) -> str:
+        """Причина для отчёта: текст прикладной ошибки показываем, чужое исключение — нет (в нём
+        бывает SQL и значения из чужих строк)."""
+        if isinstance(exc, AppError):
+            reasons = [f"{e.field}: {e.reason}" for e in exc.errors]
+            return "; ".join([exc.detail, *reasons]) if reasons else exc.detail
+        return _GENERIC_ROW_ERROR
+
+    def _fail_row(
+        self,
+        job: ImportJob,
+        row: ImportRowResult,
+        exc: Exception,
+        previous_status: str,
+        previous_errors: list[Any],
+    ) -> None:
+        if not isinstance(exc, AppError):
+            logger.exception(
+                "import_row_failed",
+                job_id=str(job.id),
+                row_number=row.row_number,
+                error=str(exc)[:200],
+            )
+        row.status = ImportRowStatus.ERROR.value
+        row.errors = [*previous_errors, self._row_error_text(exc)]
+        row.entity_id = None
+        job.error_rows += 1
+        if previous_status == ImportRowStatus.WARN.value:
+            job.warn_rows = max(0, job.warn_rows - 1)
+        else:
+            job.ok_rows = max(0, job.ok_rows - 1)
 
     async def _apply_organization_row(self, job: ImportJob, row: ImportRowResult) -> None:
         data = dict(row.row_data)
         internal = {k: data.pop(k) for k in list(data) if k.startswith("_")}
         inn = data.get("inn")
         existing = (
-            await self._session.scalar(select(Organization).where(Organization.inn == inn))
+            await self._session.scalar(
+                select(Organization).where(
+                    Organization.inn == inn, Organization.deleted_at.is_(None)
+                )
+            )
             if inn
             else None
         )
@@ -669,7 +923,9 @@ class ImportService:
         data = dict(row.row_data)
         code = data.get("code")
         existing = (
-            await self._session.scalar(select(Product).where(Product.code == code))
+            await self._session.scalar(
+                select(Product).where(Product.code == code, Product.deleted_at.is_(None))
+            )
             if code
             else None
         )
@@ -679,6 +935,15 @@ class ImportService:
                 row.status = ImportRowStatus.SKIPPED.value
                 row.errors = [*row.errors, "Запись для обновления не найдена"]
                 return
+            if code and await self._session.scalar(
+                select(Product.id).where(Product.code == code, Product.deleted_at.is_not(None))
+            ):
+                # Уникальный индекс `uq_products_code` не смотрит на `deleted_at`: повторный код
+                # удалённого продукта раньше давал 500 на вставке.
+                raise AppError(
+                    ErrorCode.DUPLICATE,
+                    f"Код {code!r} занят удалённым продуктом — восстановите его или смените код",
+                )
             raw_price = data.get("base_price")
             product = Product(
                 code=code,
@@ -738,12 +1003,15 @@ class ImportService:
         existing = (
             await self._session.scalar(
                 select(OrganizationLicense).where(
-                    OrganizationLicense.contract_number == contract_number
+                    OrganizationLicense.contract_number == contract_number,
+                    OrganizationLicense.deleted_at.is_(None),
                 )
             )
             if contract_number
             else None
         )
+        if existing is not None and str(existing.organization_id) != data.get("organization_id"):
+            raise AppError(ErrorCode.DUPLICATE, "Номер договора уже относится к другой организации")
 
         if existing is None:
             if job.mode == ImportMode.UPDATE.value:
@@ -845,6 +1113,16 @@ class ImportService:
             raise AppError(ErrorCode.IMPORT_NOT_ROLLBACKABLE, "Импорт нельзя откатить")
         job.status = ImportJobStatus.ROLLING_BACK.value
         job.rollback_available = False
+        # Строки, заблокированные прошлой попыткой отката, берутся снова: блокер (сделка, связанная
+        # с созданным контактом) мог быть снят, и повторный откат должен добрать остальное.
+        await self._session.execute(
+            update(ImportRowResult)
+            .where(
+                ImportRowResult.import_job_id == job.id,
+                ImportRowResult.status == ImportRowStatus.ROLLBACK_BLOCKED.value,
+            )
+            .values(status=ImportRowStatus.OK.value)
+        )
         await self._session.flush()
         return job
 
@@ -858,7 +1136,10 @@ class ImportService:
                         ImportRowResult.status.in_(_PENDING_STATUSES),
                         ImportRowResult.entity_id.is_not(None),
                     )
-                    .order_by(ImportRowResult.row_number)
+                    # С конца файла к началу: позднюю строку, которая пользовалась записью ранней
+                    # (второй заказ того же человека), снимаем раньше — иначе ранняя увидит её как
+                    # «зависимую» и откат заблокируется зря.
+                    .order_by(ImportRowResult.row_number.desc())
                     .limit(batch_size)
                 )
             )
@@ -868,36 +1149,67 @@ class ImportService:
         if not pending:
             return 0
 
-        model = _MODEL_BY_ENTITY[job.entity_type]
+        await self._set_actor(job)
         for row in pending:
-            entity = await self._session.get(model, row.entity_id)
-            if entity is None:
-                row.status = ImportRowStatus.ROLLED_BACK.value
-                continue
-            if row.before_snapshot:
-                for field, old_value in row.before_snapshot.items():
-                    if (
-                        field in ("region_id", "direction_id", "organization_id")
-                        and old_value is not None
-                    ):
-                        old_value = uuid.UUID(old_value)
-                    if field == "base_price" and old_value is not None:
-                        old_value = Decimal(str(old_value))
-                    if field == "license_signed_at" and old_value is not None:
-                        old_value = dt.date.fromisoformat(old_value)
-                    setattr(entity, field, old_value)
-                entity.version += 1
-                row.status = ImportRowStatus.ROLLED_BACK.value
-            else:
-                blocked = await self._has_critical_dependents(job.entity_type, entity.id)
-                if blocked:
-                    row.status = ImportRowStatus.ROLLBACK_BLOCKED.value
-                    row.errors = [*row.errors, "Откат заблокирован: есть связанные сделки"]
-                else:
-                    entity.deleted_at = dt.datetime.now(dt.UTC)
-                    row.status = ImportRowStatus.ROLLED_BACK.value
+            previous_errors = list(row.errors or [])
+            try:
+                async with self._session.begin_nested():
+                    await self._rollback_row(job, row)
+            except Exception as exc:  # noqa: BLE001 — строка не откатилась, остальные идут дальше
+                logger.exception(
+                    "import_row_rollback_failed",
+                    job_id=str(job.id),
+                    row_number=row.row_number,
+                    error=str(exc)[:200],
+                )
+                row.status = ImportRowStatus.ROLLBACK_BLOCKED.value
+                row.errors = [*previous_errors, "Откат строки не удался: внутренняя ошибка"]
         await self._session.flush()
         return len(pending)
+
+    async def _rollback_row(self, job: ImportJob, row: ImportRowResult) -> None:
+        if job.entity_type in HANDLED_ENTITY_TYPES:
+            effects = copy.deepcopy(row.effects or [])
+            blocked = await rollback_effects(self._session, effects)
+            row.effects = effects  # новый объект: JSONB не отслеживает правку на месте
+            if blocked:
+                row.status = ImportRowStatus.ROLLBACK_BLOCKED.value
+                row.errors = [*(row.errors or []), *blocked]
+            else:
+                row.status = ImportRowStatus.ROLLED_BACK.value
+            return
+
+        model = _MODEL_BY_ENTITY[job.entity_type]
+        entity = await self._session.get(model, row.entity_id)
+        if entity is None:
+            row.status = ImportRowStatus.ROLLED_BACK.value
+            return
+        # `None` — запись создана этим импортом; `{}` — импорт запись обновил без изменений
+        # (upsert того же значения). Раньше оба случая проверялись как `if before_snapshot`, и откат
+        # «пустого» обновления удалял запись, созданную предыдущим импортом.
+        if row.before_snapshot is not None:
+            for field, old_value in row.before_snapshot.items():
+                if (
+                    field in ("region_id", "direction_id", "organization_id")
+                    and old_value is not None
+                ):
+                    old_value = uuid.UUID(old_value)
+                if field == "base_price" and old_value is not None:
+                    old_value = Decimal(str(old_value))
+                if field == "license_signed_at" and old_value is not None:
+                    old_value = dt.date.fromisoformat(old_value)
+                setattr(entity, field, old_value)
+            if row.before_snapshot:
+                entity.version += 1
+            row.status = ImportRowStatus.ROLLED_BACK.value
+            return
+
+        if await self._has_critical_dependents(job.entity_type, entity.id):
+            row.status = ImportRowStatus.ROLLBACK_BLOCKED.value
+            row.errors = [*(row.errors or []), "Откат заблокирован: есть связанные сделки"]
+        else:
+            entity.deleted_at = dt.datetime.now(dt.UTC)
+            row.status = ImportRowStatus.ROLLED_BACK.value
 
     async def _has_critical_dependents(self, entity_type: str, entity_id: uuid.UUID) -> bool:
         if entity_type == ImportEntityType.ORGANIZATION.value:
@@ -930,6 +1242,27 @@ class ImportService:
         )
         if remaining:
             return False
+
+        blocked = await self._session.scalar(
+            select(func.count(ImportRowResult.id)).where(
+                ImportRowResult.import_job_id == job.id,
+                ImportRowResult.status == ImportRowStatus.ROLLBACK_BLOCKED.value,
+            )
+        )
+        if blocked:
+            # Откат «успешен» только когда откатилось всё. Пока есть заблокированные строки,
+            # задание остаётся завершённым с ошибками, а откат доступен снова — после разбора
+            # блокеров (сделки по созданному контакту, продукт в чужой сделке).
+            job.status = ImportJobStatus.COMPLETED_WITH_ERRORS.value
+            job.rollback_available = True
+            await self._session.flush()
+            await self._audit.record(
+                AuditAction.IMPORT_ROLLBACK,
+                entity_type="import_job",
+                entity_id=job.id,
+                changes={"rollback_blocked_rows": {"old": None, "new": int(blocked)}},
+            )
+            return True
 
         job.status = ImportJobStatus.ROLLED_BACK.value
         job.rolled_back_at = dt.datetime.now(dt.UTC)

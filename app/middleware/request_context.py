@@ -94,6 +94,16 @@ def _client_ip(request: Request) -> str | None:
     return _normalize_ip(request.client.host if request.client else None)
 
 
+# Токены подписания и приглашений живут в пути запроса. Лог доступа — не место для них: с токеном
+# из лога можно открыть страницу подписи или принять приглашение. Метрики шаблон маршрута и так
+# не содержит; в журнал запросов путь идёт с закрытым токеном.
+_TOKEN_IN_PATH = re.compile(r"^(/(?:public/sign|api/auth/invite)/)[^/?]+")
+
+
+def _loggable_path(path: str) -> str:
+    return _TOKEN_IN_PATH.sub(lambda m: f"{m.group(1)}***", path)
+
+
 def _route_template(request: Request) -> str:
     """Шаблон маршрута вместо конкретного пути, иначе метрики взорвутся по кардинальности."""
     route = request.scope.get("route")
@@ -145,7 +155,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                 logger.info(
                     "http_request",
                     method=request.method,
-                    path=request.url.path,
+                    path=_loggable_path(request.url.path),
                     route=route,
                     status=status_code,
                     duration_ms=round(elapsed * 1000, 2),

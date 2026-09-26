@@ -144,6 +144,8 @@ class SlaRuleIn(BaseModel):
     status: str = Field(description="id существующего статуса или code нового")
     max_duration_hours: float = Field(gt=0, le=24 * 365)
     warn_threshold_pct: int = Field(default=80, ge=1, le=100)
+    #: Доля срока в процентах, после которой нарушение эскалируется (не меньше 100).
+    escalate_threshold_pct: int = Field(default=150, ge=100, le=1000)
     escalate_to_role: str | None = None
     escalate_to_user_id: uuid.UUID | None = None
     channels: list[str] = Field(default_factory=lambda: ["in_app"])
@@ -158,6 +160,7 @@ class SlaRuleOut(BaseModel):
     status_id: uuid.UUID
     max_duration_hours: float
     warn_threshold_pct: int
+    escalate_threshold_pct: int = 150
     escalate_to_role: str | None = None
     escalate_to_user_id: uuid.UUID | None = None
     channels: list[str]
@@ -171,6 +174,7 @@ class SlaRuleOut(BaseModel):
             status_id=rule.status_id,
             max_duration_hours=rule.max_duration.total_seconds() / 3600,
             warn_threshold_pct=rule.warn_threshold_pct,
+            escalate_threshold_pct=rule.escalate_threshold_pct,
             escalate_to_role=rule.escalate_to_role,
             escalate_to_user_id=rule.escalate_to_user_id,
             channels=rule.channels,

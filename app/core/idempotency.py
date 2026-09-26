@@ -23,11 +23,15 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.db import run_after_rollback
 from app.core.errors import AppError, ErrorCode
 from app.core.redis_client import TTL_IDEMPOTENCY, get_redis, key_idempotency
 from app.modules.admin.models import IdempotencyKey
 
 logger = structlog.get_logger(__name__)
+
+# Сколько живёт метка «запрос выполняется» до появления ответа (см. `IdempotencyGuard.reserve`).
+_IN_FLIGHT_TTL_SECONDS = 120
 
 
 def request_hash(method: str, path: str, body: bytes) -> str:
@@ -128,7 +132,16 @@ class IdempotencyGuard:
             return None
 
     async def reserve(self, *, key: str, method: str, path: str, body: bytes) -> None:
-        """Занимает ключ до выполнения операции, чтобы параллельный повтор не прошёл."""
+        """Занимает ключ до выполнения операции, чтобы параллельный повтор не прошёл.
+
+        Занятие атомарно: метка в Redis ставится `SET NX`, а вставка в БД проверяет, что строка
+        действительно добавилась. Раньше «поиск» и «занятие» были раздельными шагами без проверки
+        результата, и два одновременных запроса с одним ключом выполнялись оба.
+
+        Метка «выполняется» живёт недолго (`_IN_FLIGHT_TTL_SECONDS`) и снимается, если запрос упал:
+        полный срок (24 часа) ей ставит только `store` — после того, как есть ответ, который можно
+        повторить. Раньше метка сразу получала 24 часа, и упавший запрос блокировал повтор с тем же
+        ключом на сутки."""
         settings = get_settings()
         actor_id = self._actor_id
         key = scoped_key(key, actor_id)
@@ -136,6 +149,26 @@ class IdempotencyGuard:
         expires_at = dt.datetime.now(dt.UTC) + dt.timedelta(
             seconds=settings.idempotency_ttl_seconds
         )
+
+        redis_key = key_idempotency(key)
+        marker = json.dumps({"request_hash": digest, "response_status": None})
+        marked = False
+        try:
+            marked = bool(
+                await get_redis().set(redis_key, marker, ex=_IN_FLIGHT_TTL_SECONDS, nx=True)
+            )
+            if not marked:
+                # Метку поставил другой запрос между нашим поиском и занятием.
+                raise AppError(
+                    ErrorCode.IDEMPOTENCY_CONFLICT,
+                    "Запрос с этим Idempotency-Key ещё обрабатывается",
+                    status=409,
+                )
+        except AppError:
+            raise
+        except Exception:
+            # Redis недоступен: надёжный путь — уникальный ключ в БД ниже.
+            logger.warning("idempotency_redis_reserve_failed")
 
         stmt = (
             pg_insert(IdempotencyKey)
@@ -149,16 +182,36 @@ class IdempotencyGuard:
             )
             .on_conflict_do_nothing(index_elements=[IdempotencyKey.key])
         )
-        await self._session.execute(stmt)
-
-        try:
-            await get_redis().setex(
-                key_idempotency(key),
-                TTL_IDEMPOTENCY,
-                json.dumps({"request_hash": digest, "response_status": None}),
+        inserted = (await self._session.execute(stmt.returning(IdempotencyKey.key))).first()
+        if inserted is None:
+            # Ключ уже зафиксирован другим запросом (он успел закоммитить). Свою метку снимаем,
+            # чужую запись не трогаем; повтор запроса вернёт сохранённый ответ.
+            await self._release_marker(redis_key, digest)
+            raise AppError(
+                ErrorCode.IDEMPOTENCY_CONFLICT,
+                "Запрос с этим Idempotency-Key уже обработан или обрабатывается: "
+                "повторите запрос, чтобы получить результат",
+                status=409,
             )
-        except Exception:
-            logger.warning("idempotency_redis_reserve_failed")
+
+        if marked:
+            # Запрос упал — метка «выполняется» не должна отравлять повтор.
+            run_after_rollback(self._session, lambda: self._release_marker(redis_key, digest))
+
+    @staticmethod
+    async def _release_marker(redis_key: str, digest: str) -> None:
+        """Снимает метку «выполняется», но только свою: если за это время `store` уже записал
+        ответ (или ключ занял запрос с другим телом), Redis не трогаем."""
+        try:
+            redis = get_redis()
+            raw = await redis.get(redis_key)
+            if not raw:
+                return
+            current = json.loads(raw)
+            if current.get("response_status") is None and current.get("request_hash") == digest:
+                await redis.delete(redis_key)
+        except Exception:  # noqa: BLE001 — не мешаем исходной ошибке запроса
+            logger.warning("idempotency_release_failed")
 
     async def store(self, *, key: str, status: int, body: dict[str, Any] | None) -> None:
         key = scoped_key(key, self._actor_id)

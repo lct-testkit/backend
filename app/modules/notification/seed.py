@@ -213,6 +213,12 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str | None, str]] = [
         "Вам назначена сделка в качестве ответственного.",
     ),
     (
+        "DEAL_MENTION",
+        "in_app",
+        None,
+        "Вас упомянули в комментарии к сделке — откройте сделку, чтобы прочитать.",
+    ),
+    (
         "DEAL_EVENT",
         "in_app",
         None,

@@ -186,6 +186,29 @@ async def download_object_bytes(*, bucket: str, key: str) -> bytes:
     return await asyncio.to_thread(_download)
 
 
+async def download_object_to_file(*, bucket: str, key: str, path: str) -> str:
+    """Скачивает объект в файл потоком (константная память) и возвращает его sha256.
+
+    Для больших выгрузок (полный ЕГРЮЛ — гигабайты): `download_object_bytes` держит объект
+    в памяти целиком, а `sha256` по нему считался отдельным проходом."""
+    import hashlib
+
+    def _download() -> str:
+        response = _client().get_object(Bucket=bucket, Key=key)
+        body = response["Body"]
+        digest = hashlib.sha256()
+        try:
+            with open(path, "wb") as target:
+                for chunk in body.iter_chunks(chunk_size=1024 * 1024):
+                    target.write(chunk)
+                    digest.update(chunk)
+        finally:
+            body.close()
+        return digest.hexdigest()
+
+    return await asyncio.to_thread(_download)
+
+
 async def upload_object_bytes(*, bucket: str, key: str, body: bytes, content_type: str) -> None:
     """Кладёт объект напрямую с сервера — в отличие от presigned PUT, здесь
     нет клиента, который сам грузит байты: это отчёты об ошибках импорта

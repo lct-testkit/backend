@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Path, Query, Response
+from fastapi import APIRouter, Depends, Path, Query, Response, status
 from sqlalchemy import select
 
 from app.core.deps import AuditDep, DbSession, Pagination, require_permission
-from app.core.errors import NotFoundError
+from app.core.errors import AppError, ErrorCode, NotFoundError
 from app.core.pagination import Page, keyset_before
 from app.core.permissions import Permission
 from app.core.security import Principal
@@ -24,6 +24,7 @@ from app.modules.admin.schemas import (
     AuditChainReport,
     AuditEntryOut,
     AuditListResponse,
+    FeatureFlagCreate,
     FeatureFlagListResponse,
     FeatureFlagOut,
     FeatureFlagPatch,
@@ -31,6 +32,7 @@ from app.modules.admin.schemas import (
     SystemSettingOut,
     SystemSettingPut,
 )
+from app.modules.admin.setting_crypto import decrypt_value, encrypt_value
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.models import AuditLog
 from app.modules.audit.service import AuditFilters, AuditService, diff_changes
@@ -61,6 +63,51 @@ async def list_feature_flags(
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
     built: Page = Page.build(rows, limit=page.limit, serializer=FeatureFlagOut.model_validate)
     return FeatureFlagListResponse(items=built.items, next_cursor=built.next_cursor)
+
+
+@router.post(
+    "/feature-flags",
+    summary="Создать флаг",
+    description=(
+        "Заводит флаг функциональности. Код уникален (повтор — 409). Изменение пишется "
+        "в аудит. Роль: ADMIN."
+    ),
+    response_model=FeatureFlagOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_feature_flag(
+    payload: FeatureFlagCreate,
+    session: DbSession,
+    audit: AuditDep,
+    principal: Annotated[Principal, Depends(require_permission(Permission.SETTINGS_WRITE))],
+) -> FeatureFlagOut:
+    exists = await session.scalar(select(FeatureFlag.id).where(FeatureFlag.code == payload.code))
+    if exists is not None:
+        raise AppError(ErrorCode.DUPLICATE, f"Флаг {payload.code!r} уже существует")
+    flag = FeatureFlag(
+        code=payload.code,
+        is_enabled=payload.is_enabled,
+        description=payload.description,
+        rollout=payload.rollout,
+        updated_by=principal.user_id,
+    )
+    session.add(flag)
+    await session.flush()
+    await audit.record(
+        AuditAction.FEATURE_FLAG_CHANGED,
+        entity_type="feature_flag",
+        entity_id=flag.id,
+        changes=diff_changes(
+            {},
+            {
+                "code": flag.code,
+                "is_enabled": flag.is_enabled,
+                "description": flag.description,
+                "rollout": flag.rollout,
+            },
+        ),
+    )
+    return FeatureFlagOut.model_validate(flag)
 
 
 @router.patch(
@@ -108,6 +155,14 @@ async def patch_feature_flag(
         changes=diff_changes(before, after),
     )
     return FeatureFlagOut.model_validate(flag)
+
+
+def _readable(stored: Any) -> Any:
+    """Прежнее значение настройки для сравнения; нечитаемое (нет ключа) — как «неизвестное»."""
+    try:
+        return decrypt_value(stored)
+    except AppError:
+        return None
 
 
 @router.get(
@@ -166,15 +221,27 @@ async def put_system_setting(
     ).scalar_one_or_none()
 
     is_new = setting is None
+    # Для сравнения «было → стало» значения берутся расшифрованными: шифротекст каждый раз новый,
+    # и запись того же значения выглядела бы изменением. В журнал секреты всё равно не попадают.
     before = (
-        {} if is_new else {"value": setting.value, "is_secret": setting.is_secret}  # type: ignore[union-attr]
+        {}
+        if is_new
+        else {
+            "value": _readable(setting.value),  # type: ignore[union-attr]
+            "is_secret": setting.is_secret,  # type: ignore[union-attr]
+        }
     )
 
+    will_be_secret = (
+        payload.is_secret if payload.is_secret is not None else bool(setting and setting.is_secret)
+    )
+    # Секретное значение ложится в БД зашифрованным (если задан SETTINGS_ENCRYPTION_KEY).
+    stored_value = encrypt_value(payload.value) if will_be_secret else payload.value
     if setting is None:
-        setting = SystemSetting(key=key, value=payload.value)
+        setting = SystemSetting(key=key, value=stored_value)
         session.add(setting)
     else:
-        setting.value = payload.value
+        setting.value = stored_value
 
     if payload.description is not None:
         setting.description = payload.description
@@ -183,20 +250,22 @@ async def put_system_setting(
     setting.updated_by = principal.user_id
     await session.flush()
 
-    after = {"value": setting.value, "is_secret": setting.is_secret}
-    if setting.is_secret:
-        # Само значение секрета в журнал не пишем — только факт изменения.
-        before = {**before, "value": "***"} if before else {}
-        after = {**after, "value": "***"}
-
+    after = {"value": payload.value, "is_secret": setting.is_secret}
+    changes: dict[str, Any] = {
+        "key": {"old": None if is_new else key, "new": key},
+        **diff_changes(before, after),
+    }
+    # Значение секрета в неизменяемый журнал не пишем ни в каком виде — ни новое, ни прежнее.
+    # Смотрим и на прежний признак: при снятии «секретности» старое значение раньше уходило в
+    # журнал открытым текстом. Сама смена значения остаётся видна маркером.
+    was_secret = bool(before.get("is_secret"))
+    if (was_secret or setting.is_secret) and "value" in changes:
+        changes["value"] = {"old": "***" if not is_new else None, "new": "***"}
     await audit.record(
         AuditAction.SYSTEM_SETTING_CHANGED,
         entity_type="system_setting",
         entity_id=None,
-        changes={
-            "key": {"old": None if is_new else key, "new": key},
-            **diff_changes(before, after),
-        },
+        changes=changes,
     )
 
     return SystemSettingOut(

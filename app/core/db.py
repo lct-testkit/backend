@@ -30,6 +30,8 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 # Ключ `session.info` со списком действий, отложенных до коммита (`run_after_commit`).
 _AFTER_COMMIT_KEY = "after_commit"
+# То же для откатов (`run_after_rollback`).
+_AFTER_ROLLBACK_KEY = "after_rollback"
 
 
 def create_engine() -> AsyncEngine:
@@ -83,12 +85,32 @@ def run_after_commit(session: AsyncSession, action: Callable[[], Awaitable[None]
     session.info.setdefault(_AFTER_COMMIT_KEY, []).append(action)
 
 
+def run_after_rollback(session: AsyncSession, action: Callable[[], Awaitable[None]]) -> None:
+    """Откладывает `action` до отката транзакции запроса — зеркало `run_after_commit`.
+
+    Нужно тому, что запрос успел записать во внешнее хранилище ДО результата и что при неудаче
+    должно исчезнуть: метка «запрос с этим Idempotency-Key выполняется» в Redis. Без снятия
+    упавший запрос блокировал повтор с тем же ключом на сутки (409 «ещё обрабатывается»).
+    """
+    session.info.setdefault(_AFTER_ROLLBACK_KEY, []).append(action)
+
+
 async def _run_after_commit_actions(session: AsyncSession) -> None:
+    session.info.pop(_AFTER_ROLLBACK_KEY, None)  # запрос удался — откатывать нечего
     for action in session.info.pop(_AFTER_COMMIT_KEY, []):
         try:
             await action()
         except Exception:  # noqa: BLE001 — коммит уже состоялся
             logger.warning("after_commit_action_failed", exc_info=True)
+
+
+async def _run_after_rollback_actions(session: AsyncSession) -> None:
+    session.info.pop(_AFTER_COMMIT_KEY, None)  # запрос упал — отложенное до коммита не нужно
+    for action in session.info.pop(_AFTER_ROLLBACK_KEY, []):
+        try:
+            await action()
+        except Exception:  # noqa: BLE001 — исходная ошибка запроса важнее
+            logger.warning("after_rollback_action_failed", exc_info=True)
 
 
 async def get_db_session() -> AsyncIterator[AsyncSession]:
@@ -106,6 +128,7 @@ async def get_db_session() -> AsyncIterator[AsyncSession]:
                 await session.commit()
         except Exception:
             await session.rollback()
+            await _run_after_rollback_actions(session)
             raise
         await _run_after_commit_actions(session)
 
@@ -121,6 +144,7 @@ async def session_scope() -> AsyncIterator[AsyncSession]:
                 await session.commit()
         except Exception:
             await session.rollback()
+            await _run_after_rollback_actions(session)
             raise
         await _run_after_commit_actions(session)
 

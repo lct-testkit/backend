@@ -21,8 +21,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import hashlib
+import threading
 import uuid
 from typing import Any
 
@@ -45,7 +47,12 @@ from app.core.storage import ensure_bucket, generate_presigned_get, upload_objec
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
 from app.modules.files.models import Attachment, AttachmentCategory, File, FileStatus
-from app.modules.reporting.builders import REPORT_BUILDERS, REPORT_ESTIMATORS, ReportDataset
+from app.modules.reporting.builders import (
+    FILE_ONLY_REPORTS,
+    REPORT_BUILDERS,
+    REPORT_ESTIMATORS,
+    ReportDataset,
+)
 from app.modules.reporting.models import (
     Dashboard,
     DashboardWidget,
@@ -78,13 +85,41 @@ REPORT_DATA_CATEGORIES: dict[str, list[str]] = {
     "kam_summary": ["ФИО сотрудников (КАМ)"],
     "stuck_deals": ["ФИО сотрудников (владелец сделки)"],
     "learning_progress": ["ФИО контактов/учащихся", "прогресс обучения"],
+    # Выгрузка для LMS: контакты учащихся и их профиль целиком, без маскирования.
+    "lms_users_upload": [
+        "ФИО, телефон и email учащихся",
+        "ПДн учащихся (СНИЛС, паспорт, дата рождения, адрес регистрации, диплом)",
+    ],
 }
+
+
+def _reject_null_fields(data: dict[str, Any]) -> None:
+    """Все поля дашборда и виджета в БД NOT NULL, а схемы PATCH допускают `null` (он означает
+    «не менять» только для не переданного поля). Переданный `null` доходил до UPDATE и давал
+    ошибку БД, то есть 500; теперь — 422 с перечнем полей."""
+    nulls = [key for key, value in data.items() if value is None]
+    if nulls:
+        raise ValidationError(
+            "Поле нельзя очистить: значение null не допускается",
+            [FieldError(field=key, reason="не может быть null") for key in nulls],
+        )
 
 
 def _report_data_categories(template_code: str) -> list[str]:
     return REPORT_DATA_CATEGORIES.get(
         template_code, ["не классифицировано — считать содержащим ПДн"]
     )
+
+
+# matplotlib (pyplot держит глобальное состояние), openpyxl и reportlab не рассчитаны на
+# параллельные сборки из разных потоков. Цикл событий они не блокируют (`to_thread`), но между
+# собой идут по одной.
+_RENDER_LOCK = threading.Lock()
+
+
+def _render_serialized(dataset: ReportDataset, *, format: str, template_code: str) -> bytes:
+    with _RENDER_LOCK:
+        return render_report(dataset, format=format, template_code=template_code)
 
 
 class ReportTemplateService:
@@ -220,7 +255,11 @@ class ReportJobService:
         await self._session.flush()
 
         dataset = await builder(self._session, principal, job.params)
-        content = render_report(dataset, format=job.format, template_code=kind)
+        # Рендер (openpyxl, reportlab, matplotlib) — секунды CPU: в потоке, а не в цикле событий,
+        # иначе на это время замирали бы все остальные запросы воркера.
+        content = await asyncio.to_thread(
+            _render_serialized, dataset, format=job.format, template_code=kind
+        )
 
         settings = get_settings()
         bucket = settings.s3_bucket_reports
@@ -288,6 +327,9 @@ class ReportJobService:
         )
 
     async def mark_failed(self, job: ReportJob, error: str) -> None:
+        """`error` попадает в `ReportJobOut.error`, то есть к клиенту: только обобщённый текст, без
+        текста исключения (в нём бывают SQL, пути и данные). Подробности воркер пишет в лог по
+        коду ошибки, который здесь входит в сообщение."""
         job.status = ReportJobStatus.FAILED.value
         job.error = error[:2000]
         job.finished_at = dt.datetime.now(dt.UTC)
@@ -313,11 +355,25 @@ class ReportJobService:
         self.ensure_read_access(job, principal)
         template = await ReportTemplateService(self._session).get_or_404(job.template_code)
         kind = template.query_def.get("kind", template.code)
+        if kind in FILE_ONLY_REPORTS:
+            # Отчёт с ПДн целиком (например, выгрузка для LMS: СНИЛС, паспорт, адрес). У `/data`
+            # нет записи `REPORT_EXPORTED`, значит, отдать его здесь — вынести ПДн мимо аудита.
+            raise ForbiddenError(
+                "Отчёт содержит персональные данные и доступен только файлом: скачайте его "
+                "через GET /api/reports/{id}/download"
+            )
         builder = REPORT_BUILDERS[kind]
         return await builder(self._session, principal, job.params)
 
     async def download(self, job: ReportJob, principal: Principal) -> tuple[str, dt.datetime]:
         self.ensure_read_access(job, principal)
+        # Роль могла измениться после запуска: отчёт шаблона, закрытого для нынешней роли,
+        # не выдаётся и автору (`allowed_roles` проверялась только при создании).
+        template = await self._session.scalar(
+            select(ReportTemplate).where(ReportTemplate.code == job.template_code)
+        )
+        if template is not None:
+            self._ensure_role_allowed(template, principal)
         if job.status == ReportJobStatus.FAILED.value:
             raise AppError(
                 ErrorCode.REPORT_NOT_READY,
@@ -344,6 +400,19 @@ class ReportJobService:
             filename=file.original_filename,
         )
         expires_at = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=ttl_seconds)
+        # Выдача ссылки на отчёт — выгрузка данных (часто с ПДн): пишется в аудит, как и скачивание
+        # обычного файла. Отдельного действия `REPORT_DOWNLOADED` в перечне нет — используется
+        # `FILE_DOWNLOADED` с сущностью `report_job`.
+        await self._audit.record(
+            AuditAction.FILE_DOWNLOADED,
+            entity_type="report_job",
+            entity_id=job.id,
+            changes={
+                "file_id": {"old": None, "new": str(file.id)},
+                "template_code": {"old": None, "new": job.template_code},
+                "format": {"old": None, "new": job.format},
+            },
+        )
         return url, expires_at
 
 
@@ -406,6 +475,7 @@ class DashboardService:
         if dashboard.version != expected_version:
             raise VersionConflictError(dashboard.version, {"name": dashboard.name})
         data = payload.model_dump(exclude_unset=True)
+        _reject_null_fields(data)
         changes: dict[str, dict[str, Any]] = {}
         for key, value in data.items():
             old = getattr(dashboard, key)
@@ -474,6 +544,7 @@ class DashboardWidgetService:
 
     async def update(self, widget: DashboardWidget, payload: Any) -> DashboardWidget:
         data = payload.model_dump(exclude_unset=True)
+        _reject_null_fields(data)
         changes: dict[str, dict[str, Any]] = {}
         for key, value in data.items():
             old = getattr(widget, key)

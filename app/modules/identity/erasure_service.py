@@ -69,6 +69,16 @@ _RETAINED_BUSINESS_HISTORY = {
 }
 
 
+def _grace_within_deadline(deadline_at: dt.datetime, settings: Any) -> dt.datetime:
+    """Отсрочка исполнения не позже срока запроса субъекта.
+
+    Отсрочка «Режим A» (30 дней) задумана для увольняемого сотрудника. У запроса контакта или ИП
+    срок по ст. 21 152-ФЗ короче (по умолчанию 7 дней): исполнение только после 30-дневной отсрочки
+    означало, что срок нарушался всегда, у каждого такого запроса."""
+    grace = dt.datetime.now(dt.UTC) + dt.timedelta(days=settings.erasure_grace_days)
+    return min(grace, deadline_at)
+
+
 class ErasureExecutionService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -147,11 +157,12 @@ class ErasureExecutionService:
         contact_service = ContactService(self._session)
         blockers = await contact_service.collect_erasure_blockers(contact)
         status = ErasureStatus.BLOCKED.value if blockers else ErasureStatus.PENDING.value
-        grace_until = (
-            None
-            if blockers
-            else dt.datetime.now(dt.UTC) + dt.timedelta(days=settings.erasure_grace_days)
+        # new_spec §4.8.1: срок именно для запроса контакта (ст. 21) короче, чем для сотрудника —
+        # см. docstring `erasure_contact_deadline_days` в `app/core/config.py`.
+        deadline_at = dt.datetime.now(dt.UTC) + dt.timedelta(
+            days=settings.erasure_contact_deadline_days
         )
+        grace_until = None if blockers else _grace_within_deadline(deadline_at, settings)
 
         request = DataErasureRequest(
             subject_type=SubjectType.CONTACT.value,
@@ -159,11 +170,7 @@ class ErasureExecutionService:
             reason=reason,
             legal_basis=legal_basis,
             requested_by=principal.user_id,
-            # new_spec §4.8.1: срок именно для запроса контакта (ст. 21)
-            # короче, чем для сотрудника — см. docstring `erasure_contact_
-            # deadline_days` в `app/core/config.py`.
-            deadline_at=dt.datetime.now(dt.UTC)
-            + dt.timedelta(days=settings.erasure_contact_deadline_days),
+            deadline_at=deadline_at,
             status=status,
             blockers={"mode": mode, "comment": comment, "items": blockers},
             grace_until=grace_until,
@@ -232,11 +239,10 @@ class ErasureExecutionService:
         org_service = OrganizationService(self._session)
         blockers = await org_service.collect_erasure_blockers(organization)
         status = ErasureStatus.BLOCKED.value if blockers else ErasureStatus.PENDING.value
-        grace_until = (
-            None
-            if blockers
-            else dt.datetime.now(dt.UTC) + dt.timedelta(days=settings.erasure_grace_days)
+        deadline_at = dt.datetime.now(dt.UTC) + dt.timedelta(
+            days=settings.erasure_contact_deadline_days
         )
+        grace_until = None if blockers else _grace_within_deadline(deadline_at, settings)
 
         request = DataErasureRequest(
             subject_type=SubjectType.ORGANIZATION.value,
@@ -244,8 +250,7 @@ class ErasureExecutionService:
             reason=reason,
             legal_basis=legal_basis,
             requested_by=principal.user_id,
-            deadline_at=dt.datetime.now(dt.UTC)
-            + dt.timedelta(days=settings.erasure_contact_deadline_days),
+            deadline_at=deadline_at,
             status=status,
             blockers={"mode": mode, "comment": comment, "items": blockers},
             grace_until=grace_until,
@@ -416,6 +421,26 @@ class ErasureExecutionService:
         # что-то могло измениться за дни отсрочки (появилась новая сделка,
         # контакт что-то подписал). Молча исполнять в этом случае нельзя.
         blockers = await self._collect_blockers_for(request)
+        mode = (request.blockers or {}).get("mode", "anonymize")
+        if not blockers and mode == "hard_delete":
+            # Зависимые записи не дали бы удалить строку (внешние ключи RESTRICT): заявка
+            # блокируется сразу, а не падает на DELETE и не повторяется каждые 15 минут, каждый раз
+            # заново выпуская акт уничтожения (а для пользователя — после удаления учётки в
+            # Keycloak).
+            if request.subject_type == SubjectType.ORGANIZATION.value:
+                organization = await self._session.get(Organization, request.subject_id)
+                if organization is not None:
+                    blockers = await OrganizationService(self._session).hard_delete_blockers(
+                        organization
+                    )
+            elif request.subject_type == SubjectType.USER.value:
+                subject = await self._session.get(User, request.subject_id)
+                if subject is not None:
+                    blockers = await AdminUserService(self._session).hard_delete_blockers(subject)
+            else:
+                contact = await self._session.get(Contact, request.subject_id)
+                if contact is not None:
+                    blockers = await ContactService(self._session).hard_delete_blockers(contact)
         if blockers:
             request.status = ErasureStatus.BLOCKED.value
             request.grace_until = None
@@ -434,7 +459,6 @@ class ErasureExecutionService:
             )
             return {"executed": False, "blockers": [b["code"] for b in blockers]}
 
-        mode = (request.blockers or {}).get("mode", "anonymize")
         if request.subject_type == SubjectType.USER.value:
             result = await self._execute_user(request, mode=mode)
         elif request.subject_type == SubjectType.ORGANIZATION.value:
@@ -475,8 +499,6 @@ class ErasureExecutionService:
                     "Жёсткое удаление невозможно: есть зависимые записи",
                     extra={"user_id": str(user.id)},
                 )
-            if user.keycloak_id:
-                await keycloak_client.delete_user(user.keycloak_id)
             act_file_id = await self._issue_act(
                 request,
                 subject_type="user",
@@ -485,11 +507,20 @@ class ErasureExecutionService:
                 categories_retained=[],
             )
             request.act_file_id = act_file_id
+            keycloak_id = user.keycloak_id
             await self._session.delete(user)
+            # Сначала строка в БД (внешний ключ, если что-то упустили, падает здесь и откатывает
+            # всё), и только потом учётка в Keycloak: обратный порядок оставлял человека без входа
+            # при сохранившейся локальной записи.
+            await self._session.flush()
+            if keycloak_id:
+                await keycloak_client.delete_user(keycloak_id)
             return {"changes": {"mode": {"old": None, "new": "hard_delete"}}}
 
         # Режим B — обезличивание (new_spec §4.8.2).
-        short_id = str(user.id)[:8]
+        # Хвост UUIDv7, а не начало: старшие биты — метка времени, и объекты, созданные в одну
+        # минуту, получали бы одинаковый «псевдоним».
+        short_id = user.id.hex[-8:]
         if user.avatar_file_id:
             avatar = await self._session.get(File, user.avatar_file_id)
             if avatar is not None and avatar.refcount > 0:

@@ -109,6 +109,8 @@ class AuditAction(StrEnum):
     STATUS_ARCHIVED = "STATUS_ARCHIVED"
     STATUS_MAPPING_STARTED = "STATUS_MAPPING_STARTED"
     STATUS_MAPPING_COMPLETED = "STATUS_MAPPING_COMPLETED"
+    # Перенос сделок остановился: часть сделок перенести нельзя, статус не архивирован.
+    STATUS_MAPPING_FAILED = "STATUS_MAPPING_FAILED"
 
     # --- Организации и ЕГРЮЛ ---
     ORGANIZATION_CREATED = "ORGANIZATION_CREATED"
@@ -130,6 +132,11 @@ class AuditAction(StrEnum):
     # перечисленные в разделе 18.
     CONTACT_CREATED = "CONTACT_CREATED"
     CONTACT_UPDATED = "CONTACT_UPDATED"
+    # Ответственный за продукт (каталог «Вендоры»): связь контакта с продуктом ставится и снимается
+    # вручную (`PUT`/`DELETE /products/{id}/contacts/{contact_id}`). Запись в аудите привязана к
+    # продукту — «кто отвечает за продукт» читается с его карточки.
+    CONTACT_PRODUCT_LINKED = "CONTACT_PRODUCT_LINKED"
+    CONTACT_PRODUCT_UNLINKED = "CONTACT_PRODUCT_UNLINKED"
     PRODUCT_CREATED = "PRODUCT_CREATED"
     PRODUCT_UPDATED = "PRODUCT_UPDATED"
     DIRECTION_CREATED = "DIRECTION_CREATED"

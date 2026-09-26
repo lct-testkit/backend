@@ -13,7 +13,7 @@ import uuid
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import DateTime, Index, String, Text, func
+from sqlalchemy import DateTime, Index, SmallInteger, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -65,3 +65,9 @@ class AuditLog(Base):
 
     prev_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Версия состава хэшируемых полей (`audit.service.compute_hash`): 1 — исходный, 2 — ещё и
+    # роль актора, подмена личности, IP и User-Agent. Записи до расширения остаются версии 1 и
+    # проверяются по-старому: пересчитывать их нельзя, таблица неизменяемая.
+    hash_version: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, server_default=text("1")
+    )

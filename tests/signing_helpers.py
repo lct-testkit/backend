@@ -53,7 +53,12 @@ async def _document(
     from app.core.db import session_scope
     from app.modules.catalog.models import Contact
     from app.modules.files.models import File
-    from app.modules.signing.models import Signature, SignatureDocument, SignatureRequest
+    from app.modules.signing.models import (
+        EdmAgreement,
+        Signature,
+        SignatureDocument,
+        SignatureRequest,
+    )
 
     now = dt.datetime.now(dt.UTC)
     built = Built(document_id=uuid.uuid4())
@@ -105,9 +110,22 @@ async def _document(
         for order, spec in enumerate(requests, start=1):
             user = spec.get("user")
             contact = None
+            agreement = None
             if user is None:
                 contact = Contact(first_name="Пётр", last_name="Сидоров", email="p@example.ru")
                 session.add(contact)
+                await session.flush()
+                # Подпись внешнего подписанта требует действующего соглашения об ЭДО (`send()`
+                # его находит и привязывает к запросу) — здесь запросы создаются мимо `send()`.
+                # `"agreement_status"` в описании подписанта позволяет тесту отозвать соглашение.
+                agreement = EdmAgreement(
+                    party_type="contact",
+                    party_id=contact.id,
+                    conclusion_method="paper",
+                    status=spec.get("agreement_status", "active"),
+                    revoked_at=now if spec.get("agreement_status") == "revoked" else None,
+                )
+                session.add(agreement)
                 await session.flush()
             token = spec.get("token")
             request = SignatureRequest(
@@ -115,6 +133,7 @@ async def _document(
                 signer_type="internal" if user else "external",
                 signer_user_id=user.id if user else None,
                 signer_contact_id=contact.id if contact else None,
+                edm_agreement_id=agreement.id if agreement else None,
                 signer_name_snapshot=f"Подписант {order}",
                 sign_order=order,
                 status=spec["status"],

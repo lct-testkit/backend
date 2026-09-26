@@ -39,11 +39,14 @@ from sqlalchemy import Select, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.db import run_after_commit
 from app.core.errors import AppError, ErrorCode, FieldError, NotFoundError, ValidationError
+from app.core.optimistic import claim_version
 from app.core.redis_client import TTL_WORKFLOW_GRAPH, get_redis, key_workflow_graph
 from app.core.security import Principal
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
+from app.modules.identity.models import Role, User
 from app.modules.workflow import dsl
 from app.modules.workflow.models import (
     TERMINAL_TYPES,
@@ -59,6 +62,14 @@ from app.modules.workflow.models import (
 from app.modules.workflow.schemas import GraphIn, TransitionIn
 
 MAPPING_BATCH_SIZE = 100
+
+# Значения полей эскалации SLA у правила, снимок которого сделан до их появления.
+_SLA_RULE_SNAPSHOT_DEFAULTS: dict[str, Any] = {
+    "escalate_threshold_pct": 150,
+    "escalate_to_role": None,
+    "escalate_to_user_id": None,
+    "channels": ["in_app"],
+}
 
 
 @dataclass(slots=True)
@@ -95,7 +106,10 @@ async def get_cached_published_graph(workflow: Workflow) -> dict[str, Any]:
     в ней — те же значения, что были в живых таблицах на момент публикации.
 
     Читает `cache:wf:{id}` (раздел 16), при промахе — `workflow.published_graph`
-    и заполняет кэш. Публикация инвалидирует ключ явно (`invalidate_workflow_cache`).
+    и заполняет кэш. Публикация сбрасывает ключ после коммита (`invalidate_workflow_cache`),
+    а запись в кэше несёт хэш графа и принимается, только если он совпадает с `graph_hash`
+    воронки из БД: так запись, которую читатель успел положить между коммитом публикации и
+    сбросом ключа, не оживляет устаревший снимок на час.
     """
     if workflow.state != WorkflowState.PUBLISHED.value or workflow.published_graph is None:
         raise AppError(
@@ -107,7 +121,9 @@ async def get_cached_published_graph(workflow: Workflow) -> dict[str, Any]:
     try:
         cached = await get_redis().get(key_workflow_graph(workflow.id))
         if cached:
-            return json.loads(cached)
+            entry = json.loads(cached)
+            if isinstance(entry, dict) and entry.get("h") == workflow.graph_hash and "g" in entry:
+                return entry["g"]
     except Exception:  # noqa: BLE001 — кэш не источник истины
         pass
 
@@ -116,7 +132,7 @@ async def get_cached_published_graph(workflow: Workflow) -> dict[str, Any]:
         await get_redis().setex(
             key_workflow_graph(workflow.id),
             TTL_WORKFLOW_GRAPH,
-            json.dumps(graph, default=str),
+            json.dumps({"h": workflow.graph_hash, "g": graph}, default=str),
         )
     except Exception:  # noqa: BLE001
         pass
@@ -323,7 +339,7 @@ class WorkflowService:
             await self._demote_other_defaults(workflow)
         for key, change in changes.items():
             setattr(workflow, key, change["new"])
-        workflow.version += 1
+        await self._claim_version(workflow, expected_version)
         await self._session.flush()
         await self._audit.record(
             AuditAction.WORKFLOW_UPDATED,
@@ -383,6 +399,16 @@ class WorkflowService:
                 extra={"current_version": workflow.version},
             )
 
+    async def _claim_version(self, workflow: Workflow, expected_version: int) -> None:
+        """Проверка версии воронки и её атомарный захват (`UPDATE ... WHERE version = :v`).
+
+        Проверка в Python ловит только запоздавший запрос; два запроса с одной версией проходили
+        её оба, и правки графа затирали друг друга."""
+        self._check_version(workflow, expected_version)
+        await claim_version(
+            self._session, workflow, expected_version, conflicting={"name": workflow.name}
+        )
+
     def _ensure_not_archived(self, workflow: Workflow) -> None:
         if workflow.state == WorkflowState.ARCHIVED.value:
             raise AppError(ErrorCode.VALIDATION, "Архивная воронка недоступна для изменений")
@@ -390,7 +416,7 @@ class WorkflowService:
     async def save_graph(
         self, workflow: Workflow, payload: GraphIn, *, expected_version: int
     ) -> Graph:
-        self._check_version(workflow, expected_version)
+        await self._claim_version(workflow, expected_version)
         self._ensure_not_archived(workflow)
 
         existing_statuses = await self._load_statuses(workflow.id)
@@ -439,9 +465,27 @@ class WorkflowService:
         # Статусы, убранные с холста, физически удаляются — если на них
         # ссылаются сделки, БД остановит это внешним ключом (RESTRICT), и
         # такой статус нужно сначала архивировать через мастер сопоставления.
+        #
+        # Статус из опубликованного снимка удалять нельзя вовсе, даже пока сделок в нём нет:
+        # сделки идут по снимку, и после удаления строки переход в этот статус падал бы на
+        # внешнем ключе уже в работе, а не при сохранении. Убрать такой статус можно только
+        # архивацией (без сделок она мгновенная и правит снимок).
+        published_status_ids = {
+            s["id"] for s in ((workflow.published_graph or {}).get("statuses") or [])
+        }
         for sid, row in existing_statuses.items():
             if sid not in kept_ids and not row.is_archived:
                 name = row.name
+                if str(sid) in published_status_ids:
+                    raise AppError(
+                        ErrorCode.WORKFLOW_STATUS_IN_USE,
+                        f"Статус «{name}» входит в опубликованную воронку и не удаляется: "
+                        "архивируйте его через мастер сопоставления",
+                        errors=[
+                            FieldError(field="statuses", reason=f"статус «{name}» опубликован")
+                        ],
+                        extra={"status_id": str(sid)},
+                    )
                 try:
                     async with self._session.begin_nested():
                         await self._session.delete(row)
@@ -581,12 +625,14 @@ class WorkflowService:
                     )
                 seen_active_status.add(status_id)
 
+            await self._validate_escalation_target(item)
             self._session.add(
                 SlaRule(
                     workflow_id=workflow.id,
                     status_id=status_id,
                     max_duration=dt.timedelta(hours=item.max_duration_hours),
                     warn_threshold_pct=item.warn_threshold_pct,
+                    escalate_threshold_pct=item.escalate_threshold_pct,
                     escalate_to_role=item.escalate_to_role,
                     escalate_to_user_id=item.escalate_to_user_id,
                     channels=item.channels,
@@ -595,9 +641,31 @@ class WorkflowService:
                 )
             )
 
-        workflow.version += 1
         await self._session.flush()
         return await self.get_graph(workflow)
+
+    async def _validate_escalation_target(self, item: Any) -> None:
+        """Кому эскалировать нарушение SLA: существующая роль и активный сотрудник. Раньше в
+        правило писалась любая строка и любой UUID, а эскалация молча уходила в пустоту."""
+        if item.escalate_to_role is not None and item.escalate_to_role not in {
+            role.value for role in Role
+        }:
+            raise ValidationError(
+                f"Неизвестная роль эскалации {item.escalate_to_role!r}",
+                [FieldError(field="sla_rules.escalate_to_role", reason="неизвестная роль")],
+            )
+        if item.escalate_to_user_id is not None:
+            user = await self._session.get(User, item.escalate_to_user_id)
+            if user is None or not user.is_active:
+                raise ValidationError(
+                    "Получатель эскалации не найден или неактивен",
+                    [
+                        FieldError(
+                            field="sla_rules.escalate_to_user_id",
+                            reason="нужен активный сотрудник",
+                        )
+                    ],
+                )
 
     # --- Валидация -------------------------------------------------------
 
@@ -619,7 +687,7 @@ class WorkflowService:
     async def publish(
         self, workflow: Workflow, principal: Principal, *, expected_version: int
     ) -> tuple[Workflow, list[str]]:
-        self._check_version(workflow, expected_version)
+        await self._claim_version(workflow, expected_version)
         self._ensure_not_archived(workflow)
 
         statuses = list((await self._load_statuses(workflow.id)).values())
@@ -647,10 +715,11 @@ class WorkflowService:
         workflow.published_at = now
         workflow.published_by = principal.user_id
         workflow.state = WorkflowState.PUBLISHED.value
-        workflow.version += 1
         await self._session.flush()
 
-        await invalidate_workflow_cache(workflow.id)
+        # После коммита, не сейчас: до него параллельный читатель прогрел бы кэш старым снимком,
+        # который уже некому сбросить.
+        run_after_commit(self._session, lambda: invalidate_workflow_cache(workflow.id))
         await self._audit.record(
             AuditAction.WORKFLOW_PUBLISHED,
             entity_type="workflow",
@@ -751,8 +820,24 @@ class WorkflowService:
         from app.modules.crm.service import get_deal_status_service  # см. status_impact()
 
         deal_service = get_deal_status_service()
-        workload = await deal_service.status_workload(self._session, status.id)
+        # С целевым статусом: заодно считаются сделки без его обязательных полей — их перенести
+        # можно только в резервный статус.
+        workload = await deal_service.status_workload(self._session, status.id, target.id)
+        if fallback is None and workload.problem_count > 0:
+            # Раньше такие сделки молча оставались в архивируемом статусе, а он всё равно
+            # архивировался — сделки застревали в статусе без выходов. Отказываем заранее.
+            raise ValidationError(
+                f"У {workload.problem_count} сделок нет обязательных полей статуса "
+                f"«{target.name}»: укажите резервный статус или заполните поля",
+                [
+                    FieldError(
+                        field="fallback_status_id",
+                        reason="нужен резервный статус для сделок без обязательных полей",
+                    )
+                ],
+            )
 
+        await self._claim_version(workflow, expected_version)
         job = StatusMappingJob(
             workflow_id=workflow.id,
             from_status_id=status.id,
@@ -766,7 +851,6 @@ class WorkflowService:
             initiated_by=principal.user_id,
         )
         self._session.add(job)
-        workflow.version += 1
         await self._session.flush()
 
         await self._audit.record(
@@ -786,51 +870,120 @@ class WorkflowService:
             job.started_at = now
             job.finished_at = now
             job.report = {"processed": 0, "failed": 0, "supported": workload.supported}
-            self._archive_status_row(status, target, now)
-            await self._session.flush()
-            await self.republish_after_archive(workflow)
-            await self._audit.record(
-                AuditAction.STATUS_ARCHIVED,
-                entity_type="workflow_status",
-                entity_id=status.id,
-                changes={"replaced_by": {"old": None, "new": str(target.id)}},
-            )
-            await self._complete_mapping_audit(job)
+            await self._finish_archive(workflow, status, target, job, when=now)
             return status, job
 
         job.status = MappingJobStatus.RUNNING.value
         job.started_at = now
-        result = await deal_service.migrate_batch(
-            self._session,
-            from_status_id=status.id,
-            target_status_id=target.id,
-            fallback_status_id=fallback.id if fallback else None,
-            sla_mode=sla_mode,
-            batch_size=MAPPING_BATCH_SIZE,
-        )
-        job.processed_count += result.processed
-        job.failed_count += result.failed
-
-        if not result.has_more:
-            job.status = MappingJobStatus.COMPLETED.value
-            job.finished_at = dt.datetime.now(dt.UTC)
-            job.report = {"processed": job.processed_count, "failed": job.failed_count}
-            self._archive_status_row(status, target, job.finished_at)
-            await self._session.flush()
-            await self.republish_after_archive(workflow)
-            await self._audit.record(
-                AuditAction.STATUS_ARCHIVED,
-                entity_type="workflow_status",
-                entity_id=status.id,
-                changes={"replaced_by": {"old": None, "new": str(target.id)}},
-            )
-            await self._complete_mapping_audit(job)
-        # Иначе задача остаётся `running`: следующие партии докручивает
-        # периодический воркер (`app/modules/workflow/tasks.py`), а не эта
-        # операция — см. docstring модуля.
-
+        await self.advance_mapping_job(job)
+        # Если сделок больше партии, задача остаётся `running`: следующие партии докручивает
+        # периодический воркер (`app/modules/workflow/tasks.py`), а не эта операция — см.
+        # docstring модуля.
         await self._session.flush()
         return status, job
+
+    async def advance_mapping_job(self, job: StatusMappingJob) -> None:
+        """Одна партия переноса и, если просмотр дошёл до конца, завершение задачи.
+
+        Общий шаг для HTTP-запроса архивации и воркера. Курсор (`cursor` в `mapping_rules`)
+        двигается по id сделок: сделка, которую перенести нельзя, остаётся в статусе, и без
+        курсора каждая партия читала бы одни и те же строки, а задача не кончалась. Дойдя до
+        конца, задача сверяет, что в статусе никого не осталось:
+
+        * пусто — статус архивируется;
+        * не пусто, но проход что-то перенёс — новый проход (сделки могли прийти в статус, пока
+          шёл перенос);
+        * не пусто и проход ничего не перенёс — оставшиеся застряли: задача `failed`, статус НЕ
+          архивируется (раньше он архивировался вместе со сделками, у которых не было выхода)."""
+        from app.modules.crm.service import get_deal_status_service
+
+        deal_service = get_deal_status_service()
+        rules = dict(job.mapping_rules)
+        target_id = uuid.UUID(rules["target_status_id"])
+        fallback_raw = rules.get("fallback_status_id")
+        cursor_raw = rules.get("cursor")
+
+        result = await deal_service.migrate_batch(
+            self._session,
+            from_status_id=job.from_status_id,
+            target_status_id=target_id,
+            fallback_status_id=uuid.UUID(fallback_raw) if fallback_raw else None,
+            sla_mode=rules.get("sla_mode", "recalculate"),
+            batch_size=MAPPING_BATCH_SIZE,
+            after_id=uuid.UUID(cursor_raw) if cursor_raw else None,
+        )
+        job.processed_count += result.processed
+        rules["pass_processed"] = int(rules.get("pass_processed", 0)) + result.processed
+        rules["pass_failed"] = int(rules.get("pass_failed", 0)) + result.failed
+        job.failed_count = rules["pass_failed"]
+
+        if result.has_more:
+            rules["cursor"] = str(result.last_id) if result.last_id else None
+            job.mapping_rules = rules
+            return
+
+        status = await self._session.get(WorkflowStatus, job.from_status_id)
+        target = await self._session.get(WorkflowStatus, target_id)
+        workflow = await self._session.get(Workflow, job.workflow_id)
+        remaining = (
+            await deal_service.status_workload(self._session, job.from_status_id)
+        ).active_count
+        if remaining == 0 and status is not None and target is not None and workflow is not None:
+            job.failed_count = 0
+            job.mapping_rules = rules
+            job.status = MappingJobStatus.COMPLETED.value
+            job.finished_at = dt.datetime.now(dt.UTC)
+            job.report = {"processed": job.processed_count, "failed": 0}
+            await self._finish_archive(workflow, status, target, job, when=job.finished_at)
+            return
+
+        if rules["pass_processed"] > 0:
+            # Что-то ещё переносилось: остаток мог прийти в статус во время переноса. Новый проход.
+            rules.update({"cursor": None, "pass_processed": 0, "pass_failed": 0})
+            job.mapping_rules = rules
+            return
+
+        job.mapping_rules = rules
+        job.failed_count = remaining
+        job.status = MappingJobStatus.FAILED.value
+        job.finished_at = dt.datetime.now(dt.UTC)
+        job.error = (
+            f"{remaining} сделок не перенесены: у них нет обязательных полей целевого статуса, "
+            "а резервный статус не задан. Статус не архивирован — заполните поля или задайте "
+            "резервный статус и повторите архивацию."
+        )
+        job.report = {
+            "processed": job.processed_count,
+            "failed": remaining,
+            "needs_attention": True,
+        }
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.STATUS_MAPPING_FAILED,
+            entity_type="status_mapping_job",
+            entity_id=job.id,
+            changes={"processed": job.processed_count, "failed": remaining},
+        )
+
+    async def _finish_archive(
+        self,
+        workflow: Workflow,
+        status: WorkflowStatus,
+        target: WorkflowStatus,
+        job: StatusMappingJob,
+        *,
+        when: dt.datetime,
+    ) -> None:
+        self._archive_status_row(status, target, when)
+        await self._session.flush()
+        await self.republish_after_archive(workflow, status)
+        await self._audit.record(
+            AuditAction.STATUS_ARCHIVED,
+            entity_type="workflow_status",
+            entity_id=status.id,
+            changes={"replaced_by": {"old": None, "new": str(target.id)}},
+        )
+        await self._complete_mapping_audit(job)
 
     def _archive_status_row(
         self, status: WorkflowStatus, target: WorkflowStatus, when: dt.datetime
@@ -839,37 +992,39 @@ class WorkflowService:
         status.archived_at = when
         status.replaced_by_status_id = target.id
 
-    async def republish_after_archive(self, workflow: Workflow) -> None:
-        """Пересобирает `published_graph`/`graph_hash` после того, как статус
-        реально архивирован (обе точки завершения — синхронная в этом же
-        методе и асинхронная докрутка в `workflow.tasks._process_one_batch`
-        — обязаны звать это).
+    async def republish_after_archive(
+        self, workflow: Workflow, archived: WorkflowStatus | None = None
+    ) -> None:
+        """Убирает архивированный статус из `published_graph` и пересчитывает `graph_hash`.
 
-        Раньше `archive_status` только выставлял `is_archived = true` на
-        живой строке и звал `invalidate_workflow_cache`, но переходы по
-        сделкам работают исключительно со снимком `published_graph`
-        (`get_cached_published_graph`) — сброс кэша без пересборки снимка
-        означал, что следующее чтение просто заново прогревало кэш ТЕМ ЖЕ
-        устаревшим снимком с архивным статусом внутри. Архивный статус
-        оставался живым для переходов сколь угодно долго — раздел 4.11
-        «запрет удаления без миграции» на практике не работал. Полная
-        `_validate_graph_data` здесь намеренно не перезапускается: граф уже
-        прошёл её на публикации, а архивирование — не повторная ручная
-        публикация человеком (не трогаем `published_at`/`published_by`,
-        `workflow.version` тоже не бампаем второй раз — это уже сделал
-        вызывающий код).
-        """
-        statuses = list((await self._load_statuses(workflow.id)).values())
-        transitions = await self._load_transitions(workflow.id)
-        sla_rules = await self._load_sla_rules(workflow.id)
-        snapshot = _build_snapshot(workflow, statuses, transitions, sla_rules)
+        Переходы сделок работают исключительно со снимком, поэтому одной пометки
+        `is_archived` на живой строке мало: без правки снимка архивный статус оставался бы
+        живым для переходов. Обе точки завершения (`archive_status` и воркер) зовут это.
+
+        Снимок получается из УЖЕ ОПУБЛИКОВАННОГО графа минус архивный статус, его переходы и
+        SLA-правила — а не пересборкой из живых строк черновика. Раньше пересборка молча
+        публиковала всё, что администратор успел набросать в черновике (в том числе
+        невалидное, без проверок публикации): архивация статуса выпускала чужие
+        неопубликованные правки. Теперь черновик остаётся черновиком до явной публикации.
+
+        `published_at`/`published_by`/`version` не трогаются: это не публикация человеком."""
+        published = workflow.published_graph
+        if published is None:
+            return  # воронку ещё не публиковали: снимка нет, сделки живут только на публикации
+        archived_ids = {
+            str(s.id) for s in (await self._load_statuses(workflow.id)).values() if s.is_archived
+        }
+        if archived is not None:
+            archived_ids.add(str(archived.id))
+        snapshot = _without_statuses(published, archived_ids)
         digest = hashlib.sha256(
             json.dumps(snapshot, sort_keys=True, separators=(",", ":"), default=str).encode()
         ).hexdigest()
         workflow.published_graph = snapshot
         workflow.graph_hash = digest
         await self._session.flush()
-        await invalidate_workflow_cache(workflow.id)
+        workflow_id = workflow.id
+        run_after_commit(self._session, lambda: invalidate_workflow_cache(workflow_id))
 
     async def _complete_mapping_audit(self, job: StatusMappingJob) -> None:
         await self._audit.record(
@@ -878,6 +1033,48 @@ class WorkflowService:
             entity_id=job.id,
             changes={"processed": job.processed_count, "failed": job.failed_count},
         )
+
+
+def _without_statuses(snapshot: dict[str, Any], status_ids: set[str]) -> dict[str, Any]:
+    """Снимок без перечисленных статусов, их переходов и SLA-правил."""
+    return {
+        **snapshot,
+        "statuses": [s for s in snapshot.get("statuses", []) if s["id"] not in status_ids],
+        "transitions": [
+            t
+            for t in snapshot.get("transitions", [])
+            if t["from_status_id"] not in status_ids and t["to_status_id"] not in status_ids
+        ],
+        "sla_rules": [r for r in snapshot.get("sla_rules", []) if r["status_id"] not in status_ids],
+    }
+
+
+def snapshot_structure_warnings(snapshot: dict[str, Any]) -> list[str]:
+    """Структурные проблемы снимка после архивации статуса: недостижимые статусы и ловушки.
+
+    Предупреждения, а не отказ: архивация убирает статус вместе с его переходами, и
+    администратору остаётся пересобрать пути в черновике и опубликовать заново."""
+    statuses = {s["id"]: s for s in snapshot.get("statuses", [])}
+    initials = [sid for sid, s in statuses.items() if s["type"] == StatusType.INITIAL.value]
+    forward: dict[Any, list[Any]] = defaultdict(list)
+    backward: dict[Any, list[Any]] = defaultdict(list)
+    for t in snapshot.get("transitions", []):
+        forward[t["from_status_id"]].append(t["to_status_id"])
+        backward[t["to_status_id"]].append(t["from_status_id"])
+    warnings: list[str] = []
+    if len(initials) == 1:
+        reachable = _bfs(initials[0], forward)
+        lost_names = sorted(s["name"] for sid, s in statuses.items() if sid not in reachable)
+        if lost_names:
+            warnings.append(f"Недостижимые из начального статусы: {', '.join(lost_names)}")
+    terminal_values = {t.value for t in TERMINAL_TYPES}
+    terminals = {sid for sid, s in statuses.items() if s["type"] in terminal_values}
+    if terminals:
+        can_finish = _bfs_multi_source(terminals, backward)
+        traps = sorted(s["name"] for sid, s in statuses.items() if sid not in can_finish)
+        if traps:
+            warnings.append(f"Статусы без пути в закрывающий статус: {', '.join(traps)}")
+    return warnings
 
 
 # --- Валидация графа (чистая функция, без сессии) ---------------------------
@@ -932,7 +1129,7 @@ def _validate_graph_data(
 
     terminals = [s for s in live if s.type in {t.value for t in TERMINAL_TYPES}]
     if not terminals:
-        errors.append("Воронка должна иметь хотя бы один терминальный статус (won/lost/parked)")
+        errors.append("Воронка должна иметь хотя бы один терминальный статус (won/lost)")
 
     forward: dict[uuid.UUID, list[uuid.UUID]] = defaultdict(list)
     backward: dict[uuid.UUID, list[uuid.UUID]] = defaultdict(list)
@@ -949,10 +1146,26 @@ def _validate_graph_data(
 
     if terminals:
         can_reach_terminal = _bfs_multi_source({s.id for s in terminals}, backward)
-        traps = live_ids - can_reach_terminal
+        # `parked` без исходящих переходов — не ловушка-ошибка, а предупреждение ниже: заморозка
+        # без выхода не мешает публикации (так работали все воронки до того, как parked перестал
+        # быть терминальным), но администратор должен знать, что возобновить сделку нельзя.
+        traps = {
+            i
+            for i in live_ids - can_reach_terminal
+            if by_id[i].type != StatusType.PARKED.value or forward.get(i)
+        }
         if traps:
             codes = sorted(by_id[i].code for i in traps)
             errors.append(f"Статусы без пути в терминальный статус (ловушки): {', '.join(codes)}")
+
+    # `parked` — пауза, а не закрытие: сделка должна уметь из неё выйти. Без исходящих переходов
+    # заморозка необратима (раньше она была терминальной и «закрывала» сделку).
+    for parked in (s for s in live if s.type == StatusType.PARKED.value):
+        if not forward.get(parked.id):
+            warnings.append(
+                f"Статус «{parked.name}» (parked) без исходящих переходов: "
+                "сделку из него нельзя возобновить"
+            )
 
     live_codes = {s.code for s in live}
     for t in live_transitions:
@@ -1047,6 +1260,14 @@ def _build_snapshot(
                 "max_duration_seconds": r.max_duration.total_seconds(),
                 "warn_threshold_pct": r.warn_threshold_pct,
                 "count_business_days": r.count_business_days,
+                # Эскалация и каналы живут в снимке: сделки идут по нему, а не по живым правилам
+                # черновика, и воркер SLA должен знать, кого и когда уведомлять.
+                "escalate_threshold_pct": r.escalate_threshold_pct,
+                "escalate_to_role": r.escalate_to_role,
+                "escalate_to_user_id": str(r.escalate_to_user_id)
+                if r.escalate_to_user_id
+                else None,
+                "channels": list(r.channels or []),
             }
             for r in sla_rules
             if r.status_id in live_ids and r.is_active
@@ -1077,5 +1298,14 @@ def _canonical_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         **snapshot,
         "statuses": sorted(snapshot.get("statuses", []), key=lambda item: item["id"]),
         "transitions": sorted(snapshot.get("transitions", []), key=lambda item: item["id"]),
-        "sla_rules": sorted(snapshot.get("sla_rules", []), key=lambda item: item["status_id"]),
+        "sla_rules": sorted(
+            (
+                # Правила старых публикаций без полей эскалации приравниваются к правилу с
+                # умолчаниями: иначе каждая воронка с SLA показывала бы «есть неопубликованные
+                # изменения» только из-за того, что снимок появился раньше этих полей.
+                {**_SLA_RULE_SNAPSHOT_DEFAULTS, **rule}
+                for rule in snapshot.get("sla_rules", [])
+            ),
+            key=lambda item: item["status_id"],
+        ),
     }

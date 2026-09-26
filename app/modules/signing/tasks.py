@@ -37,6 +37,8 @@ from app.modules.signing.models import SignatureRequestStatus as ReqStatus
 from app.modules.signing.service import (
     TPL_SIGNATURE_EXPIRED,
     _apply_deal_signature_outcome,
+    _sync_deal_signature_status,
+    suspend_requests_of_agreement,
 )
 
 logger = structlog.get_logger(__name__)
@@ -58,7 +60,18 @@ async def sweep_signature_deadlines(ctx: dict[str, Any]) -> dict[str, int]:
             SignatureDocument.deadline_at.is_not(None),
             SignatureDocument.deadline_at < now,
         )
-        documents = list((await session.execute(stmt)).scalars().all())
+        # Строки под замком: документ, который в этот момент подписывают, пропускается до
+        # следующего тика (не истекает под руками подписанта), а два воркера не берут один и
+        # тот же документ.
+        documents = list(
+            (
+                await session.execute(
+                    stmt.order_by(SignatureDocument.id).with_for_update(skip_locked=True)
+                )
+            )
+            .scalars()
+            .all()
+        )
 
         for document in documents:
             document.status = DocStatus.EXPIRED.value
@@ -66,7 +79,7 @@ async def sweep_signature_deadlines(ctx: dict[str, Any]) -> dict[str, int]:
                 SignatureRequest.document_id == document.id,
                 SignatureRequest.status.in_([s.value for s in OPEN_REQUEST_STATUSES]),
             )
-            for request in (await session.execute(requests_stmt)).scalars().all():
+            for request in (await session.execute(requests_stmt.with_for_update())).scalars().all():
                 request.status = ReqStatus.EXPIRED.value
             await session.flush()
 
@@ -90,8 +103,10 @@ async def sweep_signature_deadlines(ctx: dict[str, Any]) -> dict[str, int]:
                 )
             if document.entity_type == "deal":
                 deal = await session.get(Deal, document.entity_id)
-                if deal is not None:
-                    deal.signature_status = DealSignatureStatus.EXPIRED.value
+                # Только за активный документ сделки: истёкший старый документ не должен ни
+                # менять статус подписи новой, ни откатывать сделку по правилу `on_expired`.
+                if deal is not None and deal.active_signature_document_id == document.id:
+                    _sync_deal_signature_status(deal, document, DealSignatureStatus.EXPIRED.value)
                     await _apply_deal_signature_outcome(
                         session,
                         deal,
@@ -122,6 +137,8 @@ async def _expire_edm_agreements(session: AsyncSession, *, today: dt.date) -> in
     for agreement in agreements:
         agreement.status = EdmAgreementStatus.EXPIRED.value
         await session.flush()
+        # Запросы, опиравшиеся на соглашение, больше не подписываются (см. `suspend_...`).
+        await suspend_requests_of_agreement(session, agreement, reason="agreement_expired")
         await AuditService(session).record(
             AuditAction.EDM_AGREEMENT_EXPIRED,
             entity_type="edm_agreement",

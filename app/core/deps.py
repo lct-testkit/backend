@@ -297,7 +297,7 @@ async def get_if_match(
             [FieldError(field="If-Match", reason="заголовок обязателен")],
         )
     value = if_match.strip().strip('"').removeprefix("W/").strip('"')
-    if not value.isdigit():
+    if not (value.isascii() and value.isdigit()):
         raise ValidationError(
             "If-Match должен содержать числовую версию объекта",
             [FieldError(field="If-Match", reason="ожидается целое число")],

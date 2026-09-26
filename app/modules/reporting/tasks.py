@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 from typing import Any
 
 import structlog
@@ -27,8 +28,8 @@ from app.core.config import get_settings
 from app.core.db import session_scope
 from app.core.metrics import background_tasks_total
 from app.core.security import Principal, TokenClaims
-from app.core.storage import delete_object
 from app.modules.files.models import File, FileStatus
+from app.modules.files.service import delete_object_if_unreferenced
 from app.modules.identity.models import User
 from app.modules.reporting.models import ReportJob, ReportJobStatus
 from app.modules.reporting.service import ReportJobService
@@ -63,6 +64,23 @@ def _principal_for_worker(user: User) -> Principal:
     )
 
 
+async def _claim_queued(session: Any, job_id: uuid.UUID) -> ReportJob | None:
+    """Берёт задание из очереди под `FOR UPDATE SKIP LOCKED`.
+
+    `processing` в БД не коммитится (генерация идёт одной транзакцией), поэтому «занято»
+    выражено самой блокировкой строки: пересекающийся тик (cron раз в минуту, а отчёт может
+    считаться дольше) пропускает уже взятое задание, а не строит тот же отчёт второй раз.
+    Сбой воркера откатывает транзакцию, и задание само возвращается в очередь. `None` — задание
+    уже взято другим тиком или обработано."""
+    return (
+        await session.execute(
+            select(ReportJob)
+            .where(ReportJob.id == job_id, ReportJob.status == ReportJobStatus.QUEUED.value)
+            .with_for_update(skip_locked=True)
+        )
+    ).scalar_one_or_none()
+
+
 async def sweep_report_jobs(ctx: dict[str, Any]) -> dict[str, int]:
     settings = get_settings()
 
@@ -92,8 +110,8 @@ async def sweep_report_jobs(ctx: dict[str, Any]) -> dict[str, int]:
     for job_id in job_ids:
         async with session_scope() as session:
             service = ReportJobService(session)
-            job = await session.get(ReportJob, job_id)
-            if job is None or job.status != ReportJobStatus.QUEUED.value:
+            job = await _claim_queued(session, job_id)
+            if job is None:
                 continue
             user = await session.get(User, job.requested_by)
             if user is None:
@@ -104,15 +122,21 @@ async def sweep_report_jobs(ctx: dict[str, Any]) -> dict[str, int]:
             try:
                 await service.generate(job, principal)
                 processed += 1
-            except Exception as exc:  # noqa: BLE001 — сбой одного отчёта не должен ронять тик
-                logger.exception("report_generation_failed", job_id=str(job_id))
+            except Exception:  # noqa: BLE001 — сбой одного отчёта не должен ронять тик
+                # Клиент видит `report_jobs.error`: текст исключения (SQL, пути, данные) туда не
+                # попадает. Подробности — в логе, по коду ошибки из сообщения.
+                error_id = uuid.uuid4().hex[:12]
+                logger.exception("report_generation_failed", job_id=str(job_id), error_id=error_id)
                 # Неудачный flush внутри `generate()` мог оставить сессию в
                 # состоянии, требующем отката, прежде чем ей снова можно
                 # пользоваться — см. докстринг модуля.
                 await session.rollback()
-                job = await session.get(ReportJob, job_id)
-                await service.mark_failed(job, f"{type(exc).__name__}: {exc}")
-                failed += 1
+                job = await _claim_queued(session, job_id)
+                if job is not None:
+                    await service.mark_failed(
+                        job, f"Не удалось сформировать отчёт. Код ошибки для поддержки: {error_id}"
+                    )
+                    failed += 1
 
     background_tasks_total.labels(task="sweep_report_jobs", result="success").inc()
     if job_ids:
@@ -141,10 +165,16 @@ async def expire_report_files(ctx: dict[str, Any]) -> dict[str, int]:
         for job in jobs:
             file = await session.get(File, job.file_id)
             if file is not None and file.status == FileStatus.READY.value:
-                await delete_object(bucket=file.bucket, key=file.storage_key)
                 file.status = FileStatus.DELETED.value
                 file.deleted_at = now
                 file.refcount = max(0, file.refcount - 1)
+                await session.flush()
+                # Объект удаляется, только если на него не ссылается другая живая запись `files`:
+                # дедупликация могла направить туда файл пользователя, и безусловное удаление
+                # оставляло его `ready` без содержимого.
+                await delete_object_if_unreferenced(
+                    session, bucket=file.bucket, key=file.storage_key, excluding_file_id=file.id
+                )
             job.file_id = None
             expired += 1
         if jobs:

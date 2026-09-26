@@ -8,33 +8,70 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import re
 
 _DIGITS = re.compile(r"\D+")
 
-# Ключи, значения которых нельзя писать в логи и аудит ни в каком виде.
-SECRET_KEYS: frozenset[str] = frozenset(
+# Поля профиля учащегося (шаблон LMS «Загрузка пользователей»): СНИЛС, паспорт, дата рождения,
+# адрес регистрации и реквизиты диплома. Это ПДн, которые нужны только для выгрузки в LMS и
+# раскрываются только через `reveal` с отдельной записью аудита: ни в журнал аудита, ни в лог их
+# значения не попадают, даже если код по ошибке положит их в `changes` или в поля события.
+LEARNER_PII_KEYS: frozenset[str] = frozenset(
     {
-        "password",
-        "current_password",
-        "new_password",
-        "new_password_repeat",
-        "token",
-        "access_token",
-        "refresh_token",
-        "id_token",
-        "logout_token",
-        "code",
-        "otp",
-        "otp_code",
-        "client_secret",
-        "secret",
-        "authorization",
-        "cookie",
-        "set-cookie",
-        "signature_server_secret",
+        "snils",
+        "passport_series",
+        "passport_number",
+        "passport_issued_by",
+        "passport_dept_code",
+        "birth_date",
+        "reg_region",
+        "reg_city",
+        "reg_street",
+        "reg_house",
+        "reg_apartment",
+        "reg_zip",
+        "diploma_number",
+        "diploma_series",
+        "diploma_reg_number",
+        "diploma_surname",
     }
+)
+
+# Ключи, значения которых нельзя писать в логи и аудит ни в каком виде. Профиль учащегося входит
+# сюда же: `app.core.logging` вычищает из событий лога ровно этот набор.
+SECRET_KEYS: frozenset[str] = (
+    frozenset(
+        {
+            "password",
+            "current_password",
+            "new_password",
+            "new_password_repeat",
+            "token",
+            "access_token",
+            "refresh_token",
+            "id_token",
+            "logout_token",
+            # Голый `code` здесь не секрет: это код продукта, статуса воронки, справочника и
+            # `FieldError.code`. Раньше он вырезался, и события «создан продукт/справочник» в
+            # аудите теряли код (`{"old": null, "new": "***"}`), а ответы об ошибках — свои
+            # коды. Одноразовые коды называются явно.
+            "authorization_code",
+            "auth_code",
+            "otp",
+            "otp_code",
+            "confirmation_code",
+            "verification_code",
+            "client_secret",
+            "secret",
+            "authorization",
+            "cookie",
+            "set-cookie",
+            "signature_server_secret",
+        }
+    )
+    | LEARNER_PII_KEYS
 )
 
 # Ключи, которые маскируются по своему формату, а не вырезаются целиком.
@@ -86,6 +123,27 @@ def mask_name(value: str | None) -> str | None:
         return REDACTED
     initials = " ".join(f"{p[0]}." for p in parts[1:3])
     return f"{parts[0]} {initials}".strip()
+
+
+def mask_tail(value: str | None, keep: int = 3) -> str | None:
+    """СНИЛС, паспорт, адрес, диплом: виден только хвост, `11223344595` -> `***595`.
+
+    Скрытых знаков должно быть не меньше, чем показанных. У короткого значения (серия паспорта из
+    четырёх цифр, номер квартиры) хвост из трёх знаков раскрыл бы почти всё, поэтому оно
+    закрывается целиком: `4512` -> `***`.
+    """
+    if not value:
+        return value
+    if len(value) < keep * 2:
+        return REDACTED
+    return f"{REDACTED}{value[-keep:]}"
+
+
+def mask_year(value: dt.date | None) -> str | None:
+    """Дата рождения и выдачи документов: остаётся только год, `1990-05-17` -> `1990`."""
+    if value is None:
+        return None
+    return str(value.year)
 
 
 def pseudonym(subject_id: object, salt: str = "") -> str:

@@ -119,9 +119,41 @@ class LoggingNotificationService:
         )
 
 
+# Песочница jinja не ограничивает арифметику: `{{ 10 ** 10 ** 10 }}` или `{{ 'a' * 10 ** 9 }}`
+# занимали бы воркер и память. Границы щедрые для настоящих шаблонов и тесные для атаки.
+_MAX_POWER_BASE = 10**6
+_MAX_POWER_EXPONENT = 100
+_MAX_REPEATED_LENGTH = 100_000
+_MAX_SHIFT = 1_000
+
+
+class _LimitedSandbox(jinja2.sandbox.SandboxedEnvironment):
+    intercepted_binops = frozenset({"**", "*", "<<"})
+
+    def call_binop(self, context: Any, operator: str, left: Any, right: Any) -> Any:
+        numbers = isinstance(left, int) and isinstance(right, int)
+        if (
+            operator == "**"
+            and numbers
+            and (abs(left) > _MAX_POWER_BASE or abs(right) > _MAX_POWER_EXPONENT)
+        ):
+            raise jinja2.exceptions.SecurityError("степень слишком велика")
+        if operator == "<<" and numbers and abs(right) > _MAX_SHIFT:
+            raise jinja2.exceptions.SecurityError("сдвиг слишком велик")
+        if operator == "*":
+            for sequence, count in ((left, right), (right, left)):
+                if (
+                    isinstance(sequence, str | bytes | list | tuple)
+                    and isinstance(count, int)
+                    and len(sequence) * max(count, 0) > _MAX_REPEATED_LENGTH
+                ):
+                    raise jinja2.exceptions.SecurityError("повтор слишком длинный")
+        return super().call_binop(context, operator, left, right)
+
+
 # Шаблоны пишет администратор, но исполняются они на сервере: песочница не даёт
-# дотянуться из шаблона до внутренностей Python (`{{ ''.__class__ }}`).
-_JINJA = jinja2.sandbox.SandboxedEnvironment()
+# дотянуться из шаблона до внутренностей Python (`{{ ''.__class__ }}`) и съесть ресурсы.
+_JINJA = _LimitedSandbox()
 
 
 def render_template(template_str: str, payload: dict[str, Any]) -> str:
@@ -229,6 +261,20 @@ class RealNotificationService:
             target_id = target_user.id
             payload["escalated_from"] = str(recipient_id)
 
+        # Настройки получателя решают до создания записи: раньше уведомление сохранялось, а
+        # потом проверялась настройка — «отключённое» событие всё равно копилось в ленте и в
+        # счётчике непрочитанных. Критичные уведомления настройкой не гасятся.
+        pref = await session.scalar(
+            select(UserNotificationPref).where(
+                UserNotificationPref.user_id == target_id,
+                UserNotificationPref.event_code == template_code,
+            )
+        )
+        if pref is not None and priority != NotificationPriority.CRITICAL:
+            in_app_wanted = not pref.channels or NotificationChannel.IN_APP.value in pref.channels
+            if not pref.is_enabled or not in_app_wanted:
+                return
+
         notification = Notification(
             recipient_id=target_id,
             template_code=template_code,
@@ -295,17 +341,10 @@ class RealNotificationService:
                 )
                 continue
 
-            if quiet:
-                session.add(
-                    NotificationDelivery(
-                        notification_id=notification.id,
-                        channel=template.channel,
-                        status=DeliveryStatus.SKIPPED.value,
-                        error="Тихие часы получателя",
-                    )
-                )
-                continue
-
+            # Тихие часы откладывают отправку, а не отменяют её: раньше доставка получала
+            # `skipped` и не отправлялась никогда, даже когда окно заканчивалось. Запись остаётся
+            # `pending`, а задача доставки сама не трогает её, пока окно получателя открыто
+            # (`dispatch_pending_notifications`, `deferred_by_quiet_hours`).
             address = user.email if template.channel == NotificationChannel.EMAIL.value else None
             session.add(
                 NotificationDelivery(
@@ -313,6 +352,7 @@ class RealNotificationService:
                     channel=template.channel,
                     address_masked=mask_email(address) if address else None,
                     status=DeliveryStatus.PENDING.value,
+                    error="Тихие часы получателя: отправка отложена" if quiet else None,
                 )
             )
         await session.flush()
@@ -348,14 +388,32 @@ class ChannelDeliveryError(Exception):
 
 @runtime_checkable
 class ChannelGateway(Protocol):
-    async def send(self, *, address_masked: str | None, subject: str | None, body: str) -> None: ...
+    async def send(
+        self,
+        *,
+        address_masked: str | None,
+        subject: str | None,
+        body: str,
+        address: str | None = None,
+    ) -> None:
+        """`address_masked` — для журнала, `address` — настоящий адрес получателя (email,
+        chat id), который задача доставки берёт у получателя в момент отправки: в самой записи
+        доставки хранится только маска."""
+        ...
 
 
 class LoggingChannelGateway:
     def __init__(self, channel: str) -> None:
         self._channel = channel
 
-    async def send(self, *, address_masked: str | None, subject: str | None, body: str) -> None:
+    async def send(
+        self,
+        *,
+        address_masked: str | None,
+        subject: str | None,
+        body: str,
+        address: str | None = None,
+    ) -> None:
         logger.info(
             "notification_channel_not_configured",
             channel=self._channel,
@@ -465,11 +523,13 @@ class NotificationQueryService:
                 else None
             )
             body = render_template(template.body_template, notification.payload)
-        except jinja2.TemplateError as exc:
+        except Exception as exc:  # noqa: BLE001 — шаблон правит админ: любой сбой рендера
+            # (ZeroDivisionError, TypeError, OverflowError, ошибка синтаксиса) — не 500 на всю
+            # ленту, а «уведомление без текста»: остальные записи показываются как обычно.
             logger.warning(
                 "notification_render_failed",
                 template_code=template.code,
-                error=str(exc),
+                error=type(exc).__name__,
             )
             return None, None
         return subject, body
@@ -486,7 +546,9 @@ class NotificationQueryService:
         stmt = select(Notification).where(
             Notification.recipient_id == recipient_id, Notification.is_read.is_(False)
         )
-        if filters.ids:
+        if filters.ids is not None:
+            # `[]` — «ничего не выбрано» (0 строк), а не «все»: пустой список раньше был ложным
+            # и снимал фильтр, то есть отмечал прочитанными всю ленту.
             stmt = stmt.where(Notification.id.in_(filters.ids))
         if filters.priority is not None:
             stmt = stmt.where(Notification.priority == filters.priority)
