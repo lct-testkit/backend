@@ -127,8 +127,9 @@ services:
       - ./deploy/postgres/init-keycloak-db.sh:/docker-entrypoint-initdb.d/10-keycloak.sh:ro
     # 5433, потому что на хосте 5432 часто уже занят локальным Postgres / pgAdmin.
     # В pgAdmin: localhost:5433, база crm, пользователь crm, пароль crm.
+    # Только localhost: с известным паролем crm/crm порт на 0.0.0.0 открывал базу всей сети.
     ports:
-      - "${POSTGRES_PORT:-5433}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-crm} -d ${POSTGRES_DB:-crm}"]
       interval: 10s
@@ -146,10 +147,12 @@ services:
       - "yes"
       - --maxmemory
       - 512mb
-      # Сессии и идемпотентность терять нельзя, поэтому вытесняем только
-      # ключи с выставленным TTL.
+      # Сессии, ключи идемпотентности и очередь задач терять нельзя. `volatile-lru` вытеснял именно их:
+      # у сессий и `idem:*` есть TTL, а значит, при нехватке памяти пользователей молча разлогинивало.
+      # `noeviction` — при нехватке памяти запись отвечает ошибкой (видна в метриках), а не теряет
+      # данные; кэши и лимиты живут с TTL и сами освобождают место.
       - --maxmemory-policy
-      - volatile-lru
+      - noeviction
     volumes:
       - redis_data:/data
     healthcheck:
@@ -383,6 +386,8 @@ services:
     environment:
       # Origin S3-прокси (тот же адрес, что в presigned-ссылках): попадает в CSP страниц.
       S3_ORIGIN: ${S3_PUBLIC_ENDPOINT_URL:-http://localhost:8333}
+      # Адреса, которым видна консоль администратора Keycloak (см. Caddyfile); по умолчанию — закрытые сети.
+      ADMIN_CONSOLE_ALLOW: ${ADMIN_CONSOLE_ALLOW:-private_ranges}
       # Куда Caddy отдаёт всё, что не /api, /public, /health и не /auth: образ `web` (профиль web)
       # или, в разработке, Vite на хосте (WEB_UPSTREAM=host.docker.internal:5273).
       WEB_UPSTREAM: ${WEB_UPSTREAM:-web:3000}
