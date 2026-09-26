@@ -20,7 +20,7 @@ STRONG = {
 def _settings(profile: str, **overrides: str) -> Settings:
     base = {
         "app_profile": profile,
-        "database_url": "postgresql+asyncpg://crm_app:x@db:5432/crm",
+        "database_url": "postgresql+asyncpg://crm_app:Db-strong-app-password-0123456789@db:5432/crm",
         "redis_url": "redis://redis:6379/0",
         "keycloak_url": "http://kc:8080/auth",
         "keycloak_realm": "crm",
@@ -58,3 +58,21 @@ def test_prod_rejects_demo_or_short_secret(field: str, value: str) -> None:
 def test_non_prod_keeps_demo_secrets(profile: str) -> None:
     settings = _settings(profile, signature_server_secret="change-me-in-prod")
     assert not settings.is_prod
+
+
+def test_prod_rejects_demo_password_inside_database_url() -> None:
+    """Пароль роли приложения сидит и в строке подключения: демо-значение там тоже отвергается."""
+    with pytest.raises(ValidationError) as exc:
+        _settings("prod", database_url="postgresql+asyncpg://crm_app:crm_app@db:5432/crm")
+    assert "DATABASE_URL" in str(exc.value)
+
+
+def test_prod_rejects_short_audit_hmac_key() -> None:
+    with pytest.raises(ValidationError) as exc:
+        _settings("prod", audit_hmac_key="short")
+    assert "AUDIT_HMAC_KEY" in str(exc.value)
+
+
+def test_prod_accepts_strong_audit_hmac_key_and_blank_means_unset() -> None:
+    assert _settings("prod", audit_hmac_key="Audit-strong-hmac-key-0123456789abcdef").audit_hmac_key
+    assert _settings("prod", audit_hmac_key="   ").audit_hmac_key is None

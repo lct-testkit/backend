@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import unquote, urlsplit
 
 from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -287,6 +288,13 @@ class Settings(BaseSettings):
             secrets["KEYCLOAK_ADMIN_CLIENT_SECRET"] = (
                 self.keycloak_admin_client_secret.get_secret_value()
             )
+        # Пароль роли приложения сидит и в строке подключения: проверялся только отдельный
+        # CRM_APP_PASSWORD, и демо-пароль в DATABASE_URL проходил.
+        db_password = urlsplit(self.database_url).password
+        if db_password:
+            secrets["DATABASE_URL (пароль)"] = unquote(db_password)
+        if self.audit_hmac_key is not None:
+            secrets["AUDIT_HMAC_KEY"] = self.audit_hmac_key.get_secret_value()
         problems = [
             f"{name}: демо-значение"
             if value in _DEMO_SECRET_VALUES
