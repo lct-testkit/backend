@@ -43,7 +43,7 @@ case "${MODE}" in
       --port 8000 \
       --workers "${UVICORN_WORKERS:-1}" \
       --proxy-headers \
-      --forwarded-allow-ips '*' \
+      --forwarded-allow-ips "${FORWARDED_ALLOW_IPS:-*}" \
       --no-access-log
     ;;
   worker)
