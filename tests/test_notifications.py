@@ -35,6 +35,7 @@ from app.modules.notification.service import (
     TPL_ROLE_CHANGED,
     ChannelDeliveryError,
     LoggingChannelGateway,
+    SmtpEmailGateway,
     _in_quiet_hours,
     get_channel_gateway,
     render_template,
@@ -91,12 +92,17 @@ class TestQuietHours:
 
 
 class TestChannelGateways:
-    async def test_default_email_gateway_is_honest_stub_not_fake_success(self) -> None:
+    async def test_default_email_gateway_is_honest_stub_not_fake_success(self, monkeypatch) -> None:
+        from app.core.config import get_settings
+
+        # Канал email ходит по SMTP, но пока `SMTP_HOST` пуст, он остаётся прежней заглушкой.
+        monkeypatch.setattr(get_settings(), "smtp_host", "")
         gateway = get_channel_gateway("email")
-        assert isinstance(gateway, LoggingChannelGateway)
+        assert isinstance(gateway, SmtpEmailGateway)
         with pytest.raises(ChannelDeliveryError) as excinfo:
             await gateway.send(address_masked="i***@rt.ru", subject=None, body="x")
         assert excinfo.value.retryable is False
+        assert "не настроен" in str(excinfo.value)
 
     async def test_default_telegram_gateway_is_also_a_stub(self) -> None:
         gateway = get_channel_gateway("telegram")

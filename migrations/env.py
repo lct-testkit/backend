@@ -37,21 +37,10 @@ config.set_main_option(
 )
 
 
-# Объекты, которые существуют только в SQL-миграциях и не описаны ORM-моделями
-# (таблицы транспортного слоя интеграций и служебные индексы). Без этого списка
-# `alembic check` в CI видел бы их как «лишние» и не мог бы служить гейтом на
-# НОВЫЙ дрейф между моделями и схемой. Список не должен расти: новую таблицу
-# описывайте моделью.
-_MIGRATION_ONLY_TABLES = frozenset(
-    {
-        "inbound_messages",
-        "learning_progress",
-        "external_refs",
-        "outbox_events",
-        "integration_sources",
-        "sync_cursors",
-    }
-)
+# Объекты, которые существуют только в SQL-миграциях и не описаны ORM-моделями (служебные
+# индексы). Без этого списка `alembic check` в CI видел бы их как «лишние» и не мог бы служить
+# гейтом на НОВЫЙ дрейф между моделями и схемой. Список не должен расти: новую таблицу
+# описывайте моделью (шесть таблиц интеграций раньше были здесь и теперь описаны).
 _MIGRATION_ONLY_INDEXES = frozenset(
     {
         "ix_data_erasure_requests_grace_due",
@@ -61,16 +50,10 @@ _MIGRATION_ONLY_INDEXES = frozenset(
 
 
 def include_object(obj, name, type_, reflected, compare_to) -> bool:
-    """Что сравнивает автогенерация: без партиций audit_log и migration-only объектов."""
+    """Что сравнивает автогенерация: без партиций audit_log и migration-only индексов."""
     if type_ == "table":
-        return not (name.startswith("audit_log_") or name in _MIGRATION_ONLY_TABLES)
-    if type_ == "index":
-        table = getattr(obj, "table", None)
-        if name in _MIGRATION_ONLY_INDEXES:
-            return False
-        if table is not None and table.name in _MIGRATION_ONLY_TABLES:
-            return False
-    return True
+        return not name.startswith("audit_log_")
+    return not (type_ == "index" and name in _MIGRATION_ONLY_INDEXES)
 
 
 def run_migrations_offline() -> None:

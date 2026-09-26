@@ -557,7 +557,7 @@ async def build_sla_compliance(
     if clause is not None:
         stmt = stmt.where(clause)
     stmt = _apply_deal_filters(stmt, filters)
-    result = dict((await session.execute(stmt)).all())
+    result: dict[str, int] = {row[0]: row[1] for row in (await session.execute(stmt)).all()}
     total = sum(result.values())
     labels = {
         "ok": "В норме",

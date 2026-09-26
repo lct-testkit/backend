@@ -803,3 +803,220 @@ class TestSmsGatewayMock:
     def test_oversized_fields_are_refused(self) -> None:
         assert self._post({"to": "9" * 33, "message": "x"}).status_code == 422
         assert self._post({"to": "+79991234567", "message": "x" * 501}).status_code == 422
+
+
+async def _sign_and_load(request_id: uuid.UUID, document_id: uuid.UUID):
+    """Подпись через настоящий `sign()`; возвращает отсоединённую копию записи."""
+    await _issue_otp(request_id)
+    signed = await _try_sign(request_id)
+    assert isinstance(signed, uuid.UUID), signed
+    (signature,) = await _signatures_of(document_id)
+    return signature
+
+
+def _detached_copy(signature, **overrides):
+    """Копия записи подписи в памяти (в БД не пишется: таблица неизменяемая) с подменёнными
+    полями — так проверяется, что пересчёт замечает правку записи или доказательства."""
+    import copy
+
+    from app.modules.signing.models import Signature
+
+    fields = {column.key: getattr(signature, column.key) for column in Signature.__table__.columns}
+    fields["evidence"] = copy.deepcopy(signature.evidence)
+    fields.update(overrides)
+    return Signature(**fields)
+
+
+async def _verify_by_id(signature_id: uuid.UUID) -> dict:
+    from app.core.db import session_scope
+    from app.modules.signing.service import VerifyService
+
+    async with session_scope() as session:
+        return await VerifyService(session).verify_by_id(signature_id)
+
+
+async def _integrity_of(signature) -> object:
+    from app.core.db import session_scope
+    from app.modules.signing.service import VerifyService
+
+    async with session_scope() as session:
+        return await VerifyService(session).check_integrity(signature)
+
+
+class TestSignatureEvidenceCheck:
+    """`verify` пересчитывает HMAC метки целостности и хэш звена по тому, что лежит в БД."""
+
+    def _signed(self, client, stubbed_storage):
+        signer = run(client, _make_user, "KAM")
+        built = _build(client, requests=[{"user": signer, "status": "sent"}])
+        signature = run(client, _sign_and_load, built.request_ids[0], built.document_id)
+        return built, signature
+
+    def test_a_fresh_signature_is_verified(self, client, stubbed_storage) -> None:
+        _, signature = self._signed(client, stubbed_storage)
+
+        result = run(client, _verify_by_id, signature.id)
+
+        assert result["status"] == "valid"
+        assert result["integrity"] == "verified"
+
+    def test_the_public_verify_page_carries_the_integrity_state(
+        self, client, stubbed_storage
+    ) -> None:
+        _, signature = self._signed(client, stubbed_storage)
+
+        body = client.get(f"/public/verify/{signature.id}").json()
+
+        assert body["status"] == "valid"
+        assert body["integrity"] == "verified"
+
+    def test_a_signature_without_a_nonce_is_unavailable_not_forged(
+        self, client, stubbed_storage
+    ) -> None:
+        # Так выглядят подписи, поставленные до того, как nonce стали сохранять.
+        _, signature = self._signed(client, stubbed_storage)
+        evidence = signature.evidence
+        del evidence["auth"]["nonce"]
+
+        report = run(client, _integrity_of, _detached_copy(signature, evidence=evidence))
+
+        assert report.state == "unavailable"
+
+    def test_a_row_built_by_the_test_helpers_is_unavailable(self, client) -> None:
+        signer = run(client, _make_user, "KAM")
+        built = _build(client, requests=[{"user": signer, "status": "signed"}])
+
+        result = run(client, _verify_by_id, built.signature_ids[0])
+
+        assert result["status"] == "valid"
+        assert result["integrity"] == "unavailable"
+
+    def test_a_signature_made_with_another_key_version_is_unavailable(
+        self, client, stubbed_storage
+    ) -> None:
+        _, signature = self._signed(client, stubbed_storage)
+
+        report = run(client, _integrity_of, _detached_copy(signature, key_version=99))
+
+        assert report.state == "unavailable"
+
+    @pytest.mark.parametrize(
+        "override",
+        [
+            pytest.param({"signature_value": "0" * 64}, id="signature_value"),
+            pytest.param({"content_hash": "1" * 64}, id="content_hash"),
+            pytest.param({"prev_hash": "2" * 64}, id="prev_hash"),
+            pytest.param({"request_id": uuid.uuid4()}, id="request_id"),
+            pytest.param({"hash": "3" * 64}, id="chain_hash"),
+            pytest.param({"signed_at": dt.datetime(2020, 1, 1, tzinfo=dt.UTC)}, id="signed_at"),
+        ],
+    )
+    def test_a_changed_column_is_detected(self, client, stubbed_storage, override) -> None:
+        _, signature = self._signed(client, stubbed_storage)
+
+        report = run(client, _integrity_of, _detached_copy(signature, **override))
+
+        assert report.state == "broken", report.problems
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            ("signer", "id"),
+            ("time", "signed_at"),
+            ("auth", "nonce"),
+            ("document", "content_hash"),
+        ],
+    )
+    def test_a_changed_evidence_field_is_detected(self, client, stubbed_storage, path) -> None:
+        _, signature = self._signed(client, stubbed_storage)
+        evidence = signature.evidence
+        section, key = path
+        evidence[section][key] = "2020-01-01T00:00:00+00:00" if key == "signed_at" else "changed"
+
+        report = run(client, _integrity_of, _detached_copy(signature, evidence=evidence))
+
+        assert report.state == "broken", report.problems
+
+    def test_a_link_to_a_missing_predecessor_is_detected(self, client, stubbed_storage) -> None:
+        from app.modules.signing.service import compute_chain_hash
+
+        _, signature = self._signed(client, stubbed_storage)
+        # Хэш звена пересчитан под подставной `prev_hash`: собственная запись согласована, но
+        # предыдущего звена с таким хэшем в цепочке нет.
+        fake_prev = "4" * 64
+        relinked = _detached_copy(
+            signature,
+            prev_hash=fake_prev,
+            hash=compute_chain_hash(
+                prev_hash=fake_prev,
+                signature_value=signature.signature_value,
+                content_hash=signature.content_hash,
+                request_id=str(signature.request_id),
+                signed_at_iso=signature.evidence["time"]["signed_at"],
+            ),
+        )
+
+        report = run(client, _integrity_of, relinked)
+
+        assert report.state == "broken"
+        assert any("несуществующую" in problem for problem in report.problems)
+
+    def test_a_broken_signature_is_reported_as_tampered_in_the_verify_result(
+        self, client, stubbed_storage, monkeypatch
+    ) -> None:
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        _, signature = self._signed(client, stubbed_storage)
+        forged = _detached_copy(signature, signature_value="0" * 64)
+        original_get = AsyncSession.get
+
+        async def fake_get(self, model, ident, *args, **kwargs):
+            if ident == signature.id:
+                return forged
+            return await original_get(self, model, ident, *args, **kwargs)
+
+        monkeypatch.setattr(AsyncSession, "get", fake_get)
+
+        result = run(client, _verify_by_id, signature.id)
+
+        assert result["status"] == "tampered"
+        assert result["integrity"] == "broken"
+
+
+class TestOneSignaturePerRequest:
+    @staticmethod
+    async def _second_signature(request_id: uuid.UUID, document_id: uuid.UUID) -> str:
+        from sqlalchemy.exc import IntegrityError
+
+        from app.core.db import get_session_factory
+        from app.modules.signing.models import Signature
+
+        async with get_session_factory()() as session:
+            session.add(
+                Signature(
+                    request_id=request_id,
+                    document_id=document_id,
+                    content_hash="a" * 64,
+                    method="pep_otp",
+                    signer_display="Дубль",
+                    signature_value="v",
+                    evidence={},
+                    signed_at=dt.datetime.now(dt.UTC),
+                    hash=uuid.uuid4().hex + uuid.uuid4().hex,
+                )
+            )
+            try:
+                await session.flush()
+            except IntegrityError as exc:
+                await session.rollback()
+                return getattr(getattr(exc.orig, "__cause__", None), "constraint_name", "")
+            await session.rollback()
+            return ""
+
+    def test_the_database_refuses_a_second_signature_for_a_request(self, client) -> None:
+        signer = run(client, _make_user, "KAM")
+        built = _build(client, requests=[{"user": signer, "status": "signed"}])
+
+        constraint = run(client, self._second_signature, built.request_ids[0], built.document_id)
+
+        assert constraint == "uq_signatures_request_id"

@@ -34,6 +34,19 @@ _AFTER_COMMIT_KEY = "after_commit"
 _AFTER_ROLLBACK_KEY = "after_rollback"
 
 
+def _server_settings() -> dict[str, str]:
+    """Параметры сессии Postgres, которые asyncpg выставляет при открытии каждого соединения."""
+    settings = get_settings()
+    server_settings = {"jit": "off"}
+    # Транзакция, «повисшая» открытой (зависший внешний вызов, забытый коммит), держит свои
+    # замки, в том числе advisory-лок цепочки аудита, и останавливает запись у всей системы.
+    # Сервер сам рвёт такое соединение по истечении срока; 0 отключает предел. Настройка
+    # действует именно на простой между командами: долгий запрос ею не прерывается.
+    idle_seconds = max(0, settings.db_idle_in_transaction_timeout_seconds)
+    server_settings["idle_in_transaction_session_timeout"] = str(idle_seconds * 1000)
+    return server_settings
+
+
 def create_engine() -> AsyncEngine:
     settings = get_settings()
     return create_async_engine(
@@ -44,7 +57,7 @@ def create_engine() -> AsyncEngine:
         pool_pre_ping=True,
         pool_recycle=1800,
         # Пул стейтментов asyncpg плохо дружит с pgbouncer в transaction-режиме.
-        connect_args={"statement_cache_size": 0, "server_settings": {"jit": "off"}},
+        connect_args={"statement_cache_size": 0, "server_settings": _server_settings()},
     )
 
 

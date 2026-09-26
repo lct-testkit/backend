@@ -404,6 +404,12 @@ class Signature(UuidPkMixin, Base):
     __table_args__ = (
         Index("ix_signatures_document", "document_id", "created_at"),
         Index("ix_signatures_request", "request_id"),
+        # Подпись на запрос одна. Гонку двух `/sign` закрывает замок строки запроса, индекс —
+        # последний рубеж на уровне БД (миграция 0020: на базах с уже имеющимися дублями он
+        # частичный и не трогает старые строки: таблица неизменяемая).
+        Index("uq_signatures_request_id", "request_id", unique=True),
+        # Связь звена цепочки с предыдущим (`prev_hash` → `hash`) при проверке подписи.
+        Index("ix_signatures_hash", "hash"),
         CheckConstraint(
             "method IN ('pep_otp','pep_session','unep','ukep')", name="signatures_method_valid"
         ),

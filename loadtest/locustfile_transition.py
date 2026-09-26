@@ -7,11 +7,18 @@
 находится). Пул сделок готовит `provision.py` (`--count`, по умолчанию
 4000 — с запасом на 50 RPS × 60 с = 3000 запросов).
 
-Аутентификация — прямой grant Keycloak (`grant_type=password`), тот же
-способ, что использовался для живой проверки во всех прошлых спринтах:
-реальный JWT в `Authorization: Bearer`, в обход SvelteKit BFF/cookie-сессии
-(её в этом репозитории нет — фронтенда нет, см. project-overview), тем же
-путём, каким `ALLOW_BEARER_AUTH` в .env.example явно это разрешает.
+Аутентификация — прямой grant Keycloak (`grant_type=password`): реальный JWT в
+`Authorization: Bearer`, в обход BFF/cookie-сессии и CSRF-токена, тем же путём, каким
+`ALLOW_BEARER_AUTH` в .env.example явно это разрешает.
+
+Для стенда с профилем `demo`/`dev` этого достаточно: Bearer там принимается от любой роли
+(`Settings.bearer_auth_mode == "all"`). В `prod` Bearer разрешён только роли INTEGRATION
+(`bearer_auth_mode == "integration_only"`), и этот сценарий под KAM получит 401: браузерный
+клиент ходит через `/api/auth/login` → Keycloak → `/api/auth/callback` (cookie `crm_sid`) и
+шлёт `X-CSRF-Token` на каждый мутирующий запрос. Поэтому гейт гоняют на стенде с
+`APP_PROFILE=demo`. Bearer обходит чтение сессии из Redis (`session_store.get`) и сверку
+CSRF, то есть немного оптимистичнее браузерного пути; замера с настоящими cookie-сессиями
+на prod-профиле пока нет.
 
 Запуск:
   python loadtest/provision.py
@@ -44,13 +51,11 @@ KEYCLOAK_TOKEN_URL = os.environ.get(
 CLIENT_ID = os.environ.get("LOADTEST_CLIENT_ID", "crm-bff")
 CLIENT_SECRET = os.environ.get("LOADTEST_CLIENT_SECRET", "crm-bff-secret")
 USERNAME = os.environ.get("LOADTEST_USERNAME", "kam.ivanov")
-# Пароль из realm-crm.json (Kam123456789!) на живом стенде этой сессии
-# больше не подходил — реалистичный дрейф после множества сессий живой
-# проверки identity-модуля за 11 спринтов (смена/сброс пароля и т.п.
-# тестировались буквально), не баг этого спринта. Сброшен через
-# сервис-аккаунт `crm-admin` (тот же путь, что `identity.service` уже
-# использует для админского сброса) с явного разрешения пользователя.
-PASSWORD = os.environ.get("LOADTEST_PASSWORD", "LoadTest123456!")
+# Пароль демо-КАМа `kam.ivanov` из deploy/keycloak/realm-crm.json: им же realm импортируется
+# при первом старте стека, его же подставляет loadtest/run_ci.sh. Прежний дефолт
+# (`LoadTest123456!`) годился только на одном давно пересозданном стенде и на чистом стеке
+# давал 401 у password-grant. Другой стенд или пароль — переменная LOADTEST_PASSWORD.
+PASSWORD = os.environ.get("LOADTEST_PASSWORD", "Kam123456789!")
 
 _FIXTURES = json.loads((Path(__file__).parent / "fixtures.json").read_text())
 _TO_STATUS_ID = _FIXTURES["to_status_id"]

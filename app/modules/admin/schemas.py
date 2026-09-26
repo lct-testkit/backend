@@ -108,7 +108,7 @@ class AuditEntryOut(BaseModel):
     request_id: str | None = None
     prev_hash: str | None = None
     hash: str
-    #: Версия состава хэшируемых полей записи (1 — до расширения, 2 — с ролью, IP и UA).
+    #: Версия хэша записи (1 — до расширения, 2 — с ролью, IP и UA, 3 — то же, но HMAC).
     hash_version: int = 1
 
 

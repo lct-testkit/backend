@@ -301,6 +301,8 @@ async def change_password(
         limit=settings.password_change_max_attempts,
         window_seconds=settings.password_change_lock_seconds,
         detail="Слишком много попыток смены пароля, попробуйте позже",
+        # Лимит — единственная защита от перебора текущего пароля: без Redis не пускаем.
+        fail_closed=True,
     )
 
     try:

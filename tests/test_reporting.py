@@ -352,7 +352,7 @@ class TestReportPermissions:
 
 
 class TestReportDataEndpoint:
-    """П2 (rtk_requiriments.md разд. 6.4; backend-issues.md #19):
+    """П2 (rtk_requiriments.md разд. 6.4; frontend/docs/backend-issues.md #19):
     `GET /api/reports/{report_id}/data` отдаёт тот же датасет, что и
     xlsx/pdf, но JSON'ом — без файла в S3, без `REPORT_EXPORTED`. Настоящая
     Postgres обязательна — см. докстринг модуля."""

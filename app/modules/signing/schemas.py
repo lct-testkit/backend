@@ -275,11 +275,16 @@ class SignatureOut(BaseModel):
 
 # --- Проверка подписи ----------------------------------------------------------
 
-VerifyStatusLiteral = Literal["valid", "disputed", "void", "hash_mismatch", "not_found"]
+VerifyStatusLiteral = Literal["valid", "disputed", "void", "hash_mismatch", "not_found", "tampered"]
+# Пересчёт доказательства подписи: `verified` — HMAC и хэш звена сошлись, `unavailable` — подпись
+# поставлена до сохранения nonce или другим ключом (пересчитать нечем, подделкой не считается),
+# `broken` — не сошлись (тогда и `status` = `tampered`).
+IntegrityLiteral = Literal["verified", "unavailable", "broken"]
 
 
 class VerifyResult(BaseModel):
     status: VerifyStatusLiteral
+    integrity: IntegrityLiteral | None = None
     signature_id: uuid.UUID | None = None
     signer_display: str | None = None
     signed_at: dt.datetime | None = None

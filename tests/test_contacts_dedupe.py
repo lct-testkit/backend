@@ -399,3 +399,94 @@ class TestFindOrCreate:
             "organization_id": result["first_org"],
             "contact_methods": ["email", "telegram"],
         }
+
+
+class TestPlaceholderSurname:
+    """Лид «только телефон» заводит контакт с фамилией-заглушкой «—». Она не фамилия: такой
+    контакт и следующий с тем же телефоном — один человек, с какой стороны ни стоит заглушка."""
+
+    def test_a_named_contact_matches_the_placeholder_one_by_phone(self, client) -> None:
+        _sign_in(client)
+        phone = f"+7999{_phone_tail()}"
+        first = client.post(
+            "/api/contacts", json={"first_name": "Без имени", "last_name": "—", "phone": phone}
+        )
+        assert first.status_code == 201, first.text
+
+        second = _create(client, phone=phone)
+
+        assert second.status_code == 409, second.text
+        candidates = second.json()["candidates"]
+        assert [c["id"] for c in candidates] == [first.json()["id"]]
+        assert candidates[0]["match"] == "phone"
+
+    def test_a_placeholder_request_matches_a_named_contact_by_phone(self, client) -> None:
+        _sign_in(client)
+        phone = f"+7999{_phone_tail()}"
+        first = _create(client, phone=phone)
+        assert first.status_code == 201, first.text
+
+        second = client.post(
+            "/api/contacts", json={"first_name": "Без имени", "last_name": "—", "phone": phone}
+        )
+
+        assert second.status_code == 409, second.text
+
+    @pytest.mark.parametrize("dash", ["—", "–", "-"])
+    def test_two_placeholders_with_one_phone_are_one_person(self, client, dash) -> None:
+        _sign_in(client)
+        phone = f"+7999{_phone_tail()}"
+        payload = {"first_name": "Без имени", "last_name": dash, "phone": phone}
+        assert client.post("/api/contacts", json=payload).status_code == 201
+
+        assert client.post("/api/contacts", json=payload).status_code == 409
+
+    def test_a_placeholder_does_not_match_anyone_by_a_different_phone(self, client) -> None:
+        _sign_in(client)
+        first = _create(client, phone=f"+7999{_phone_tail()}")
+        assert first.status_code == 201, first.text
+
+        second = client.post(
+            "/api/contacts",
+            json={"first_name": "Без имени", "last_name": "—", "phone": f"+7999{_phone_tail()}"},
+        )
+
+        assert second.status_code == 201, second.text
+
+    def test_two_real_surnames_on_one_phone_are_still_two_people(self, client) -> None:
+        _sign_in(client)
+        phone = f"+7999{_phone_tail()}"
+        assert _create(client, phone=phone).status_code == 201
+
+        assert _create(client, phone=phone).status_code == 201
+
+    def test_the_lead_path_finds_the_placeholder_contact(self, client) -> None:
+        phone = f"+7999{_phone_tail()}"
+
+        async def scenario() -> tuple[bool, bool, bool, uuid.UUID, uuid.UUID]:
+            from app.core.db import session_scope
+            from app.modules.catalog.service import ContactService
+
+            async with session_scope() as session:
+                service = ContactService(session)
+                nameless = await service.find_or_create(
+                    first_name="Без имени", last_name="—", phone=phone, source="cms"
+                )
+                named = await service.find_or_create(
+                    first_name="Пётр", last_name=_surname(), phone=phone, source="cms"
+                )
+                again = await service.find_or_create(
+                    first_name="Без имени", last_name="—", phone=phone, source="cms"
+                )
+                return (
+                    nameless.created,
+                    named.created,
+                    again.created,
+                    nameless.contact.id,
+                    named.contact.id,
+                )
+
+        created_first, created_named, created_again, first_id, named_id = run(client, scenario)
+
+        assert (created_first, created_named, created_again) == (True, False, False)
+        assert first_id == named_id

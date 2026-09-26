@@ -122,6 +122,9 @@ jobs:
           alembic downgrade -1
           alembic upgrade head
 
+      # Тесты идут под суперпользователем `crm` (он же мигрирует), поэтому права роли приложения
+      # `crm_app` (журнал аудита только на чтение и вставку, без DDL) проверяет
+      # tests/test_app_role_grants.py отдельным соединением под этой ролью.
       - name: pytest (покрытие, без пропусков)
         run: pytest -q --cov=app --cov-report=term --cov-report=xml
 
@@ -165,6 +168,29 @@ jobs:
       - name: hadolint
         run: docker run --rm -i "${HADOLINT_IMAGE}" hadolint --failure-threshold warning - < Dockerfile
 
+  # На main образ собирает и публикует общий конвейер ниже; на PR достаточно убедиться, что
+  # Dockerfile собирается (иначе поломка вскрывается уже после merge). Без push и без секретов.
+  image:
+    name: сборка образа api (без публикации)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: docker build (тот же Dockerfile, кэш GHA)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          provenance: false
+          tags: rtk-crm-api:pr-${{ github.event.number }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   publish:
     name: publish образа api
     needs: [lint, test, security]
@@ -173,7 +199,12 @@ jobs:
       contents: read
       packages: write
       id-token: write
-    uses: lct-testkit/deploy/.github/workflows/docker-publish.yml@main
+    # Общий конвейер закреплён по SHA, а не по @main: иначе любой коммит в чужом репозитории
+    # исполнялся бы здесь с `secrets: inherit` и правом писать в GHCR. SHA — main
+    # lct-testkit/deploy на 2026-09-26 (`gh api repos/lct-testkit/deploy/commits/main --jq .sha`);
+    # docker-publish.yml в нём тот же, что в 449e3e5. Обновляйте осознанно, прочитав изменения
+    # файла: `gh api "repos/lct-testkit/deploy/commits?path=.github/workflows/docker-publish.yml"`.
+    uses: lct-testkit/deploy/.github/workflows/docker-publish.yml@a134fcf1344f6e26490e33f4804135910fa008e1
     with:
       image: api
       event-type: backend-image-built

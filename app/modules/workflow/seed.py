@@ -5,7 +5,9 @@
     python -m app.modules.workflow.seed
 
 Идемпотентно: если воронка с данным `code` уже существует, сид её не
-трогает — повторный запуск на уже заполненной базе безопасен.
+трогает — повторный запуск на уже заполненной базе безопасен. Единственное исключение —
+`backfill_resume_transitions`: воронки, развёрнутые до появления выхода из «Заморожена», получают
+недостающие переходы «Возобновить» (см. его докстринг: только когда это безопасно).
 
 Обе воронки создаются сразу опубликованными. Это осознанное отличие от
 обычного пути «черновик → правка → публикация»: цель сидов — дать рабочую
@@ -21,17 +23,15 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
-import hashlib
-import json
 from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.db import session_scope
+from app.core.db import run_after_commit, session_scope
 from app.core.logging import configure_logging
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
@@ -44,7 +44,14 @@ from app.modules.workflow.models import (
     WorkflowStatus,
     WorkflowTransition,
 )
-from app.modules.workflow.service import _build_snapshot, _validate_graph_data
+from app.modules.workflow.service import (
+    _build_snapshot,
+    _validate_graph_data,
+    invalidate_workflow_cache,
+    snapshot_digest,
+    snapshot_structure_warnings,
+    transition_snapshot_entry,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -377,11 +384,120 @@ def _b2c_spec() -> WorkflowSpec:
     )
 
 
-async def seed_workflow(session: AsyncSession, spec: WorkflowSpec) -> Workflow | None:
+async def backfill_resume_transitions(
+    session: AsyncSession, workflow: Workflow, spec: WorkflowSpec
+) -> int:
+    """Выход из «Заморожена» для воронки, развёрнутой сидом до его появления. Возвращает число
+    добавленных переходов.
+
+    Старые сиды заводили `parked` без единого исходящего перехода: сделка, замороженная на любом
+    шаге, оставалась там навсегда. Новые сиды несут переходы «Возобновить» сразу, а на уже
+    развёрнутую воронку они сами не попадают (сид существующую воронку не трогает).
+
+    Безопасно для живых сделок, потому что они идут по снимку `published_graph`, а не по живым
+    строкам, и правка только ДОБАВЛЯЕТ переходы: ни один существующий переход, статус и его
+    идентификатор не меняются, а замороженные сделки получают выход. Поэтому переходы вносятся
+    в оба места сразу — в живые строки (их видит конструктор и следующая публикация) и в снимок —
+    а не пересборкой снимка из живых строк: та опубликовала бы всё, что администратор успел
+    набросать в черновике (так уже было с архивацией статуса). Версия воронки растёт: открытый
+    конструктор со старой версией не сможет сохранить граф без новых переходов и стереть их.
+
+    Условия, при которых воронка НЕ трогается (это чужие решения, а не дефект сида):
+    воронка не опубликована; у `parked` в снимке или в черновике уже есть хоть один исходящий
+    переход (администратор настроил выход по-своему); статуса `parked` или шага нет в снимке
+    (удалён, заархивирован). Тогда выход нужно добавить в конструкторе воронок вручную."""
+    if workflow.state != WorkflowState.PUBLISHED.value or workflow.published_graph is None:
+        return 0
+    wanted = [t for t in spec.transitions if t.from_code == "parked"]
+    if not wanted:
+        return 0
+
+    statuses = {
+        row.code: row
+        for row in (
+            await session.execute(
+                select(WorkflowStatus).where(WorkflowStatus.workflow_id == workflow.id)
+            )
+        ).scalars()
+    }
+    parked = statuses.get("parked")
+    snapshot = workflow.published_graph
+    live_ids = {item["id"] for item in snapshot.get("statuses", [])}
+    if parked is None or parked.is_archived or str(parked.id) not in live_ids:
+        return 0
+    if any(item["from_status_id"] == str(parked.id) for item in snapshot.get("transitions", [])):
+        return 0
+    draft_exits = await session.scalar(
+        select(func.count())
+        .select_from(WorkflowTransition)
+        .where(
+            WorkflowTransition.workflow_id == workflow.id,
+            WorkflowTransition.from_status_id == parked.id,
+        )
+    )
+    if draft_exits:
+        return 0
+
+    added: list[WorkflowTransition] = []
+    for item in wanted:
+        target = statuses.get(item.to_code)
+        if target is None or target.is_archived or str(target.id) not in live_ids:
+            continue
+        row = WorkflowTransition(
+            workflow_id=workflow.id,
+            from_status_id=parked.id,
+            to_status_id=target.id,
+            name=item.name,
+            allowed_roles=item.allowed_roles,
+            conditions=item.conditions,
+            actions=item.actions,
+            requires_comment=item.requires_comment,
+            sort_order=item.sort_order,
+        )
+        session.add(row)
+        added.append(row)
+    if not added:
+        return 0
+    await session.flush()  # идентификаторы новых переходов нужны снимку
+
+    updated = {
+        **snapshot,
+        "transitions": [
+            *snapshot.get("transitions", []),
+            *(transition_snapshot_entry(row) for row in added),
+        ],
+    }
+    old_hash = workflow.graph_hash
+    workflow.published_graph = updated
+    workflow.graph_hash = snapshot_digest(updated)
+    workflow.version += 1
+    await session.flush()
+    workflow_id = workflow.id
+    run_after_commit(session, lambda: invalidate_workflow_cache(workflow_id))
+
+    for warning in snapshot_structure_warnings(updated):
+        logger.warning("workflow_backfill_warning", code=spec.code, warning=warning)
+    await AuditService(session).record(
+        AuditAction.WORKFLOW_UPDATED,
+        entity_type="workflow",
+        entity_id=workflow.id,
+        changes={
+            "resume_transitions_added": {"old": 0, "new": len(added)},
+            "graph_hash": {"old": old_hash, "new": workflow.graph_hash},
+        },
+    )
+    logger.info("workflow_resume_transitions_backfilled", code=spec.code, added=len(added))
+    return len(added)
+
+
+async def seed_workflow(
+    session: AsyncSession, spec: WorkflowSpec, *, is_default: bool = True
+) -> Workflow | None:
     existing = (
         await session.execute(select(Workflow).where(Workflow.code == spec.code))
     ).scalar_one_or_none()
     if existing is not None:
+        await backfill_resume_transitions(session, existing, spec)
         logger.info("workflow_seed_skip_existing", code=spec.code)
         return None
 
@@ -389,7 +505,7 @@ async def seed_workflow(session: AsyncSession, spec: WorkflowSpec) -> Workflow |
         code=spec.code,
         name=spec.name,
         deal_type=spec.deal_type,
-        is_default=True,
+        is_default=is_default,
         state=WorkflowState.DRAFT.value,
     )
     session.add(workflow)
@@ -457,9 +573,7 @@ async def seed_workflow(session: AsyncSession, spec: WorkflowSpec) -> Workflow |
         logger.warning("workflow_seed_warning", code=spec.code, warning=warning)
 
     snapshot = _build_snapshot(workflow, statuses, transitions, sla_rules)
-    digest = hashlib.sha256(
-        json.dumps(snapshot, sort_keys=True, separators=(",", ":"), default=str).encode()
-    ).hexdigest()
+    digest = snapshot_digest(snapshot)
 
     workflow.published_graph = snapshot
     workflow.graph_hash = digest

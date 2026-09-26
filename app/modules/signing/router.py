@@ -48,6 +48,7 @@ from app.modules.signing.service import (
     SignatureRequestService,
     SignatureTemplateService,
     VerifyService,
+    build_sign_url,
     pdf_inline_headers,
 )
 
@@ -459,8 +460,7 @@ def _internal_file_url(request_id: uuid.UUID) -> str:
 
 
 def _sign_url(token: str) -> str:
-    # Ссылка ведёт на страницу веб-клиента (SPA `/sign/{token}`), а не на JSON-ручку API.
-    return f"{get_settings().base_url.rstrip('/')}/sign/{token}"
+    return build_sign_url(token)
 
 
 def _document_out(

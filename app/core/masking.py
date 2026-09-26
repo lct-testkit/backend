@@ -125,6 +125,25 @@ def mask_name(value: str | None) -> str | None:
     return f"{parts[0]} {initials}".strip()
 
 
+_TEXT_EMAIL = re.compile(r"[^\s,;<>()]+@[^\s,;<>()]+")
+_TEXT_PHONE = re.compile(r"\+?\d[\d\s().-]{7,}\d")
+# Подряд идущие слова с заглавной буквы (до трёх): фамилия, имя, отчество.
+_TEXT_NAME = re.compile(r"[A-ZА-ЯЁ][a-zа-яё]+(?:\s+[A-ZА-ЯЁ][a-zа-яё]+){1,2}")
+
+
+def mask_contacts_text(value: str | None) -> str | None:
+    """Свободный текст со списком контактов («Иванов Иван, +7 999 123-45-12, i@vuz.ru»).
+
+    Разбирать его на поля нечем, поэтому маскируется всё узнаваемое внутри: email и телефоны — по
+    своим форматам, ФИО — до `Иванов И.` (`mask_name`). Остальной текст (должности, пояснения)
+    остаётся как есть."""
+    if not value:
+        return value
+    masked = _TEXT_EMAIL.sub(lambda match: mask_email(match.group()) or REDACTED, value)
+    masked = _TEXT_PHONE.sub(lambda match: mask_phone(match.group()) or REDACTED, masked)
+    return _TEXT_NAME.sub(lambda match: mask_name(match.group()) or REDACTED, masked)
+
+
 def mask_tail(value: str | None, keep: int = 3) -> str | None:
     """СНИЛС, паспорт, адрес, диплом: виден только хвост, `11223344595` -> `***595`.
 

@@ -8,14 +8,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from fastapi import APIRouter, FastAPI
-from fastapi.openapi.utils import get_openapi
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from swagger_ui_bundle import swagger_ui_path
 
+from app.api.openapi import install_openapi
 from app.core.config import Settings
 
 _SWAGGER_INIT_JS = """window.addEventListener("load", function () {
@@ -49,74 +48,11 @@ _SWAGGER_HTML = """<!DOCTYPE html>
 </html>
 """
 
-# Ручки без токена: иначе Swagger потребует Authorize и для /health.
-_PUBLIC_PATH_PREFIXES = (
-    "/health/",
-    "/metrics",
-    "/api/auth/login",
-    "/api/auth/callback",
-    "/api/auth/backchannel-logout",
-    "/api/auth/invite/",
-)
-
-
-def _is_public_path(path: str) -> bool:
-    return any(path == prefix or path.startswith(prefix) for prefix in _PUBLIC_PATH_PREFIXES)
-
-
-def _install_bearer_auth(app: FastAPI) -> None:
-    """Добавляет схему Bearer в OpenAPI — без неё у Swagger нет кнопки Authorize."""
-
-    def custom_openapi() -> dict[str, Any]:
-        if app.openapi_schema is not None:
-            return app.openapi_schema
-
-        schema = get_openapi(
-            title=app.title,
-            version=app.version,
-            openapi_version=app.openapi_version,
-            description=app.description,
-            routes=app.routes,
-        )
-        components = schema.setdefault("components", {})
-        schemes = components.setdefault("securitySchemes", {})
-        schemes["BearerAuth"] = {
-            "type": "http",
-            "scheme": "bearer",
-            "bearerFormat": "JWT",
-            "description": (
-                "Access token из Keycloak. "
-                "Вставьте только сам токен — слово Bearer добавлять не нужно, "
-                "Swagger подставит его сам."
-            ),
-        }
-        schema["security"] = [{"BearerAuth": []}]
-
-        for path, methods in schema.get("paths", {}).items():
-            if not _is_public_path(path):
-                continue
-            for method, operation in methods.items():
-                if isinstance(operation, dict) and method.lower() in {
-                    "get",
-                    "post",
-                    "put",
-                    "patch",
-                    "delete",
-                    "head",
-                    "options",
-                }:
-                    operation["security"] = []
-
-        app.openapi_schema = schema
-        return schema
-
-    app.openapi = custom_openapi  # type: ignore[method-assign]
-
 
 def attach_docs(app: FastAPI, settings: Settings) -> None:
-    # Схема описывает схему авторизации всегда, даже когда UI закрыт.
+    # Схема описывает способы аутентификации и формат ошибок всегда, даже когда UI закрыт.
     if settings.expose_openapi:
-        _install_bearer_auth(app)
+        install_openapi(app, settings)
     if not settings.expose_docs:
         return
 
