@@ -37,9 +37,11 @@ KEYCLOAK_TOKEN_URL = os.environ.get(
 CLIENT_ID = os.environ.get("LOADTEST_CLIENT_ID", "crm-bff")
 CLIENT_SECRET = os.environ.get("LOADTEST_CLIENT_SECRET", "crm-bff-secret")
 USERNAME = os.environ.get("LOADTEST_USERNAME", "kam.ivanov")
-# См. комментарий в locustfile_transition.py: пароль сброшен через
-# сервис-аккаунт `crm-admin` с явного разрешения пользователя.
-PASSWORD = os.environ.get("LOADTEST_PASSWORD", "LoadTest123456!")
+# Пароль демо-КАМа `kam.ivanov` из deploy/keycloak/realm-crm.json: им же realm импортируется
+# при первом старте стека, его же подставляет loadtest/run_ci.sh. Прежний дефолт
+# (`LoadTest123456!`) годился только на одном давно пересозданном стенде и на чистом стеке
+# давал 401 у password-grant. Другой стенд или пароль — переменная LOADTEST_PASSWORD.
+PASSWORD = os.environ.get("LOADTEST_PASSWORD", "Kam123456789!")
 
 _FIXTURES = json.loads((Path(__file__).parent / "fixtures.json").read_text())
 _POOL = itertools.cycle(_FIXTURES["comment_deal_ids"])
@@ -91,6 +93,7 @@ class CommentUser(HttpUser):
     wait_time = constant_throughput(_RPS_PER_USER) if _RPS_PER_USER > 0 else constant(0)
 
     def on_start(self) -> None:
+        # Вход Bearer-токеном, как в locustfile_transition.py; про prod см. его шапку.
         token = _shared_token()
         self.client.headers.update({"Authorization": f"Bearer {token}"})
 

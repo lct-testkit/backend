@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import unquote, urlsplit
 
 from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -160,6 +161,23 @@ class Settings(BaseSettings):
     signature_otp_max_attempts: int = 3
     signature_server_secret: SecretStr
     signature_key_version: int = 1
+    # Код ПЭП в ответе API (`debug_code`): `None` — как раньше, только вне prod; `False` выключает и
+    # в dev/demo (стенд без SMS-шлюза), `True` включает явно.
+    signature_expose_debug_otp: bool | None = None
+    # Ключ HMAC записей аудита (версия хэша 3): голый SHA-256 может пересчитать тот, у кого есть
+    # доступ к БД, ключ лежит вне БД. Пусто — хэш без ключа (версия 2), как раньше.
+    audit_hmac_key: SecretStr | None = None
+    # Сколько секунд транзакция может простаивать «открытой» до принудительного закрытия сервером
+    # Postgres (`idle_in_transaction_session_timeout`): зависший клиент не должен держать замки.
+    db_idle_in_transaction_timeout_seconds: int = 60
+    # --- Почта (ссылки подписантам, email-уведомления) ---------------------
+    # Пустой `smtp_host` — письма не отправляются, доставка email остаётся заглушкой.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: SecretStr | None = None
+    smtp_from: str = ""
+    smtp_starttls: bool = True
     # dop.md §13 добавляет `ntp`/`sms-gateway-mock` в контейнерную карту
     # (§2.2) как инфраструктурные сервисы этого же стека, а не опциональную
     # внешнюю интеграцию (в отличие от `lms_base_url`/`bitrix_*`, у которых
@@ -238,6 +256,15 @@ class Settings(BaseSettings):
     # OpenAPI-схема нужна фронтенду и в prod; закрывается только UI.
     openapi_enabled: bool = True
 
+    @field_validator("signature_expose_debug_otp", "audit_hmac_key", "smtp_password", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, value: object) -> object:
+        """docker-compose передаёт незаданную переменную пустой строкой (`${VAR:-}`): для
+        необязательных значений это «не задано», а не пустой ключ и не ошибка разбора булева."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @field_validator("database_url", "kc_database_url", mode="after")
     @classmethod
     def _require_async_driver(cls, value: str | None) -> str | None:
@@ -261,6 +288,13 @@ class Settings(BaseSettings):
             secrets["KEYCLOAK_ADMIN_CLIENT_SECRET"] = (
                 self.keycloak_admin_client_secret.get_secret_value()
             )
+        # Пароль роли приложения сидит и в строке подключения: проверялся только отдельный
+        # CRM_APP_PASSWORD, и демо-пароль в DATABASE_URL проходил.
+        db_password = urlsplit(self.database_url).password
+        if db_password:
+            secrets["DATABASE_URL (пароль)"] = unquote(db_password)
+        if self.audit_hmac_key is not None:
+            secrets["AUDIT_HMAC_KEY"] = self.audit_hmac_key.get_secret_value()
         problems = [
             f"{name}: демо-значение"
             if value in _DEMO_SECRET_VALUES
@@ -272,7 +306,7 @@ class Settings(BaseSettings):
             raise ValueError(
                 "APP_PROFILE=prod отвергает небезопасные секреты — "
                 + "; ".join(problems)
-                + ". Сгенерируйте значения (deploy/scripts/gen_env.sh)."
+                + ". Сгенерируйте значения (scripts/gen_env.sh в репозитории lct-testkit/deploy)."
             )
         return self
 

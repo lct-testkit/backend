@@ -678,6 +678,11 @@ class OrganizationService:
 # =============================================================================
 
 
+def _is_placeholder_last_name(value: object) -> bool:
+    """Заглушка вместо фамилии («—», «-», пусто) не различает людей: см. `find_matches`."""
+    return not name_key(value).strip("-. ")
+
+
 class ContactService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -771,9 +776,12 @@ class ContactService:
 
         Правило: совпал email (без регистра) — тот же человек. Телефон один и тот же у разных
         людей бывает (общий номер кафедры, семейный номер), поэтому по телефону совпадение только
-        при той же фамилии; если фамилии в запросе нет — по телефону одному. Удалённые и
-        обезличенные контакты не участвуют: обезличенный человек, подавший заявку снова, — новый
-        контакт (new_spec §4.8.5). Аргументы уже нормализованы (`_identity`)."""
+        при той же фамилии; если фамилии в запросе нет — по телефону одному. Заглушка вместо
+        фамилии (`—` у лида «только телефон») — тоже «нет фамилии», причём с обеих сторон: и у
+        запроса, и у уже заведённого контакта. Иначе лид «— …» и следующий с тем же телефоном, но
+        уже с настоящей фамилией, становились двумя людьми. Удалённые и обезличенные контакты не
+        участвуют: обезличенный человек, подавший заявку снова, — новый контакт (new_spec §4.8.5).
+        Аргументы уже нормализованы (`_identity`)."""
         if not email and not phone:
             return []
         base = select(Contact).where(Contact.deleted_at.is_(None), Contact.is_anonymized.is_(False))
@@ -798,7 +806,7 @@ class ContactService:
                 seen.add(row.id)
                 found.append((row, "email"))
         if phone:
-            wanted = name_key(last_name) if last_name else ""
+            wanted = "" if _is_placeholder_last_name(last_name) else name_key(last_name)
             rows = (
                 (
                     await self._session.execute(
@@ -813,7 +821,11 @@ class ContactService:
             for row in rows:
                 if row.id in seen:
                     continue
-                if not wanted or name_key(row.last_name) == wanted:
+                if (
+                    not wanted
+                    or _is_placeholder_last_name(row.last_name)
+                    or name_key(row.last_name) == wanted
+                ):
                     found.append((row, "phone"))
         return found
 

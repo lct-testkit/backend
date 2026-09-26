@@ -15,13 +15,11 @@
 **Провайдерная архитектура каналов** — тот же приём, что `SignatureProvider`
 (dop.md §10.3) и `OrgLookupProvider` (dop.md §11.2): доставка `in_app`
 реализована напрямую (запись и есть доставка), а `email`/`telegram` идут
-через `ChannelGateway`, зарегистрированный в `_channel_gateways`. По
-умолчанию оба — честная заглушка `LoggingChannelGateway`: в этом контуре нет
-ни настроенного SMTP, ни SMS/Telegram-шлюза (то же самое ограничение, что
-`app/modules/signing/service.py` уже документирует для доставки OTP,
-dop.md §10.11). Подключение реального SMTP-клиента позже — это
-`register_channel_gateway("email", SmtpGateway(...))`, без изменений в
-`RealNotificationService`.
+через `ChannelGateway`, зарегистрированный в `_channel_gateways`. Для `email` это
+`SmtpEmailGateway`: письмо уходит по SMTP (`email_transport`), пока заданы `SMTP_HOST` и адрес
+отправителя; иначе — честная заглушка `LoggingChannelGateway`, как и у `telegram` (в этом контуре
+нет Telegram-шлюза, dop.md §10.11). Подключение другого транспорта — это
+`register_channel_gateway(channel, gateway)`, без изменений в `RealNotificationService`.
 """
 
 from __future__ import annotations
@@ -43,6 +41,7 @@ from app.core.masking import mask_email
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
 from app.modules.identity.models import User, UserStatus
+from app.modules.notification.email_transport import EmailSendError, send_email, smtp_configured
 from app.modules.notification.models import (
     DeliveryStatus,
     Notification,
@@ -255,10 +254,11 @@ class RealNotificationService:
                     template_code=template_code,
                 )
                 return
-            target_user = await session.get(User, recipient.manager_id)
-            if target_user is None:
+            manager = await session.get(User, recipient.manager_id)
+            if manager is None:
                 return
-            target_id = target_user.id
+            target_user = manager
+            target_id = manager.id
             payload["escalated_from"] = str(recipient_id)
 
         # Настройки получателя решают до создания записи: раньше уведомление сохранялось, а
@@ -426,8 +426,44 @@ class LoggingChannelGateway:
         )
 
 
+_DEFAULT_EMAIL_SUBJECT = "Уведомление CRM"
+
+
+class SmtpEmailGateway:
+    """Канал `email` по SMTP. Без настроенного SMTP ведёт себя как заглушка (`skipped`), с ним —
+    отправляет письмо. Настройки читаются в момент отправки, а не при старте: воркер и API
+    подхватывают их без пересборки, а тесты подменяют их на лету.
+
+    Временный сбой (`EmailSendError.retryable`) оставляет доставку в очереди — задача доставки
+    повторит её по расписанию и после последней попытки пометит `failed`; отказ принять адрес
+    получателя повтором не лечится."""
+
+    def __init__(self) -> None:
+        self._fallback = LoggingChannelGateway(NotificationChannel.EMAIL.value)
+
+    async def send(
+        self,
+        *,
+        address_masked: str | None,
+        subject: str | None,
+        body: str,
+        address: str | None = None,
+    ) -> None:
+        if not smtp_configured():
+            await self._fallback.send(
+                address_masked=address_masked, subject=subject, body=body, address=address
+            )
+            return
+        if not address:
+            raise ChannelDeliveryError("У получателя нет адреса электронной почты", retryable=False)
+        try:
+            await send_email(to=address, subject=subject or _DEFAULT_EMAIL_SUBJECT, body=body)
+        except EmailSendError as exc:
+            raise ChannelDeliveryError(str(exc), retryable=exc.retryable) from exc
+
+
 _channel_gateways: dict[str, ChannelGateway] = {
-    NotificationChannel.EMAIL.value: LoggingChannelGateway(NotificationChannel.EMAIL.value),
+    NotificationChannel.EMAIL.value: SmtpEmailGateway(),
     NotificationChannel.TELEGRAM.value: LoggingChannelGateway(NotificationChannel.TELEGRAM.value),
 }
 

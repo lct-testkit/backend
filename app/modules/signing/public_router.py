@@ -85,6 +85,7 @@ async def _rate_limited(request: Request, token: Annotated[str, Path()]) -> None
         limit=per_token * _IP_LIMIT_FACTOR,
         window_seconds=60,
         detail="Слишком много запросов к странице подписания, повторите позже",
+        fail_closed=True,
     )
     # В ключ Redis идёт хэш, а не сам токен: токен — единственный секрет ссылки.
     await rate_limit_enforce(
@@ -93,6 +94,7 @@ async def _rate_limited(request: Request, token: Annotated[str, Path()]) -> None
         limit=per_token,
         window_seconds=60,
         detail="Слишком много запросов по этой ссылке, повторите через минуту",
+        fail_closed=True,
     )
 
 

@@ -66,8 +66,9 @@ class AuditLog(Base):
     prev_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     hash: Mapped[str] = mapped_column(String(64), nullable=False)
     # Версия состава хэшируемых полей (`audit.service.compute_hash`): 1 — исходный, 2 — ещё и
-    # роль актора, подмена личности, IP и User-Agent. Записи до расширения остаются версии 1 и
-    # проверяются по-старому: пересчитывать их нельзя, таблица неизменяемая.
+    # роль актора, подмена личности, IP и User-Agent, 3 — состав версии 2, но хэш — HMAC с
+    # `AUDIT_HMAC_KEY`. Записи до расширения остаются версии 1 и проверяются по-старому:
+    # пересчитывать их нельзя, таблица неизменяемая.
     hash_version: Mapped[int] = mapped_column(
         SmallInteger, nullable=False, server_default=text("1")
     )

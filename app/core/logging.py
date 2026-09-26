@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from typing import Any
 
@@ -43,6 +44,30 @@ def _redact_secrets(
     return event_dict
 
 
+# Токены подписания и приглашений живут в пути запроса: с токеном из лога можно открыть страницу
+# подписи или принять приглашение. Регулярка не привязана к началу строки — путь бывает и внутри
+# сообщения (`HTTP Request: GET http://api/public/sign/<токен> ...` от httpx), и внутри
+# трассировки исключения.
+_TOKEN_IN_PATH = re.compile(r"(/(?:public/sign|api/auth/invite)/)[^/?#\s\"'<>{}]+")
+
+
+def redact_path_tokens(text: str) -> str:
+    """Закрывает токен ссылки подписания/приглашения в пути или в тексте, содержащем путь."""
+    return _TOKEN_IN_PATH.sub(lambda m: f"{m.group(1)}***", text)
+
+
+def _redact_path_tokens(
+    _logger: Any, _name: str, event_dict: structlog.types.EventDict
+) -> structlog.types.EventDict:
+    """Последний барьер для токенов в путях: обработчики ошибок пишут `path=request.url.path`,
+    сторонние библиотеки — полный URL в тексте сообщения. Проходит по строковым значениям
+    верхнего уровня (включая `event` и отформатированное `exception`)."""
+    for key, value in event_dict.items():
+        if isinstance(value, str) and "/" in value:
+            event_dict[key] = redact_path_tokens(value)
+    return event_dict
+
+
 def _drop_color_message(
     _logger: Any, _name: str, event_dict: structlog.types.EventDict
 ) -> structlog.types.EventDict:
@@ -65,6 +90,7 @@ def _shared_processors() -> list[structlog.types.Processor]:
         structlog.stdlib.ExtraAdder(),
         _drop_color_message,
         _redact_secrets,
+        _redact_path_tokens,
     ]
 
 
@@ -96,6 +122,8 @@ def configure_logging(*, level: str = "INFO", json_output: bool = True) -> None:
         processors=[
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
             structlog.processors.format_exc_info,
+            # Трассировка форматируется уже после общей цепочки: закрываем токены и в ней.
+            _redact_path_tokens,
             renderer,
         ],
     )

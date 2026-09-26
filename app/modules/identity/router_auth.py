@@ -346,6 +346,8 @@ async def check_invite(
         limit=20,
         window_seconds=3600,
         detail="Слишком много попыток проверки приглашения",
+        # Лимит — единственная защита от перебора токенов приглашения: без Redis не пускаем.
+        fail_closed=True,
     )
 
     invite = (

@@ -702,9 +702,7 @@ class WorkflowService:
             )
 
         snapshot = _build_snapshot(workflow, statuses, transitions, sla_rules)
-        digest = hashlib.sha256(
-            json.dumps(snapshot, sort_keys=True, separators=(",", ":"), default=str).encode()
-        ).hexdigest()
+        digest = snapshot_digest(snapshot)
 
         if workflow.is_default:
             await self._demote_other_defaults(workflow)
@@ -1017,9 +1015,7 @@ class WorkflowService:
         if archived is not None:
             archived_ids.add(str(archived.id))
         snapshot = _without_statuses(published, archived_ids)
-        digest = hashlib.sha256(
-            json.dumps(snapshot, sort_keys=True, separators=(",", ":"), default=str).encode()
-        ).hexdigest()
+        digest = snapshot_digest(snapshot)
         workflow.published_graph = snapshot
         workflow.graph_hash = digest
         await self._session.flush()
@@ -1216,6 +1212,27 @@ def _bfs_multi_source(
     return seen
 
 
+def transition_snapshot_entry(t: WorkflowTransition) -> dict[str, Any]:
+    """Переход в том виде, в каком он лежит в `published_graph`."""
+    return {
+        "id": str(t.id),
+        "from_status_id": str(t.from_status_id),
+        "to_status_id": str(t.to_status_id),
+        "name": t.name,
+        "allowed_roles": t.allowed_roles,
+        "conditions": t.conditions,
+        "actions": t.actions,
+        "requires_comment": t.requires_comment,
+    }
+
+
+def snapshot_digest(snapshot: dict[str, Any]) -> str:
+    """`graph_hash` снимка: sha256 канонического JSON."""
+    return hashlib.sha256(
+        json.dumps(snapshot, sort_keys=True, separators=(",", ":"), default=str).encode()
+    ).hexdigest()
+
+
 def _build_snapshot(
     workflow: Workflow,
     statuses: list[WorkflowStatus],
@@ -1241,16 +1258,7 @@ def _build_snapshot(
             if not s.is_archived
         ],
         "transitions": [
-            {
-                "id": str(t.id),
-                "from_status_id": str(t.from_status_id),
-                "to_status_id": str(t.to_status_id),
-                "name": t.name,
-                "allowed_roles": t.allowed_roles,
-                "conditions": t.conditions,
-                "actions": t.actions,
-                "requires_comment": t.requires_comment,
-            }
+            transition_snapshot_entry(t)
             for t in transitions
             if t.from_status_id in live_ids and t.to_status_id in live_ids
         ],

@@ -69,6 +69,16 @@ from app.modules.identity.models import (
 # --- импорт каталогов (раздел 5.10/§4.12, спринт 5) ---
 from app.modules.imports.models import ImportJob, ImportPreset, ImportRowResult
 
+# --- интеграции: транспортный слой, шесть таблиц раздела 7.8 (спринт 9) ---
+from app.modules.integration.models import (
+    ExternalRef,
+    InboundMessage,
+    IntegrationSource,
+    LearningProgress,
+    OutboxEvent,
+    SyncCursor,
+)
+
 # --- уведомления (раздел 5.7, спринт 7) ---
 from app.modules.notification.models import (
     Notification,
@@ -136,6 +146,7 @@ __all__ = [
     "Direction",
     "EdmAgreement",
     "EgrulEntry",
+    "ExternalRef",
     "FeatureFlag",
     "File",
     "Holiday",
@@ -143,6 +154,9 @@ __all__ = [
     "ImportJob",
     "ImportPreset",
     "ImportRowResult",
+    "InboundMessage",
+    "IntegrationSource",
+    "LearningProgress",
     "LossReason",
     "Notification",
     "NotificationDelivery",
@@ -151,6 +165,7 @@ __all__ = [
     "Organization",
     "OrganizationBranch",
     "OrganizationLicense",
+    "OutboxEvent",
     "Product",
     "Region",
     "RegistryVersion",
@@ -164,6 +179,7 @@ __all__ = [
     "SignatureTemplate",
     "SlaRule",
     "StatusMappingJob",
+    "SyncCursor",
     "SystemSetting",
     "Task",
     "Team",

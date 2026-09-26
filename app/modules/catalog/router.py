@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, Path, Query, Request, status
 from app.core.deps import DbSession, IdempotencyKeyHeader, IfMatch, Pagination, require_permission
 from app.core.idempotency import IdempotencyGuard
 from app.core.pagination import Page, keyset_before
-from app.core.permissions import Permission
+from app.core.permissions import Permission, has_permission
 from app.core.security import Principal
 from app.modules.catalog.models import (
     Contact,
@@ -978,7 +978,12 @@ async def list_organization_licenses(
             keyset_before(OrganizationLicense.created_at, OrganizationLicense.id, cursor)
         )
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
-    built = Page.build(rows, limit=page.limit, serializer=OrganizationLicenseOut.model_validate)
+    reveal = has_permission(principal.role, Permission.CONTACT_REVEAL)
+    built = Page.build(
+        rows,
+        limit=page.limit,
+        serializer=lambda row: OrganizationLicenseOut.from_model(row, reveal=reveal),
+    )
     return OrganizationLicenseListResponse(items=built.items, next_cursor=built.next_cursor)
 
 
@@ -991,4 +996,6 @@ async def get_organization_license(
     session: DbSession, principal: CatalogRead, license_id: Annotated[uuid.UUID, Path()]
 ) -> OrganizationLicenseOut:
     license_ = await OrganizationLicenseService(session).get_or_404(license_id, principal)
-    return OrganizationLicenseOut.model_validate(license_)
+    return OrganizationLicenseOut.from_model(
+        license_, reveal=has_permission(principal.role, Permission.CONTACT_REVEAL)
+    )

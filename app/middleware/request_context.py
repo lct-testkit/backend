@@ -24,6 +24,7 @@ from app.core.context import (
     set_client,
     set_request_id,
 )
+from app.core.logging import redact_path_tokens
 from app.core.metrics import (
     http_errors_total,
     http_request_duration_seconds,
@@ -96,12 +97,10 @@ def _client_ip(request: Request) -> str | None:
 
 # Токены подписания и приглашений живут в пути запроса. Лог доступа — не место для них: с токеном
 # из лога можно открыть страницу подписи или принять приглашение. Метрики шаблон маршрута и так
-# не содержит; в журнал запросов путь идёт с закрытым токеном.
-_TOKEN_IN_PATH = re.compile(r"^(/(?:public/sign|api/auth/invite)/)[^/?]+")
-
-
+# не содержит; в журнал запросов путь идёт с закрытым токеном (тем же правилом, что и остальные
+# логи: `app.core.logging.redact_path_tokens`).
 def _loggable_path(path: str) -> str:
-    return _TOKEN_IN_PATH.sub(lambda m: f"{m.group(1)}***", path)
+    return redact_path_tokens(path)
 
 
 def _route_template(request: Request) -> str:

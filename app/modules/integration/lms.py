@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
@@ -51,6 +53,24 @@ from app.modules.integration.models import LearningProgress, SyncCursor
 logger = structlog.get_logger(__name__)
 
 _TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+
+
+@asynccontextmanager
+async def _http_errors_without_url(operation: str) -> AsyncIterator[None]:
+    """Ошибка HTTP без адреса в тексте. `raise_for_status()` вшивает `response.url` в сообщение,
+    а оно уходит в `outbox_events.last_error` и оттуда в ответ админской ручки и в лог; адрес
+    LMS, заданный с логином или ключом в строке, не должен там оказаться (так же устроен
+    `BitrixClient._call`). Наружу — только операция и статус либо тип сбоя."""
+    try:
+        yield
+    except httpx.HTTPStatusError as exc:
+        raise RuntimeError(
+            f"lms {operation} http error: "
+            f"{exc.response.status_code} {exc.response.reason_phrase}"
+        ) from None
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"lms {operation} request failed: {type(exc).__name__}") from None
+
 
 #: События воронки, при доставке которых LMS получает сведения об учащемся.
 ENROLLMENT_EVENTS = frozenset({"LEARNING_ENROLLMENT_SENT", "LEARNING_TRANSFER_REQUESTED"})
@@ -71,7 +91,10 @@ class LmsClient:
 
     async def pull_progress(self, *, updated_since: str | None) -> list[dict[str, Any]]:
         params = {"updated_since": updated_since} if updated_since else {}
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        async with (
+            _http_errors_without_url("students/progress"),
+            httpx.AsyncClient(timeout=_TIMEOUT) as client,
+        ):
             response = await client.get(
                 f"{self._base_url}/students/progress", params=params, headers=self._headers()
             )
@@ -84,7 +107,10 @@ class LmsClient:
     ) -> dict[str, Any]:
         """`idempotency_key` — стабильный ключ доставки (id события outbox): повтор после сбоя
         или обрыва связи приходит к LMS с тем же ключом, и она не заводит зачисление второй раз."""
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        async with (
+            _http_errors_without_url("enrollments"),
+            httpx.AsyncClient(timeout=_TIMEOUT) as client,
+        ):
             response = await client.post(
                 f"{self._base_url}/enrollments",
                 json=payload,

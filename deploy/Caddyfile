@@ -73,14 +73,34 @@
 	@no_request_id not header X-Request-Id *
 	request_header @no_request_id X-Request-Id {http.request.uuid}
 
+	# Журнал доступа: токены подписания и приглашений живут в пути запроса, а с токеном из лога можно
+	# открыть страницу подписи или принять приглашение — их закрываем. Заголовки Authorization и
+	# Cookie Caddy в журнале скрывает сам.
 	log {
 		output stdout
-		format json
+		format filter {
+			wrap json
+			fields {
+				request>uri regexp ^(/(?:public/sign|api/auth/invite)/)[^/?\s]+ ${1}REDACTED
+			}
+		}
 	}
 
 	# Keycloak отдаётся под /auth, чтобы весь контур жил на одном порту.
 	# Именно handle, а не handle_path: Keycloak сам слушает на /auth
 	# (KC_HTTP_RELATIVE_PATH), поэтому префикс срезать нельзя.
+	# Консоль администратора Keycloak и realm master — только из закрытой сети (localhost, docker,
+	# VPN, ssh-туннель): с публичного адреса админ-вход не должен быть виден вовсе, а пароль
+	# администратора по умолчанию известен. Расширить круг: ADMIN_CONSOLE_ALLOW="10.0.0.0/8 203.0.113.7".
+	# `client_ip` учитывает trusted_proxies, поэтому за внешним прокси проверяется адрес клиента.
+	@kc_admin_outside {
+		path /auth/admin /auth/admin/* /auth/realms/master /auth/realms/master/*
+		not client_ip {$ADMIN_CONSOLE_ALLOW:private_ranges}
+	}
+	handle @kc_admin_outside {
+		respond "Not Found" 404
+	}
+
 	handle /auth/* {
 		reverse_proxy keycloak:8080
 	}

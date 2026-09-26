@@ -7,7 +7,7 @@
 <sub>Команда **«Тесткит»** — [github.com/lct-testkit](https://github.com/lct-testkit)</sub>
 
 <!--STATS-->
-**203** операции API &nbsp;·&nbsp; **13** модулей &nbsp;·&nbsp; **67** таблиц &nbsp;·&nbsp; **19** миграций &nbsp;·&nbsp; **1992** теста &nbsp;·&nbsp; **11** сервисов Compose
+**203** операции API &nbsp;·&nbsp; **13** модулей &nbsp;·&nbsp; **67** таблиц &nbsp;·&nbsp; **20** миграций &nbsp;·&nbsp; **2143** теста &nbsp;·&nbsp; **11** сервисов Compose
 <!--/STATS-->
 
 [Быстрый старт](#быстрый-старт) · [Примеры](#примеры-использования) · [Приём данных](#приём-данных-вендоры-оплаты-учащиеся) · [Как устроено](#как-устроено) · [Модули](#что-внутри) · [Настройка](#настройка) · [Разработка](#разработка) · [Безопасность](#безопасность) · [Ограничения](#ограничения-и-известные-проблемы)
@@ -24,7 +24,7 @@
 
 * **Закрытый контур, запуск одной командой.** `docker compose up -d --build` поднимает 11 сервисов; интернет нужен только на сборке образов. Swagger UI отдаётся из локального пакета, шрифт с кириллицей для PDF вложен в образ — CDN не нужны.
 * **BFF: токены Keycloak не покидают Redis.** Браузер получает только httpOnly-cookie сессии (`Secure` вне профиля `dev`, `SameSite=Lax`) и CSRF-cookie. Вход — OIDC с `state`, `nonce` и PKCE S256, `id_token` проверяется полностью, обновление токена идёт под локом.
-* **Идемпотентность и оптимистичные блокировки.** `Idempotency-Key` (8–255 символов, ключ живёт внутри актора) на создании сделок, организаций и контактов: тот же ключ с другим телом — `409 CRM-1003`. Изменения требуют `If-Match` с `version`, конфликт — `409 CRM-1002` с актуальными значениями.
+* **Идемпотентность и оптимистичные блокировки.** `Idempotency-Key` (8–255 символов, ключ живёт внутри актора) на создании сделок, организаций и контактов и на вебхуке сайта (`POST /api/v1/integrations/cms/leads`): тот же ключ с другим телом — `409 CRM-1003`. Изменения требуют `If-Match` с `version`, конфликт — `409 CRM-1002` с актуальными значениями.
 * **RFC 7807 везде.** Любая ошибка — `application/problem+json` с кодом из каталога `CRM-XXYY` (50 кодов) и `request_id`; стектрейсы наружу не уходят.
 * **Неизменяемый аудит с цепочкой хэшей.** `audit_log` партиционирован по месяцам, триггеры на каждой партиции запрещают `UPDATE`, `DELETE` и `TRUNCATE`, каждая запись хранит `prev_hash` и SHA-256 `hash`; `GET /api/admin/audit/verify-chain` пересчитывает хвост цепочки. Запись идёт в той же транзакции, что и бизнес-изменение; отказы в доступе тоже попадают в журнал.
 * **ПЭП с проверкой.** Одноразовый код (6 цифр, в базе только bcrypt-хэш, 3 попытки, 5 минут), HMAC-SHA256 метка целостности, цепочка хэшей подписей, неизменяемая таблица `signatures`, доверенное время из контейнера `ntp` (рассинхрон больше 5 с блокирует подписание), публичная проверка `/public/verify/{id}` и проверка файла по хэшу.
@@ -38,7 +38,7 @@
 
 <img src="docs/img/swagger.png" width="720" alt="Swagger UI: 30 групп ручек, кнопка Authorize для Bearer-токена">
 
-*Swagger UI на `/api/docs`: 203 операции в 30 группах, схема `BearerAuth` (вставьте access-токен Keycloak в Authorize). В `prod` интерактивный UI закрыт, схема `/api/openapi.json` остаётся.*
+*Swagger UI на `/api/docs`: 203 операции в 30 группах, схемы безопасности `BearerAuth` (вставьте access-токен Keycloak в Authorize), `SessionCookie` и `CsrfToken`. В `prod` интерактивный UI закрыт, схема `/api/openapi.json` остаётся.*
 
 <img src="docs/img/keycloak-login.png" width="410" alt="Форма входа Keycloak, realm crm">
 
@@ -189,7 +189,7 @@ curl -s "http://localhost:8080/api/admin/audit/verify-chain?limit=1000" -H "Auth
 curl -s http://localhost:8080/api/openapi.json -o openapi.json
 ```
 
-`openapi.json` — 3.0.3, 162 путей, 203 операции, 241 схем, единственная схема авторизации `BearerAuth`. Тот же файл — источник для генератора клиента фронтенда (`frontend/tools/gen-api.mjs`).
+`openapi.json` — 3.0.3, 162 путей, 203 операции, 241 схем, схемы безопасности `BearerAuth`, `SessionCookie` (cookie `crm_sid`) и `CsrfToken` (заголовок `X-CSRF-Token`), ошибки — общая схема `Problem` (RFC 7807, `application/problem+json`). Тот же файл — источник для генератора клиента фронтенда (`frontend/tools/gen-api.mjs`).
 
 ### Автоподстановка и проверка ИНН
 
@@ -339,8 +339,8 @@ app/
 │                        integration, notification, registry, reporting, signing, workflow
 ├── assets/fonts/        DejaVu Sans — кириллица в PDF (xhtml2pdf) и графиках (matplotlib)
 └── worker/main.py       arq: воркер и планировщик периодических задач
-migrations/versions/     19 миграций Alembic: 0001_baseline … 0019_audit_sla_hardening
-tests/                   76 файлов, 1992 теста (офлайн + сквозные с TEST_DATABASE_URL)
+migrations/versions/     20 миграций Alembic: 0001_baseline … 0020_signature_unique_request
+tests/                   83 файлов, 2143 теста (офлайн + сквозные с TEST_DATABASE_URL)
 loadtest/                Locust: provision.py + 2 locustfile, README со своими результатами
 deploy/                  Caddyfile, entrypoint.sh, keycloak/realm-crm.json, postgres/, seaweedfs/
 ```
@@ -416,12 +416,12 @@ lint-imports                                      # границы модуле�
 python tools/export_openapi.py --check            # контракт API: openapi.json не разошёлся с кодом
 ```
 
-* `mypy` проверяет всю кодовую базу, кроме модулей из `[[tool.mypy.overrides]]` (накопленный долг, 93 ошибки на момент включения) — список не должен расти; исправили модуль — удалите его из списка.
+* `mypy` проверяет всю кодовую базу, кроме модулей из `[[tool.mypy.overrides]]` (накопленный долг, 93 ошибки на момент включения; из 26 модулей в списке осталось 20) — список не должен расти; исправили модуль — удалите его из списка.
 * `import-linter` держит слои внутри модулей (`router`/`tasks` → `service` → `models`) и запрещает импортировать роутеры/`tasks` чужих модулей (спека §2.2).
 * `openapi.json` в корне — контракт с фронтендом (`frontend/tools/gen-api.mjs` строит из него типы). Изменили API — перегенерируйте: `python tools/export_openapi.py`.
 * Исключения ruff (кириллица, `S105/S106` на константы-коды и т.п.) и их причины — в `[tool.ruff.lint]`.
 
-**Миграции.** Alembic, `migrations/env.py` берёт URL из `Settings().database_url` (или `MIGRATIONS_DATABASE_URL` при локальном запуске вне Docker — та же ограниченная роль `crm_app` не имеет DDL-прав, см. «Аудит»). 19 линейных ревизий, от `0001_baseline` до `0019_audit_sla_hardening`. В CI проверяются: ровно одна голова, `upgrade head`, **`alembic check`** (модели не разошлись со схемой) и round-trip последней ревизии (`downgrade -1` → `upgrade head`). Таблицы транспортного слоя интеграций, созданные только SQL-миграциями, перечислены в `migrations/env.py` (`_MIGRATION_ONLY_TABLES`) — новые таблицы описывайте моделью.
+**Миграции.** Alembic, `migrations/env.py` берёт URL из `Settings().database_url` (или `MIGRATIONS_DATABASE_URL` при локальном запуске вне Docker — та же ограниченная роль `crm_app` не имеет DDL-прав, см. «Аудит»). 20 линейных ревизий, от `0001_baseline` до `0020_signature_unique_request`. В CI проверяются: ровно одна голова, `upgrade head`, **`alembic check`** (модели не разошлись со схемой) и round-trip последней ревизии (`downgrade -1` → `upgrade head`). Все таблицы, включая шесть таблиц интеграций, описаны моделями: `alembic check` не исключает ни одной; в `migrations/env.py` пропускаются только партиции `audit_log_*` и два служебных индекса (`_MIGRATION_ONLY_INDEXES`) — новые таблицы описывайте моделью.
 
 ```bash
 alembic upgrade head
@@ -465,16 +465,18 @@ locust -f loadtest/locustfile_transition.py --headless -u 50 -r 25 -t 60s --host
 
 | Workflow | Когда | Что делает |
 |---|---|---|
-| `ci.yml` | PR, push в `main` | Три параллельных гейта — `lint · types · architecture · contract` (ruff, mypy, import-linter, `openapi.json`, lock-файлы), `pytest + миграции (Postgres)` (одна голова, `upgrade`, `alembic check`, round-trip, тесты с покрытием ≥ 55% и **без пропусков**), `зависимости · секреты · Dockerfile` (`pip-audit`, Trivy fs: уязвимости+секреты+misconfig, hadolint). С `main` после зелёных гейтов — публикация образа |
-| публикация образа | `ci.yml`, только `main` | Общий конвейер из `lct-testkit/deploy`: сборка → **Trivy до push** → push в GHCR → SBOM + provenance → подпись cosign → dispatch в `deploy` (без токена — падает, а не молчит) |
+| `ci.yml` | PR, push в `main` | Три параллельных гейта — `lint · types · architecture · contract` (ruff, mypy, import-linter, `openapi.json`, lock-файлы), `pytest + миграции (Postgres)` (одна голова, `upgrade`, `alembic check`, round-trip, тесты с покрытием ≥ 70% и **без пропусков**, в том числе права роли `crm_app` отдельным соединением под ней — `tests/test_app_role_grants.py`), `зависимости · секреты · Dockerfile` (`pip-audit`, Trivy fs: уязвимости+секреты+misconfig, hadolint). На PR дополнительно собирается образ без публикации (job `image`, кэш GHA). С `main` после зелёных гейтов — публикация образа |
+| публикация образа | `ci.yml`, только `main` | Общий конвейер из `lct-testkit/deploy`, закреплённый по SHA коммита, а не по `@main`: сборка → **Trivy до push** → push в GHCR → SBOM + provenance → подпись cosign → dispatch в `deploy` (без токена — падает, а не молчит) |
 | `loadtest.yml` | ночью, вручную, PR с меткой `perf` | Locust против стека из исходников, SLO p95 ≤ 300 мс при 50 RPS |
 
-Образ собирается multi-stage из `requirements.lock` (`pip --require-hashes`), базовый образ закреплён по digest, в рантайме нет pip/setuptools; `.trivyignore` пуст намеренно. Настройки репозитория (защита `main`, обязательные проверки) — `deploy/docs/REPO-SETTINGS.md`.
+Образ собирается multi-stage из `requirements.lock` (`pip --require-hashes`), базовый образ закреплён по digest, в рантайме нет pip/setuptools; `.trivyignore` пуст намеренно. Настройки репозитория (защита `main`, обязательные проверки) — [`docs/REPO-SETTINGS.md`](https://github.com/lct-testkit/deploy/blob/main/docs/REPO-SETTINGS.md) в репозитории `deploy`.
 
 ## Безопасность
 
 Только подтверждённое в коде и на живом стенде:
 
+* **Схема OpenAPI описывает вход так, как он работает.** `BearerAuth` (сервисные вызовы; в `prod` только `INTEGRATION`) или `SessionCookie` (`crm_sid`), а на POST/PUT/PATCH/DELETE при сессии ещё и `CsrfToken` (`X-CSRF-Token`) — это в `security` каждой мутирующей операции. Публичные ручки (`/public/*`, `/api/auth/*`, вебхуки `/api/v1/integrations/*`, `/health/*`) помечены `security: []`, `POST /api/auth/logout` принимает сессию необязательно. Каждая операция описывает 400/401/403/404/409/422/429/500 как `application/problem+json` со схемой `Problem`; тест `tests/test_openapi_contract.py` сверяет это с кодом, в том числе список публичных ручек и операций с `Idempotency-Key`.
+* **Права роли приложения проверяются под самой ролью.** Миграции и обычные тесты идут суперпользователем и обошли бы регресс в `GRANT`/`REVOKE`, поэтому `tests/test_app_role_grants.py` подключается как `crm_app`: журнал аудита и все его партиции — только чтение и вставка, DDL и защитная функция партиций недоступны, ни одного объекта во владении, нет привилегированных атрибутов роли.
 * **CSRF.** Double-submit токен на мутирующих запросах с сессионной cookie: cookie `crm_csrf` (читаемая JS — вторая половина приёма) плюс заголовок `X-CSRF-Token`, сверка `hmac.compare_digest` (`app/core/csrf.py`, `CRM-1107` при расхождении). Запросы с `Authorization: Bearer` не проверяются — у них нет cookie, значит нет и вектора CSRF.
 * **CSP, HSTS и остальные заголовки — на каждом ответе Caddy** (проверено `curl -i`): `Content-Security-Policy` со списком `connect-src`/`img-src`/`frame-src`, ограниченным собственным origin и портом SeaweedFS; `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy`, заголовок `Server` скрыт (`deploy/Caddyfile`).
 * **Redirect-safe `next`.** Адрес возврата после входа принимается только как путь внутри сайта (`app/modules/identity/redirects.py::safe_next_path`; 17 тестов в `tests/test_redirects.py`, проверено и живым запросом с `next=https://evil.example`) — раньше `GET /api/auth/login?next=…` работал как открытый редирект, исправлено.

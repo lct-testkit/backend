@@ -12,12 +12,18 @@
 было до расширения) проверяются по-старому, новые — версии 2, где в хэш входят и роль
 актора, подмена личности, IP и User-Agent. Иначе эти поля можно было бы поправить в БД,
 и цепочка этого не заметила бы.
+
+Версия 3 — тот же состав, что у версии 2, но вместо голого SHA-256 берётся HMAC-SHA256 с
+серверным ключом `AUDIT_HMAC_KEY`. Голый SHA-256 может пересчитать любой, у кого есть запись в
+БД: правит запись и переписывает хэши всех последующих. Ключ лежит вне БД, и без него такую
+подмену не скрыть. Пока ключ не задан, пишется версия 2, как раньше.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import hmac
 import json
 import uuid
 from dataclasses import dataclass
@@ -28,6 +34,7 @@ from sqlalchemy import Select, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.context import (
     get_actor,
     get_client,
@@ -55,8 +62,19 @@ _PG_LOCK_NOT_AVAILABLE = "55P03"
 
 GENESIS_HASH = "0" * 64
 
-#: Версия состава хэшируемых полей для новых записей. 1 — исходный состав (без роли, IP и UA).
+#: Версия состава хэшируемых полей для новых записей без ключа. 1 — исходный состав (без роли,
+#: IP и UA), 2 — расширенный (SHA-256).
 AUDIT_HASH_VERSION = 2
+#: Расширенный состав, хэш — HMAC-SHA256 с `AUDIT_HMAC_KEY`. Пишется, когда ключ задан.
+AUDIT_HASH_VERSION_HMAC = 3
+_KNOWN_HASH_VERSIONS = frozenset({1, 2, AUDIT_HASH_VERSION_HMAC})
+
+
+def audit_hmac_key() -> bytes | None:
+    """Ключ HMAC записей аудита из настроек; `None` — ключ не задан."""
+    secret = get_settings().audit_hmac_key
+    value = secret.get_secret_value() if secret is not None else ""
+    return value.encode("utf-8") if value else None
 
 
 @dataclass(slots=True)
@@ -91,13 +109,21 @@ def compute_hash(
     impersonated_by: str | None = None,
     ip: str | None = None,
     user_agent: str | None = None,
+    hmac_key: bytes | None = None,
 ) -> str:
-    """Канонизация и SHA-256. Порядок полей фиксирован, иначе хэш невоспроизводим.
+    """Канонизация и SHA-256 (версия 3 — HMAC-SHA256). Порядок полей фиксирован, иначе хэш
+    невоспроизводим.
 
     Версия 1 хэширует девять исходных полей — записи, сделанные до расширения, обязаны
     проверяться именно так, поэтому её состав менять нельзя. Версия 2 добавляет роль
     актора, `impersonated_by`, IP и User-Agent и саму версию (чтобы запись версии 2 нельзя
-    было выдать за версию 1 с теми же девятью полями)."""
+    было выдать за версию 1 с теми же девятью полями). Версия 3 хэширует тот же состав, что и
+    версия 2 (с `v` = 3, чтобы запись нельзя было выдать за другую версию), но как HMAC с
+    `hmac_key`: без ключа она не вычисляется, вызов без ключа — ошибка программиста, а не
+    тихий откат на SHA-256, который выдал бы подделываемый хэш за защищённый."""
+    if version not in _KNOWN_HASH_VERSIONS:
+        raise ValueError(f"неизвестная версия хэша аудита: {version}")
+
     payload: dict[str, Any] = {
         "prev_hash": prev_hash or GENESIS_HASH,
         "created_at": created_at,
@@ -122,6 +148,10 @@ def compute_hash(
     canonical = json.dumps(
         payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
     )
+    if version >= AUDIT_HASH_VERSION_HMAC:
+        if not hmac_key:
+            raise ValueError("для хэша аудита версии 3 нужен ключ HMAC")
+        return hmac.new(hmac_key, canonical.encode("utf-8"), hashlib.sha256).hexdigest()
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -206,6 +236,9 @@ class AuditService:
         masked_changes = mask_mapping(changes) if changes else None
 
         prev_hash = await self._chain_head()
+        # С ключом запись подписывается HMAC (версия 3), без ключа — как раньше (версия 2).
+        hmac_key = audit_hmac_key()
+        hash_version = AUDIT_HASH_VERSION_HMAC if hmac_key else AUDIT_HASH_VERSION
 
         entry = AuditLog(
             actor_id=resolved_actor_id,
@@ -220,7 +253,7 @@ class AuditService:
             user_agent=client.user_agent if client else None,
             request_id=request_id,
             prev_hash=prev_hash,
-            hash_version=AUDIT_HASH_VERSION,
+            hash_version=hash_version,
         )
         # created_at нужен до вставки: он входит в хэш и в первичный ключ. Берётся именно
         # `clock_timestamp()` и именно ПОСЛЕ захвата лока цепочки: `now()` — это время начала
@@ -241,11 +274,12 @@ class AuditService:
             changes=masked_changes,  # type: ignore[arg-type]
             result=str(result),
             request_id=request_id,
-            version=AUDIT_HASH_VERSION,
+            version=hash_version,
             actor_role=resolved_role,
             impersonated_by=str(entry.impersonated_by) if entry.impersonated_by else None,
             ip=entry.ip,
             user_agent=entry.user_agent,
+            hmac_key=hmac_key,
         )
 
         self._session.add(entry)
@@ -307,7 +341,12 @@ class AuditService:
         return stmt
 
     async def verify_chain(self, *, limit: int = 1000) -> dict[str, Any]:
-        """Проверяет целостность хвоста цепочки. Используется админкой и тестами."""
+        """Проверяет целостность хвоста цепочки. Используется админкой и тестами.
+
+        Каждая запись проверяется по своей версии хэша. Записи версии 3 требуют
+        `AUDIT_HMAC_KEY`: без него они не «подделаны», а просто непроверяемы, и отчёт говорит
+        именно это. Неверный ключ от подделки отличить нельзя (хэш не сходится в обоих
+        случаях), поэтому в сообщении названы оба объяснения."""
         rows = (
             (
                 await self._session.execute(
@@ -320,30 +359,61 @@ class AuditService:
             .all()
         )
         entries = list(reversed(rows))
+        hmac_key = audit_hmac_key()
         broken: list[str] = []
+        unverifiable: list[uuid.UUID] = []
+        # Самая высокая версия, уже встреченная в хвосте цепочки (записи идут по времени).
+        highest_version = 0
         for index, entry in enumerate(entries):
-            expected = compute_hash(
-                prev_hash=entry.prev_hash,
-                created_at=entry.created_at.isoformat(),
-                actor_id=str(entry.actor_id) if entry.actor_id else None,
-                action=entry.action,
-                entity_type=entry.entity_type,
-                entity_id=str(entry.entity_id) if entry.entity_id else None,
-                changes=entry.changes,
-                result=entry.result,
-                request_id=entry.request_id,
-                # Запись проверяется по тому составу полей, с которым она была хэширована.
-                version=entry.hash_version or 1,
-                actor_role=entry.actor_role,
-                impersonated_by=str(entry.impersonated_by) if entry.impersonated_by else None,
-                ip=entry.ip,
-                user_agent=entry.user_agent,
-            )
-            if expected != entry.hash:
-                broken.append(f"{entry.id}: хэш записи не совпадает")
+            # Запись проверяется по тому составу полей, с которым она была хэширована.
+            version = entry.hash_version or 1
+            if version not in _KNOWN_HASH_VERSIONS:
+                broken.append(f"{entry.id}: неизвестная версия хэша {version}")
+            elif version >= AUDIT_HASH_VERSION_HMAC and hmac_key is None:
+                unverifiable.append(entry.id)
+            else:
+                expected = compute_hash(
+                    prev_hash=entry.prev_hash,
+                    created_at=entry.created_at.isoformat(),
+                    actor_id=str(entry.actor_id) if entry.actor_id else None,
+                    action=entry.action,
+                    entity_type=entry.entity_type,
+                    entity_id=str(entry.entity_id) if entry.entity_id else None,
+                    changes=entry.changes,
+                    result=entry.result,
+                    request_id=entry.request_id,
+                    version=version,
+                    actor_role=entry.actor_role,
+                    impersonated_by=str(entry.impersonated_by) if entry.impersonated_by else None,
+                    ip=entry.ip,
+                    user_agent=entry.user_agent,
+                    hmac_key=hmac_key,
+                )
+                if expected != entry.hash:
+                    reason = (
+                        "хэш записи не совпадает (запись изменена либо задан другой "
+                        "AUDIT_HMAC_KEY)"
+                        if version >= AUDIT_HASH_VERSION_HMAC
+                        else "хэш записи не совпадает"
+                    )
+                    broken.append(f"{entry.id}: {reason}")
+            # Понижение версии после HMAC-записи: подмена, переписавшая записи голым SHA-256,
+            # либо компонент, работающий без ключа. Проверяется только при заданном ключе:
+            # без него отчёт и так сообщает, что записи версии 3 не проверены.
+            if hmac_key is not None and version < highest_version:
+                broken.append(
+                    f"{entry.id}: запись версии {version} после версии {highest_version} "
+                    "(понижение версии хэша либо компонент без AUDIT_HMAC_KEY)"
+                )
+            highest_version = max(highest_version, version)
             if index > 0 and entry.prev_hash != entries[index - 1].hash:
                 broken.append(f"{entry.id}: разрыв цепочки с предыдущей записью")
 
+        if unverifiable:
+            broken.append(
+                f"{unverifiable[0]}: не задан AUDIT_HMAC_KEY — записи версии 3 не проверены "
+                f"(всего таких записей: {len(unverifiable)})"
+            )
         return {"checked": len(entries), "ok": not broken, "problems": broken}
 
 

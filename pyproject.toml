@@ -158,8 +158,8 @@ plugins = ["pydantic.mypy"]
 
 # «Храповик»: новые и чистые модули проверяются строго; перечисленные ниже
 # модули несут накопленный долг типизации (93 ошибки на момент включения
-# mypy в CI). Исправили модуль — удалите его из списка, и он навсегда
-# останется чистым. Список не должен расти.
+# mypy в CI, в списке было 26 модулей, теперь 20). Исправили модуль — удалите
+# его из списка, и он навсегда останется чистым. Список не должен расти.
 [[tool.mypy.overrides]]
 module = [
     "app.core.problem",
@@ -167,7 +167,6 @@ module = [
     "app.modules.catalog.service",
     "app.modules.crm.router",
     "app.modules.crm.service",
-    "app.modules.crm.tasks",
     "app.modules.files.router",
     "app.modules.identity.erasure_service",
     "app.modules.identity.router_auth",
@@ -175,17 +174,12 @@ module = [
     "app.modules.imports.service",
     "app.modules.integration.tasks",
     "app.modules.notification.router",
-    "app.modules.notification.service",
     "app.modules.registry.providers",
-    "app.modules.reporting.builders",
     "app.modules.reporting.rendering",
     "app.modules.reporting.router",
-    "app.modules.reporting.service",
-    "app.modules.reporting.tasks",
     "app.modules.signing.service",
     "app.modules.signing.tasks",
     "app.modules.workflow.dsl",
-    "app.modules.workflow.router",
     "app.modules.workflow.service",
     "app.worker.main",
 ]
@@ -200,7 +194,7 @@ testpaths = ["tests"]
 source = ["app"]
 
 [tool.coverage.report]
-# Порог выставлен по измеренной базе (58% со сквозными тестами на Postgres)
-# с запасом; поднимайте по мере роста покрытия, не опускайте.
-fail_under = 55
+# Порог выставлен по измеренной базе (74,32% в CI со сквозными тестами на Postgres)
+# с запасом на новый код; поднимайте по мере роста покрытия, не опускайте.
+fail_under = 70
 skip_covered = true

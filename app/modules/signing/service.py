@@ -49,6 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
 from app.core.config import get_settings
+from app.core.db import run_after_commit
 from app.core.errors import (
     AppError,
     ErrorCode,
@@ -84,6 +85,11 @@ from app.modules.crm.models import SignatureStatus as DealSignatureStatus
 from app.modules.files.models import Attachment, AttachmentCategory, File, FileStatus
 from app.modules.identity.models import User
 from app.modules.integration.service import get_outbox_service
+from app.modules.notification.email_transport import (
+    EmailSendError,
+    send_email,
+    smtp_configured,
+)
 from app.modules.notification.service import NotificationPriority, get_notification_service
 from app.modules.signing.models import (
     OPEN_DOCUMENT_STATUSES,
@@ -189,6 +195,41 @@ def _expose_debug_otp() -> bool:
     if override is not None:
         return bool(override)
     return not settings.is_prod
+
+
+def build_sign_url(token: str) -> str:
+    """Ссылка внешнего подписанта: страница веб-клиента (SPA `/sign/{token}`), не JSON-ручка."""
+    return f"{get_settings().base_url.rstrip('/')}/sign/{token}"
+
+
+_SIGN_LINK_SUBJECT = "Вам направлен документ на подписание"
+
+
+def render_sign_link_email(
+    *,
+    title: str,
+    url: str,
+    token_expires_at: dt.datetime | None,
+    deadline_at: dt.datetime | None,
+) -> tuple[str, str]:
+    """Тема и текст письма со ссылкой подписания. Только то, что нужно получателю: название
+    документа, ссылка и сроки; имён и реквизитов подписанта в письме нет."""
+    lines = [
+        "Здравствуйте!",
+        "",
+        f"Вам направлен документ «{title}» на подписание простой электронной подписью.",
+        "",
+        f"Открыть документ и подписать: {url}",
+        "",
+        "Ссылка личная: не пересылайте её другим людям.",
+    ]
+    if token_expires_at is not None:
+        until = token_expires_at.astimezone(dt.UTC)
+        lines.append(f"Ссылка действует до {until:%d.%m.%Y %H:%M} UTC.")
+    if deadline_at is not None:
+        lines.append(f"Срок подписания: до {deadline_at.astimezone(dt.UTC):%d.%m.%Y %H:%M} UTC.")
+    lines += ["", "Если вы не ожидали это письмо, просто проигнорируйте его."]
+    return _SIGN_LINK_SUBJECT, "\n".join(lines)
 
 
 def _agreement_is_effective(agreement: EdmAgreement | None, today: dt.date | None = None) -> bool:
@@ -1063,6 +1104,7 @@ class SignatureDocumentService:
             request.sent_at = now
             if request.signer_type == SignerType.EXTERNAL.value:
                 revealed[request.id] = self._issue_token(request, now)
+                await self._queue_link_email(document, request, revealed[request.id])
             else:
                 await get_notification_service().notify_user(
                     self._session,
@@ -1073,6 +1115,43 @@ class SignatureDocumentService:
                     entity_id=request.id,
                 )
         return revealed
+
+    async def _queue_link_email(
+        self, document: SignatureDocument, request: SignatureRequest, token: str
+    ) -> None:
+        """Ссылка внешнему подписанту письмом — если настроен SMTP; иначе ничего не делается, и
+        ссылку, как раньше, выдаёт инициатору ответ `/send` или `/reissue-link`.
+
+        Письмо уходит ПОСЛЕ коммита: токен существует, только если транзакция зафиксирована,
+        откат оставил бы получателю мёртвую ссылку. Сбой отправки (сервер недоступен, адрес
+        отвергнут) запрос не ломает — он в журнале, инициатор по-прежнему может передать ссылку
+        сам."""
+        if not smtp_configured():
+            return
+        contact = (
+            await self._session.get(Contact, request.signer_contact_id)
+            if request.signer_contact_id
+            else None
+        )
+        address = contact.email if contact else None
+        if not address:
+            logger.warning("signature_link_email_no_address", request_id=str(request.id))
+            return
+        subject, body = render_sign_link_email(
+            title=document.title,
+            url=build_sign_url(token),
+            token_expires_at=request.token_expires_at,
+            deadline_at=document.deadline_at,
+        )
+
+        async def _send() -> None:
+            try:
+                await send_email(to=address, subject=subject, body=body)
+            except EmailSendError:
+                # Причина и маскированный адрес уже в журнале транспорта.
+                logger.warning("signature_link_email_failed", request_id=str(request.id))
+
+        run_after_commit(self._session, _send)
 
     def _issue_token(self, request: SignatureRequest, now: dt.datetime) -> str:
         """Новый токен внешнему подписанту. В БД остаётся только его sha256,
@@ -1106,6 +1185,7 @@ class SignatureDocumentService:
             )
         old_expires_at = request.token_expires_at
         token = self._issue_token(request, dt.datetime.now(dt.UTC))
+        await self._queue_link_email(document, request, token)
         await self._session.flush()
         await self._audit.record(
             AuditAction.SIGNATURE_LINK_REISSUED,
@@ -1389,12 +1469,28 @@ class SignatureRequestService:
                 )
 
     async def _dispatch_otp(self, channel: str, destination: str, code: str) -> bool:
-        """Отправляет код; `True` — он ушёл. SMS идёт на шлюз (результат шлюза учитывается),
-        у email и telegram транспорта в контуре нет: раньше `challenge` всё равно отвечал
-        «отправлено», и подписант ждал письма, которого не будет."""
+        """Отправляет код; `True` — он ушёл. SMS идёт на шлюз (результат шлюза учитывается), email —
+        по SMTP, когда он настроен. У telegram (и у email без SMTP) транспорта в контуре нет:
+        раньше `challenge` всё равно отвечал «отправлено», и подписант ждал сообщения, которого
+        не будет."""
         if channel == "sms":
             message_id = await send_sms(to=destination, message=f"Код подтверждения: {code}")
             return message_id is not None
+        if channel == "email" and smtp_configured():
+            minutes = max(self._settings.signature_otp_ttl_seconds // 60, 1)
+            try:
+                await send_email(
+                    to=destination,
+                    subject="Код подтверждения подписи",
+                    body=(
+                        f"Код подтверждения для подписания документа: {code}\n\n"
+                        f"Код действует {minutes} мин. Никому его не сообщайте.\n"
+                        "Если вы не запрашивали код, проигнорируйте это письмо."
+                    ),
+                )
+            except EmailSendError:
+                return False
+            return True
         return False
 
     async def challenge(
@@ -1419,6 +1515,7 @@ class SignatureRequestService:
             limit=1,
             window_seconds=60,
             detail="Код уже отправлен — повторная отправка возможна через минуту",
+            fail_closed=True,
         )
 
         contact = (
@@ -1452,7 +1549,8 @@ class SignatureRequestService:
         self._session.add(otp)
         await self._session.flush()
 
-        # SMS уходит через `sms-gateway-mock` (dop.md §13). У email и telegram транспорта нет.
+        # SMS уходит через `sms-gateway-mock` (dop.md §13), email — по SMTP, если он настроен;
+        # у telegram транспорта нет.
         # Код не попадает в наш лог ни в одной ветке — только в тело запроса к шлюзу.
         delivered = await self._dispatch_otp(channel, destination, code)
         debug_code = code if _expose_debug_otp() else None
@@ -1538,6 +1636,7 @@ class SignatureRequestService:
             limit=_SIGN_RATE_LIMIT_PER_MIN,
             window_seconds=60,
             detail="Слишком частые попытки подписания, повторите через минуту",
+            fail_closed=True,
         )
         document = await self._lock_for_action(request)
         await self._ensure_actionable(
@@ -2079,6 +2178,93 @@ def compute_chain_hash(
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+# Итоги проверки доказательства подписи (`check_signature_evidence`).
+INTEGRITY_VERIFIED = "verified"
+INTEGRITY_UNAVAILABLE = "unavailable"
+INTEGRITY_BROKEN = "broken"
+
+
+@dataclass(slots=True)
+class IntegrityReport:
+    """Итог проверки одной подписи: `state` и человекочитаемые причины (для лога, не для клиента:
+    публичная проверка отдаёт только состояние)."""
+
+    state: str
+    problems: list[str]
+
+
+def check_signature_evidence(
+    signature: Signature, *, secret: str, key_version: int
+) -> IntegrityReport:
+    """Пересчитывает метку целостности (HMAC) и хэш звена цепочки из того, что лежит в БД.
+
+    Проверка доступна только подписям с сохранённым `nonce` (`evidence.auth.nonce`): он —
+    открытый вход HMAC. Подпись без него поставлена до того, как nonce стали сохранять, и
+    пересчитать её нечем — это «проверка недоступна», а не подделка. Так же недоступна подпись,
+    поставленная ключом другой версии: серверный ключ в настройках один, прежних он не хранит.
+
+    Что покрывает проверка: `content_hash`, идентификатор подписанта, метка времени и nonce —
+    через HMAC; `prev_hash`, значение подписи, номер запроса — через хэш звена; сами поля
+    доказательства (подписант, документ, время) — через сверку с записью. Связь с предыдущим
+    звеном проверяет `VerifyService`, ему нужна БД."""
+    evidence = signature.evidence if isinstance(signature.evidence, dict) else {}
+    auth = evidence.get("auth") if isinstance(evidence.get("auth"), dict) else {}
+    nonce = auth.get("nonce")
+    if not isinstance(nonce, str) or not nonce:
+        return IntegrityReport(
+            INTEGRITY_UNAVAILABLE, ["в доказательстве нет nonce (подпись до его сохранения)"]
+        )
+    if signature.key_version != key_version:
+        return IntegrityReport(
+            INTEGRITY_UNAVAILABLE,
+            [f"подпись поставлена ключом версии {signature.key_version}: его в настройках нет"],
+        )
+
+    signer = evidence.get("signer") if isinstance(evidence.get("signer"), dict) else {}
+    time_block = evidence.get("time") if isinstance(evidence.get("time"), dict) else {}
+    document = evidence.get("document") if isinstance(evidence.get("document"), dict) else {}
+    signer_id = signer.get("id")
+    signed_at_iso = time_block.get("signed_at")
+    if not isinstance(signer_id, str) or not isinstance(signed_at_iso, str):
+        return IntegrityReport(
+            INTEGRITY_BROKEN, ["в доказательстве нет подписанта или времени подписи"]
+        )
+
+    problems: list[str] = []
+    expected_value = compute_signature_value(
+        secret=secret,
+        content_hash=signature.content_hash,
+        signer_id=signer_id,
+        signed_at_iso=signed_at_iso,
+        nonce=nonce,
+    )
+    if not hmac.compare_digest(expected_value, signature.signature_value):
+        problems.append("значение подписи не совпадает с пересчитанным HMAC")
+
+    try:
+        evidence_time = dt.datetime.fromisoformat(signed_at_iso)
+    except ValueError:
+        problems.append("время подписи в доказательстве не разобрать")
+    else:
+        if evidence_time.tzinfo is None:
+            evidence_time = evidence_time.replace(tzinfo=dt.UTC)
+        if evidence_time != signature.signed_at:
+            problems.append("время подписи в доказательстве расходится с записью")
+    if document.get("content_hash") not in (None, signature.content_hash):
+        problems.append("хэш документа в доказательстве расходится с записью")
+
+    expected_hash = compute_chain_hash(
+        prev_hash=signature.prev_hash,
+        signature_value=signature.signature_value,
+        content_hash=signature.content_hash,
+        request_id=str(signature.request_id),
+        signed_at_iso=signed_at_iso,
+    )
+    if expected_hash != signature.hash:
+        problems.append("хэш звена цепочки не совпадает с пересчитанным")
+    return IntegrityReport(INTEGRITY_BROKEN if problems else INTEGRITY_VERIFIED, problems)
+
+
 async def _apply_deal_signature_outcome(
     session: AsyncSession, deal: Deal, *, rule: str | None, note: str
 ) -> None:
@@ -2139,18 +2325,57 @@ class VerifyService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def check_integrity(self, signature: Signature) -> IntegrityReport:
+        """Доказательство подписи и её место в цепочке: см. `check_signature_evidence`.
+
+        К пересчёту добавляется связь с предыдущим звеном: `prev_hash` обязан указывать на
+        существующую подпись (или быть началом цепочки). Порядок звеньев по времени здесь не
+        сверяется: до исправления гонки (`created_at` брался из начала транзакции) порядок мог
+        расходиться с цепочкой у подписей, поставленных параллельно, и это была бы ложная тревога.
+        Подписи без nonce не проверяются вовсе — как и в `check_signature_evidence`."""
+        settings = get_settings()
+        report = check_signature_evidence(
+            signature,
+            secret=settings.signature_server_secret.get_secret_value(),
+            key_version=settings.signature_key_version,
+        )
+        if report.state == INTEGRITY_UNAVAILABLE:
+            return report
+        prev_hash = signature.prev_hash
+        if prev_hash and prev_hash != GENESIS_HASH:
+            predecessor = await self._session.scalar(
+                select(Signature.id).where(Signature.hash == prev_hash).limit(1)
+            )
+            if predecessor is None:
+                report.problems.append("звено цепочки ссылается на несуществующую подпись")
+        if report.problems:
+            report.state = INTEGRITY_BROKEN
+        return report
+
     async def verify_by_id(self, signature_id: uuid.UUID) -> dict[str, Any]:
         signature = await self._session.get(Signature, signature_id)
         if signature is None:
             return {"status": "not_found"}
         document = await self._session.get(SignatureDocument, signature.document_id)
+        integrity = await self.check_integrity(signature)
+        if integrity.state == INTEGRITY_BROKEN:
+            # Причины — только в лог: клиенту публичной проверки устройство защиты не нужно.
+            logger.error(
+                "signature_integrity_broken",
+                signature_id=str(signature.id),
+                problems=integrity.problems,
+            )
         status = "valid"
-        if signature.is_disputed:
+        if integrity.state == INTEGRITY_BROKEN:
+            # Сильнее прочих статусов: подделанная запись не «оспорена» и не «аннулирована».
+            status = "tampered"
+        elif signature.is_disputed:
             status = "disputed"
         elif document is not None and document.status == SignatureDocumentStatus.VOID.value:
             status = "void"
         return {
             "status": status,
+            "integrity": integrity.state,
             "signature_id": signature.id,
             "signer_display": signature.signer_display,
             "signed_at": signature.signed_at,

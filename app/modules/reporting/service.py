@@ -28,7 +28,7 @@ import threading
 import uuid
 from typing import Any
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, any_, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -135,7 +135,9 @@ class ReportTemplateService:
             stmt = stmt.where(
                 or_(
                     func.cardinality(ReportTemplate.allowed_roles) == 0,
-                    ReportTemplate.allowed_roles.any(principal.role),
+                    # `:role = ANY(allowed_roles)`: то же, что `ARRAY.any()`, но без обращения
+                    # к relationship-компаратору, который mypy подставляет вместо ARRAY.
+                    literal(principal.role) == any_(ReportTemplate.allowed_roles),
                 )
             )
         return stmt.order_by(ReportTemplate.code)

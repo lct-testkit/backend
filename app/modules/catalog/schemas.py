@@ -17,7 +17,14 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
-from app.core.masking import mask_email, mask_phone, mask_tail, mask_year
+from app.core.masking import (
+    mask_contacts_text,
+    mask_email,
+    mask_name,
+    mask_phone,
+    mask_tail,
+    mask_year,
+)
 from app.core.normalize import clean_text, normalize_email, normalize_phone
 from app.modules.catalog import learner
 
@@ -630,6 +637,18 @@ class OrganizationLicenseOut(BaseModel):
     version: int
     created_at: dt.datetime
     updated_at: dt.datetime
+
+    @classmethod
+    def from_model(cls, license_: Any, *, reveal: bool) -> OrganizationLicenseOut:
+        """ФИО менеджера и «ответственные от вуза» — персональные данные из исходного xls. Без
+        права `contact:reveal` они отдаются маскированными: инициалами вместо ФИО, email и
+        телефоны по своим форматам (`mask_contacts_text`). Раскрытие остальным — через обычный
+        `reveal` контактов, где оно попадает в аудит."""
+        out = cls.model_validate(license_)
+        if not reveal:
+            out.manager_full_name = mask_name(license_.manager_full_name)
+            out.responsible_contacts = mask_contacts_text(license_.responsible_contacts)
+        return out
 
 
 class OrganizationLicenseListResponse(BaseModel):

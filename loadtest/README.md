@@ -37,8 +37,11 @@ locust -f loadtest/locustfile_comment.py --headless \
 ```
 
 Аутентификация — прямой grant Keycloak (`kam.ivanov`, демо-КАМ из
-`deploy/keycloak/realm-crm.json`), переменные `LOADTEST_*` в обоих
-locustfile переопределяют пользователя/URL при необходимости.
+`deploy/keycloak/realm-crm.json`; пароль по умолчанию в locustfile — тот же, что в realm),
+переменные `LOADTEST_*` в обоих locustfile переопределяют пользователя/URL/пароль при
+необходимости. Запросы идут с `Authorization: Bearer`, минуя cookie-сессию и CSRF-токен: это
+работает на профилях `demo`/`dev`, а в `prod` Bearer принимается только от роли INTEGRATION
+(подробнее — в шапке `locustfile_transition.py`), поэтому гейт гоняют на `APP_PROFILE=demo`.
 
 ## Результаты (2026-09-18, эта сессия)
 
