@@ -57,6 +57,19 @@ x-api-env: &api-env
   S3_ACCESS_KEY: ${S3_ACCESS_KEY:-crm_access}
   S3_SECRET_KEY: ${S3_SECRET_KEY:-crm_secret_key}
   SIGNATURE_SERVER_SECRET: ${SIGNATURE_SERVER_SECRET:-change-me-in-prod}
+  SIGNATURE_EXPOSE_DEBUG_OTP: ${SIGNATURE_EXPOSE_DEBUG_OTP:-}
+  # Ключ HMAC записей аудита и Fernet-ключ секретных настроек: пусто — работают без них (см. .env.example).
+  AUDIT_HMAC_KEY: ${AUDIT_HMAC_KEY:-}
+  SETTINGS_ENCRYPTION_KEY: ${SETTINGS_ENCRYPTION_KEY:-}
+  # Почта: пустой SMTP_HOST — письма (ссылки подписантам, email-уведомления) не уходят.
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USER: ${SMTP_USER:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_FROM: ${SMTP_FROM:-}
+  SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+  # Без явного списка контейнер берёт дефолт из кода; значение из .env перекрывало его и без json загрузка оплат не работала.
+  ALLOWED_FILE_EXTENSIONS: ${ALLOWED_FILE_EXTENSIONS:-png,jpeg,jpg,pdf,zip,gz,gzip,rar,doc,docx,xls,xlsx,xml,csv,json}
   # dop.md §13 добавляет `ntp`/`sms-gateway-mock` в карту контейнеров (§2.2)
   # как часть этого же стека, а не опциональную внешнюю интеграцию — сетевые
   # имена зашиты напрямую, тем же приёмом, что S3_ENDPOINT_URL выше
