@@ -306,7 +306,7 @@ class Settings(BaseSettings):
             raise ValueError(
                 "APP_PROFILE=prod отвергает небезопасные секреты — "
                 + "; ".join(problems)
-                + ". Сгенерируйте значения (deploy/scripts/gen_env.sh)."
+                + ". Сгенерируйте значения (scripts/gen_env.sh в репозитории lct-testkit/deploy)."
             )
         return self
 
