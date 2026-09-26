@@ -48,7 +48,6 @@
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
-		X-Frame-Options "DENY"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		Permissions-Policy "geolocation=(), microphone=(), camera=()"
 		-Server
@@ -68,6 +67,13 @@
 	# object-src 'none'). `>` — отложенная установка: перекрывает CSP апстрима, как и раньше.
 	@app_csp not path /auth/*
 	header @app_csp >Content-Security-Policy "default-src 'self'; img-src 'self' data: blob: {$S3_ORIGIN}; connect-src 'self' {$S3_ORIGIN}; style-src 'self' 'unsafe-inline'; script-src {$CSP_SCRIPT_SRC:'self'}; worker-src 'self' blob:; object-src 'self' blob:; frame-src 'self' blob: {$S3_ORIGIN}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+
+	# X-Frame-Options по той же причине не для /auth/*: консоль администратора Keycloak сама
+	# встраивает свои страницы (3p-cookies/step1.html, login-status-iframe.html) в iframe, и наш
+	# DENY блокировал их — консоль вечно крутила индикатор загрузки. Keycloak отдаёт там свой
+	# SAMEORIGIN вместе с frame-ancestors 'self'.
+	@app_frame not path /auth/*
+	header @app_frame >X-Frame-Options "DENY"
 
 	# Прокидываем идентификатор запроса или создаём новый.
 	@no_request_id not header X-Request-Id *
