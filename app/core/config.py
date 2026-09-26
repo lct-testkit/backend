@@ -150,7 +150,10 @@ class Settings(BaseSettings):
 
     # --- Автоподстановка по ИНН и локальный реестр ЕГРЮЛ ------------------
     org_lookup_rate_limit_per_min: int = 30
-    external_org_lookup_enabled: bool = False
+    # Внешний источник (публичный поиск ФНС) включает флаг функции `external_org_lookup` в админке;
+    # здесь только адрес и таймаут (адрес меняют для закрытого зеркала или проверки).
+    fns_lookup_base_url: str = "https://egrul.nalog.ru"
+    fns_lookup_timeout_seconds: float = 8.0
     # dop.md §11.7: «раз в 30 дней или при обновлении локального реестра».
     registry_drift_interval_days: int = 30
 

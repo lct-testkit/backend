@@ -4,11 +4,10 @@
 допускает вынос в `system_settings`, но заводить настройку ради одной,
 никогда не менявшейся на практике цепочки — заранее готовиться к требованию,
 которого никто не просил): локальный реестр первым (офлайн, ~5 мс), затем
-уже подтверждённые организации нашей БД, затем — только если включён флаг
-`external_org_lookup_enabled` — внешние провайдеры. Ни один внешний провайдер
-не реализован (dop.md §11.1: закрытый контур, внешние — «опциональный
-плагин»): протокол уже есть, реализация не нужна, пока флаг выключен по
-умолчанию — тот же приём, что `NullAntivirusScanner` в `files.service`.
+уже подтверждённые организации нашей БД, затем — только если администратор
+включил флаг функции `external_org_lookup` — публичный поиск ФНС
+(`registry.fns`). dop.md §11.1: закрытый контур, внешние источники — «опциональный
+плагин», поэтому флаг по умолчанию выключен.
 """
 
 from __future__ import annotations
@@ -275,16 +274,30 @@ class MockProvider:
         return True
 
 
-def resolve_chain(session: AsyncSession) -> list[OrgLookupProvider]:
-    """Собирает цепочку в приоритетном порядке (dop.md §11.2). Внешние
-    провайдеры (DaData/FNS API) сюда не попадают, пока флаг выключен — их
-    просто нет: включать нечего, реализации не существует (см. docstring
-    модуля)."""
+# Код флага функции в `feature_flags`, включающего внешний источник (см. миграцию 0021).
+EXTERNAL_LOOKUP_FLAG = "external_org_lookup"
+
+
+async def resolve_chain(session: AsyncSession) -> list[OrgLookupProvider]:
+    """Собирает цепочку в приоритетном порядке (dop.md §11.2). Внешний источник
+    (публичный поиск ФНС) попадает в неё только при включённом флаге
+    `external_org_lookup`; выключенный флаг — значит его в цепочке просто нет."""
+    # Импорты внутри функции: `fns` сам берёт датаклассы из этого модуля, а флаги живут в admin.
+    from app.modules.admin.flags import is_feature_enabled
+    from app.modules.registry.fns import FnsEgrulProvider
+
     settings = get_settings()
     chain: list[OrgLookupProvider] = [
         LocalRegistryProvider(session),
         InternalCacheProvider(session),
     ]
+    if await is_feature_enabled(session, EXTERNAL_LOOKUP_FLAG, default=False):
+        chain.append(
+            FnsEgrulProvider(
+                base_url=settings.fns_lookup_base_url,
+                timeout_seconds=settings.fns_lookup_timeout_seconds,
+            )
+        )
     if settings.app_profile != "prod":
         # В тестах/деве локальный реестр обычно пуст — без mock'а
         # автоподстановка никогда бы не сработала в CI. В prod ложных
