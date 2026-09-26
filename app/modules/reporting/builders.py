@@ -32,11 +32,17 @@ xlsx/pdf/png. Скоуп строк — тот же `deal_scope_clause`, что 
 пяти фильтров ему структурно осмысленны — решение описано в комментарии
 рядом с телом builder'а. `learning_progress` не участвует (честная заглушка,
 данных нет структурно).
+
+Девятый вид, `lms_users_upload`, — не отчёт из раздела 4.13, а файл для внешней системы: учащиеся
+оплаченных сделок физлиц в формате шаблона LMS «Загрузка пользователей». В нём СНИЛС, паспорт и
+адрес целиком, поэтому он выходит только файлом xlsx через очередь отчётов (аудит
+`REPORT_EXPORTED`), а не JSON-ом через `GET /reports/{id}/data` (`FILE_ONLY_REPORTS`).
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -48,7 +54,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import FieldError, ValidationError
 from app.core.permissions import DealScope, deal_scope_for
 from app.core.security import Principal
-from app.modules.catalog.models import LossReason, Organization, Product, Region
+from app.modules.catalog import learner
+from app.modules.catalog.models import (
+    Contact,
+    ContactLearnerProfile,
+    LossReason,
+    Organization,
+    Product,
+    Region,
+)
 from app.modules.crm.models import Deal, DealProduct, DealStatusHistory
 from app.modules.crm.service import deal_scope_clause
 from app.modules.identity.models import User
@@ -739,6 +753,179 @@ async def build_learning_progress(
 
 
 # =============================================================================
+# 9. Выгрузка учащихся в шаблон LMS «Загрузка пользователей»
+# =============================================================================
+
+LMS_USERS_UPLOAD = "lms_users_upload"
+
+# Этапы воронки физлиц, на которых человек уже оплатил обучение и ему нужна учётная запись в LMS:
+# «Оплата и договор оферты» и «Зачисление в LMS».
+LMS_DEFAULT_STATUS_CODES = ("payment_contract", "lms_enrollment")
+
+# Виды отчёта с ПДн целиком (СНИЛС, паспорт, адрес): отдаются только файлом с записью аудита
+# `REPORT_EXPORTED`, а не JSON-ом через `GET /reports/{id}/data`, у которого аудита нет.
+FILE_ONLY_REPORTS: frozenset[str] = frozenset({LMS_USERS_UPLOAD})
+
+_INT32_MAX = 2_147_483_647
+_NON_DIGITS = re.compile(r"\D+")
+
+
+def _parse_positive_int(params: dict[str, Any], key: str) -> int | None:
+    """Целое от 1 (номер потока). В отличие от `_parse_int`, не «подрезает» значение до границ:
+    поток `-5` — ошибка запроса, а не поток №1."""
+    raw = params.get(key)
+    if raw is None or raw == "":
+        return None
+    try:
+        # `True` для `int()` — единица, но номером потока не является.
+        if isinstance(raw, bool):
+            raise ValueError
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(
+            f"Параметр {key!r} должен быть целым числом от 1",
+            [FieldError(field=key, reason="ожидается целое число от 1")],
+        ) from exc
+    if not 1 <= value <= _INT32_MAX:
+        raise ValidationError(
+            f"Параметр {key!r} должен быть целым числом от 1",
+            [FieldError(field=key, reason="ожидается целое число от 1")],
+        )
+    return value
+
+
+def _parse_status_codes(params: dict[str, Any]) -> list[str]:
+    """Коды статусов воронки: JSON-массив либо CSV-строка (как `_parse_uuid_list`). Пусто — статусы
+    по умолчанию; неизвестный код не ошибка, просто ни одна сделка в нём не найдётся."""
+    raw = params.get("status_codes")
+    if raw is None or raw == "" or raw == []:
+        return list(LMS_DEFAULT_STATUS_CODES)
+    if isinstance(raw, str):
+        items: list[Any] = raw.split(",")
+    elif isinstance(raw, list | tuple):
+        items = list(raw)
+    else:
+        raise ValidationError(
+            "Параметр 'status_codes' должен быть списком кодов статусов",
+            [FieldError(field="status_codes", reason="ожидается массив строк")],
+        )
+    if not all(isinstance(item, str) for item in items):
+        raise ValidationError(
+            "Параметр 'status_codes' должен быть списком кодов статусов",
+            [FieldError(field="status_codes", reason="ожидается массив строк")],
+        )
+    codes = list(dict.fromkeys(item.strip() for item in items if item.strip()))
+    if any(len(code) > 64 for code in codes):
+        raise ValidationError(
+            "Код статуса не длиннее 64 символов",
+            [FieldError(field="status_codes", reason="слишком длинный код статуса")],
+        )
+    return codes or list(LMS_DEFAULT_STATUS_CODES)
+
+
+def _phone_number(phone: str | None) -> int | None:
+    """`+79990234365` -> `79990234365`: в шаблоне LMS телефон — число без плюса. E.164 — до 15 цифр,
+    целое такой длины Excel хранит без потери точности."""
+    digits = _NON_DIGITS.sub("", phone or "")
+    return int(digits) if digits else None
+
+
+def _lms_profile_cell(target: str, value: Any) -> Any:
+    """Значение профиля в виде, который ждёт шаблон: СНИЛС `112-233-445 95`, пол `М`/`Ж`,
+    образование — текст из выпадающего списка «Лист2». Даты остаются датами (формат ячейки задаёт
+    рендер), остальное — текст."""
+    if value is None or value == "":
+        return None
+    if target == "snils":
+        return learner.format_snils(value)
+    if target == "sex":
+        return learner.SEX_LABELS.get(value)
+    if target == "education":
+        return learner.EDUCATION_LABELS.get(value)
+    return value
+
+
+def _lms_users_query(clause: Any, params: dict[str, Any]) -> Any:
+    """Контакты B2C-сделок в скоупе принципала: по одной строке на человека, сколько бы сделок у
+    него ни подходило под фильтры. Профиль присоединяется слева: у оплатившего, чьи данные ещё не
+    собраны, в шаблоне заполнены только имя, телефон и email."""
+    date_from, date_to = _parse_date_range(params)
+    product_id = _parse_uuid(params, "product_id")
+    stream_number = _parse_positive_int(params, "stream_number")
+    status_codes = _parse_status_codes(params)
+
+    deals = (
+        select(Deal.contact_id)
+        .join(WorkflowStatus, WorkflowStatus.id == Deal.status_id)
+        .where(
+            Deal.deleted_at.is_(None),
+            Deal.deal_type == "b2c",
+            Deal.contact_id.is_not(None),
+            WorkflowStatus.code.in_(status_codes),
+        )
+    )
+    if clause is not None:
+        deals = deals.where(clause)
+    if date_from is not None:
+        deals = deals.where(Deal.created_at >= _day_start(date_from))
+    if date_to is not None:
+        deals = deals.where(Deal.created_at < _day_start(date_to) + dt.timedelta(days=1))
+    if product_id is not None or stream_number is not None:
+        # Продукт и поток — об одной и той же строке сделки: «курс А, поток 2», а не «курс А» у
+        # одной позиции и «поток 2» у другой.
+        lines = select(DealProduct.id).where(DealProduct.deal_id == Deal.id)
+        if product_id is not None:
+            lines = lines.where(DealProduct.product_id == product_id)
+        if stream_number is not None:
+            lines = lines.where(DealProduct.stream_number == stream_number)
+        deals = deals.where(lines.exists())
+
+    return (
+        select(Contact, ContactLearnerProfile)
+        .outerjoin(ContactLearnerProfile, ContactLearnerProfile.contact_id == Contact.id)
+        .where(
+            Contact.id.in_(deals),
+            Contact.deleted_at.is_(None),
+            Contact.is_anonymized.is_(False),
+        )
+        .order_by(Contact.last_name, Contact.first_name, Contact.id)
+    )
+
+
+async def build_lms_users_upload(
+    session: AsyncSession, principal: Principal, params: dict[str, Any]
+) -> ReportDataset:
+    """Строки шаблона LMS: 30 колонок `catalog.learner.LMS_USER_COLUMNS` в порядке шаблона.
+
+    Параметры: `product_id` и `stream_number` (курс и поток), `status_codes` (по умолчанию
+    «Оплата и договор оферты» и «Зачисление в LMS»), `date_from`/`date_to` (по дате создания
+    сделки, включительно). Значения отдаются в типах шаблона — телефон числом, даты датами, СНИЛС и
+    паспорт текстом, — а как их положить в ячейки, решает `rendering.render_lms_users_xlsx`."""
+    clause = await deal_scope_clause(session, principal)
+    stmt = _lms_users_query(clause, params)
+
+    rows: list[list[Any]] = []
+    for contact, profile in (await session.execute(stmt)).all():
+        values: dict[str, Any] = {
+            "last_name": contact.last_name,
+            "first_name": contact.first_name,
+            "middle_name": contact.middle_name,
+            "phone": _phone_number(contact.phone),
+            "email": contact.email,
+        }
+        if profile is not None:
+            for target in learner.PROFILE_TARGETS:
+                values[target] = _lms_profile_cell(target, getattr(profile, target))
+        rows.append([values.get(target) for target, _header in learner.LMS_USER_COLUMNS])
+
+    return ReportDataset(
+        title="Загрузка пользователей",
+        columns=[header for _target, header in learner.LMS_USER_COLUMNS],
+        rows=rows,
+    )
+
+
+# =============================================================================
 # Реестр
 # =============================================================================
 
@@ -751,6 +938,7 @@ REPORT_BUILDERS: dict[str, ReportBuilder] = {
     "monthly_dynamics": build_monthly_dynamics,
     "stuck_deals": build_stuck_deals,
     "learning_progress": build_learning_progress,
+    LMS_USERS_UPLOAD: build_lms_users_upload,
 }
 
 #: Отсутствие ключа = отчёт всегда лёгкий (см. докстринг модуля).

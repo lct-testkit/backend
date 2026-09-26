@@ -313,8 +313,11 @@ async def _deal_outs(
     "/{deal_id}",
     summary="Обновить сделку",
     description=(
-        "Частичное обновление. Обязателен If-Match. `owner_id` меняется только "
-        "через `/reassign`, `status_id`/`workflow_id` — только через `/transition`. "
+        "Частичное обновление. Обязателен If-Match (версия проверяется атомарно: "
+        "параллельная правка с той же версией — 409 CRM-1002). `null` в обязательных "
+        "полях (title, currency, priority) — 422. Участник-наблюдатель (watcher) "
+        "менять сделку не может — 403. `owner_id` меняется только через `/reassign`, "
+        "`status_id`/`workflow_id` — только через `/transition`. "
         "Роль: обновление сделок."
     ),
     response_model=DealOut,
@@ -327,8 +330,8 @@ async def update_deal(
     deal_id: Annotated[uuid.UUID, Path()],
 ) -> DealOut:
     service = DealService(session)
-    deal = await service.get_or_404(deal_id, principal)
-    deal = await service.update(deal, payload, expected_version=if_match)
+    deal = await service.get_or_404(deal_id, principal, write=True)
+    deal = await service.update(deal, payload, expected_version=if_match, principal=principal)
     return (await _deal_outs(service, principal, [deal]))[0]
 
 
@@ -350,7 +353,7 @@ async def replace_deal_products(
     deal_id: Annotated[uuid.UUID, Path()],
 ) -> DealCardOut:
     service = DealService(session)
-    deal = await service.get_or_404(deal_id, principal)
+    deal = await service.get_or_404(deal_id, principal, write=True)
     await service.replace_products(deal, payload.items, expected_version=if_match)
     card = await _build_card(service, deal)
     card.deal = (await _deal_outs(service, principal, [deal]))[0]
@@ -426,7 +429,7 @@ async def transition_deal(
     deal_id: Annotated[uuid.UUID, Path()],
 ) -> TransitionResponse:
     service = DealService(session)
-    deal = await service.get_or_404(deal_id, principal)
+    deal = await service.get_or_404(deal_id, principal, write=True)
 
     async with distributed_lock(f"deal:{deal_id}:transition") as acquired:
         if not acquired:
@@ -499,7 +502,7 @@ async def reassign_deal(
     deal_id: Annotated[uuid.UUID, Path()],
 ) -> DealOut:
     service = DealService(session)
-    deal = await service.get_or_404(deal_id, principal)
+    deal = await service.get_or_404(deal_id, principal, write=True)
     deal = await service.reassign(
         deal, principal, owner_id=payload.owner_id, reason=payload.reason, expected_version=if_match
     )
@@ -534,7 +537,7 @@ async def add_participant(
     principal: DealUpdatePerm,
     deal_id: Annotated[uuid.UUID, Path()],
 ) -> ParticipantOut:
-    deal = await DealService(session).get_or_404(deal_id, principal)
+    deal = await DealService(session).get_or_404(deal_id, principal, write=True)
     participant = await ParticipantService(session).add(
         deal, principal, user_id=payload.user_id, role_in_deal=payload.role_in_deal
     )
@@ -552,12 +555,12 @@ async def remove_participant(
     deal_id: Annotated[uuid.UUID, Path()],
     participant_id: Annotated[uuid.UUID, Path()],
 ) -> OperationResult:
-    await DealService(session).get_or_404(deal_id, principal)
+    deal = await DealService(session).get_or_404(deal_id, principal, write=True)
     service = ParticipantService(session)
     participant = await service.get_or_404(participant_id)
     if participant.deal_id != deal_id:
         raise NotFoundError("Участник сделки", participant_id)
-    await service.remove(participant)
+    await service.remove(deal, principal, participant)
     return OperationResult(ok=True, detail="Участник удалён")
 
 
@@ -565,8 +568,8 @@ async def remove_participant(
     "/{deal_id}/comments",
     summary="Комментарии сделки",
     description=(
-        "Без `limit` — все комментарии. С `limit` (1–100) — страница в хронологическом "
-        "порядке; продолжение — `cursor` из `next_cursor` предыдущего ответа. "
+        "Страница в хронологическом порядке: без `limit` — первые 100, с `limit` (1–100) — "
+        "столько; продолжение — `cursor` из `next_cursor` предыдущего ответа. "
         "Роль: чтение сделок."
     ),
     response_model=CommentListResponse,
@@ -601,7 +604,7 @@ async def create_comment(
     deal_id: Annotated[uuid.UUID, Path()],
 ) -> CommentOut:
     service = DealService(session)
-    deal = await service.get_or_404(deal_id, principal)
+    deal = await service.get_or_404(deal_id, principal, write=True)
     comment = await CommentService(session).create(
         deal,
         principal,
@@ -629,7 +632,7 @@ async def update_comment(
 ) -> CommentOut:
     comment_service = CommentService(session)
     comment = await comment_service.get_or_404(comment_id)
-    await DealService(session).get_or_404(comment.deal_id, principal)
+    await DealService(session).get_or_404(comment.deal_id, principal, write=True)
     comment = await comment_service.update(comment, principal, body=payload.body)
     return CommentOut.model_validate(comment)
 
@@ -645,7 +648,7 @@ async def delete_comment(
 ) -> OperationResult:
     comment_service = CommentService(session)
     comment = await comment_service.get_or_404(comment_id)
-    await DealService(session).get_or_404(comment.deal_id, principal)
+    await DealService(session).get_or_404(comment.deal_id, principal, write=True)
     await comment_service.delete(comment, principal, reason=payload.reason)
     return OperationResult(ok=True, detail="Комментарий удалён")
 
@@ -706,7 +709,7 @@ async def create_task(
     payload: TaskCreateRequest, session: DbSession, principal: DealUpdatePerm
 ) -> TaskOut:
     # Проверяет и существование, и скоуп родительской сделки.
-    deal = await DealService(session).get_or_404(payload.deal_id, principal)
+    deal = await DealService(session).get_or_404(payload.deal_id, principal, write=True)
     task = await TaskService(session).create(
         principal,
         deal_id=deal.id,
@@ -728,8 +731,8 @@ async def update_task(
 ) -> TaskOut:
     task_service = TaskService(session)
     task = await task_service.get_or_404(task_id)
-    deal = await DealService(session).get_or_404(task.deal_id, principal)
-    task = await task_service.update(task, payload)
+    deal = await DealService(session).get_or_404(task.deal_id, principal, write=True)
+    task = await task_service.update(task, principal, payload)
     return _task_out(task, deal.number, deal.title)
 
 
@@ -739,6 +742,6 @@ async def complete_task(
 ) -> TaskOut:
     task_service = TaskService(session)
     task = await task_service.get_or_404(task_id)
-    deal = await DealService(session).get_or_404(task.deal_id, principal)
+    deal = await DealService(session).get_or_404(task.deal_id, principal, write=True)
     task = await task_service.complete(task, principal)
     return _task_out(task, deal.number, deal.title)

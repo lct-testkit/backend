@@ -24,6 +24,9 @@ from app.modules.audit.models import AuditLog
 from app.modules.catalog.models import (
     Contact,
     ContactChannel,
+    # Три файла заказчика о людях: ответственные за продукты вендоров и данные учащихся LMS.
+    ContactLearnerProfile,
+    ContactProduct,
     CustomFieldDef,
     Direction,
     Holiday,
@@ -117,6 +120,8 @@ __all__ = [
     "Consent",
     "Contact",
     "ContactChannel",
+    "ContactLearnerProfile",
+    "ContactProduct",
     "CustomFieldDef",
     "Dashboard",
     "DashboardWidget",

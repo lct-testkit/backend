@@ -5,12 +5,22 @@
     python -m app.modules.integration.seed
 
 Идемпотентно — тот же принцип, что `workflow.seed`/`reporting.seed`: если
-запись с данным ключом уже есть, сид её не трогает.
+запись с данным ключом уже есть, сид её не трогает (в том числе не включает
+источник, который администратор мог выключить сознательно).
 
 Источники заводятся `is_active=False` — тот же осторожный дефолт, что
 `external_org_lookup_enabled=False` в спринте 5: включает их администратор
 явно через `PATCH /api/admin/integrations/sources/{code}`, когда `base_url`/
 `credentials_ref` реально настроены, а не сразу после разворачивания.
+
+Единственное исключение — `cms`: у него секрет вебхука задаётся окружением
+(`CMS_WEBHOOK_SECRET_REF` — имя переменной, в которой лежит секрет), и без
+исключения настройка окружения не доходила бы до вебхука, пока админ не
+пройдёт по нему руками (вебхук отвечал 503). Поэтому сид подставляет
+`credentials_ref` из `CMS_WEBHOOK_SECRET_REF` и включает источник, только если
+переменная с секретом реально есть в окружении и не пуста; иначе он выключен,
+как и остальные. Значение секрета нигде не читается в лог и не сохраняется —
+в БД только имя переменной.
 
 Служебная учётка `role=INTEGRATION` нужна `integration.service.
 get_integration_principal()` — без неё любой вебхук CMS падает с CRM-9503
@@ -32,6 +42,7 @@ from app.core.db import session_scope
 from app.core.logging import configure_logging
 from app.modules.identity.models import Role, User
 from app.modules.integration.models import IntegrationSource, IntegrationSourceCode
+from app.modules.integration.security import resolve_secret
 
 logger = structlog.get_logger(__name__)
 
@@ -44,6 +55,20 @@ _SOURCES: tuple[tuple[str, str], ...] = (
 _INTEGRATION_EMAIL = "integration@system.local"
 
 
+def _configure_cms_source(source: IntegrationSource) -> None:
+    """`credentials_ref` — из `CMS_WEBHOOK_SECRET_REF`; включён, только если секрет есть в
+    окружении. Пустая переменная — не секрет: подпись, посчитанная от пустого ключа, ничего не
+    защищает (`verify_signature` такой секрет не принимает)."""
+    ref = get_settings().cms_webhook_secret_ref
+    if not ref:
+        return
+    source.credentials_ref = ref
+    secret = resolve_secret(ref)
+    source.is_active = bool(secret and secret.strip())
+    if not source.is_active:
+        logger.warning("cms_source_left_inactive", reason="secret_not_in_environment", ref=ref)
+
+
 async def seed_integration_sources(session: AsyncSession) -> int:
     created = 0
     for code, name in _SOURCES:
@@ -52,7 +77,10 @@ async def seed_integration_sources(session: AsyncSession) -> int:
         ).scalar_one_or_none()
         if existing is not None:
             continue
-        session.add(IntegrationSource(code=code, name=name, is_active=False))
+        source = IntegrationSource(code=code, name=name, is_active=False)
+        if code == IntegrationSourceCode.CMS.value:
+            _configure_cms_source(source)
+        session.add(source)
         created += 1
     if created:
         await session.flush()

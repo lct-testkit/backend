@@ -23,10 +23,11 @@ import structlog
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.cache import invalidate_principal
+from app.core.cache import invalidate_principal_after_commit
 from app.core.config import get_settings
 from app.core.context import get_client
 from app.core.errors import AppError, ErrorCode
+from app.core.optimistic import claim_version
 from app.core.redis_client import get_redis
 from app.core.security import TokenClaims
 from app.modules.admin.models import SystemSetting
@@ -58,6 +59,30 @@ class PolicyVersion:
 
     version: str
     text_hash: str | None = None
+
+
+#: Домен служебных записей (владелец демо-истории отчётов и т.п.): реальному человеку они не
+#: принадлежат, привязывать к ним учётку Keycloak по адресу нельзя ни при каком токене.
+_SYSTEM_EMAIL_DOMAIN = "@system.local"
+
+
+def _email_binding_allowed(local: User, claims: TokenClaims) -> bool:
+    """Можно ли привязать вошедшую учётку к локальной записи без `keycloak_id` по email.
+
+    Нужны подтверждённый адрес (`email_verified` в токене) и не служебная запись."""
+    if (local.email or "").lower().endswith(_SYSTEM_EMAIL_DOMAIN):
+        return False
+    return claims.raw.get("email_verified") is True
+
+
+def _token_predates_local_change(user: User, claims: TokenClaims) -> bool:
+    token_epoch = claims.raw.get("perm_epoch")
+    if token_epoch is not None:
+        return int(token_epoch) < user.perm_epoch
+    issued_at = claims.raw.get("iat")
+    if issued_at is None:
+        return user.perm_epoch > 1  # времени нет: после любой смены в CRM эпоха уже выше начальной
+    return dt.datetime.fromtimestamp(int(issued_at), dt.UTC) < user.updated_at
 
 
 class IdentityService:
@@ -117,6 +142,20 @@ class IdentityService:
         if claims.email:
             invited = await self.get_by_email(claims.email)
             if invited and not invited.keycloak_id:
+                if not _email_binding_allowed(invited, claims):
+                    # Привязка учётки Keycloak к локальной записи по email — это передача ей роли и
+                    # данных записи. Без подтверждённого адреса любой аккаунт с чужим email
+                    # (`verifyEmail=false` в realm) забрал бы, например, активного администратора.
+                    await self.record_security_event(
+                        SecurityEventType.PERMISSION_DENIED,
+                        severity=Severity.WARNING,
+                        details={"reason": "email_binding_refused", "subject": claims.subject},
+                    )
+                    await self._session.commit()  # как ниже: отказ не должен откатить след
+                    raise AppError(
+                        ErrorCode.FORBIDDEN,
+                        "Адрес электронной почты не подтверждён: обратитесь к администратору",
+                    )
                 invited.keycloak_id = claims.subject
                 if invited.status == UserStatus.INVITED:
                     invited.status = UserStatus.ACTIVE
@@ -200,10 +239,17 @@ class IdentityService:
         kc_role = claims.crm_role
         if not kc_role or kc_role == user.role:
             return
+        # Токен, выданный до последней смены роли в CRM, несёт прежнюю роль: его вход не должен
+        # возвращать роль обратно (понижение отменялось бы старым токеном). Свежесть — по
+        # `perm_epoch` (claim обязан быть не меньше локального) или, если claim нет (realm без
+        # атрибута), по времени выдачи токена: он должен быть не старше последнего изменения записи.
+        if _token_predates_local_change(user, claims):
+            logger.info("role_sync_skipped_stale_token", user_id=str(user.id))
+            return
         old_role = user.role
         user.role = kc_role
         await self._session.flush()
-        await invalidate_principal(user.id, keycloak_id=user.keycloak_id)
+        invalidate_principal_after_commit(self._session, user.id, keycloak_id=user.keycloak_id)
         await self._audit.record(
             AuditAction.USER_ROLE_CHANGED,
             entity_type="user",
@@ -234,9 +280,9 @@ class IdentityService:
             return
         for name, value in updates.items():
             setattr(user, name, value)
-        user.version += 1
+        await claim_version(self._session, user)
         await self._session.flush()
-        await invalidate_principal(user.id, keycloak_id=user.keycloak_id)
+        invalidate_principal_after_commit(self._session, user.id, keycloak_id=user.keycloak_id)
         await self._audit.record(
             AuditAction.USER_UPDATED,
             entity_type="user",
@@ -339,7 +385,7 @@ class IdentityService:
         self._session.add(consent)
         user.consent_version = policy_version
         await self._session.flush()
-        await invalidate_principal(user.id, keycloak_id=user.keycloak_id)
+        invalidate_principal_after_commit(self._session, user.id, keycloak_id=user.keycloak_id)
 
         await self._audit.record(
             AuditAction.CONSENT_ACCEPTED,
@@ -480,6 +526,10 @@ class IdentityService:
             User.role == Role.ADMIN.value,
             User.status == UserStatus.ACTIVE.value,
             User.deleted_at.is_(None),
+            # Администратор без учётки Keycloak (служебная запись сида, `@system.local`) войти не
+            # может: считать его «активным» значило бы пропускать блокировку настоящего последнего
+            # администратора.
+            User.keycloak_id.is_not(None),
         )
         if exclude:
             stmt = stmt.where(User.id != exclude)
@@ -500,7 +550,7 @@ class IdentityService:
         """Мгновенно обесценивает ранее выданные токены (new_spec §4.6)."""
         user.perm_epoch += 1
         await self._session.flush()
-        await invalidate_principal(user.id, keycloak_id=user.keycloak_id)
+        invalidate_principal_after_commit(self._session, user.id, keycloak_id=user.keycloak_id)
 
 
 def hash_token(token: str) -> str:

@@ -255,9 +255,24 @@ def create_deal(client, workflow_id: str, **overrides: Any) -> dict[str, Any]:
     return response.json()
 
 
+def _release_transition_lock(client, deal_id: str) -> None:
+    """Redis-лок перехода снимает Lua-скрипт, а `fakeredis` без `lupa` его не исполняет: лок
+    оставался бы до конца TTL (30 с) и второй переход той же сделки получал бы 503. Ключ
+    удаляется вручную — на поведение самого перехода это не влияет."""
+
+    async def _delete() -> None:
+        from app.core.redis_client import get_redis, key_lock
+
+        await get_redis().delete(key_lock(f"deal:{deal_id}:transition"))
+
+    run(client, _delete)
+
+
 def transition_deal(client, deal: dict[str, Any], to_status_id: str, **body: Any):
-    return client.post(
+    response = client.post(
         f"/api/deals/{deal['id']}/transition",
         json={"to_status_id": to_status_id, **body},
         headers={"If-Match": str(deal["version"])},
     )
+    _release_transition_lock(client, deal["id"])
+    return response

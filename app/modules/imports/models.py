@@ -28,6 +28,12 @@ class ImportEntityType(StrEnum):
     # П3 (rtk_requiriments.md разд. 4, Треб.1): лицензии/договоры
     # вуз↔вендор↔ПО, см. `catalog.models.OrganizationLicense`.
     LICENSE = "license"
+    # Три файла заказчика о людях. Строка такого файла порождает несколько записей сразу
+    # (организация + продукты + контакт + связи; контакт + сделка + продукт сделки), поэтому эти
+    # типы применяются обработчиками из `imports.handlers` и откатываются по `effects`.
+    VENDOR_CONTACT = "vendor_contact"  # «Вендоры»: компания, продукты, ответственный
+    PAYMENT = "payment"  # «Данные оплат»: заказ физлица на курс
+    LEARNER = "learner"  # «Загрузка пользователей» — шаблон учащихся LMS
 
 
 class ImportMode(StrEnum):
@@ -64,6 +70,7 @@ class ImportRowStatus(StrEnum):
 
 _JOB_STATUSES = tuple(s.value for s in ImportJobStatus)
 _ROW_STATUSES = tuple(s.value for s in ImportRowStatus)
+_ENTITY_TYPES = tuple(e.value for e in ImportEntityType)
 
 
 class ImportJob(UuidPkMixin, TimestampMixin, Base):
@@ -72,7 +79,7 @@ class ImportJob(UuidPkMixin, TimestampMixin, Base):
         Index("ix_import_jobs_status", "status"),
         Index("ix_import_jobs_initiated_by", "initiated_by"),
         CheckConstraint(
-            "entity_type IN ('organization','product','license')",
+            f"entity_type IN {_ENTITY_TYPES!r}",
             name="import_jobs_entity_type_valid",
         ),
         CheckConstraint("mode IN ('insert','upsert','update')", name="import_jobs_mode_valid"),
@@ -89,6 +96,9 @@ class ImportJob(UuidPkMixin, TimestampMixin, Base):
         String(24), nullable=False, server_default=text("'uploaded'")
     )
     total_rows: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # Прогресс применения: сколько строк уже обработано фоновой задачей (`ok_rows`/`warn_rows`/
+    # `error_rows` — итог проверки, они при применении не двигаются).
+    processed_rows: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     ok_rows: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     warn_rows: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     error_rows: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
@@ -133,6 +143,12 @@ class ImportRowResult(UuidPkMixin, Base):
     # это чекпоинт по данным, не только по номеру строки.
     row_data: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    # Что строка создала или изменила: `[{"kind": "contact", "op": "create", "id": "…"}, …]`,
+    # `op="update"` несёт `before` — прежние значения. Нужен для отката строк, порождающих
+    # несколько записей (`before_snapshot` умеет только одну запись типа задания).
+    effects: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
     )
     errors: Mapped[list[Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb")

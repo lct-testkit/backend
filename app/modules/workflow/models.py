@@ -53,8 +53,10 @@ class StatusType(StrEnum):
     PARKED = "parked"
 
 
-#: Терминальные типы: сделка в них считается закрытой или приостановленной.
-TERMINAL_TYPES = frozenset({StatusType.WON, StatusType.LOST, StatusType.PARKED})
+#: Терминальные типы: сделка в них закрыта (`closed_at`) и дальше не идёт. `parked` сюда НЕ
+#: входит: «заморозка» — пауза (SLA стоит, время копится в `sla_paused_total`), из неё сделку
+#: возобновляют обычным переходом; раньше она закрывалась и оживить её было нечем.
+TERMINAL_TYPES = frozenset({StatusType.WON, StatusType.LOST})
 
 
 class MappingJobStatus(StrEnum):
@@ -197,6 +199,9 @@ class SlaRule(UuidPkMixin, TimestampMixin, Base):
         CheckConstraint(
             "warn_threshold_pct BETWEEN 1 AND 100", name="sla_rules_warn_threshold_valid"
         ),
+        CheckConstraint(
+            "escalate_threshold_pct BETWEEN 100 AND 1000", name="sla_rules_escalate_threshold_valid"
+        ),
         CheckConstraint("max_duration > interval '0'", name="sla_rules_duration_positive"),
     )
 
@@ -209,6 +214,11 @@ class SlaRule(UuidPkMixin, TimestampMixin, Base):
     max_duration: Mapped[dt.timedelta] = mapped_column(Interval, nullable=False)
     warn_threshold_pct: Mapped[int] = mapped_column(
         SmallInteger, nullable=False, server_default=text("80")
+    )
+    # Доля срока (в процентах), после которой нарушение SLA эскалируется (`escalate_to_*`).
+    # Не меньше 100: эскалация — продолжение нарушения, а не предупреждения.
+    escalate_threshold_pct: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, server_default=text("150")
     )
     escalate_to_role: Mapped[str | None] = mapped_column(String(32), nullable=True)
     escalate_to_user_id: Mapped[uuid.UUID | None] = mapped_column(

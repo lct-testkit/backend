@@ -14,9 +14,15 @@
 перебор чужих токенов каждый раз начинал бы новую квоту токена, и сдерживает его
 только он.
 
-Токен не хранится в открытом виде нигде, включая логи: маршруты принимают
+Токен не хранится в открытом виде в БД и в ключах Redis: маршруты принимают
 его только как часть пути и сразу хэшируют (`SignatureRequestService.
-get_by_token`). Коммит — на `DbSession`/`get_db_session` (раздел 1: одна
+get_by_token`). Оговорка: в путь запроса он попадает целиком, поэтому access-лог
+(`app/middleware/request_context.py`, `path=`) и лог Caddy должны писать шаблон
+маршрута или маскировать сегмент — это настраивается там, а не здесь. Адрес клиента
+для лимитов и доказательств подписи — из контекста запроса (`get_client()`), уже
+приведённого middleware к валидному IP, а не из сырого `request.client.host`: при
+`--forwarded-allow-ips '*'` он равен тому, что клиент сам написал в X-Forwarded-For.
+Коммит — на `DbSession`/`get_db_session` (раздел 1: одна
 транзакция на запрос, фиксируется зависимостью, не сервисом), как везде в
 проекте — свой `session.commit()` здесь не нужен.
 """
@@ -30,6 +36,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Path, Request, Response
 
 from app.core.config import get_settings
+from app.core.context import get_client
 from app.core.deps import DbSession
 from app.core.rate_limit import enforce as rate_limit_enforce
 from app.modules.signing.schemas import (
@@ -55,8 +62,21 @@ public_verify_router = APIRouter(prefix="/verify", tags=["signing-public"])
 _IP_LIMIT_FACTOR = 10
 
 
+def _client_ip(request: Request) -> str | None:
+    """Валидный адрес клиента, уже нормализованный middleware (`get_client()`): в доказательство
+    подписи (`signatures.ip` — `inet`) не должно попадать имя хоста или произвольная строка."""
+    client = get_client()
+    return client.ip if client else None
+
+
+def _limit_key(request: Request) -> str:
+    """Ключ лимита по IP. Без нормализованного адреса (нет прокси или он не разобрался) — сырой
+    адрес соединения: лучше общий бакет, чем отсутствие лимита."""
+    return _client_ip(request) or (request.client.host if request.client else "unknown")
+
+
 async def _rate_limited(request: Request, token: Annotated[str, Path()]) -> None:
-    ip = request.client.host if request.client else "unknown"
+    ip = _limit_key(request)
     settings = get_settings()
     per_token = settings.public_sign_rate_limit_per_min
     await rate_limit_enforce(
@@ -87,7 +107,7 @@ async def _rate_limited_verify(request: Request) -> None:
     `public:sign`) — чтение статуса подписи и сам процесс подписания не
     должны исчерпывать один и тот же счётчик друг у друга.
     """
-    ip = request.client.host if request.client else "unknown"
+    ip = _limit_key(request)
     settings = get_settings()
     await rate_limit_enforce(
         ip,
@@ -112,7 +132,7 @@ async def get_sign_page(
 ) -> SigningPageOut:
     service = SignatureRequestService(session)
     signature_request = await service.get_by_token(token)
-    client_ip = request.client.host if request.client else None
+    client_ip = _client_ip(request)
     user_agent = request.headers.get("User-Agent")
     page = await service.build_signing_page(
         signature_request, mark_viewed=True, ip=client_ip, user_agent=user_agent
@@ -154,7 +174,7 @@ async def public_challenge(
 ) -> ChallengeResponse:
     service = SignatureRequestService(session)
     signature_request = await service.get_by_token(token)
-    client_ip = request.client.host if request.client else None
+    client_ip = _client_ip(request)
     user_agent = request.headers.get("User-Agent")
     otp, channel, masked, debug_code = await service.challenge(
         signature_request, ip=client_ip, user_agent=user_agent
@@ -182,7 +202,7 @@ async def public_sign(
 ) -> SignatureOut:
     service = SignatureRequestService(session)
     signature_request = await service.get_by_token(token)
-    client_ip = request.client.host if request.client else None
+    client_ip = _client_ip(request)
     user_agent = request.headers.get("User-Agent")
     signature = await service.sign(
         signature_request, otp_code=payload.otp, ip=client_ip, user_agent=user_agent
@@ -204,7 +224,7 @@ async def public_reject(
 ) -> SignatureRequestOut:
     service = SignatureRequestService(session)
     signature_request = await service.get_by_token(token)
-    client_ip = request.client.host if request.client else None
+    client_ip = _client_ip(request)
     user_agent = request.headers.get("User-Agent")
     signature_request = await service.reject(
         signature_request, reason=payload.reason, ip=client_ip, user_agent=user_agent

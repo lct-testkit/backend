@@ -40,6 +40,7 @@ from app.modules.workflow.service import (
     WorkflowFilters,
     WorkflowService,
     has_unpublished_changes,
+    snapshot_structure_warnings,
 )
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
@@ -287,8 +288,12 @@ async def status_impact(
     description=(
         "Запускает мастер сопоставления: сделки переносятся батчами на "
         "target_status_id (или fallback_status_id), статус помечается "
-        "archived только после завершения переноса. Обязателен If-Match. "
-        "Роль: публикация воронок."
+        "archived только после завершения переноса. Если у сделок нет обязательных "
+        "полей целевого статуса, нужен fallback_status_id (иначе 422). Если часть "
+        "сделок всё же перенести нельзя, задача завершается со статусом failed, а "
+        "статус остаётся в воронке (в warnings — причина). Из опубликованного снимка "
+        "убирается только архивируемый статус, черновик воронки не публикуется. "
+        "Обязателен If-Match. Роль: публикация воронок."
     ),
     response_model=StatusArchiveResponse,
 )
@@ -321,6 +326,11 @@ async def archive_status(
             "Модуль сделок ещё не подключён: статус архивирован без переноса, "
             "переносить было нечего"
         )
+    if job.status == "failed" and job.error:
+        # Часть сделок перенести нельзя: статус остался в воронке, задачу нужно повторить.
+        warnings.append(job.error)
+    if archived_status.is_archived and workflow.published_graph:
+        warnings.extend(snapshot_structure_warnings(workflow.published_graph))
 
     return StatusArchiveResponse(
         status=StatusOut.model_validate(archived_status),

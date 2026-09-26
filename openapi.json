@@ -387,6 +387,11 @@
             "title": "Hash",
             "type": "string"
           },
+          "hash_version": {
+            "default": 1,
+            "title": "Hash Version",
+            "type": "integer"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -750,6 +755,54 @@
         "title": "ChallengeResponse",
         "type": "object"
       },
+      "CmsLeadResponse": {
+        "description": "Ответ `POST /api/v1/integrations/cms/leads`: чем закончилась доставка.",
+        "properties": {
+          "contact_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Контакт (клиент) сделки",
+            "title": "Contact Id"
+          },
+          "deal_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Сделка по заявке",
+            "title": "Deal Id"
+          },
+          "inbound_message_id": {
+            "description": "Запись в журнале входящих сообщений",
+            "format": "uuid",
+            "title": "Inbound Message Id",
+            "type": "string"
+          },
+          "status": {
+            "description": "`processed` — заявка принята и создала сделку; `duplicate` — такая заявка уже есть (открытая сделка того же человека и продукта либо заказ с тем же номером), новая сделка не заводилась; при повторе доставки с тем же `Idempotency-Key` возвращается статус первой обработки",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "inbound_message_id"
+        ],
+        "title": "CmsLeadResponse",
+        "type": "object"
+      },
       "CommentCreateRequest": {
         "properties": {
           "body": {
@@ -1055,6 +1108,7 @@
         "type": "object"
       },
       "ContactCreateRequest": {
+        "description": "Email приводится к нижнему регистру, телефон — к E.164; и тот и другой при дубле\n(`ContactService.create`) дают 409 CRM-1301. Пустая строка — «нет значения».",
         "properties": {
           "channels": {
             "items": {
@@ -1074,6 +1128,19 @@
               }
             ],
             "title": "Consent Id"
+          },
+          "contact_methods": {
+            "items": {
+              "enum": [
+                "email",
+                "phone",
+                "telegram",
+                "whatsapp"
+              ],
+              "type": "string"
+            },
+            "title": "Contact Methods",
+            "type": "array"
           },
           "email": {
             "anyOf": [
@@ -1207,6 +1274,13 @@
       "ContactOut": {
         "description": "Список/карточка по умолчанию: телефон и email маскированы (раздел 6.6).\n\nПолные значения — только через `POST /api/contacts/{id}/reveal`\n(`ContactRevealOut`), с отдельной записью аудита `PII_REVEALED`.",
         "properties": {
+          "contact_methods": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Contact Methods",
+            "type": "array"
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -1329,6 +1403,51 @@
         "title": "ContactOut",
         "type": "object"
       },
+      "ContactProductListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ContactProductOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "ContactProductListResponse",
+        "type": "object"
+      },
+      "ContactProductOut": {
+        "description": "Продукт, за который отвечает контакт.",
+        "properties": {
+          "product": {
+            "$ref": "#/components/schemas/ProductOut"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "role"
+        ],
+        "title": "ContactProductOut",
+        "type": "object"
+      },
       "ContactRevealOut": {
         "description": "Полные, немаскированные контактные данные (раздел 6.6, `reveal`).",
         "properties": {
@@ -1337,6 +1456,13 @@
               "$ref": "#/components/schemas/ContactChannelOut"
             },
             "title": "Channels",
+            "type": "array"
+          },
+          "contact_methods": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Contact Methods",
             "type": "array"
           },
           "email": {
@@ -1423,7 +1549,21 @@
         "type": "object"
       },
       "ContactUpdateRequest": {
+        "description": "Частичное обновление: передаются только меняемые поля. `email`/`phone` пустой строкой\nочищаются; `contact_methods` заменяется списком целиком (`null` не допускается).",
         "properties": {
+          "contact_methods": {
+            "items": {
+              "enum": [
+                "email",
+                "phone",
+                "telegram",
+                "whatsapp"
+              ],
+              "type": "string"
+            },
+            "title": "Contact Methods",
+            "type": "array"
+          },
           "email": {
             "anyOf": [
               {
@@ -2205,6 +2345,19 @@
             "title": "External Ids",
             "type": "object"
           },
+          "order_number": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Order Number"
+          },
           "organization_id": {
             "anyOf": [
               {
@@ -2541,6 +2694,17 @@
             "title": "Number",
             "type": "string"
           },
+          "order_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Order Number"
+          },
           "organization_id": {
             "anyOf": [
               {
@@ -2714,6 +2878,18 @@
             "title": "Quantity",
             "type": "integer"
           },
+          "stream_number": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stream Number"
+          },
           "total": {
             "anyOf": [
               {
@@ -2768,6 +2944,17 @@
           "quantity": {
             "title": "Quantity",
             "type": "integer"
+          },
+          "stream_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stream Number"
           },
           "total": {
             "anyOf": [
@@ -4108,6 +4295,45 @@
         "title": "ExternalRefOut",
         "type": "object"
       },
+      "FeatureFlagCreate": {
+        "properties": {
+          "code": {
+            "description": "Код флага, snake_case",
+            "pattern": "^[a-z][a-z0-9_]{1,62}$",
+            "title": "Code",
+            "type": "string"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "is_enabled": {
+            "default": false,
+            "title": "Is Enabled",
+            "type": "boolean"
+          },
+          "rollout": {
+            "default": 100,
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Rollout",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "title": "FeatureFlagCreate",
+        "type": "object"
+      },
       "FeatureFlagListResponse": {
         "properties": {
           "items": {
@@ -4543,13 +4769,104 @@
         "title": "HolidayUpdateRequest",
         "type": "object"
       },
+      "ImportEntityTypeListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ImportEntityTypeOut"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "ImportEntityTypeListResponse",
+        "type": "object"
+      },
+      "ImportEntityTypeOut": {
+        "description": "Тип сущности импорта с полями, форматами файла и условиями достаточности маппинга — по нему\nклиент строит окно сопоставления колонок, не зашивая списки полей у себя.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/ImportFieldOut"
+            },
+            "title": "Fields",
+            "type": "array"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "requirements": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Requirements",
+            "type": "array"
+          },
+          "source_formats": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Source Formats",
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "label",
+          "source_formats",
+          "fields",
+          "requirements"
+        ],
+        "title": "ImportEntityTypeOut",
+        "type": "object"
+      },
+      "ImportFieldOut": {
+        "description": "Целевое поле типа сущности: то, что можно указать в маппинге.",
+        "properties": {
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "required": {
+            "title": "Required",
+            "type": "boolean"
+          },
+          "target": {
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "label",
+          "kind",
+          "required"
+        ],
+        "title": "ImportFieldOut",
+        "type": "object"
+      },
       "ImportJobCreateRequest": {
         "properties": {
           "entity_type": {
             "enum": [
               "organization",
               "product",
-              "license"
+              "license",
+              "vendor_contact",
+              "payment",
+              "learner"
             ],
             "title": "Entity Type",
             "type": "string"
@@ -4573,7 +4890,8 @@
             "enum": [
               "xlsx",
               "xls",
-              "csv"
+              "csv",
+              "json"
             ],
             "title": "Source Format",
             "type": "string"
@@ -4676,6 +4994,11 @@
           },
           "ok_rows": {
             "title": "Ok Rows",
+            "type": "integer"
+          },
+          "processed_rows": {
+            "default": 0,
+            "title": "Processed Rows",
             "type": "integer"
           },
           "result_file_id": {
@@ -4861,6 +5184,17 @@
       },
       "ImportProfileResponse": {
         "properties": {
+          "applied_preset": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Applied Preset"
+          },
           "headers": {
             "items": {
               "type": "string"
@@ -4897,6 +5231,82 @@
           "total_rows"
         ],
         "title": "ImportProfileResponse",
+        "type": "object"
+      },
+      "ImportRowListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ImportRowOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "ImportRowListResponse",
+        "type": "object"
+      },
+      "ImportRowOut": {
+        "description": "Строка результата проверки/применения; значения ПДн в `row_data` замаскированы.",
+        "properties": {
+          "entity_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entity Id"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "row_data": {
+            "additionalProperties": true,
+            "title": "Row Data",
+            "type": "object"
+          },
+          "row_number": {
+            "title": "Row Number",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "row_number",
+          "status"
+        ],
+        "title": "ImportRowOut",
         "type": "object"
       },
       "InboundMessageOut": {
@@ -5114,6 +5524,7 @@
           "auth_type": {
             "anyOf": [
               {
+                "maxLength": 16,
                 "type": "string"
               },
               {
@@ -5125,6 +5536,7 @@
           "base_url": {
             "anyOf": [
               {
+                "maxLength": 512,
                 "type": "string"
               },
               {
@@ -5148,6 +5560,8 @@
           "credentials_ref": {
             "anyOf": [
               {
+                "maxLength": 128,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
                 "type": "string"
               },
               {
@@ -5228,6 +5642,903 @@
           "login_url"
         ],
         "title": "InviteCheckResponse",
+        "type": "object"
+      },
+      "LearnerProfileOut": {
+        "description": "Профиль учащегося в маскированном виде (`GET /contacts/{id}/learner-profile`).\n\nСНИЛС, паспорт, адрес регистрации и реквизиты диплома — `***` и три последних знака (короткие\nзначения закрыты целиком); даты рождения и выдачи документов — только год (`\"1990\"`). Полные\nзначения отдаёт `POST .../learner-profile/reveal` с записью аудита. Если профиля нет, все\nполя `null`.",
+        "properties": {
+          "birth_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Birth Date"
+          },
+          "diploma_institution": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diploma Institution"
+          },
+          "diploma_issued_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diploma Issued At"
+          },
+          "diploma_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diploma Number"
+          },
+          "diploma_profession": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diploma Profession"
+          },
+          "diploma_reg_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diploma Reg Number"
+          },
+          "diploma_series": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diploma Series"
+          },
+          "diploma_surname": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diploma Surname"
+          },
+          "education": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Education"
+          },
+          "education_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Education Label"
+          },
+          "first_name_dative": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name Dative"
+          },
+          "last_name_dative": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Name Dative"
+          },
+          "middle_name_dative": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Middle Name Dative"
+          },
+          "passport_dept_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passport Dept Code"
+          },
+          "passport_issued_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passport Issued At"
+          },
+          "passport_issued_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passport Issued By"
+          },
+          "passport_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passport Number"
+          },
+          "passport_series": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passport Series"
+          },
+          "reg_apartment": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reg Apartment"
+          },
+          "reg_city": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reg City"
+          },
+          "reg_house": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reg House"
+          },
+          "reg_region": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reg Region"
+          },
+          "reg_street": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reg Street"
+          },
+          "reg_zip": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reg Zip"
+          },
+          "sex": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sex"
+          },
+          "snils": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snils"
+          }
+        },
+        "title": "LearnerProfileOut",
+        "type": "object"
+      },
+      "LearnerProfileRevealOut": {
+        "description": "Полный профиль учащегося (`POST .../learner-profile/reveal`). Каждый вызов пишет в аудит\n`PII_REVEALED` (категория, без значений).",
+        "properties": {
+          "birth_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Birth Date"
+          },
+          "diploma_institution": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diploma Institution"
+          },
+          "diploma_issued_at": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diploma Issued At"
+          },
+          "diploma_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diploma Number"
+          },
+          "diploma_profession": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diploma Profession"
+          },
+          "diploma_reg_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diploma Reg Number"
+          },
+          "diploma_series": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diploma Series"
+          },
+          "diploma_surname": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diploma Surname"
+          },
+          "education": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Education"
+          },
+          "education_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Education Label"
+          },
+          "first_name_dative": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name Dative"
+          },
+          "last_name_dative": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Name Dative"
+          },
+          "middle_name_dative": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Middle Name Dative"
+          },
+          "passport_dept_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passport Dept Code"
+          },
+          "passport_issued_at": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passport Issued At"
+          },
+          "passport_issued_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passport Issued By"
+          },
+          "passport_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passport Number"
+          },
+          "passport_series": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passport Series"
+          },
+          "reg_apartment": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reg Apartment"
+          },
+          "reg_city": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reg City"
+          },
+          "reg_house": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reg House"
+          },
+          "reg_region": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reg Region"
+          },
+          "reg_street": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reg Street"
+          },
+          "reg_zip": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reg Zip"
+          },
+          "sex": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sex"
+          },
+          "snils": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snils"
+          }
+        },
+        "title": "LearnerProfileRevealOut",
+        "type": "object"
+      },
+      "LearnerProfileUpdateRequest": {
+        "additionalProperties": false,
+        "description": "Частичное обновление профиля: обновляются только переданные поля, пустая строка (или\n`null`) очищает поле. Значения разбираются так же, как при импорте шаблона LMS\n(`catalog.learner.parse_profile_value`): СНИЛС с контрольной суммой, серия паспорта из 4 цифр,\nдаты `ДД.ММ.ГГГГ` или `ГГГГ-ММ-ДД`, пол `М`/`Ж`, образование из списка листа «Лист2».",
+        "properties": {
+          "birth_date": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Birth Date"
+          },
+          "diploma_institution": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diploma Institution"
+          },
+          "diploma_issued_at": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diploma Issued At"
+          },
+          "diploma_number": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diploma Number"
+          },
+          "diploma_profession": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diploma Profession"
+          },
+          "diploma_reg_number": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diploma Reg Number"
+          },
+          "diploma_series": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diploma Series"
+          },
+          "diploma_surname": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diploma Surname"
+          },
+          "education": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Education"
+          },
+          "first_name_dative": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name Dative"
+          },
+          "last_name_dative": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Name Dative"
+          },
+          "middle_name_dative": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Middle Name Dative"
+          },
+          "passport_dept_code": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passport Dept Code"
+          },
+          "passport_issued_at": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passport Issued At"
+          },
+          "passport_issued_by": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passport Issued By"
+          },
+          "passport_number": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passport Number"
+          },
+          "passport_series": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passport Series"
+          },
+          "reg_apartment": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reg Apartment"
+          },
+          "reg_city": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reg City"
+          },
+          "reg_house": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reg House"
+          },
+          "reg_region": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reg Region"
+          },
+          "reg_street": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reg Street"
+          },
+          "reg_zip": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reg Zip"
+          },
+          "sex": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sex"
+          },
+          "snils": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snils"
+          }
+        },
+        "title": "LearnerProfileUpdateRequest",
         "type": "object"
       },
       "LogoutRequest": {
@@ -8016,6 +9327,63 @@
         "title": "PolicyResponse",
         "type": "object"
       },
+      "ProductContactLinkRequest": {
+        "properties": {
+          "role": {
+            "const": "responsible",
+            "default": "responsible",
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "title": "ProductContactLinkRequest",
+        "type": "object"
+      },
+      "ProductContactListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ProductContactOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "ProductContactListResponse",
+        "type": "object"
+      },
+      "ProductContactOut": {
+        "description": "Ответственный контакт продукта. Телефон и email маскированы, как в списке контактов:\nполные значения — только через `POST /api/contacts/{id}/reveal`.",
+        "properties": {
+          "contact": {
+            "$ref": "#/components/schemas/ContactOut"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contact",
+          "role"
+        ],
+        "title": "ProductContactOut",
+        "type": "object"
+      },
       "ProductCreateRequest": {
         "properties": {
           "base_price": {
@@ -8136,6 +9504,18 @@
               }
             ],
             "title": "Valid To"
+          },
+          "vendor_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vendor Id"
           }
         },
         "required": [
@@ -8290,6 +9670,29 @@
               }
             ],
             "title": "Valid To"
+          },
+          "vendor_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vendor Id"
+          },
+          "vendor_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vendor Name"
           },
           "version": {
             "title": "Version",
@@ -8450,6 +9853,18 @@
               }
             ],
             "title": "Valid To"
+          },
+          "vendor_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vendor Id"
           }
         },
         "title": "ProductUpdateRequest",
@@ -8859,7 +10274,7 @@
           },
           "params": {
             "additionalProperties": true,
-            "description": "Параметры вида отчёта, накладываются поверх `default_params` шаблона. Специфичные для вида (например `months`/`limit`/`workflow_id`) — см. `GET /report-templates`. Общие для П1 (rtk_requiriments.md разд. 4, ФТ.1/ФТ.4), поддержаны почти всеми видами, кроме `learning_progress`: `date_from`/`date_to` (YYYY-MM-DD, период включительно), `organization_ids`/`direction_ids`/`product_ids`/`owner_ids` (списки UUID).",
+            "description": "Параметры вида отчёта, накладываются поверх `default_params` шаблона. Специфичные для вида (например `months`/`limit`/`workflow_id`) — см. `GET /report-templates`. Общие для П1 (rtk_requiriments.md разд. 4, ФТ.1/ФТ.4), поддержаны почти всеми видами, кроме `learning_progress`: `date_from`/`date_to` (YYYY-MM-DD, период включительно), `organization_ids`/`direction_ids`/`product_ids`/`owner_ids` (списки UUID). Выгрузка для LMS (`lms_users_upload`, только xlsx) принимает `product_id`, `stream_number`, `status_codes` (по умолчанию `payment_contract` и `lms_enrollment`) и `date_from`/`date_to` по дате создания сделки.",
             "title": "Params",
             "type": "object"
           },
@@ -10024,6 +11439,13 @@
             "title": "Count Business Days",
             "type": "boolean"
           },
+          "escalate_threshold_pct": {
+            "default": 150,
+            "maximum": 1000.0,
+            "minimum": 100.0,
+            "title": "Escalate Threshold Pct",
+            "type": "integer"
+          },
           "escalate_to_role": {
             "anyOf": [
               {
@@ -10090,6 +11512,11 @@
           "count_business_days": {
             "title": "Count Business Days",
             "type": "boolean"
+          },
+          "escalate_threshold_pct": {
+            "default": 150,
+            "title": "Escalate Threshold Pct",
+            "type": "integer"
           },
           "escalate_to_role": {
             "anyOf": [
@@ -12040,6 +13467,18 @@
       },
       "UserPatchRequest": {
         "properties": {
+          "approval_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Id"
+          },
           "display_name": {
             "anyOf": [
               {
@@ -14037,6 +15476,64 @@
           }
         },
         "summary": "Список флагов",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "description": "Заводит флаг функциональности. Код уникален (повтор — 409). Изменение пишется в аудит. Роль: ADMIN.",
+        "operationId": "create_feature_flag_api_admin_feature_flags_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeatureFlagCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureFlagOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Создать флаг",
         "tags": [
           "admin"
         ]
@@ -16112,7 +17609,7 @@
         ]
       },
       "patch": {
-        "description": "Меняет роль, команду, руководителя и локальные настройки. Обязателен `If-Match`. При смене роли обновляется маппинг в Keycloak, растёт `perm_epoch` и сбрасывается кэш прав. Понизить последнего администратора нельзя (CRM-1903). Статус правкой не меняется: активация происходит при первом входе, блокировка, разблокировка и увольнение — отдельные операции (422). Роль: ADMIN.",
+        "description": "Меняет роль, команду, руководителя и локальные настройки. Обязателен `If-Match`. При смене роли обновляется маппинг в Keycloak, растёт `perm_epoch` и сбрасывается кэш прав. Понизить последнего администратора нельзя (CRM-1903). Повышение до ADMIN — операция «четырёх глаз»: без `approval_id` ответ 409 CRM-1902 с id заявки, которую подтверждает другой администратор. Статус правкой не меняется: активация происходит при первом входе, блокировка, разблокировка и увольнение — отдельные операции (422). Роль: ADMIN.",
         "operationId": "patch_user_api_admin_users__user_id__patch",
         "parameters": [
           {
@@ -17568,6 +19065,254 @@
         ]
       }
     },
+    "/api/contacts/{contact_id}/learner-profile": {
+      "get": {
+        "description": "СНИЛС, паспорт, адрес регистрации и реквизиты диплома — `***` и три последних знака (короткие значения закрыты целиком), даты — только год. Профиля нет — все поля `null`. Полные значения — через `POST .../learner-profile/reveal`.",
+        "operationId": "get_learner_profile_api_contacts__contact_id__learner_profile_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Contact Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LearnerProfileOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Профиль учащегося (маскированный)",
+        "tags": [
+          "contacts"
+        ]
+      },
+      "put": {
+        "description": "Частичное обновление: меняются только переданные поля, пустая строка очищает поле. Значения проверяются так же, как при импорте шаблона LMS; ошибки — 422 с перечнем полей. В аудит попадают имена изменённых полей, но не значения. Ответ маскирован.",
+        "operationId": "update_learner_profile_api_contacts__contact_id__learner_profile_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Contact Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LearnerProfileUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LearnerProfileOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Обновить профиль учащегося",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
+    "/api/contacts/{contact_id}/learner-profile/reveal": {
+      "post": {
+        "description": "Каждый вызов пишет событие аудита PII_REVEALED (категория данных, без значений). Профиля нет — все поля `null`.",
+        "operationId": "reveal_learner_profile_api_contacts__contact_id__learner_profile_reveal_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Contact Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LearnerProfileRevealOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Раскрыть полный профиль учащегося",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
+    "/api/contacts/{contact_id}/products": {
+      "get": {
+        "description": "Каталог «Вендоры»: связи контакт — продукт. Доступ — как к карточке контакта (чужой контакт — 404). Удалённые продукты не показываются.",
+        "operationId": "list_contact_products_api_contacts__contact_id__products_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Contact Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContactProductListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Продукты, за которые отвечает контакт",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
     "/api/contacts/{contact_id}/reveal": {
       "post": {
         "description": "Каждый вызов пишет отдельное событие аудита PII_REVEALED (раздел 6.6).",
@@ -19017,7 +20762,7 @@
         ]
       },
       "patch": {
-        "description": "Частичное обновление. Обязателен If-Match. `owner_id` меняется только через `/reassign`, `status_id`/`workflow_id` — только через `/transition`. Роль: обновление сделок.",
+        "description": "Частичное обновление. Обязателен If-Match (версия проверяется атомарно: параллельная правка с той же версией — 409 CRM-1002). `null` в обязательных полях (title, currency, priority) — 422. Участник-наблюдатель (watcher) менять сделку не может — 403. `owner_id` меняется только через `/reassign`, `status_id`/`workflow_id` — только через `/transition`. Роль: обновление сделок.",
         "operationId": "update_deal_api_deals__deal_id__patch",
         "parameters": [
           {
@@ -19163,7 +20908,7 @@
     },
     "/api/deals/{deal_id}/comments": {
       "get": {
-        "description": "Без `limit` — все комментарии. С `limit` (1–100) — страница в хронологическом порядке; продолжение — `cursor` из `next_cursor` предыдущего ответа. Роль: чтение сделок.",
+        "description": "Страница в хронологическом порядке: без `limit` — первые 100, с `limit` (1–100) — столько; продолжение — `cursor` из `next_cursor` предыдущего ответа. Роль: чтение сделок.",
         "operationId": "list_comments_api_deals__deal_id__comments_get",
         "parameters": [
           {
@@ -20922,6 +22667,56 @@
         ]
       }
     },
+    "/api/imports/entity-types": {
+      "get": {
+        "description": "Что можно импортировать: для каждого типа — поля для сопоставления колонок, допустимые форматы файла и то, что обязательно должно быть в маппинге. Окно сопоставления строится по этому ответу, списки полей на клиенте не хранятся.",
+        "operationId": "list_import_entity_types_api_imports_entity_types_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportEntityTypeListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Типы импорта и их поля",
+        "tags": [
+          "imports"
+        ]
+      }
+    },
     "/api/imports/{job_id}": {
       "get": {
         "operationId": "get_import_job_api_imports__job_id__get",
@@ -21286,6 +23081,110 @@
           }
         },
         "summary": "Откатить импорт",
+        "tags": [
+          "imports"
+        ]
+      }
+    },
+    "/api/imports/{job_id}/rows": {
+      "get": {
+        "description": "Построчный итог проверки и применения: статус, причины, разобранные значения. Значения ПДн (телефон, email, СНИЛС, паспорт) замаскированы. Фильтр `status` — `ok`, `warn`, `error`, `skipped`, `rolled_back`, `rollback_blocked`.",
+        "operationId": "list_import_rows_api_imports__job_id__rows_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportRowListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Результаты по строкам",
         "tags": [
           "imports"
         ]
@@ -21985,7 +23884,7 @@
     },
     "/api/me/sessions": {
       "get": {
-        "description": "Список серверных сессий пользователя из Redis: устройство, IP, User-Agent, время создания и последняя активность. Токены не возвращаются. Роль: любой аутентифицированный пользователь.",
+        "description": "Список серверных сессий пользователя из Redis: устройство, IP, User-Agent, время создания и последняя активность. Токены не возвращаются, а `sid` — не значение session-cookie, а необратимый публичный идентификатор сессии: по нему работает `DELETE /me/sessions/{sid}`. Роль: любой аутентифицированный пользователь.",
         "operationId": "list_sessions_api_me_sessions_get",
         "parameters": [
           {
@@ -22035,7 +23934,7 @@
     },
     "/api/me/sessions/{sid}": {
       "delete": {
-        "description": "Завершает конкретную сессию пользователя. Завершить можно только свою сессию: чужие завершаются через административный механизм. Факт завершения пишется в аудит. Роль: любой аутентифицированный.",
+        "description": "Завершает конкретную сессию пользователя по публичному идентификатору из списка сессий (для совместимости принимается и сам sid). Завершить можно только свою сессию: чужие завершаются через административный механизм; сессия гасится и в Keycloak. Факт завершения пишется в аудит. Роль: любой аутентифицированный.",
         "operationId": "delete_session_api_me_sessions__sid__delete",
         "parameters": [
           {
@@ -22643,7 +24542,7 @@
     },
     "/api/organization-licenses": {
       "get": {
-        "description": "Фильтр: organization_id. Роль: чтение каталога.",
+        "description": "Фильтр: organization_id. Только организации из скоупа вызывающего (KAM/HEAD — свои и по своим сделкам, ADMIN — все). Роль: чтение каталога.",
         "operationId": "list_organization_licenses_api_organization_licenses_get",
         "parameters": [
           {
@@ -23516,6 +25415,23 @@
           },
           {
             "in": "query",
+            "name": "vendor_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Vendor Id"
+            }
+          },
+          {
+            "in": "query",
             "name": "code",
             "required": false,
             "schema": {
@@ -23651,7 +25567,7 @@
         ]
       },
       "post": {
-        "description": "`valid_from` не позже `valid_to`, иначе 422. Роль: запись каталога.",
+        "description": "`valid_from` не позже `valid_to`, иначе 422. `vendor_id` — организация-вендор (несуществующая или удалённая — 404). Код, занятый удалённым продуктом, — 409 CRM-1301. Роль: запись каталога.",
         "operationId": "create_product_api_products_post",
         "parameters": [
           {
@@ -23711,7 +25627,7 @@
     },
     "/api/products/{product_id}": {
       "patch": {
-        "description": "`valid_from` не позже `valid_to` (новая дата сверяется с сохранённой), иначе 422. Роль: запись каталога.",
+        "description": "`valid_from` не позже `valid_to` (новая дата сверяется с сохранённой), иначе 422. `vendor_id: null` снимает вендора. Роль: запись каталога.",
         "operationId": "update_product_api_products__product_id__patch",
         "parameters": [
           {
@@ -23790,6 +25706,207 @@
           }
         },
         "summary": "Обновить продукт",
+        "tags": [
+          "products"
+        ]
+      }
+    },
+    "/api/products/{product_id}/contacts": {
+      "get": {
+        "description": "Каталог «Вендоры»: люди, к которым идут по вопросам продукта. Показываются только контакты, видимые вызывающему по скоупу; телефон и email маскированы. Роль: чтение каталога.",
+        "operationId": "list_product_contacts_api_products__product_id__contacts_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Product Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductContactListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ответственные за продукт",
+        "tags": [
+          "products"
+        ]
+      }
+    },
+    "/api/products/{product_id}/contacts/{contact_id}": {
+      "delete": {
+        "description": "Связи нет — 404. Пишет событие аудита CONTACT_PRODUCT_UNLINKED. Роль: запись каталога.",
+        "operationId": "unlink_product_contact_api_products__product_id__contacts__contact_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Product Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Contact Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Снять ответственного с продукта",
+        "tags": [
+          "products"
+        ]
+      },
+      "put": {
+        "description": "Создаёт связь контакт — продукт или меняет роль у существующей (повтор идемпотентен). Пишет событие аудита CONTACT_PRODUCT_LINKED. Роль: запись каталога.",
+        "operationId": "link_product_contact_api_products__product_id__contacts__contact_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Product Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Contact Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProductContactLinkRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductContactOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Назначить ответственного за продукт",
         "tags": [
           "products"
         ]
@@ -25618,6 +27735,7 @@
     },
     "/api/v1/integrations/cms/leads": {
       "post": {
+        "description": "Вебхук сайта без сессии. Подпись — `X-Signature: sha256=<HMAC-SHA256 тела>`, повтор доставки узнаётся по `Idempotency-Key` (до 255 символов): с тем же ключом возвращается итог первой обработки. Без номера заказа создаётся лид (сделка в начальном статусе), с номером — оплаченный заказ (сделка «Оплата и договор оферты», идемпотентно по номеру). Один и тот же человек (email, либо телефон при той же фамилии) не дублируется. Отказ оставляет тело во входящих (`GET /api/admin/integrations/inbound-messages`) со статусом `failed`.",
         "operationId": "cms_leads_api_v1_integrations_cms_leads_post",
         "parameters": [
           {
@@ -25653,30 +27771,51 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "description": "JSON-объект. Ключи английские (`first_name`, `last_name`, `middle_name`, `name`/`full_name`, `phone`, `email`, `product_name`/`product_code`/`program_code`/`course`, `comment`, `source_url`, `order_number`/`order_id`, `stream_number`, `amount`, `external_id`, `created_at`) либо русские, как в выгрузке «Данные оплат» (`Номер заявки`, `Курс`, `Фамилия`, `Имя`, `Отчество`, `Телефон`, `Email`, `Номер потока`, `Сумма`); регистр и пробелы в ключах не важны. Обязателен `email` или `phone`. Если есть номер заказа — нужны ещё курс, фамилия и имя.",
+                "example": {
+                  "comment": "Позвоните после 18:00",
+                  "email": "ivanov@example.ru",
+                  "first_name": "Иван",
+                  "last_name": "Иванов",
+                  "phone": "+7 (900) 111-22-33",
+                  "product_name": "Python-разработчик с использованием инструментов ИИ"
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {
-                    "type": "string"
-                  },
-                  "title": "Response Cms Leads Api V1 Integrations Cms Leads Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/CmsLeadResponse"
                 }
               }
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "Подпись неверна или отсутствует (CRM-1701)"
+          },
+          "413": {
+            "description": "Тело запроса больше 256 КиБ"
+          },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "Нет `Idempotency-Key` или он длиннее 255 символов; тело не JSON-объект; нет email и телефона; некорректные поля (`errors[]`)"
+          },
+          "429": {
+            "description": "Слишком много запросов"
+          },
+          "503": {
+            "description": "Источник `cms` выключен или не настроен"
           }
         },
         "summary": "Приём лида с сайта (CMS)",
@@ -26349,7 +28488,7 @@
     },
     "/api/workflows/{workflow_id}/statuses/{status_id}/archive": {
       "post": {
-        "description": "Запускает мастер сопоставления: сделки переносятся батчами на target_status_id (или fallback_status_id), статус помечается archived только после завершения переноса. Обязателен If-Match. Роль: публикация воронок.",
+        "description": "Запускает мастер сопоставления: сделки переносятся батчами на target_status_id (или fallback_status_id), статус помечается archived только после завершения переноса. Если у сделок нет обязательных полей целевого статуса, нужен fallback_status_id (иначе 422). Если часть сделок всё же перенести нельзя, задача завершается со статусом failed, а статус остаётся в воронке (в warnings — причина). Из опубликованного снимка убирается только архивируемый статус, черновик воронки не публикуется. Обязателен If-Match. Роль: публикация воронок.",
         "operationId": "archive_status_api_workflows__workflow_id__statuses__status_id__archive_post",
         "parameters": [
           {

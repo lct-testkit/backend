@@ -1,4 +1,5 @@
-"""Восемь шаблонов отчётов из раздела 4.13 (`python -m app.modules.reporting.seed`).
+"""Шаблоны отчётов: восемь из раздела 4.13 и выгрузка учащихся для LMS
+(`python -m app.modules.reporting.seed`).
 
 Идемпотентно по `code` — тот же приём, что `notification.seed`/`workflow.seed`.
 `query_def.kind` — ключ в `reporting.builders.REPORT_BUILDERS`; без строки в
@@ -109,6 +110,17 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str, str, list[str], dict[str, Any], li
         [],
         {},
         ["xlsx", "pdf"],
+    ),
+    (
+        "lms_users_upload",
+        "Загрузка пользователей в LMS",
+        "Учащиеся оплаченных сделок физлиц в формате шаблона LMS «Загрузка пользователей»: "
+        "данные контакта и профиль учащегося. Параметры: product_id, stream_number, "
+        "status_codes, date_from/date_to. Только xlsx; содержит ПДн.",
+        "lms_users_upload",
+        ["HEAD", "ADMIN"],
+        {"status_codes": ["payment_contract", "lms_enrollment"]},
+        ["xlsx"],
     ),
 ]
 

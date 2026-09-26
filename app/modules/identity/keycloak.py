@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -15,9 +16,21 @@ import httpx
 import structlog
 
 from app.core.config import get_settings
-from app.core.errors import AppError, DependencyStatus, ErrorCode
+from app.core.errors import AppError, DependencyStatus, ErrorCode, FieldError
 
 logger = structlog.get_logger(__name__)
+
+
+def _keycloak_error_text(response: httpx.Response) -> str | None:
+    """Человекочитаемый текст ошибки Admin API (политика паролей и т.п.), не длиннее 300 знаков."""
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    text = body.get("error_description") or body.get("errorMessage") or body.get("error")
+    return str(text)[:300] if text else None
 
 
 @dataclass(slots=True)
@@ -269,7 +282,23 @@ class KeycloakClient:
         response.raise_for_status()
 
     async def set_required_actions(self, keycloak_id: str, actions: list[str]) -> None:
+        """Заменяет список целиком. Чтобы не стереть чужие обязательные действия (`CONFIGURE_TOTP`),
+        для добавления и снятия одного действия есть `update_required_actions`."""
         await self.update_user(keycloak_id, {"requiredActions": actions})
+
+    async def update_required_actions(
+        self, keycloak_id: str, *, add: Sequence[str] = (), remove: Sequence[str] = ()
+    ) -> None:
+        """Добавляет и снимает обязательные действия, не трогая остальные.
+
+        Сброс пароля раньше заменял список на `UPDATE_PASSWORD`, а смена пароля — на пустой:
+        требование настроить TOTP пропадало при первом же сбросе."""
+        user = await self.get_user(keycloak_id)
+        current = list((user or {}).get("requiredActions") or [])
+        updated = [a for a in current if a not in set(remove)]
+        updated += [a for a in add if a not in updated]
+        if updated != current:
+            await self.update_user(keycloak_id, {"requiredActions": updated})
 
     async def set_attribute(self, keycloak_id: str, key: str, value: Any) -> None:
         """Обновляет один атрибут, сохраняя остальные.
@@ -344,7 +373,17 @@ class KeycloakClient:
             f"/users/{keycloak_id}/reset-password",
             json_body={"type": "password", "value": password, "temporary": temporary},
         )
-        response.raise_for_status()
+        if response.status_code == 400:
+            # Политика паролей realm (длина, классы символов, история): текст политики — ответ
+            # пользователю, а не «Внутренняя ошибка». Сам пароль в ответ Keycloak не возвращает.
+            raise AppError(
+                ErrorCode.VALIDATION,
+                _keycloak_error_text(response) or "Пароль не соответствует политике безопасности",
+                errors=[FieldError(field="new_password", reason="не соответствует политике")],
+            )
+        if response.status_code >= 400:
+            logger.warning("keycloak_set_password_failed", status=response.status_code)
+            raise AppError(ErrorCode.DEPENDENCY_UNAVAILABLE, "Не удалось сменить пароль в Keycloak")
 
     async def logout_all_sessions(self, keycloak_id: str) -> None:
         response = await self.admin_request("POST", f"/users/{keycloak_id}/logout")

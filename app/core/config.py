@@ -130,8 +130,10 @@ class Settings(BaseSettings):
     # xml/csv — выгрузка ЕГРЮЛ (раздел 5.11) и файлы импорта каталогов
     # (раздел 4.12) идут через тот же общий `files`-конвейер, что и вложения
     # сделок: не отдельная загрузка в обход magic-bytes/антивируса, а те же
-    # расширения в общем allowlist.
-    allowed_file_extensions: str = "png,jpeg,jpg,pdf,zip,gz,gzip,rar,doc,docx,xls,xlsx,xml,csv"
+    # расширения в общем allowlist. json — выгрузка «Данные оплат» для импорта
+    # оплат: без него файл нельзя было бы загрузить вовсе (проверка содержимого
+    # json — `files.service._check_magic_bytes`).
+    allowed_file_extensions: str = "png,jpeg,jpg,pdf,zip,gz,gzip,rar,doc,docx,xls,xlsx,xml,csv,json"
 
     # --- Отчёты ----------------------------------------------------------
     reports_max_concurrent: int = 10

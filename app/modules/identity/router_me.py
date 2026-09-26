@@ -174,8 +174,9 @@ async def get_recent(principal: CurrentUser) -> RecentListResponse:
     summary="Активные сессии",
     description=(
         "Список серверных сессий пользователя из Redis: устройство, IP, User-Agent, "
-        "время создания и последняя активность. Токены не возвращаются. "
-        "Роль: любой аутентифицированный пользователь."
+        "время создания и последняя активность. Токены не возвращаются, а `sid` — не "
+        "значение session-cookie, а необратимый публичный идентификатор сессии: по нему "
+        "работает `DELETE /me/sessions/{sid}`. Роль: любой аутентифицированный пользователь."
     ),
     response_model=SessionListResponse,
 )
@@ -196,9 +197,10 @@ async def list_sessions(principal: CurrentUser) -> SessionListResponse:
     "/sessions/{sid}",
     summary="Завершить сессию",
     description=(
-        "Завершает конкретную сессию пользователя. Завершить можно только свою "
-        "сессию: чужие завершаются через административный механизм. Факт "
-        "завершения пишется в аудит. Роль: любой аутентифицированный."
+        "Завершает конкретную сессию пользователя по публичному идентификатору из списка "
+        "сессий (для совместимости принимается и сам sid). Завершить можно только свою "
+        "сессию: чужие завершаются через административный механизм; сессия гасится и в "
+        "Keycloak. Факт завершения пишется в аудит. Роль: любой аутентифицированный."
     ),
     response_model=OperationResult,
 )
@@ -207,14 +209,23 @@ async def delete_session(
     session: DbSession,
     sid: Annotated[str, Path(description="Идентификатор сессии")],
 ) -> OperationResult:
-    stored = await session_store.get(sid)
+    # Идентификатор из списка сессий — свёртка (`public_id`), не значение cookie; для совместимости
+    # принимается и сам `sid`. Ищем среди сессий самого пользователя: чужая сессия по публичному
+    # идентификатору неотличима от несуществующей.
+    own = await session_store.list_for_user(principal.user_id)
+    stored = next((item for item in own if sid in (item.public_id, item.sid)), None)
     if stored is None:
+        foreign = await session_store.get(sid)
+        if foreign is not None and foreign.user_id != str(principal.user_id):
+            # Не раскрываем существование чужой сессии деталями ошибки.
+            raise AppError(ErrorCode.FORBIDDEN, "Можно завершать только свои сессии")
         raise NotFoundError("Сессия", sid)
-    if stored.user_id != str(principal.user_id):
-        # Не раскрываем существование чужой сессии деталями ошибки.
-        raise AppError(ErrorCode.FORBIDDEN, "Можно завершать только свои сессии")
 
-    await session_store.delete(sid)
+    await session_store.delete(stored.sid)
+    if stored.refresh_token:
+        # Локальной сессии мало: пока жива сессия в Keycloak, вход по ней возможен (тот же
+        # refresh-токен), и «завершённая» сессия оставалась рабочей.
+        await keycloak_client.logout(stored.refresh_token)
     await AuditService(session).record(
         AuditAction.SESSION_TERMINATED,
         entity_type="user",
@@ -317,7 +328,7 @@ async def change_password(
         user.keycloak_id, password=payload.new_password, temporary=False
     )
     # Обязательное действие выполнено — снимаем его и в Keycloak, и локально.
-    await keycloak_client.set_required_actions(user.keycloak_id, [])
+    await keycloak_client.update_required_actions(user.keycloak_id, remove=["UPDATE_PASSWORD"])
     user.must_change_password = False
     user.password_changed_at = dt.datetime.now(dt.UTC)
     await session.flush()

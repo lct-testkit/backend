@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import uuid
 from typing import Any
 
 import structlog
@@ -28,85 +27,50 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import session_scope
 from app.core.metrics import background_tasks_total
-from app.modules.audit.actions import AuditAction
-from app.modules.audit.service import AuditService
-from app.modules.crm.service import get_deal_status_service
-from app.modules.workflow.models import MappingJobStatus, StatusMappingJob, Workflow, WorkflowStatus
-from app.modules.workflow.service import MAPPING_BATCH_SIZE, WorkflowService
+from app.modules.workflow.models import MappingJobStatus, StatusMappingJob
+from app.modules.workflow.service import WorkflowService
 
 logger = structlog.get_logger(__name__)
 
 
 async def _process_one_batch(session: AsyncSession, job: StatusMappingJob) -> None:
-    rules = job.mapping_rules
-    target_status_id = uuid.UUID(rules["target_status_id"])
-    fallback_raw = rules.get("fallback_status_id")
-
-    result = await get_deal_status_service().migrate_batch(
-        session,
-        from_status_id=job.from_status_id,
-        target_status_id=target_status_id,
-        fallback_status_id=uuid.UUID(fallback_raw) if fallback_raw else None,
-        sla_mode=rules.get("sla_mode", "recalculate"),
-        batch_size=MAPPING_BATCH_SIZE,
-    )
-    job.processed_count += result.processed
-    job.failed_count += result.failed
-
-    if result.has_more:
-        return
-
-    job.status = MappingJobStatus.COMPLETED.value
-    job.finished_at = dt.datetime.now(dt.UTC)
-    job.report = {"processed": job.processed_count, "failed": job.failed_count}
-
-    status = await session.get(WorkflowStatus, job.from_status_id)
-    if status is not None:
-        status.is_archived = True
-        status.archived_at = job.finished_at
-        status.replaced_by_status_id = target_status_id
-        await session.flush()
-
-        # Не просто `invalidate_workflow_cache`: без пересборки снимка
-        # следующее чтение просто заново прогрело бы кэш тем же устаревшим
-        # `published_graph`, в котором архивируемый статус всё ещё жив для
-        # переходов — см. docstring `WorkflowService.republish_after_archive`.
-        workflow = await session.get(Workflow, status.workflow_id)
-        if workflow is not None:
-            await WorkflowService(session).republish_after_archive(workflow)
-
-        await AuditService(session).record(
-            AuditAction.STATUS_ARCHIVED,
-            entity_type="workflow_status",
-            entity_id=status.id,
-            changes={"replaced_by": {"old": None, "new": str(target_status_id)}},
-        )
-
-    await AuditService(session).record(
-        AuditAction.STATUS_MAPPING_COMPLETED,
-        entity_type="status_mapping_job",
-        entity_id=job.id,
-        changes={"processed": job.processed_count, "failed": job.failed_count},
-    )
+    """Одна партия задачи. Логика переноса и завершения — в `WorkflowService.advance_mapping_job`
+    (тот же шаг, что делает первая, синхронная партия HTTP-запроса): курсор по id сделок,
+    новый проход, если что-то переносилось, и `failed` без архивации статуса, если остались
+    только застрявшие сделки."""
+    await WorkflowService(session).advance_mapping_job(job)
 
 
 async def sweep_status_mapping_jobs(ctx: dict[str, Any]) -> dict[str, int]:
     """Обрабатывает по одной партии для каждой незавершённой задачи сопоставления."""
     touched = 0
     async with session_scope() as session:
+        # `skip_locked`: тик, начавшийся до окончания прошлого, не берёт задачи, которые тот
+        # ещё обрабатывает, — иначе одну партию переносили бы дважды.
         jobs = list(
             (
                 await session.execute(
-                    select(StatusMappingJob).where(
-                        StatusMappingJob.status == MappingJobStatus.RUNNING.value
-                    )
+                    select(StatusMappingJob)
+                    .where(StatusMappingJob.status == MappingJobStatus.RUNNING.value)
+                    .order_by(StatusMappingJob.created_at)
+                    .with_for_update(skip_locked=True)
                 )
             )
             .scalars()
             .all()
         )
         for job in jobs:
-            await _process_one_batch(session, job)
+            job_id = str(job.id)  # после отката SAVEPOINT объект истечёт, а читать атрибуты нельзя
+            try:
+                # SAVEPOINT: сбой одной задачи не откатывает остальные и не заставляет воркер
+                # каждую минуту повторять ту же ошибку на всей пачке.
+                async with session.begin_nested():
+                    await _process_one_batch(session, job)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("status_mapping_job_failed", job_id=job_id)
+                job.status = MappingJobStatus.FAILED.value
+                job.finished_at = dt.datetime.now(dt.UTC)
+                job.error = f"{type(exc).__name__}: перенос остановлен, подробности в журнале"
             touched += 1
 
     background_tasks_total.labels(task="sweep_status_mapping_jobs", result="success").inc()

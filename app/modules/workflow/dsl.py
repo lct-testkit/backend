@@ -553,9 +553,32 @@ def _exists(value: Any) -> bool:
     return True
 
 
+_TRUE_WORDS = frozenset({"true", "1", "yes", "да"})
+_FALSE_WORDS = frozenset({"false", "0", "no", "нет"})
+
+
+def _as_bool(value: Any) -> bool | None:
+    """Логическое значение из поля: настоящий `bool` либо явное слово («true», «нет», 0/1).
+    Всё остальное — `None`, то есть не равно ни `true`, ни `false`. Раньше сравнение шло через
+    `bool(actual)`, и непустая строка `"false"` считалась истиной."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        word = value.strip().casefold()
+        if word in _TRUE_WORDS:
+            return True
+        if word in _FALSE_WORDS:
+            return False
+        return None
+    if isinstance(value, int | Decimal) and value in (0, 1):
+        return bool(value)
+    return None
+
+
 def _equals(actual: Any, expected: Any) -> bool:
     if isinstance(actual, bool) or isinstance(expected, bool):
-        return bool(actual) is bool(expected)
+        left_bool = _as_bool(actual)
+        return left_bool is not None and left_bool is _as_bool(expected)
     left, right = _to_decimal(actual), _to_decimal(expected)
     if left is not None and right is not None:
         return left == right
@@ -601,18 +624,23 @@ def _compare_dates(operator: Operator, actual: Any, expected: Any) -> bool:
 
 
 def _to_decimal(value: Any) -> Decimal | None:
+    """Число из значения поля или `None`. `NaN`/`Infinity` числом не считаются: `Decimal("NaN")`
+    проходил проверку условия, а сравнение с ним бросало `InvalidOperation` — переход давал 500."""
     if isinstance(value, bool) or value is None:
         return None
+    parsed: Decimal | None = None
     if isinstance(value, Decimal):
-        return value
-    if isinstance(value, int | float):
-        return Decimal(str(value))
-    if isinstance(value, str):
+        parsed = value
+    elif isinstance(value, int | float):
+        parsed = Decimal(str(value))
+    elif isinstance(value, str):
         try:
-            return Decimal(value.strip())
+            parsed = Decimal(value.strip())
         except (InvalidOperation, ValueError):
             return None
-    return None
+    if parsed is None or not parsed.is_finite():
+        return None
+    return parsed
 
 
 def _to_date(value: Any) -> dt.datetime | None:

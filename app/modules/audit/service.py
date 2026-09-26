@@ -7,6 +7,11 @@
 Цепочка хэшей: каждая запись хранит `prev_hash` предыдущей и свой `hash`.
 Чтобы цепочка не рвалась при параллельных вставках, голова цепочки берётся
 под транзакционным advisory-локом.
+
+Состав хэшируемых полей версионируется (`hash_version`): записи версии 1 (всё, что
+было до расширения) проверяются по-старому, новые — версии 2, где в хэш входят и роль
+актора, подмена личности, IP и User-Agent. Иначе эти поля можно было бы поправить в БД,
+и цепочка этого не заметила бы.
 """
 
 from __future__ import annotations
@@ -20,9 +25,18 @@ from typing import Any
 
 import structlog
 from sqlalchemy import Select, select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.context import get_actor, get_client, get_request_id
+from app.core.context import (
+    get_actor,
+    get_client,
+    get_request_id,
+    set_actor,
+    set_client,
+    set_request_id,
+)
+from app.core.errors import AppError, ErrorCode
 from app.core.masking import mask_mapping
 from app.core.metrics import audit_records_total
 from app.modules.audit.actions import AuditAction
@@ -33,7 +47,16 @@ logger = structlog.get_logger(__name__)
 # Произвольная, но фиксированная константа для advisory-лока цепочки аудита.
 _AUDIT_CHAIN_LOCK_ID = 0x4352_4D41  # "CRMA"
 
+# Сколько запись аудита ждёт лок цепочки. Лок один на всю систему и держится до коммита
+# транзакции-владельца: без предела зависший запрос с открытой транзакцией останавливал бы
+# все аудируемые изменения в системе. Отказ по таймауту — 503 «повторите», а не вечное ожидание.
+_AUDIT_LOCK_TIMEOUT_MS = 15_000
+_PG_LOCK_NOT_AVAILABLE = "55P03"
+
 GENESIS_HASH = "0" * 64
+
+#: Версия состава хэшируемых полей для новых записей. 1 — исходный состав (без роли, IP и UA).
+AUDIT_HASH_VERSION = 2
 
 
 @dataclass(slots=True)
@@ -63,9 +86,19 @@ def compute_hash(
     changes: dict[str, Any] | None,
     result: str,
     request_id: str | None,
+    version: int = 1,
+    actor_role: str | None = None,
+    impersonated_by: str | None = None,
+    ip: str | None = None,
+    user_agent: str | None = None,
 ) -> str:
-    """Канонизация и SHA-256. Порядок полей фиксирован, иначе хэш невоспроизводим."""
-    payload = {
+    """Канонизация и SHA-256. Порядок полей фиксирован, иначе хэш невоспроизводим.
+
+    Версия 1 хэширует девять исходных полей — записи, сделанные до расширения, обязаны
+    проверяться именно так, поэтому её состав менять нельзя. Версия 2 добавляет роль
+    актора, `impersonated_by`, IP и User-Agent и саму версию (чтобы запись версии 2 нельзя
+    было выдать за версию 1 с теми же девятью полями)."""
+    payload: dict[str, Any] = {
         "prev_hash": prev_hash or GENESIS_HASH,
         "created_at": created_at,
         "actor_id": actor_id,
@@ -76,6 +109,16 @@ def compute_hash(
         "result": result,
         "request_id": request_id,
     }
+    if version >= 2:
+        payload.update(
+            {
+                "v": version,
+                "actor_role": actor_role,
+                "impersonated_by": impersonated_by,
+                "ip": ip,
+                "user_agent": user_agent,
+            }
+        )
     canonical = json.dumps(
         payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
     )
@@ -111,10 +154,32 @@ class AuditService:
         держит транзакция того же запроса, даёт взаимную блокировку. Поэтому
         записи, не принадлежащие транзакции запроса, откладываются до её
         завершения (`defer_audit`), а не пишутся «рядом».
+
+        Ожидание лока ограничено `_AUDIT_LOCK_TIMEOUT_MS` (`lock_timeout` действует только на
+        время захвата и потом возвращается прежним): владелец лока, застрявший на медленном
+        внешнем вызове, не должен замораживать запись аудита у всей системы.
         """
+        previous = await self._session.scalar(text("SELECT current_setting('lock_timeout')"))
         await self._session.execute(
-            text("SELECT pg_advisory_xact_lock(:lock_id)"),
-            {"lock_id": _AUDIT_CHAIN_LOCK_ID},
+            text("SELECT set_config('lock_timeout', :value, true)"),
+            {"value": f"{_AUDIT_LOCK_TIMEOUT_MS}ms"},
+        )
+        try:
+            await self._session.execute(
+                text("SELECT pg_advisory_xact_lock(:lock_id)"),
+                {"lock_id": _AUDIT_CHAIN_LOCK_ID},
+            )
+        except DBAPIError as exc:
+            if getattr(exc.orig, "pgcode", None) == _PG_LOCK_NOT_AVAILABLE:
+                logger.error("audit_chain_lock_timeout", timeout_ms=_AUDIT_LOCK_TIMEOUT_MS)
+                raise AppError(
+                    ErrorCode.DEPENDENCY_UNAVAILABLE,
+                    "Журнал аудита занят другими операциями, повторите запрос",
+                    headers={"Retry-After": "1"},
+                ) from exc
+            raise
+        await self._session.execute(
+            text("SELECT set_config('lock_timeout', :value, true)"), {"value": previous or "0"}
         )
         result = await self._session.execute(
             select(AuditLog.hash).order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(1)
@@ -155,9 +220,16 @@ class AuditService:
             user_agent=client.user_agent if client else None,
             request_id=request_id,
             prev_hash=prev_hash,
+            hash_version=AUDIT_HASH_VERSION,
         )
-        # created_at нужен до вставки: он входит в хэш и в первичный ключ.
-        now = await self._session.scalar(text("SELECT now()"))
+        # created_at нужен до вставки: он входит в хэш и в первичный ключ. Берётся именно
+        # `clock_timestamp()` и именно ПОСЛЕ захвата лока цепочки: `now()` — это время начала
+        # транзакции. Долгая транзакция, начавшаяся раньше, но получившая лок позже, писала бы
+        # запись «в прошлое» с `prev_hash` более поздней, а следующая находила бы голову по
+        # `created_at` уже не там, где она в цепочке: цепочка ветвилась и рвалась (26 разрывов и
+        # 7 ветвлений на 96 параллельных записях). Время под локом растёт в порядке захвата
+        # лока — порядок по `created_at` и порядок хэшей совпадают.
+        now = await self._session.scalar(text("SELECT clock_timestamp()"))
         entry.created_at = now  # type: ignore[assignment]
         entry.hash = compute_hash(
             prev_hash=prev_hash,
@@ -169,6 +241,11 @@ class AuditService:
             changes=masked_changes,  # type: ignore[arg-type]
             result=str(result),
             request_id=request_id,
+            version=AUDIT_HASH_VERSION,
+            actor_role=resolved_role,
+            impersonated_by=str(entry.impersonated_by) if entry.impersonated_by else None,
+            ip=entry.ip,
+            user_agent=entry.user_agent,
         )
 
         self._session.add(entry)
@@ -255,6 +332,12 @@ class AuditService:
                 changes=entry.changes,
                 result=entry.result,
                 request_id=entry.request_id,
+                # Запись проверяется по тому составу полей, с которым она была хэширована.
+                version=entry.hash_version or 1,
+                actor_role=entry.actor_role,
+                impersonated_by=str(entry.impersonated_by) if entry.impersonated_by else None,
+                ip=entry.ip,
+                user_agent=entry.user_agent,
             )
             if expected != entry.hash:
                 broken.append(f"{entry.id}: хэш записи не совпадает")
@@ -298,6 +381,56 @@ async def record_out_of_band(
     except Exception:  # noqa: BLE001
         # Невозможность записать отказ не должна подменять исходную ошибку прав.
         logger.exception("audit_out_of_band_failed", action=str(action))
+
+
+def defer_denied_audit(
+    session: AsyncSession,
+    action: AuditAction | str = AuditAction.ACCESS_DENIED,
+    *,
+    entity_type: str | None = None,
+    entity_id: uuid.UUID | None = None,
+    reason: str | None = None,
+) -> None:
+    """Отказ на объектном уровне (чужая сделка, нет права на запись): в журнал он попадает
+    отдельной закоммиченной записью ПОСЛЕ отката транзакции запроса.
+
+    Проверка объекта завершается исключением (403/404), и транзакция откатывается вместе с
+    всем, что запрос успел записать, — в том числе с аудитом. Писать отказ «рядом» нельзя:
+    запись встала бы за advisory-локом цепочки, который, возможно, держит эта же транзакция.
+    Поэтому запись откладывается до отката (`run_after_rollback`): к тому моменту лок
+    освобождён, и отказ пишется собственной короткой транзакцией. Если запрос всё же
+    завершился успехом (исключение перехвачено выше), отложенная запись отбрасывается.
+
+    Актор, IP и request_id запоминаются сразу: к моменту отката контекст запроса может уже
+    сбрасываться."""
+    from app.core.db import run_after_rollback
+
+    actor = get_actor()
+    client = get_client()
+    request_id = get_request_id()
+    changes: dict[str, Any] = {}
+    if reason:
+        changes["reason"] = reason
+    if actor is not None and actor.role:
+        changes["role"] = actor.role
+
+    async def _write() -> None:
+        # Контекст мог быть сброшен: возвращаем, чтобы запись получила актора и адрес.
+        if get_actor() is None and actor is not None:
+            set_actor(actor)
+        if get_client() is None and client is not None:
+            set_client(client)
+        if get_request_id() is None and request_id is not None:
+            set_request_id(request_id)
+        await record_out_of_band(
+            action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            changes=changes or None,
+            result=AuditResult.DENIED,
+        )
+
+    run_after_rollback(session, _write)
 
 
 async def record_denied_and_commit(

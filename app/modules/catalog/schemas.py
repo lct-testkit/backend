@@ -7,9 +7,19 @@ import uuid
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
+from pydantic_core import PydanticCustomError
 
-from app.core.masking import mask_email, mask_phone
+from app.core.masking import mask_email, mask_phone, mask_tail, mask_year
+from app.core.normalize import clean_text, normalize_email, normalize_phone
+from app.modules.catalog import learner
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
@@ -23,6 +33,41 @@ CustomFieldTypeLiteral = Literal[
     "string", "number", "date", "bool", "select", "multiselect", "file"
 ]
 ContactChannelTypeLiteral = Literal["telegram", "whatsapp", "phone_extra", "email_extra"]
+# «Способ связи» человека: какими каналами с ним связываются (`contacts.contact_methods`).
+ContactMethodLiteral = Literal["email", "phone", "telegram", "whatsapp"]
+# Роль контакта при продукте: сейчас только ответственный (каталог «Вендоры»).
+ProductContactRoleLiteral = Literal["responsible"]
+
+
+def _valid_email(value: str | None) -> str | None:
+    """Канонический адрес (нижний регистр). Пустая строка -> `None`: так поле очищают в PATCH.
+    Непустое значение, которое не разобралось, — 422 с именем поля, а не молчаливая потеря
+    ключа дедупликации."""
+    if value is None or clean_text(value) is None:
+        return None
+    normalized = normalize_email(value)
+    if normalized is None:
+        raise PydanticCustomError("invalid_email", "некорректный адрес электронной почты")
+    return normalized
+
+
+def _valid_phone(value: str | None) -> str | None:
+    """Телефон в E.164 (`+79990234365`); пустая строка -> `None`, нераспознанное — 422."""
+    if value is None or clean_text(value) is None:
+        return None
+    normalized = normalize_phone(value)
+    if normalized is None:
+        raise PydanticCustomError("invalid_phone", "некорректный номер телефона")
+    return normalized
+
+
+def _unique_methods(value: list[ContactMethodLiteral]) -> list[ContactMethodLiteral]:
+    return list(dict.fromkeys(value))
+
+
+ContactEmail = Annotated[str | None, Field(max_length=255), AfterValidator(_valid_email)]
+ContactPhone = Annotated[str | None, Field(max_length=32), AfterValidator(_valid_phone)]
+ContactMethods = Annotated[list[ContactMethodLiteral], AfterValidator(_unique_methods)]
 
 
 # =============================================================================
@@ -200,13 +245,17 @@ class ContactChannelOut(BaseModel):
 
 
 class ContactCreateRequest(BaseModel):
+    """Email приводится к нижнему регистру, телефон — к E.164; и тот и другой при дубле
+    (`ContactService.create`) дают 409 CRM-1301. Пустая строка — «нет значения»."""
+
     organization_id: uuid.UUID | None = None
     first_name: NonEmptyStr = Field(max_length=128)
     last_name: NonEmptyStr = Field(max_length=128)
     middle_name: str | None = Field(default=None, max_length=128)
     position: str | None = Field(default=None, max_length=255)
-    email: str | None = Field(default=None, max_length=255)
-    phone: str | None = Field(default=None, max_length=32)
+    email: ContactEmail = None
+    phone: ContactPhone = None
+    contact_methods: ContactMethods = Field(default_factory=list)
     is_decision_maker: bool = False
     consent_id: uuid.UUID | None = None
     source: str | None = Field(default=None, max_length=32)
@@ -215,13 +264,18 @@ class ContactCreateRequest(BaseModel):
 
 
 class ContactUpdateRequest(BaseModel):
+    """Частичное обновление: передаются только меняемые поля. `email`/`phone` пустой строкой
+    очищаются; `contact_methods` заменяется списком целиком (`null` не допускается)."""
+
     organization_id: uuid.UUID | None = None
     first_name: NonEmptyStr | None = Field(default=None, max_length=128)
     last_name: NonEmptyStr | None = Field(default=None, max_length=128)
     middle_name: str | None = Field(default=None, max_length=128)
     position: str | None = Field(default=None, max_length=255)
-    email: str | None = Field(default=None, max_length=255)
-    phone: str | None = Field(default=None, max_length=32)
+    email: ContactEmail = None
+    phone: ContactPhone = None
+    # Не `None` по умолчанию: колонка NOT NULL, и явный `null` в PATCH должен быть 422, а не 500.
+    contact_methods: ContactMethods = Field(default_factory=list)
     is_decision_maker: bool | None = None
 
 
@@ -240,6 +294,7 @@ class ContactOut(BaseModel):
     position: str | None = None
     email: str | None = None
     phone: str | None = None
+    contact_methods: list[str] = Field(default_factory=list)
     is_decision_maker: bool
     is_anonymized: bool
     source: str | None = None
@@ -259,6 +314,7 @@ class ContactOut(BaseModel):
             position=contact.position,
             email=mask_email(contact.email),
             phone=mask_phone(contact.phone),
+            contact_methods=list(contact.contact_methods or []),
             is_decision_maker=contact.is_decision_maker,
             is_anonymized=contact.is_anonymized,
             source=contact.source,
@@ -282,6 +338,7 @@ class ContactRevealOut(BaseModel):
     position: str | None = None
     email: str | None = None
     phone: str | None = None
+    contact_methods: list[str] = Field(default_factory=list)
     is_decision_maker: bool
     channels: list[ContactChannelOut] = Field(default_factory=list)
 
@@ -329,6 +386,8 @@ class ProductCreateRequest(BaseModel):
     name: NonEmptyStr = Field(max_length=255)
     description: str | None = None
     direction_id: uuid.UUID | None = None
+    # Вендор продукта — организация каталога; несуществующая или удалённая — 404.
+    vendor_id: uuid.UUID | None = None
     duration_hours: int | None = Field(default=None, ge=0)
     format: ProductFormatLiteral | None = None
     base_price: Decimal | None = None
@@ -343,6 +402,8 @@ class ProductUpdateRequest(BaseModel):
     name: NonEmptyStr | None = Field(default=None, max_length=255)
     description: str | None = None
     direction_id: uuid.UUID | None = None
+    # `null` снимает вендора с продукта.
+    vendor_id: uuid.UUID | None = None
     duration_hours: int | None = Field(default=None, ge=0)
     format: ProductFormatLiteral | None = None
     base_price: Decimal | None = None
@@ -361,6 +422,9 @@ class ProductOut(BaseModel):
     name: str
     description: str | None = None
     direction_id: uuid.UUID | None = None
+    vendor_id: uuid.UUID | None = None
+    # Только чтение: название вендора берётся из организации `vendor_id` при выдаче.
+    vendor_name: str | None = None
     duration_hours: int | None = None
     format: str | None = None
     base_price: Decimal | None = None
@@ -373,9 +437,49 @@ class ProductOut(BaseModel):
     created_at: dt.datetime
     updated_at: dt.datetime
 
+    @classmethod
+    def from_model(cls, product: Any, vendor_name: str | None = None) -> ProductOut:
+        out = cls.model_validate(product)
+        out.vendor_name = vendor_name
+        return out
+
 
 class ProductListResponse(BaseModel):
     items: list[ProductOut]
+    next_cursor: str | None = None
+
+
+# =============================================================================
+# Ответственные за продукты: связь контакт — продукт (каталог «Вендоры»)
+# =============================================================================
+
+
+class ProductContactLinkRequest(BaseModel):
+    role: ProductContactRoleLiteral = "responsible"
+
+
+class ProductContactOut(BaseModel):
+    """Ответственный контакт продукта. Телефон и email маскированы, как в списке контактов:
+    полные значения — только через `POST /api/contacts/{id}/reveal`."""
+
+    contact: ContactOut
+    role: str
+
+
+class ProductContactListResponse(BaseModel):
+    items: list[ProductContactOut]
+    next_cursor: str | None = None
+
+
+class ContactProductOut(BaseModel):
+    """Продукт, за который отвечает контакт."""
+
+    product: ProductOut
+    role: str
+
+
+class ContactProductListResponse(BaseModel):
+    items: list[ContactProductOut]
     next_cursor: str | None = None
 
 
@@ -531,3 +635,151 @@ class OrganizationLicenseOut(BaseModel):
 class OrganizationLicenseListResponse(BaseModel):
     items: list[OrganizationLicenseOut]
     next_cursor: str | None = None
+
+
+# =============================================================================
+# Профиль учащегося: ПДн для шаблона LMS «Загрузка пользователей»
+# =============================================================================
+
+# Маскированный вид: даты — только год; пол, образование и падежные формы ФИО (само ФИО и так есть
+# в карточке контакта) — как есть; остальное (СНИЛС, паспорт, адрес регистрации, диплом) — хвост.
+_PROFILE_YEAR_ONLY: frozenset[str] = frozenset(
+    {"passport_issued_at", "birth_date", "diploma_issued_at"}
+)
+_PROFILE_CLEAR: frozenset[str] = frozenset(
+    {"sex", "education", "first_name_dative", "last_name_dative", "middle_name_dative"}
+)
+
+# Значение поля профиля во входящем запросе: строка как в шаблоне LMS (`13.03.2020`, `М`, метка из
+# списка «Образование»). Длина ограничена заранее: разбор ниже не должен работать над мегабайтами.
+ProfileInput = Annotated[str | None, Field(max_length=1024)]
+
+
+class LearnerProfileOut(BaseModel):
+    """Профиль учащегося в маскированном виде (`GET /contacts/{id}/learner-profile`).
+
+    СНИЛС, паспорт, адрес регистрации и реквизиты диплома — `***` и три последних знака (короткие
+    значения закрыты целиком); даты рождения и выдачи документов — только год (`"1990"`). Полные
+    значения отдаёт `POST .../learner-profile/reveal` с записью аудита. Если профиля нет, все
+    поля `null`.
+    """
+
+    snils: str | None = None
+    passport_series: str | None = None
+    passport_number: str | None = None
+    passport_issued_by: str | None = None
+    passport_issued_at: str | None = None
+    passport_dept_code: str | None = None
+    sex: str | None = None
+    birth_date: str | None = None
+    reg_region: str | None = None
+    reg_city: str | None = None
+    reg_street: str | None = None
+    reg_house: str | None = None
+    reg_apartment: str | None = None
+    reg_zip: str | None = None
+    first_name_dative: str | None = None
+    last_name_dative: str | None = None
+    middle_name_dative: str | None = None
+    education: str | None = None
+    education_label: str | None = None
+    diploma_profession: str | None = None
+    diploma_institution: str | None = None
+    diploma_surname: str | None = None
+    diploma_number: str | None = None
+    diploma_series: str | None = None
+    diploma_reg_number: str | None = None
+    diploma_issued_at: str | None = None
+
+    @classmethod
+    def from_model(cls, profile: Any) -> LearnerProfileOut:
+        if profile is None:
+            return cls()
+        values: dict[str, Any] = {}
+        for name in learner.PROFILE_TARGETS:
+            raw = getattr(profile, name)
+            if name in _PROFILE_YEAR_ONLY:
+                values[name] = mask_year(raw)
+            elif name in _PROFILE_CLEAR:
+                values[name] = raw
+            else:
+                values[name] = mask_tail(raw)
+        values["education_label"] = learner.EDUCATION_LABELS.get(profile.education or "")
+        return cls(**values)
+
+
+class LearnerProfileRevealOut(BaseModel):
+    """Полный профиль учащегося (`POST .../learner-profile/reveal`). Каждый вызов пишет в аудит
+    `PII_REVEALED` (категория, без значений)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    snils: str | None = None
+    passport_series: str | None = None
+    passport_number: str | None = None
+    passport_issued_by: str | None = None
+    passport_issued_at: dt.date | None = None
+    passport_dept_code: str | None = None
+    sex: str | None = None
+    birth_date: dt.date | None = None
+    reg_region: str | None = None
+    reg_city: str | None = None
+    reg_street: str | None = None
+    reg_house: str | None = None
+    reg_apartment: str | None = None
+    reg_zip: str | None = None
+    first_name_dative: str | None = None
+    last_name_dative: str | None = None
+    middle_name_dative: str | None = None
+    education: str | None = None
+    education_label: str | None = None
+    diploma_profession: str | None = None
+    diploma_institution: str | None = None
+    diploma_surname: str | None = None
+    diploma_number: str | None = None
+    diploma_series: str | None = None
+    diploma_reg_number: str | None = None
+    diploma_issued_at: dt.date | None = None
+
+    @classmethod
+    def from_model(cls, profile: Any) -> LearnerProfileRevealOut:
+        if profile is None:
+            return cls()
+        out = cls.model_validate(profile)
+        out.education_label = learner.EDUCATION_LABELS.get(profile.education or "")
+        return out
+
+
+class LearnerProfileUpdateRequest(BaseModel):
+    """Частичное обновление профиля: обновляются только переданные поля, пустая строка (или
+    `null`) очищает поле. Значения разбираются так же, как при импорте шаблона LMS
+    (`catalog.learner.parse_profile_value`): СНИЛС с контрольной суммой, серия паспорта из 4 цифр,
+    даты `ДД.ММ.ГГГГ` или `ГГГГ-ММ-ДД`, пол `М`/`Ж`, образование из списка листа «Лист2»."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    snils: ProfileInput = None
+    passport_series: ProfileInput = None
+    passport_number: ProfileInput = None
+    passport_issued_by: ProfileInput = None
+    passport_issued_at: ProfileInput = None
+    passport_dept_code: ProfileInput = None
+    sex: ProfileInput = None
+    birth_date: ProfileInput = None
+    reg_region: ProfileInput = None
+    reg_city: ProfileInput = None
+    reg_street: ProfileInput = None
+    reg_house: ProfileInput = None
+    reg_apartment: ProfileInput = None
+    reg_zip: ProfileInput = None
+    first_name_dative: ProfileInput = None
+    last_name_dative: ProfileInput = None
+    middle_name_dative: ProfileInput = None
+    education: ProfileInput = None
+    diploma_profession: ProfileInput = None
+    diploma_institution: ProfileInput = None
+    diploma_surname: ProfileInput = None
+    diploma_number: ProfileInput = None
+    diploma_series: ProfileInput = None
+    diploma_reg_number: ProfileInput = None
+    diploma_issued_at: ProfileInput = None

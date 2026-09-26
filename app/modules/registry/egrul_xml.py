@@ -241,10 +241,14 @@ def parse_entry(elem: etree._Element) -> ParsedEntry | None:
     )
 
 
-def iter_entries(stream: IO[bytes]) -> Iterator[ParsedEntry]:
+def iter_entries(stream: IO[bytes], *, strict: bool = True) -> Iterator[ParsedEntry]:
     """Стримингом разбирает выгрузку, отдавая по одной записи за раз —
-    dop.md §11.3: «полный ЕГРЮЛ это миллионы записей, в память не влезает»."""
-    context = etree.iterparse(stream, events=("end",), tag=_LEGAL_ENTITY_TAGS, recover=True)
+    dop.md §11.3: «полный ЕГРЮЛ это миллионы записей, в память не влезает».
+
+    `strict=True` (по умолчанию): ошибка разбора XML — исключение. Режим восстановления lxml
+    (`recover`) молча пропускал битые места, и обрезанный файл выглядел как успешный импорт
+    меньшего числа записей."""
+    context = etree.iterparse(stream, events=("end",), tag=_LEGAL_ENTITY_TAGS, recover=not strict)
     for _event, elem in context:
         entry = parse_entry(elem)
         if entry is not None:

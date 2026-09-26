@@ -24,6 +24,7 @@ from app.core.deps import (
     require_permission,
 )
 from app.core.errors import AppError, ErrorCode, NotFoundError, VersionConflictError
+from app.core.optimistic import claim_version
 from app.core.pagination import Page, keyset_before
 from app.core.permissions import Permission
 from app.core.rate_limit import enforce as rate_limit
@@ -198,7 +199,9 @@ async def create_user(
         "Меняет роль, команду, руководителя и локальные настройки. Обязателен "
         "`If-Match`. При смене роли обновляется маппинг в Keycloak, растёт "
         "`perm_epoch` и сбрасывается кэш прав. Понизить последнего "
-        "администратора нельзя (CRM-1903). Статус правкой не меняется: активация "
+        "администратора нельзя (CRM-1903). Повышение до ADMIN — операция «четырёх глаз»: без "
+        "`approval_id` ответ 409 CRM-1902 с id заявки, которую подтверждает другой "
+        "администратор. Статус правкой не меняется: активация "
         "происходит при первом входе, блокировка, разблокировка и увольнение — "
         "отдельные операции (422). Роль: ADMIN."
     ),
@@ -213,11 +216,14 @@ async def patch_user(
 ) -> UserOut:
     service = AdminUserService(session)
     user = await service.get_or_404(user_id)
+    updates = payload.model_dump(exclude_unset=True)
+    approval_id = updates.pop("approval_id", None)
     updated = await service.patch_user(
         user=user,
         principal=principal,
         expected_version=if_match,
-        updates=payload.model_dump(exclude_unset=True),
+        updates=updates,
+        approval_id=approval_id,
     )
     return UserOut.model_validate(updated)
 
@@ -885,7 +891,9 @@ async def patch_team(
 
     changes = diff_changes(before, after)
     if changes:
-        team.version += 1
+        # Атомарно и с версией клиента, если он её прислал: два параллельных PATCH команды не
+        # проходят проверку версии оба.
+        await claim_version(session, team, if_match)
         await session.flush()
     await audit.record(
         AuditAction.TEAM_UPDATED,

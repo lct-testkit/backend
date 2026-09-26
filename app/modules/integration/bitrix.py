@@ -96,6 +96,9 @@ _TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 # Системные идентификаторы типов CRM-объектов: Lead=1, Deal=2, Contact=3,
 # Company=4, Invoice=31 — здесь используется только Deal.
 _DEAL_ENTITY_TYPE_ID = 2
+# Метка «сделка создана нашей CRM» и её id в поле `originId`: по ним при повторе доставки находится
+# сделка, которую прежняя попытка уже создала (у `crm.item.add` нет ключа идемпотентности).
+ORIGINATOR_ID = "rtk-crm"
 
 
 class BitrixClient:
@@ -139,6 +142,26 @@ class BitrixClient:
         return await self._call(
             "crm.item.add", {"entityTypeId": _DEAL_ENTITY_TYPE_ID, "fields": fields}
         )
+
+    async def find_deal_by_origin(self, origin_id: str) -> dict[str, Any] | None:
+        """Сделка, ранее созданная нашей CRM под этим `originId`, либо `None`.
+        https://apidocs.bitrix24.com/api-reference/crm/universal/crm-item-list.html"""
+        data = await self._call(
+            "crm.item.list",
+            {
+                "entityTypeId": _DEAL_ENTITY_TYPE_ID,
+                "filter": {"originatorId": ORIGINATOR_ID, "originId": origin_id},
+                "select": ["id", "updatedTime", "originId"],
+            },
+        )
+        result = data.get("result")
+        items = result.get("items") if isinstance(result, dict) else None
+        # Фильтр мог быть проигнорирован порталом: связываем сделку только с найденной, чей
+        # `originId` совпал, а не с первой попавшейся.
+        for item in items or []:
+            if isinstance(item, dict) and str(item.get("originId")) == origin_id:
+                return item
+        return None
 
     async def update_deal(self, bitrix_id: str, fields: dict[str, Any]) -> dict[str, Any]:
         return await self._call(
@@ -213,7 +236,7 @@ async def _reject_if_bitrix_moved_ahead(client: BitrixClient, ref: ExternalRef) 
 
 
 async def push_deal(
-    session: AsyncSession, client: BitrixClient, *, deal_id: uuid.UUID
+    session: AsyncSession, client: BitrixClient, *, deal_id: uuid.UUID, retry: bool = False
 ) -> ExternalRef:
     deal = await session.get(Deal, deal_id)
     if deal is None:
@@ -236,7 +259,18 @@ async def push_deal(
     if ref is not None:
         response = await client.update_deal(ref.external_id, fields)
     else:
-        response = await client.add_deal(fields)
+        found = None
+        if retry:
+            # Повторная попытка: прежняя могла дойти до Bitrix24 и создать сделку, а ответ или
+            # запись `external_refs` потерялись. Сначала ищем её по `originId`, иначе на каждой
+            # такой попытке в портале появлялась бы ещё одна сделка.
+            found = await client.find_deal_by_origin(str(deal_id))
+        if found is not None:
+            response = {"result": {"item": found}}
+        else:
+            response = await client.add_deal(
+                {**fields, "originatorId": ORIGINATOR_ID, "originId": str(deal_id)}
+            )
     # Раздел «Response JSON Structure» crm.item.add/update: `result.item.id`,
     # не голый `result`, как у устаревшего `crm.deal.*`.
     item = response["result"]["item"]

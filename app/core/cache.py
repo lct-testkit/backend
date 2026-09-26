@@ -18,7 +18,9 @@ import uuid
 from dataclasses import asdict, dataclass
 
 import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.db import run_after_commit
 from app.core.redis_client import TTL_PERMISSIONS, get_redis, key_permissions
 
 logger = structlog.get_logger(__name__)
@@ -83,3 +85,15 @@ async def invalidate_principal(user_id: uuid.UUID | str, *, keycloak_id: str | N
         await redis.delete(*keys)
     except Exception:  # noqa: BLE001
         logger.warning("principal_cache_invalidate_failed", user_id=str(user_id))
+
+
+def invalidate_principal_after_commit(
+    session: AsyncSession, user_id: uuid.UUID | str, *, keycloak_id: str | None = None
+) -> None:
+    """Сбрасывает кэш прав ПОСЛЕ коммита транзакции, которая меняет роль, статус или эпоху.
+
+    Сброс до коммита оставлял окно: параллельный запрос находил кэш пустым, читал из БД ещё
+    старую (незакоммиченную для него) роль и клал её обратно на пять минут — уволенный или
+    разжалованный работал дальше с прежними правами. После коммита читатель видит новые данные.
+    Если запрос откатится, кэш не трогается: прежние права остаются верными."""
+    run_after_commit(session, lambda: invalidate_principal(user_id, keycloak_id=keycloak_id))

@@ -13,13 +13,15 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import ColumnElement, Select, exists, false, func, or_, select
+from sqlalchemy import ColumnElement, Select, delete, exists, false, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.dependents import restrict_dependents
 from app.core.errors import (
     AppError,
     ErrorCode,
@@ -28,13 +30,18 @@ from app.core.errors import (
     ValidationError,
     VersionConflictError,
 )
+from app.core.normalize import clean_text, company_key, name_key, normalize_email, normalize_phone
+from app.core.optimistic import claim_version
 from app.core.security import Principal
 from app.modules.audit.actions import AuditAction
-from app.modules.audit.service import AuditService
+from app.modules.audit.service import AuditService, defer_denied_audit
+from app.modules.catalog import learner
 from app.modules.catalog.drift import drift_new_value
 from app.modules.catalog.models import (
     Contact,
     ContactChannel,
+    ContactLearnerProfile,
+    ContactProduct,
     CustomFieldDef,
     Direction,
     Holiday,
@@ -50,6 +57,10 @@ from app.modules.notification.service import NotificationPriority, get_notificat
 
 _SIMILARITY_THRESHOLD = 0.3
 _SIMILARITY_LIMIT = 5
+# Сколько организаций с тем же названием показывать в ответе 409 при создании без ИНН.
+_SAME_NAME_LIMIT = 5
+# Ответственных за один продукт на практике единицы; предел нужен только как страховка выдачи.
+_PRODUCT_CONTACTS_LIMIT = 500
 
 
 def _json_safe(value: Any) -> Any:
@@ -126,7 +137,17 @@ async def contact_scope_clause(
     if deal_clause is not None:
         contact_ids_via_deal = contact_ids_via_deal.where(deal_clause)
 
-    return or_(Contact.organization_id.in_(org_ids), Contact.id.in_(contact_ids_via_deal))
+    return or_(
+        Contact.organization_id.in_(org_ids),
+        Contact.id.in_(contact_ids_via_deal),
+        # Свой только что созданный контакт: организации и сделок у него ещё нет, и без этой ветки
+        # `POST /contacts` отвечал 201, а следующий `GET` тут же 404.
+        Contact.created_by == principal.user_id,
+        # Ответственные за продукты (каталог «Вендоры») — справочные данные для всех менеджеров:
+        # без них не узнать, к кому идти по лицензии. Телефон и email в ответе всё равно
+        # маскируются, раскрытие — только через `reveal` с записью аудита.
+        Contact.id.in_(select(ContactProduct.contact_id)),
+    )
 
 
 async def contact_in_scope(session: AsyncSession, principal: Principal, contact: Contact) -> bool:
@@ -142,6 +163,17 @@ async def contact_in_scope(session: AsyncSession, principal: Principal, contact:
 # =============================================================================
 # Фильтры списков
 # =============================================================================
+
+
+@dataclass(slots=True)
+class ContactUpsertResult:
+    """Итог `ContactService.find_or_create`: `changed` — поле → значение ДО (для отката импорта),
+    `notes` — то, что применить не удалось и о чём стоит предупредить."""
+
+    contact: Contact
+    created: bool
+    changed: dict[str, Any] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -218,6 +250,12 @@ class OrganizationService:
         if organization is None or organization.deleted_at is not None:
             raise NotFoundError("Организация", organization_id)
         if not await organization_in_scope(self._session, principal, organization):
+            defer_denied_audit(
+                self._session,
+                entity_type="organization",
+                entity_id=organization_id,
+                reason="out_of_scope",
+            )
             # Раздел 3.2: чужой объект вне скоупа — 404, не 403.
             raise NotFoundError("Организация", organization_id)
         return organization
@@ -236,6 +274,39 @@ class OrganizationService:
             .limit(_SIMILARITY_LIMIT)
         )
         return list((await self._session.execute(stmt)).scalars().all())
+
+    async def find_same_name(self, name: str) -> list[Organization]:
+        """Неудалённые организации с тем же названием: `ООО «Базис»`, `ооо "Базис"` и `ООО  Базис` —
+        одна компания (`company_key`: регистр, кавычки, «ё», тире и пробелы не различают названия).
+        Сравниваются полное и краткое название существующих организаций.
+
+        Ключ считается в Python, а не в SQL: результат не зависит от локали БД (`lower()` кириллицы
+        в базе с локалью C не работает). Организации создают вручную и редко, а выбираются три
+        короткие колонки, поэтому полный проход по каталогу дёшев."""
+        key = company_key(name)
+        if not key:
+            return []
+        rows = (
+            await self._session.execute(
+                select(Organization.id, Organization.name, Organization.short_name).where(
+                    Organization.deleted_at.is_(None)
+                )
+            )
+        ).all()
+        ids = [
+            row.id for row in rows if key in (company_key(row.name), company_key(row.short_name))
+        ]
+        if not ids:
+            return []
+        found = (
+            await self._session.execute(
+                select(Organization)
+                .where(Organization.id.in_(ids))
+                .order_by(Organization.created_at, Organization.id)
+                .limit(_SAME_NAME_LIMIT)
+            )
+        ).scalars()
+        return list(found.all())
 
     async def check_duplicate(
         self, principal: Principal, *, inn: str | None, ogrn: str | None, name: str | None
@@ -269,6 +340,34 @@ class OrganizationService:
 
         return await self._session.get(EgrulEntry, inn)
 
+    async def _reject_same_name(self, principal: Principal, name: str | None) -> None:
+        """Организация без ИНН: отличить её от уже заведённой можно только названием. Дубль по
+        нормализованному названию — 409 CRM-1301 с кандидатами. Организации с ИНН проверяются по
+        ИНН (`ORGANIZATION_INN_EXISTS`), название у них не ключ: у разных юрлиц оно бывает одним.
+
+        `id` кандидата отдаётся только тому, кому организация видна по скоупу; название совпадает с
+        введённым, так что существование чужой организации — единственное, что узнаёт вызывающий
+        (та же граница, что у `GET /organizations/check-duplicate`)."""
+        duplicates = await self.find_same_name(name or "")
+        if not duplicates:
+            return
+        candidates: list[dict[str, Any]] = []
+        for existing in duplicates:
+            accessible = await organization_in_scope(self._session, principal, existing)
+            candidates.append(
+                {
+                    "id": str(existing.id) if accessible else None,
+                    "name": existing.name,
+                    "match": "same_name",
+                    "accessible": accessible,
+                }
+            )
+        raise AppError(
+            ErrorCode.DUPLICATE,
+            "Организация с таким названием уже существует",
+            extra={"candidates": candidates},
+        )
+
     async def create(self, principal: Principal, payload: Any) -> Organization:
         inn = payload.inn.strip() if payload.inn else None
         registry_entry = None
@@ -294,6 +393,8 @@ class OrganizationService:
                     },
                 )
             registry_entry = await self._lookup_registry(inn)
+        else:
+            await self._reject_same_name(principal, payload.name)
 
         organization = Organization(
             name=payload.name
@@ -544,24 +645,32 @@ class OrganizationService:
         персональные данные, и они нужны, чтобы отличить одну обезличенную
         запись от другой в истории сделок."""
         self._ensure_erasure_applicable(organization)
-        short_id = str(organization.id)[:8]
+        # Хвост UUIDv7, а не начало: старшие биты — метка времени, и объекты, созданные в одну
+        # минуту, получали бы одинаковый «псевдоним».
+        short_id = organization.id.hex[-8:]
         organization.name = f"ИП #{short_id}"
         organization.short_name = None
         organization.legal_address = None
         organization.actual_address = None
         organization.main_phone = None
         organization.main_email = None
-        organization.version += 1
+        await claim_version(self._session, organization)
         await self._session.flush()
 
-    async def hard_delete_eligible(self, organization: Organization) -> bool:
-        """Режим C (new_spec §4.8.2): только если организация не встречается
+    async def hard_delete_blockers(self, organization: Organization) -> list[dict[str, Any]]:
+        """Что мешает физически удалить организацию: записи, ссылающиеся на неё внешним ключом
+        без каскада (сделки, включая завершённые, контакты, лицензии…), в том числе мягко
+        удалённые — БД их всё равно видит.
 
-        вообще ни в одной сделке, включая завершённые."""
+        Раньше проверялись только сделки, а остальное обнаруживалось уже при `DELETE`: запрос
+        падал, вечно висел в очереди и каждые 15 минут заново выпускал акт уничтожения."""
         self._ensure_erasure_applicable(organization)
-        from app.modules.crm.service import count_all_deals_for_organization
+        return await restrict_dependents(self._session, Organization.__tablename__, organization.id)
 
-        return await count_all_deals_for_organization(self._session, organization.id) == 0
+    async def hard_delete_eligible(self, organization: Organization) -> bool:
+        """Режим C (new_spec §4.8.2): только если на организацию нет ссылок вообще — ни сделок
+        (включая завершённые), ни контактов, лицензий, продуктов."""
+        return not await self.hard_delete_blockers(organization)
 
 
 # =============================================================================
@@ -593,12 +702,15 @@ class ContactService:
         if filters.source:
             stmt = stmt.where(Contact.source == filters.source)
         if filters.q:
-            pattern = f"%{filters.q.strip()}%"
-            stmt = stmt.where(
-                Contact.first_name.ilike(pattern)
-                | Contact.last_name.ilike(pattern)
-                | Contact.email.ilike(pattern)
-            )
+            needle = filters.q.strip()
+            pattern = f"%{needle}%"
+            condition = Contact.first_name.ilike(pattern) | Contact.last_name.ilike(pattern)
+            # Email в выдаче маскирован, а поиск по подстроке позволял подбирать его по символам
+            # (`a%`, `ab%`, …). Полный адрес находится только точным совпадением: подобрать
+            # чужой адрес так нельзя, а известный — найти можно.
+            if "@" in needle:
+                condition = condition | (func.lower(Contact.email) == needle.lower())
+            stmt = stmt.where(condition)
         return stmt
 
     async def get_or_404(self, contact_id: uuid.UUID, principal: Principal) -> Contact:
@@ -606,37 +718,156 @@ class ContactService:
         if contact is None or contact.deleted_at is not None:
             raise NotFoundError("Контакт", contact_id)
         if not await contact_in_scope(self._session, principal, contact):
+            defer_denied_audit(
+                self._session, entity_type="contact", entity_id=contact_id, reason="out_of_scope"
+            )
             raise NotFoundError("Контакт", contact_id)
         return contact
 
-    async def create(self, principal: Principal, payload: Any) -> Contact:
-        if payload.organization_id is not None:
-            organization = await self._session.get(Organization, payload.organization_id)
-            if organization is None or organization.deleted_at is not None:
-                raise NotFoundError("Организация", payload.organization_id)
-            if not await organization_in_scope(self._session, principal, organization):
-                # Раздел 3.2: без этой проверки KAM мог бы писать контакты в
-                # организацию чужого портфеля, зная только её id — раньше
-                # проверялось только существование записи, не скоуп.
-                raise NotFoundError("Организация", payload.organization_id)
+    # --- Дедупликация и приём из внешних потоков ---------------------------
 
+    @staticmethod
+    def _identity(email: object, phone: object) -> tuple[str | None, str | None]:
+        """Нормализованные email и телефон; непустое значение, которое не разобралось, — 422, а не
+        молчаливая потеря ключа дедупликации."""
+        email_n, phone_n = normalize_email(email), normalize_phone(phone)
+        errors: list[FieldError] = []
+        if clean_text(email) and email_n is None:
+            errors.append(FieldError(field="email", reason="некорректный адрес электронной почты"))
+        if clean_text(phone) and phone_n is None:
+            errors.append(FieldError(field="phone", reason="некорректный номер телефона"))
+        if errors:
+            raise ValidationError("Некорректные контактные данные", errors)
+        return email_n, phone_n
+
+    async def _lock_identity(self, email: str | None, phone: str | None) -> None:
+        """Два одновременных запроса с одним email проходят проверку «такого ещё нет» оба и создают
+        два контакта. Транзакционный advisory-lock на ключ идентичности сериализует их: второй
+        дождётся коммита первого и найдёт его контакт. Ключи берутся в фиксированном порядке — иначе
+        пара «email+телефон» и «телефон+email» взаимно заблокируется."""
+        keys = sorted(
+            key
+            for key in (
+                f"contact-email:{email}" if email else None,
+                f"contact-phone:{phone}" if phone else None,
+            )
+            if key
+        )
+        for key in keys:
+            await self._session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": key}
+            )
+
+    async def find_matches(
+        self,
+        *,
+        email: str | None,
+        phone: str | None,
+        last_name: str | None = None,
+        exclude_id: uuid.UUID | None = None,
+    ) -> list[tuple[Contact, str]]:
+        """Контакты, которые это тот же человек: `[(контакт, "email" | "phone"), …]`, сначала по
+        email.
+
+        Правило: совпал email (без регистра) — тот же человек. Телефон один и тот же у разных
+        людей бывает (общий номер кафедры, семейный номер), поэтому по телефону совпадение только
+        при той же фамилии; если фамилии в запросе нет — по телефону одному. Удалённые и
+        обезличенные контакты не участвуют: обезличенный человек, подавший заявку снова, — новый
+        контакт (new_spec §4.8.5). Аргументы уже нормализованы (`_identity`)."""
+        if not email and not phone:
+            return []
+        base = select(Contact).where(Contact.deleted_at.is_(None), Contact.is_anonymized.is_(False))
+        if exclude_id is not None:
+            base = base.where(Contact.id != exclude_id)
+
+        found: list[tuple[Contact, str]] = []
+        seen: set[uuid.UUID] = set()
+        if email:
+            rows = (
+                (
+                    await self._session.execute(
+                        base.where(Contact.email == email)
+                        .order_by(Contact.created_at, Contact.id)
+                        .limit(20)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for row in rows:
+                seen.add(row.id)
+                found.append((row, "email"))
+        if phone:
+            wanted = name_key(last_name) if last_name else ""
+            rows = (
+                (
+                    await self._session.execute(
+                        base.where(Contact.phone == phone)
+                        .order_by(Contact.created_at, Contact.id)
+                        .limit(20)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for row in rows:
+                if row.id in seen:
+                    continue
+                if not wanted or name_key(row.last_name) == wanted:
+                    found.append((row, "phone"))
+        return found
+
+    async def match_contact(
+        self,
+        *,
+        email: object = None,
+        phone: object = None,
+        last_name: str | None = None,
+        exclude_id: uuid.UUID | None = None,
+    ) -> Contact | None:
+        email_n, phone_n = self._identity(email, phone)
+        matches = await self.find_matches(
+            email=email_n, phone=phone_n, last_name=last_name, exclude_id=exclude_id
+        )
+        return matches[0][0] if matches else None
+
+    async def _insert(
+        self,
+        *,
+        organization_id: uuid.UUID | None,
+        first_name: str,
+        last_name: str,
+        middle_name: str | None,
+        position: str | None,
+        email: str | None,
+        phone: str | None,
+        is_decision_maker: bool,
+        consent_id: uuid.UUID | None,
+        source: str | None,
+        external_ids: dict[str, Any] | None,
+        contact_methods: list[str] | None,
+        created_by: uuid.UUID | None,
+        channels: list[Any] | None = None,
+    ) -> Contact:
         contact = Contact(
-            organization_id=payload.organization_id,
-            first_name=payload.first_name,
-            last_name=payload.last_name,
-            middle_name=payload.middle_name,
-            position=payload.position,
-            email=payload.email,
-            phone=payload.phone,
-            is_decision_maker=payload.is_decision_maker,
-            consent_id=payload.consent_id,
-            source=payload.source,
-            external_ids=payload.external_ids or {},
+            organization_id=organization_id,
+            first_name=first_name,
+            last_name=last_name,
+            middle_name=middle_name,
+            position=position,
+            email=email,
+            phone=phone,
+            is_decision_maker=is_decision_maker,
+            consent_id=consent_id,
+            source=source,
+            external_ids=external_ids or {},
+            contact_methods=list(contact_methods or []),
+            created_by=created_by,
         )
         self._session.add(contact)
         await self._session.flush()
 
-        for channel in payload.channels:
+        for channel in channels or []:
             self._session.add(
                 ContactChannel(
                     contact_id=contact.id,
@@ -654,11 +885,141 @@ class ContactService:
             changes={
                 "organization_id": {
                     "old": None,
-                    "new": str(payload.organization_id) if payload.organization_id else None,
-                }
+                    "new": str(organization_id) if organization_id else None,
+                },
+                "source": {"old": None, "new": source},
             },
         )
         return contact
+
+    async def create(self, principal: Principal, payload: Any) -> Contact:
+        if payload.organization_id is not None:
+            organization = await self._session.get(Organization, payload.organization_id)
+            if organization is None or organization.deleted_at is not None:
+                raise NotFoundError("Организация", payload.organization_id)
+            if not await organization_in_scope(self._session, principal, organization):
+                # Раздел 3.2: без этой проверки KAM мог бы писать контакты в
+                # организацию чужого портфеля, зная только её id — раньше
+                # проверялось только существование записи, не скоуп.
+                raise NotFoundError("Организация", payload.organization_id)
+
+        email, phone = self._identity(payload.email, payload.phone)
+        await self._lock_identity(email, phone)
+        matches = await self.find_matches(email=email, phone=phone, last_name=payload.last_name)
+        if matches:
+            # Раньше дубли не проверялись вовсе: те же пять человек, что уже пришли с сайта,
+            # заводились вторыми экземплярами. Ответ не раскрывает чужие контакты — `id` отдаётся
+            # только тем, кому контакт виден по скоупу.
+            candidates: list[dict[str, Any]] = []
+            for existing, by in matches:
+                accessible = await contact_in_scope(self._session, principal, existing)
+                candidates.append(
+                    {
+                        "id": str(existing.id) if accessible else None,
+                        "match": by,
+                        "accessible": accessible,
+                    }
+                )
+            raise AppError(
+                ErrorCode.DUPLICATE,
+                "Контакт с таким email или телефоном уже существует",
+                extra={"candidates": candidates},
+            )
+
+        return await self._insert(
+            organization_id=payload.organization_id,
+            first_name=payload.first_name,
+            last_name=payload.last_name,
+            middle_name=payload.middle_name,
+            position=payload.position,
+            email=email,
+            phone=phone,
+            is_decision_maker=payload.is_decision_maker,
+            consent_id=payload.consent_id,
+            source=payload.source,
+            external_ids=payload.external_ids,
+            contact_methods=list(getattr(payload, "contact_methods", None) or []),
+            created_by=principal.user_id,
+            channels=list(payload.channels),
+        )
+
+    async def find_or_create(
+        self,
+        *,
+        first_name: str,
+        last_name: str,
+        middle_name: str | None = None,
+        email: object = None,
+        phone: object = None,
+        organization_id: uuid.UUID | None = None,
+        position: str | None = None,
+        contact_methods: list[str] | None = None,
+        source: str,
+        created_by: uuid.UUID | None = None,
+        external_ids: dict[str, Any] | None = None,
+    ) -> ContactUpsertResult:
+        """Приём человека из внешнего потока (вебхук сайта, импорт файлов): найти того же
+        человека или завести нового. Существующему только ДОЗАПОЛНЯЕТСЯ пустое (отчество, email,
+        телефон, должность, организация, способы связи): то, что в карточке уже есть, файл не
+        перезаписывает — менеджер мог поправить вручную.
+
+        `changed` — прежние значения дозаполненных полей: по ним импорт откатывает строку."""
+        email_n, phone_n = self._identity(email, phone)
+        await self._lock_identity(email_n, phone_n)
+        matches = await self.find_matches(email=email_n, phone=phone_n, last_name=last_name)
+        if not matches:
+            contact = await self._insert(
+                organization_id=organization_id,
+                first_name=first_name,
+                last_name=last_name,
+                middle_name=middle_name,
+                position=position,
+                email=email_n,
+                phone=phone_n,
+                is_decision_maker=False,
+                consent_id=None,
+                source=source,
+                external_ids=external_ids,
+                contact_methods=contact_methods,
+                created_by=created_by,
+            )
+            return ContactUpsertResult(contact=contact, created=True)
+
+        existing = matches[0][0]
+        result = ContactUpsertResult(contact=existing, created=False)
+        proposed: dict[str, Any] = {
+            "middle_name": middle_name,
+            "email": email_n,
+            "phone": phone_n,
+            "position": position,
+        }
+        for attr, value in proposed.items():
+            if value and not getattr(existing, attr):
+                result.changed[attr] = getattr(existing, attr)
+                setattr(existing, attr, value)
+        if organization_id is not None:
+            if existing.organization_id is None:
+                result.changed["organization_id"] = None
+                existing.organization_id = organization_id
+            elif existing.organization_id != organization_id:
+                result.notes.append("Контакт уже привязан к другой организации — не изменена")
+        methods = [m for m in (contact_methods or []) if m not in (existing.contact_methods or [])]
+        if methods:
+            result.changed["contact_methods"] = list(existing.contact_methods or [])
+            existing.contact_methods = [*(existing.contact_methods or []), *methods]
+        if result.changed:
+            existing.version += 1
+            await self._session.flush()
+            await self._audit.record(
+                AuditAction.CONTACT_UPDATED,
+                entity_type="contact",
+                entity_id=existing.id,
+                changes={
+                    key: {"old": _json_safe(old), "new": _json_safe(getattr(existing, key))}
+                    for key, old in result.changed.items()
+                },
+            )
+        return result
 
     # --- 152-ФЗ: удаление/обезличивание (new_spec §4.8.5) -----------------
 
@@ -722,7 +1083,9 @@ class ContactService:
         поведение, а не баг»): дедупликации по обезличенным полям здесь
         сознательно нет.
         """
-        short_id = str(contact.id)[:8]
+        # Хвост UUIDv7, а не начало: старшие биты — метка времени, и объекты, созданные в одну
+        # минуту, получали бы одинаковый «псевдоним».
+        short_id = contact.id.hex[-8:]
         contact.first_name = f"Контакт #{short_id}"
         contact.last_name = ""
         contact.middle_name = None
@@ -733,16 +1096,23 @@ class ContactService:
         await self._session.execute(
             ContactChannel.__table__.delete().where(ContactChannel.contact_id == contact.id)
         )
+        # Профиль учащегося (СНИЛС, паспорт, адрес, диплом) — те же ПДн, что и у контакта: запись
+        # контакта остаётся ради истории сделок, а эти данные после обезличивания хранить нельзя.
+        await self._session.execute(
+            delete(ContactLearnerProfile).where(ContactLearnerProfile.contact_id == contact.id)
+        )
         await self._session.flush()
 
+    async def hard_delete_blockers(self, contact: Contact) -> list[dict[str, Any]]:
+        """Записи, ссылающиеся на контакт внешним ключом без каскада (сделки, включая
+        завершённые, подписи, лицензии…): они не дают физически удалить строку. Таблицы берутся
+        из метаданных ORM (`core.dependents`), а не из списка, который устаревает с миграциями."""
+        return await restrict_dependents(self._session, Contact.__tablename__, contact.id)
+
     async def hard_delete_eligible(self, contact: Contact) -> bool:
-        """Режим C (new_spec §4.8.2): только если контакт не встречается
-
-        вообще ни в одной сделке, включая завершённые.
-        """
-        from app.modules.crm.service import count_all_deals_for_contact
-
-        return await count_all_deals_for_contact(self._session, contact.id) == 0
+        """Режим C (new_spec §4.8.2): только если на контакт нет ссылок вообще — ни в сделках
+        (включая завершённые), ни в других таблицах."""
+        return not await self.hard_delete_blockers(contact)
 
     _PATCHABLE_FIELDS = frozenset(
         {
@@ -754,6 +1124,7 @@ class ContactService:
             "email",
             "phone",
             "is_decision_maker",
+            "contact_methods",
         }
     )
 
@@ -762,14 +1133,56 @@ class ContactService:
     ) -> Contact:
         if contact.version != expected_version:
             raise VersionConflictError(contact.version, {"last_name": contact.last_name})
+        if contact.is_anonymized:
+            # Обезличенный контакт нельзя снова заполнить ПДн: иначе обезличивание (152-ФЗ)
+            # отменялось бы обычным PATCH.
+            raise AppError(
+                ErrorCode.ERASURE_BLOCKED,
+                "Контакт обезличен: его данные больше не редактируются",
+            )
 
         data = payload.model_dump(exclude_unset=True)
+        # Явный `null` в обязательных полях — ошибка клиента (422), а не нарушение NOT NULL в БД.
+        null_required = [k for k in ("first_name", "last_name") if k in data and data[k] is None]
+        if null_required:
+            raise ValidationError(
+                "Обязательные поля нельзя очистить",
+                [FieldError(field=k, reason="обязательное поле") for k in null_required],
+            )
         if data.get("organization_id") is not None:
             organization = await self._session.get(Organization, data["organization_id"])
             if organization is None or organization.deleted_at is not None:
                 raise NotFoundError("Организация", data["organization_id"])
             if not await organization_in_scope(self._session, principal, organization):
                 raise NotFoundError("Организация", data["organization_id"])
+
+        if "email" in data or "phone" in data:
+            email_n, phone_n = self._identity(
+                data.get("email", contact.email), data.get("phone", contact.phone)
+            )
+            if "email" in data:
+                data["email"] = email_n
+            if "phone" in data:
+                data["phone"] = phone_n
+            if email_n != contact.email or phone_n != contact.phone:
+                await self._lock_identity(email_n, phone_n)
+                last_name = data.get("last_name") or contact.last_name
+                clash = await self.find_matches(
+                    email=email_n if email_n != contact.email else None,
+                    phone=phone_n if phone_n != contact.phone else None,
+                    last_name=last_name,
+                    exclude_id=contact.id,
+                )
+                if clash:
+                    raise AppError(
+                        ErrorCode.DUPLICATE,
+                        "Контакт с таким email или телефоном уже существует",
+                        extra={
+                            "candidates": [
+                                {"match": by, "accessible": False} for _existing, by in clash
+                            ]
+                        },
+                    )
 
         changes: dict[str, dict[str, Any]] = {}
         for key, value in data.items():
@@ -969,6 +1382,7 @@ class DirectionService:
 @dataclass(slots=True)
 class ProductFilters:
     direction_id: uuid.UUID | None = None
+    vendor_id: uuid.UUID | None = None
     code: str | None = None
     is_active: bool | None = None
     format: str | None = None
@@ -992,6 +1406,8 @@ class ProductService:
         stmt = select(Product).where(Product.deleted_at.is_(None))
         if filters.direction_id:
             stmt = stmt.where(Product.direction_id == filters.direction_id)
+        if filters.vendor_id:
+            stmt = stmt.where(Product.vendor_id == filters.vendor_id)
         if filters.code:
             stmt = stmt.where(Product.code == filters.code)
         if filters.is_active is not None:
@@ -1009,21 +1425,51 @@ class ProductService:
             raise NotFoundError("Продукт", product_id)
         return product
 
+    async def vendor_names(self, products: Iterable[Product]) -> dict[uuid.UUID, str]:
+        """Названия вендоров для выдачи (`ProductOut.vendor_name`): один запрос на всю страницу.
+        Название удалённой организации тоже отдаётся: продукт по-прежнему на неё ссылается."""
+        vendor_ids = {p.vendor_id for p in products if p.vendor_id is not None}
+        if not vendor_ids:
+            return {}
+        rows = (
+            await self._session.execute(
+                select(Organization.id, Organization.name).where(Organization.id.in_(vendor_ids))
+            )
+        ).all()
+        return {row.id: row.name for row in rows}
+
+    async def _require_vendor(self, vendor_id: uuid.UUID) -> None:
+        """Вендор — обычная организация каталога: несуществующая или удалённая — 404, как любая
+        другая ссылка из тела запроса."""
+        organization = await self._session.get(Organization, vendor_id)
+        if organization is None or organization.deleted_at is not None:
+            raise NotFoundError("Организация", vendor_id)
+
     async def create(self, payload: Any) -> Product:
-        existing = await self._session.scalar(
-            select(Product).where(Product.code == payload.code, Product.deleted_at.is_(None))
-        )
+        # Уникальный индекс `uq_products_code` не смотрит на `deleted_at`: код удалённого продукта
+        # остаётся занятым. Без явной проверки это было бы нарушение ограничения уже при вставке.
+        existing = await self._session.scalar(select(Product).where(Product.code == payload.code))
+        if existing is not None and existing.deleted_at is not None:
+            raise AppError(
+                ErrorCode.DUPLICATE,
+                "Код занят удалённым продуктом: выберите другой код",
+                errors=[FieldError(field="code", reason="код занят удалённым продуктом")],
+                extra={"product_id": str(existing.id), "deleted": True},
+            )
         if existing is not None:
             raise ValidationError(
                 "Продукт с таким кодом уже существует",
                 [FieldError(field="code", reason="код уже используется")],
             )
         _check_validity_period(payload.valid_from, payload.valid_to)
+        if payload.vendor_id is not None:
+            await self._require_vendor(payload.vendor_id)
         product = Product(
             code=payload.code,
             name=payload.name,
             description=payload.description,
             direction_id=payload.direction_id,
+            vendor_id=payload.vendor_id,
             duration_hours=payload.duration_hours,
             format=payload.format,
             base_price=payload.base_price,
@@ -1051,6 +1497,10 @@ class ProductService:
         _check_validity_period(
             data.get("valid_from", product.valid_from), data.get("valid_to", product.valid_to)
         )
+        # Вендор проверяется только при смене: продукт, чей вендор потом удалён, редактируется как
+        # обычно, пока вендора не трогают.
+        if data.get("vendor_id") is not None and data["vendor_id"] != product.vendor_id:
+            await self._require_vendor(data["vendor_id"])
         changes: dict[str, dict[str, Any]] = {}
 
         if "custom_fields" in data:
@@ -1080,6 +1530,178 @@ class ProductService:
             changes=changes,
         )
         return product
+
+
+# =============================================================================
+# Ответственные за продукты: связь контакт — продукт (каталог «Вендоры»)
+# =============================================================================
+
+
+class ProductContactService:
+    """`contact_products`: кто отвечает за продукт. Связи заводит импорт «Вендоров» и
+    администратор каталога вручную; читать их могут все, кому видны сами контакты (телефон и email
+    в ответе маскированы, полные значения — только через `reveal` с записью аудита).
+
+    Запись аудита привязана к продукту (`entity_type='product'`): вопрос «кто и когда назначил
+    ответственного» задают с карточки продукта."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self._audit = AuditService(session)
+
+    async def contacts_of_product(
+        self, product: Product, principal: Principal
+    ) -> list[tuple[Contact, str]]:
+        """Ответственные продукта, видимые вызывающему по скоупу контактов. Удалённые и
+        обезличенные контакты не показываются: связаться с ними нельзя."""
+        stmt = (
+            select(Contact, ContactProduct.role)
+            .join(ContactProduct, ContactProduct.contact_id == Contact.id)
+            .where(
+                ContactProduct.product_id == product.id,
+                Contact.deleted_at.is_(None),
+                Contact.is_anonymized.is_(False),
+            )
+            .order_by(Contact.last_name, Contact.first_name, Contact.id)
+            .limit(_PRODUCT_CONTACTS_LIMIT)
+        )
+        clause = await contact_scope_clause(self._session, principal)
+        if clause is not None:
+            stmt = stmt.where(clause)
+        return [(contact, role) for contact, role in (await self._session.execute(stmt)).all()]
+
+    async def products_of_contact(self, contact: Contact) -> list[tuple[Product, str]]:
+        """Продукты, за которые отвечает контакт (доступ к самому контакту проверен вызывающим)."""
+        stmt = (
+            select(Product, ContactProduct.role)
+            .join(ContactProduct, ContactProduct.product_id == Product.id)
+            .where(ContactProduct.contact_id == contact.id, Product.deleted_at.is_(None))
+            .order_by(Product.name, Product.id)
+        )
+        return [(product, role) for product, role in (await self._session.execute(stmt)).all()]
+
+    async def link(self, product: Product, contact: Contact, role: str) -> None:
+        """Ставит связь или меняет роль у существующей; повтор с той же ролью ничего не пишет."""
+        link = await self._session.get(ContactProduct, (contact.id, product.id))
+        old_role: str | None = None
+        if link is None:
+            self._session.add(
+                ContactProduct(contact_id=contact.id, product_id=product.id, role=role)
+            )
+        elif link.role != role:
+            old_role = link.role
+            link.role = role
+        else:
+            return
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.CONTACT_PRODUCT_LINKED,
+            entity_type="product",
+            entity_id=product.id,
+            changes={
+                "contact_id": {
+                    "old": None if link is None else str(contact.id),
+                    "new": str(contact.id),
+                },
+                "role": {"old": old_role, "new": role},
+            },
+        )
+
+    async def unlink(self, product: Product, contact: Contact) -> None:
+        link = await self._session.get(ContactProduct, (contact.id, product.id))
+        if link is None:
+            raise NotFoundError("Ответственный за продукт", contact.id)
+        role = link.role
+        await self._session.delete(link)
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.CONTACT_PRODUCT_UNLINKED,
+            entity_type="product",
+            entity_id=product.id,
+            changes={
+                "contact_id": {"old": str(contact.id), "new": None},
+                "role": {"old": role, "new": None},
+            },
+        )
+
+
+# =============================================================================
+# Профиль учащегося: ПДн для шаблона LMS «Загрузка пользователей»
+# =============================================================================
+
+
+class LearnerProfileService:
+    """`contact_learner_profiles`: СНИЛС, паспорт, адрес регистрации, диплом. Наружу значения
+    уходят только маскированными (`LearnerProfileOut`) либо через `reveal` с записью аудита. В
+    аудит попадают имена изменённых полей, но не значения: журнал читает больше людей, чем видит
+    сам профиль."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self._audit = AuditService(session)
+
+    async def get(self, contact: Contact) -> ContactLearnerProfile | None:
+        return await self._session.get(ContactLearnerProfile, contact.id)
+
+    async def reveal(self, contact: Contact) -> ContactLearnerProfile | None:
+        """Полный профиль. Аудит — только категория данных: кто раскрыл и когда, знает запись
+        журнала (актор), сами значения в неё не попадают."""
+        profile = await self.get(contact)
+        await self._audit.record(
+            AuditAction.PII_REVEALED,
+            entity_type="contact",
+            entity_id=contact.id,
+            changes={"category": {"old": None, "new": "learner_profile"}},
+        )
+        return profile
+
+    async def update(
+        self, contact: Contact, values: dict[str, str | None]
+    ) -> ContactLearnerProfile | None:
+        """Частичное обновление: меняются только переданные поля, пустое значение очищает поле.
+        Каждое значение разбирается тем же `learner.parse_profile_value`, что и при импорте шаблона,
+        поэтому ручной ввод и файл дают одинаковые данные и одинаковые сообщения об ошибках."""
+        if contact.is_anonymized:
+            raise ValidationError("Контакт обезличен: данные учащегося не сохраняются")
+
+        parsed: dict[str, object | None] = {}
+        errors: list[FieldError] = []
+        for name, raw in values.items():
+            if name not in learner.PROFILE_TARGETS:
+                errors.append(FieldError(field=name, reason="неизвестное поле профиля"))
+                continue
+            text_value = (raw or "").strip()
+            if not text_value:
+                parsed[name] = None
+                continue
+            try:
+                parsed[name] = learner.parse_profile_value(name, text_value)
+            except ValueError as exc:
+                errors.append(FieldError(field=name, reason=str(exc)))
+        if errors:
+            raise ValidationError("Некорректные данные учащегося", errors)
+
+        profile = await self._session.get(ContactLearnerProfile, contact.id)
+        if profile is None:
+            if all(value is None for value in parsed.values()):
+                return None  # очищать нечего, пустую строку в таблице заводить незачем
+            profile = ContactLearnerProfile(contact_id=contact.id)
+            self._session.add(profile)
+
+        changed = sorted(name for name, value in parsed.items() if getattr(profile, name) != value)
+        if not changed:
+            return profile
+        for name in changed:
+            setattr(profile, name, parsed[name])
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.CONTACT_UPDATED,
+            entity_type="contact",
+            entity_id=contact.id,
+            # Только имена полей: СНИЛС, паспорт и адрес в журнал аудита не попадают.
+            changes={"learner_profile": {"old": None, "new": changed}},
+        )
+        return profile
 
 
 # =============================================================================
@@ -1361,16 +1983,35 @@ class OrganizationLicenseService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    def list_query(
-        self, *, organization_id: uuid.UUID | None = None
+    async def list_query(
+        self, principal: Principal, *, organization_id: uuid.UUID | None = None
     ) -> Select[tuple[OrganizationLicense]]:
+        """Лицензии только организаций из скоупа вызывающего. Раньше хватало права на чтение
+        каталога, и любой KAM/HEAD читал договоры (с именами менеджеров) всех вузов."""
         stmt = select(OrganizationLicense).where(OrganizationLicense.deleted_at.is_(None))
+        clause = await organization_scope_clause(self._session, principal)
+        if clause is not None:
+            stmt = stmt.where(
+                OrganizationLicense.organization_id.in_(select(Organization.id).where(clause))
+            )
         if organization_id is not None:
             stmt = stmt.where(OrganizationLicense.organization_id == organization_id)
         return stmt
 
-    async def get_or_404(self, license_id: uuid.UUID) -> OrganizationLicense:
+    async def get_or_404(self, license_id: uuid.UUID, principal: Principal) -> OrganizationLicense:
         license_ = await self._session.get(OrganizationLicense, license_id)
         if license_ is None or license_.deleted_at is not None:
+            raise NotFoundError("Лицензия", license_id)
+        organization = await self._session.get(Organization, license_.organization_id)
+        if organization is None or not await organization_in_scope(
+            self._session, principal, organization
+        ):
+            # Как и чужая организация: 404, а не 403 — существование договора не раскрывается.
+            defer_denied_audit(
+                self._session,
+                entity_type="organization_license",
+                entity_id=license_id,
+                reason="out_of_scope",
+            )
             raise NotFoundError("Лицензия", license_id)
         return license_

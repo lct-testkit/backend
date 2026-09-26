@@ -293,8 +293,10 @@ class TestLearningProgressStub:
 
 
 class TestBuilderRegistry:
-    def test_eight_builders_match_new_spec_4_13_literal_list(self) -> None:
-        assert len(REPORT_BUILDERS) == 8
+    def test_eight_builders_match_new_spec_4_13_literal_list_plus_the_lms_upload(self) -> None:
+        # Восемь видов раздела 4.13 и девятый — выгрузка учащихся для LMS (`lms_users_upload`).
+        assert len(REPORT_BUILDERS) == 9
+        assert "lms_users_upload" in REPORT_BUILDERS
 
     def test_only_stuck_deals_has_a_real_row_estimator(self) -> None:
         # Раздел 4.13: агрегаты структурно малы (статусы/регионы/КАМы/
@@ -307,8 +309,8 @@ class TestBuilderRegistry:
 
 
 class TestSeedTemplates:
-    def test_eight_templates_seeded(self) -> None:
-        assert len(_DEFAULT_TEMPLATES) == 8
+    def test_nine_templates_seeded(self) -> None:
+        assert len(_DEFAULT_TEMPLATES) == 9
 
     def test_no_duplicate_codes(self) -> None:
         codes = [row[0] for row in _DEFAULT_TEMPLATES]

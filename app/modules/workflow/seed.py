@@ -152,7 +152,7 @@ def _linear_funnel(
     ]
 
     transitions: list[TransitionSpec] = []
-    for index, (code, _name) in enumerate(steps):
+    for index, (code, step_name) in enumerate(steps):
         if index + 1 < len(steps):
             next_code, next_name = steps[index + 1]
             transitions.append(
@@ -192,6 +192,17 @@ def _linear_funnel(
                 requires_comment=True,
                 conditions=_PARK_CONDITION,
                 sort_order=40,
+            )
+        )
+        # Выход из заморозки: parked — пауза, а не закрытие (SLA стоит, время копится в
+        # `sla_paused_total`). Без возврата на любой шаг сделка «зависла» бы навсегда.
+        transitions.append(
+            TransitionSpec(
+                from_code="parked",
+                to_code=code,
+                name=f"Возобновить: вернуть на статус «{step_name}»",
+                requires_comment=True,
+                sort_order=100 + index,
             )
         )
 

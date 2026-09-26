@@ -1,7 +1,9 @@
 """Нарушения ограничений БД, которые не перехватил сервис (B#5 из
 `frontend/docs/backend-issues.md`): дубль и ссылка на связанные данные — 409
-Problem Details, а не «Внутренняя ошибка сервера». Всё остальное (NOT NULL,
-CHECK) — дыра в валидации или баг, такая ошибка остаётся 500."""
+Problem Details, а не «Внутренняя ошибка сервера». Пустое обязательное поле (NOT NULL) и
+значение вне CHECK — тоже вина запроса, а не сервера: 422 с именем поля, а не 500 (раньше
+оставались 500 как «дыра в валидации»; внешнее тестирование показало, что клиенту от этого
+не легче — он не знает, что править). Неизвестные сбои по-прежнему 500."""
 
 from __future__ import annotations
 
@@ -55,13 +57,62 @@ class TestIntegrityErrorHandler:
         assert body["code"] == "CRM-1303"
         assert "несуществующ" in body["detail"]
 
-    @pytest.mark.parametrize("sqlstate", ["23502", "23514"])
-    async def test_other_violations_stay_internal_errors(self, sqlstate: str) -> None:
+    async def test_null_in_a_required_column_is_a_validation_error_with_the_field(self) -> None:
+        cause = Exception("null value in column")
+        cause.column_name = "title"  # type: ignore[attr-defined]
+        orig = Exception("нарушено ограничение")
+        orig.pgcode = "23502"  # type: ignore[attr-defined]
+        orig.__cause__ = cause
+        error = IntegrityError("UPDATE deals SET title = $1", {}, orig)
+
+        response = await integrity_error_handler(_request(), error)
+
+        body = json.loads(response.body)
+        assert response.status_code == 422
+        assert body["code"] == "CRM-1001"
+        assert body["errors"][0]["field"] == "title"
+
+    async def test_check_violation_is_a_validation_error(self) -> None:
         response = await integrity_error_handler(
-            _request(), _integrity_error(sqlstate, "INSERT INTO directions (code) VALUES ($1)")
+            _request(), _integrity_error("23514", "UPDATE deals SET priority = $1")
+        )
+        body = json.loads(response.body)
+        assert response.status_code == 422
+        assert body["code"] == "CRM-1001"
+        assert b"deals" not in response.body  # устройство схемы наружу не уходит
+
+    async def test_unknown_violations_stay_internal_errors(self) -> None:
+        response = await integrity_error_handler(
+            _request(), _integrity_error("23001", "INSERT INTO directions (code) VALUES ($1)")
         )
         assert response.status_code == 500
         assert json.loads(response.body)["code"] == "CRM-9000"
+
+    async def test_too_long_value_is_a_validation_error(self) -> None:
+        from sqlalchemy.exc import DataError
+
+        from app.core.problem import data_error_handler
+
+        orig = Exception("value too long")
+        orig.pgcode = "22001"  # type: ignore[attr-defined]
+        response = await data_error_handler(
+            _request(), DataError("UPDATE deals SET source = $1", {}, orig)
+        )
+        assert response.status_code == 422
+
+    @pytest.mark.parametrize("sqlstate", ["40P01", "55P03"])
+    async def test_lock_trouble_is_a_retryable_503(self, sqlstate: str) -> None:
+        from sqlalchemy.exc import DBAPIError
+
+        from app.core.problem import database_error_handler
+
+        orig = Exception("deadlock detected")
+        orig.pgcode = sqlstate  # type: ignore[attr-defined]
+        response = await database_error_handler(
+            _request(), DBAPIError("UPDATE deals SET title = $1", {}, orig)
+        )
+        assert response.status_code == 503
+        assert response.headers["retry-after"] == "1"
 
     async def test_constraint_details_are_not_leaked(self) -> None:
         response = await integrity_error_handler(

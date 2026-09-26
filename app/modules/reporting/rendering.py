@@ -2,7 +2,8 @@
 
 * **xlsx** — `openpyxl` в `write_only`-режиме (раздел 4.13: «стриминг,
   константная память») — тот же приём, что `imports.service` уже применяет к
-  сгенерированным отчётам об ошибках импорта.
+  сгенерированным отчётам об ошибках импорта. Исключение по форме, не по режиму — файл для LMS
+  (`lms_users_upload`): он повторяет шаблон заказчика, см. `render_lms_users_xlsx`.
 * **pdf** — раздел 2.3 называет WeasyPrint, но `signing.rendering` (спринт 6)
   уже осознанно заменил его на `xhtml2pdf` (WeasyPrint тянет системные
   Pango/Cairo/GDK-Pixbuf, что противоречит принципу `Dockerfile`) и вложил
@@ -23,6 +24,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import io
 from typing import Any
 
@@ -31,9 +33,14 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402 — backend должен быть выбран до импорта pyplot
 from openpyxl import Workbook
+from openpyxl.cell import WriteOnlyCell
+from openpyxl.styles import Alignment, Font
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 
+from app.modules.catalog import learner
 from app.modules.imports.parsing import sanitize_formula
-from app.modules.reporting.builders import ReportDataset
+from app.modules.reporting.builders import LMS_USERS_UPLOAD, ReportDataset
 from app.modules.reporting.models import ReportFormat
 from app.modules.signing.rendering import html_to_pdf, render_template_html
 
@@ -105,6 +112,129 @@ def render_xlsx(dataset: ReportDataset) -> bytes:
     sheet.append(dataset.columns)
     for row in dataset.rows:
         sheet.append([_xlsx_cell(value) for value in row])
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+# Ширина колонок листа «Лист1» шаблона LMS — как в оригинале заказчика («Загрузка пользователей»),
+# по порядку колонок `learner.LMS_USER_COLUMNS`. «Пол» (L) в оригинале без своей ширины — остаётся
+# стандартной.
+_LMS_COLUMN_WIDTHS: tuple[float | None, ...] = (
+    23.86,  # A  Фамилия
+    24.86,  # B  Имя
+    24.0,  # C  Отчество
+    22.14,  # D  Номер телефона
+    20.71,  # E  Email
+    14.71,  # F  СНИЛС
+    14.57,  # G  Серия паспорта
+    15.86,  # H  Номер паспорта
+    19.57,  # I  Кем выдан паспорт
+    20.43,  # J  Дата выдачи паспорта
+    18.43,  # K  Код подразделения
+    None,  # L  Пол
+    15.29,  # M  Дата рождения
+    18.14,  # N  Регион регистрации
+    29.14,  # O  Населенный пункт регистрации
+    17.71,  # P  Улица регистрации
+    16.29,  # Q  Дом регистрации
+    20.29,  # R  Квартира регистрации
+    19.0,  # S  Индекс регистрации
+    23.0,  # T  Имя (дательный падеж)
+    27.0,  # U  Фамилия (дательный падеж)
+    26.14,  # V  Отчество (дательный падеж)
+    37.14,  # W  Образование
+    21.43,  # X  Профессия по диплому
+    29.57,  # Y  Учебное заведение по диплому
+    29.0,  # Z  Фамилия, указанная в дипломе
+    15.29,  # AA Номер диплома
+    14.86,  # AB Серия диплома
+    31.0,  # AC Регистрационный номер диплома
+    22.0,  # AD Дата выдачи диплома
+)
+_LMS_LOOKUP_WIDTH = 58.14
+_LMS_DATE_FORMAT = "DD.MM.YYYY"
+# В оригинале первые шесть заголовков выровнены по центру, остальные — по умолчанию.
+_LMS_CENTERED_HEADERS = 6
+
+
+def _lms_cell(sheet: Any, value: Any) -> Any:
+    """Ячейка данных шаблона LMS. Число (телефон `79990234365`) — числом, дата — настоящей датой
+    Excel в формате `ДД.ММ.ГГГГ`, всё остальное — текстом (СНИЛС, серия и номер паспорта, индекс:
+    иначе Excel съел бы ведущие нули и дефисы). Пустое остаётся пустой ячейкой.
+
+    Текст проходит через `sanitize_formula`: значения приходят от людей (адрес, ФИО, название
+    учебного заведения), и ячейка, начинающаяся с `=`, стала бы формулой — файл заказчик открывает в
+    Excel. Формул в шаблоне нет."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, dt.date):
+        cell = WriteOnlyCell(sheet, value=value)
+        cell.number_format = _LMS_DATE_FORMAT
+        return cell
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int):
+        return value
+    return sanitize_formula(str(value))
+
+
+def render_lms_users_xlsx(dataset: ReportDataset) -> bytes:
+    """Файл для загрузки учащихся в LMS: повторяет шаблон заказчика `Загрузка пользователей.xlsx`.
+
+    * `Лист1` — 30 заголовков буквально как в оригинале (в том числе `Отчествопри наличии)`: LMS
+      сопоставляет колонки по этому тексту) и строки учащихся; ширина колонок как в оригинале.
+    * `Лист2` — справочники: `М`/`Ж` в A1:A2 и семь уровней образования в B1:B7.
+    * На «Пол» (L) и «Образование» (W) повешены выпадающие списки на этот справочник, на 1000 строк.
+
+    Книга пишется в `write_only`-режиме, как остальные отчёты: константная память, а выпадающие
+    списки, ширина колонок и второй лист в нём поддерживаются (ширина задаётся до записи первой
+    строки листа, списки — до сохранения книги).
+    """
+    workbook = Workbook(write_only=True)
+    users = workbook.create_sheet(title=learner.LMS_USERS_SHEET)
+    lookup = workbook.create_sheet(title=learner.LMS_LOOKUP_SHEET)
+
+    for index, width in enumerate(_LMS_COLUMN_WIDTHS, start=1):
+        if width is not None:
+            users.column_dimensions[get_column_letter(index)].width = width
+    lookup.column_dimensions["B"].width = _LMS_LOOKUP_WIDTH
+
+    header_row = []
+    for index, title in enumerate(dataset.columns):
+        header = WriteOnlyCell(users, value=title)
+        header.font = Font(name="Calibri", size=11, bold=True)
+        if index < _LMS_CENTERED_HEADERS:
+            header.alignment = Alignment(horizontal="center")
+        header_row.append(header)
+    users.append(header_row)
+    for row in dataset.rows:
+        users.append([_lms_cell(users, value) for value in row])
+
+    sex_labels = list(learner.SEX_LABELS.values())
+    education_labels = [label for _code, label in learner.EDUCATION_LEVELS]
+    for position in range(max(len(sex_labels), len(education_labels))):
+        lookup.append(
+            [
+                sex_labels[position] if position < len(sex_labels) else None,
+                education_labels[position] if position < len(education_labels) else None,
+            ]
+        )
+
+    targets = [target for target, _header in learner.LMS_USER_COLUMNS]
+    for target, source in (
+        ("sex", f"{learner.LMS_LOOKUP_SHEET}!$A$1:$A${len(sex_labels)}"),
+        ("education", f"{learner.LMS_LOOKUP_SHEET}!$B$1:$B${len(education_labels)}"),
+    ):
+        validation = DataValidation(
+            type="list", formula1=source, allow_blank=True, showErrorMessage=True
+        )
+        column = get_column_letter(targets.index(target) + 1)
+        validation.add(f"{column}2:{column}{learner.LMS_VALIDATION_LAST_ROW}")
+        # У write-only листа нет `add_data_validation`, но список проверок в нём есть и
+        # сохраняется вместе с книгой.
+        users.data_validations.append(validation)
+
     buffer = io.BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
@@ -330,6 +460,8 @@ def render_png(dataset: ReportDataset, *, template_code: str) -> bytes:
 
 def render_report(dataset: ReportDataset, *, format: str, template_code: str) -> bytes:
     if format == ReportFormat.XLSX.value:
+        if template_code == LMS_USERS_UPLOAD:
+            return render_lms_users_xlsx(dataset)
         return render_xlsx(dataset)
     if format == ReportFormat.PDF.value:
         return render_pdf(dataset)

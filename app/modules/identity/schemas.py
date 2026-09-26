@@ -25,6 +25,7 @@ from pydantic import (
     model_validator,
 )
 
+from app.core.patch import reject_null
 from app.modules.identity.models import Role, UserStatus
 
 RoleLiteral = Literal["KAM", "HEAD", "ADMIN", "AUDITOR", "INTEGRATION"]
@@ -246,6 +247,14 @@ class UserPatchRequest(BaseModel):
     position: str | None = Field(default=None, max_length=255)
     locale: str | None = Field(default=None, max_length=8)
     timezone: str | None = Field(default=None, max_length=64)
+    # Подтверждение второго администратора: обязательно для повышения до ADMIN.
+    approval_id: uuid.UUID | None = None
+
+    @field_validator("role", "status", "locale", "timezone", mode="before")
+    @classmethod
+    def _required_are_not_nulled(cls, value: Any) -> Any:
+        # Эти колонки users — NOT NULL: `null` в PATCH раньше доходил до БД и давал 500.
+        return reject_null(value)
 
     @model_validator(mode="after")
     def _not_empty(self) -> UserPatchRequest:

@@ -16,7 +16,16 @@ import uuid
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
+
+from app.core.patch import reject_null
 
 DealTypeLiteral = Literal["b2b", "b2c"]
 PriorityLiteral = Literal["low", "normal", "high", "critical"]
@@ -35,6 +44,8 @@ class DealProductIn(BaseModel):
     price: Decimal | None = None
     discount_pct: Decimal = Field(default=Decimal("0"), ge=0, le=100)
     total: Decimal | None = None
+    #: Номер потока курса (один курс идёт несколькими параллельными потоками).
+    stream_number: int | None = Field(default=None, ge=1)
 
 
 class DealProductOut(BaseModel):
@@ -46,6 +57,7 @@ class DealProductOut(BaseModel):
     price: Decimal | None = None
     discount_pct: Decimal
     total: Decimal | None = None
+    stream_number: int | None = None
 
 
 class DealProductsReplaceRequest(BaseModel):
@@ -74,6 +86,8 @@ class DealCreateRequest(BaseModel):
     custom_fields: dict[str, Any] = Field(default_factory=dict)
     source: str | None = Field(default=None, max_length=32)
     external_ids: dict[str, Any] = Field(default_factory=dict)
+    #: Внешний «Номер заявки» (оплата с сайта). Уникален среди неудалённых сделок.
+    order_number: str | None = Field(default=None, min_length=1, max_length=64)
 
     @model_validator(mode="after")
     def _requires_party(self) -> DealCreateRequest:
@@ -100,6 +114,12 @@ class DealUpdateRequest(BaseModel):
     contact_id: uuid.UUID | None = None
     source: str | None = Field(default=None, max_length=32)
     custom_fields: dict[str, Any] | None = None
+
+    @field_validator("title", "currency", "priority", mode="before")
+    @classmethod
+    def _required_are_not_nulled(cls, value: Any) -> Any:
+        # Колонки NOT NULL: `null` — не «не менять» (для этого поле не передают), а 422, а не 500.
+        return reject_null(value)
 
 
 class DealOut(BaseModel):
@@ -132,6 +152,8 @@ class DealOut(BaseModel):
     custom_fields: dict[str, Any]
     source: str | None = None
     external_ids: dict[str, Any]
+    #: Внешний «Номер заявки» (не путать с `number` — внутренним D-2026-000431).
+    order_number: str | None = None
     owner_unavailable: bool
     signature_status: str
     version: int

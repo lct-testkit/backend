@@ -13,8 +13,11 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import io
+import json
+import math
 from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import Any
 
 import openpyxl
 import xlrd
@@ -46,6 +49,10 @@ def _cell_to_text(value: object) -> str:
     if isinstance(value, dt.date):
         return value.isoformat()
     if isinstance(value, float):
+        if not math.isfinite(value):
+            # `inf`/`nan` из ячейки Excel или `1e999` из JSON: строка «inf» дальше прошла бы в
+            # `Decimal`/`int` и уронила применение. Пустое значение даёт понятную ошибку поля.
+            return ""
         if value.is_integer():
             return str(int(value))
         return repr(value)
@@ -132,6 +139,66 @@ def parse_xls(content: bytes) -> ParsedTable:
     return ParsedTable(headers=headers, rows=rows)
 
 
+def _reject_json_constant(token: str) -> Any:
+    raise ValueError(f"недопустимая константа {token}")
+
+
+def _json_cell(value: Any) -> str:
+    if isinstance(value, dict | list):
+        # Вложенное значение не разворачиваем в колонки: как строка оно хотя бы видно в отчёте
+        # об ошибках, а не пропадает молча.
+        return json.dumps(value, ensure_ascii=False)
+    return _cell_to_text(value)
+
+
+def parse_json(content: bytes) -> ParsedTable:
+    """JSON-выгрузка сайта («Данные оплат.json»): массив объектов, заголовки — ключи.
+
+    Элементы массива, не являющиеся объектами, пропускаются без ошибки: выгрузка сайта начинается с
+    `null`, и это не повод отклонять весь файл. Корень-объект допустим, если в нём ровно один
+    массив (`{"orders": [...]}`). `NaN`/`Infinity` в JSON недопустимы: иначе они превращались бы
+    в числа, на которых падает применение.
+    """
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        detection = from_bytes(content).best()
+        if detection is None:
+            raise AppError(
+                ErrorCode.IMPORT_BAD_FORMAT, "Не удалось определить кодировку файла"
+            ) from None
+        text = str(detection)
+    try:
+        data = json.loads(text, parse_constant=_reject_json_constant)
+    except ValueError as exc:
+        raise AppError(
+            ErrorCode.IMPORT_BAD_FORMAT, f"Файл не является корректным JSON: {exc}"
+        ) from exc
+
+    if isinstance(data, dict):
+        arrays = [value for value in data.values() if isinstance(value, list)]
+        if len(arrays) != 1:
+            raise AppError(
+                ErrorCode.IMPORT_BAD_FORMAT,
+                "Ожидается массив объектов (или объект с одним массивом верхнего уровня)",
+            )
+        data = arrays[0]
+    if not isinstance(data, list):
+        raise AppError(ErrorCode.IMPORT_BAD_FORMAT, "Ожидается массив объектов")
+
+    records = [item for item in data if isinstance(item, dict)]
+    if not records:
+        raise AppError(ErrorCode.IMPORT_BAD_FORMAT, "В файле нет ни одной записи-объекта")
+
+    headers: dict[str, None] = {}
+    for record in records:
+        for key in record:
+            headers.setdefault(str(key), None)
+    names = list(headers)
+    rows = [[_json_cell(record.get(name)) for name in names] for record in records]
+    return ParsedTable(headers=names, rows=rows)
+
+
 def parse_table(content: bytes, *, source_format: str) -> ParsedTable:
     fmt = source_format.lower().lstrip(".")
     if fmt == "xlsx":
@@ -140,6 +207,8 @@ def parse_table(content: bytes, *, source_format: str) -> ParsedTable:
         return parse_xls(content)
     if fmt == "csv":
         return parse_csv(content)
+    if fmt == "json":
+        return parse_json(content)
     raise AppError(ErrorCode.IMPORT_BAD_FORMAT, f"Формат {source_format!r} не поддерживается")
 
 

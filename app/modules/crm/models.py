@@ -142,6 +142,15 @@ class Deal(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteMixin, Base):
             "('none','pending','partially_signed','signed','rejected','expired','void')",
             name="deals_signature_status_valid",
         ),
+        # Внешний «Номер заявки» (оплата с сайта): повторная загрузка или доставка того же заказа
+        # не должна плодить сделки — на уровне БД, а не только проверкой в коде (два запроса
+        # одновременно проходят проверку оба).
+        Index(
+            "uq_deals_order_number",
+            "order_number",
+            unique=True,
+            postgresql_where=text("order_number IS NOT NULL AND deleted_at IS NULL"),
+        ),
     )
 
     number: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -177,6 +186,11 @@ class Deal(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteMixin, Base):
     )
     sla_due_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     sla_state: Mapped[str] = mapped_column(String(16), nullable=False, server_default="ok")
+    # Когда по этой сделке ушла эскалация нарушения SLA (`sla_rules.escalate_*`): пока статус тот
+    # же, повторно не шлём. Сбрасывается при входе в новый статус.
+    sla_escalated_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # Накопленное время в статусах типа parked — не таймер, а счётчик для
     # отчётности (new_spec §4.10): «сколько мы в сумме прождали вуз».
     sla_paused_total: Mapped[dt.timedelta] = mapped_column(
@@ -196,6 +210,8 @@ class Deal(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteMixin, Base):
     external_ids: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
+    # «Номер заявки» из внешней системы (сайт, файл оплат), не путать с `number` (D-2026-000431).
+    order_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
     owner_unavailable: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
     signature_status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="none")
     # Модуль ПЭП (спринт 6) — FK на `signature_documents`, а не на живой
@@ -311,6 +327,10 @@ class DealProduct(UuidPkMixin, TimestampMixin, Base):
         Index("ix_deal_products_product", "product_id"),
         CheckConstraint("quantity > 0", name="deal_products_quantity_positive"),
         CheckConstraint("discount_pct BETWEEN 0 AND 100", name="deal_products_discount_valid"),
+        CheckConstraint(
+            "stream_number IS NULL OR stream_number > 0",
+            name="deal_products_stream_number_positive",
+        ),
     )
 
     deal_id: Mapped[uuid.UUID] = mapped_column(
@@ -325,6 +345,9 @@ class DealProduct(UuidPkMixin, TimestampMixin, Base):
         Numeric(5, 2), nullable=False, server_default=text("0")
     )
     total: Mapped[Money | None] = mapped_column(Numeric(14, 2), nullable=True)
+    # Номер потока курса («Номер потока» из данных оплат): один и тот же курс идёт несколькими
+    # параллельными потоками, и отчёт «сколько учится на потоке 2» без этого поля невозможен.
+    stream_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class DealComment(UuidPkMixin, TimestampMixin, SoftDeleteMixin, Base):

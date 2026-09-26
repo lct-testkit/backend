@@ -49,6 +49,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
@@ -227,6 +228,8 @@ class Contact(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteMixin, Base):
     __table_args__ = (
         Index("ix_contacts_organization", "organization_id"),
         Index("ix_contacts_email", "email"),
+        Index("ix_contacts_phone", "phone"),
+        Index("ix_contacts_created_by", "created_by"),
     )
 
     organization_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -248,6 +251,16 @@ class Contact(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteMixin, Base):
     source: Mapped[str | None] = mapped_column(String(32), nullable=True)
     external_ids: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    # Кто завёл контакт. Без этого контакт без организации и сделки (обычный случай при ручном
+    # вводе) исчезал у создателя сразу после `201`: скоуп контактов строится через организации и
+    # сделки, а у только что созданного их ещё нет.
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
+    # «Способ связи» из вендорского каталога: `email` | `phone` | `telegram` | `whatsapp`.
+    contact_methods: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
     )
 
 
@@ -291,6 +304,7 @@ class Product(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteMixin, Base):
     __table_args__ = (
         UniqueConstraint("code", name="uq_products_code"),
         Index("ix_products_direction", "direction_id"),
+        Index("ix_products_vendor", "vendor_id"),
         CheckConstraint(
             "format IS NULL OR format IN ('online','offline','blended')",
             name="products_format_valid",
@@ -313,10 +327,93 @@ class Product(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteMixin, Base):
     import_job_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("import_jobs.id", ondelete="SET NULL"), nullable=True
     )
-    # Раздел 19: «вендор», «ПО», признак программы (`product_kind`) — сюда,
-    # без отдельных таблиц `vendors`/`it_programs`.
+    # Вендор продукта — обычная организация (`org_type='company'`): каталог «Вендоры» приходит
+    # файлом «Компания / Продукт / ФИО / Телефон / Почта / Способ связи», и без ссылки на
+    # компанию из него терялась бы половина строки. Отдельной таблицы `vendors` нет: у вендора те
+    # же реквизиты, что у любой организации, а ответственные люди — обычные контакты
+    # (`ContactProduct`).
+    vendor_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True
+    )
+    # Раздел 19: «ПО», признак программы (`product_kind`) — сюда, без отдельной таблицы
+    # `it_programs`.
     custom_fields: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+
+
+class ContactProduct(Base):
+    """Ответственный контакт продукта: у каждого продукта вендора есть человек, к которому идут по
+    вопросам лицензий и поставки («Вендоры.xlsx»). Один человек может отвечать за несколько
+    продуктов и наоборот."""
+
+    __tablename__ = "contact_products"
+    __table_args__ = (Index("ix_contact_products_product", "product_id"),)
+
+    contact_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("contacts.id", ondelete="CASCADE"), primary_key=True
+    )
+    product_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("products.id", ondelete="CASCADE"), primary_key=True
+    )
+    role: Mapped[str] = mapped_column(String(24), nullable=False, server_default="responsible")
+    created_at: Mapped[dt.datetime] = mapped_column(server_default=text("now()"), nullable=False)
+
+
+class ContactLearnerProfile(Base):
+    """ПДн учащегося для шаблона LMS «Загрузка пользователей» (см. `catalog.learner`).
+
+    Отдельной таблицей, а не колонками `contacts`: СНИЛС, паспорт и адрес регистрации нужны только
+    для выгрузки в LMS и не должны попадать ни в `ContactOut`, ни в поиск, ни в аудит. Читается
+    через `GET /contacts/{id}/learner-profile` (маскированно) и `.../reveal` (с записью аудита).
+    Значения в БД уже нормализованы: СНИЛС — 11 цифр, серия — 4, номер — 6, код подразделения —
+    `NNN-NNN`, пол — `M`/`F`, образование — код из `catalog.learner.EDUCATION_LEVELS`.
+    """
+
+    __tablename__ = "contact_learner_profiles"
+    __table_args__ = (
+        CheckConstraint(
+            "sex IS NULL OR sex IN ('M','F')", name="contact_learner_profiles_sex_valid"
+        ),
+        CheckConstraint(
+            "education IS NULL OR education IN ('none','basic_general','secondary_general',"
+            "'secondary_vocational','higher_bachelor','higher_specialist_master',"
+            "'higher_top_qualification')",
+            name="contact_learner_profiles_education_valid",
+        ),
+    )
+
+    contact_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("contacts.id", ondelete="CASCADE"), primary_key=True
+    )
+    snils: Mapped[str | None] = mapped_column(String(14), nullable=True)
+    passport_series: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    passport_number: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    passport_issued_by: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    passport_issued_at: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    passport_dept_code: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    sex: Mapped[str | None] = mapped_column(String(1), nullable=True)
+    birth_date: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    reg_region: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    reg_city: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    reg_street: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    reg_house: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reg_apartment: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reg_zip: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    first_name_dative: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_name_dative: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    middle_name_dative: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    education: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    diploma_profession: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    diploma_institution: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    diploma_surname: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    diploma_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    diploma_series: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    diploma_reg_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    diploma_issued_at: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(server_default=text("now()"), nullable=False)
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        server_default=text("now()"), onupdate=func.now(), nullable=False
     )
 
 

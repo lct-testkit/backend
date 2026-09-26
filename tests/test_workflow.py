@@ -557,7 +557,10 @@ class TestSaveGraphWithDeals:
         assert "В работе" in problem["detail"]
         assert get_graph(client, graph["workflow"]["id"])["statuses"] == graph["statuses"]
 
-    def test_removing_an_unused_status_still_works(self, client) -> None:
+    def test_removing_a_published_status_is_refused_even_when_unused(self, client) -> None:
+        # Сделки идут по опубликованному снимку: удалив строку статуса, из которого сделка ещё
+        # может в него перейти, мы получили бы сбой на внешнем ключе уже в работе. Убрать
+        # опубликованный статус можно только архивацией (без сделок она мгновенная).
         login(client)
         graph = create_published_workflow(
             client,
@@ -575,17 +578,46 @@ class TestSaveGraphWithDeals:
                 sla_rules=[],
             ),
         )
-        extra = by_code(graph)["extra"]
+        codes = by_code(graph)
+        extra = codes["extra"]
 
         body = body_from_graph(graph)
         body["statuses"] = [s for s in body["statuses"] if s["id"] != extra["id"]]
         body["transitions"] = [
             t for t in body["transitions"] if extra["id"] not in (t["from_status"], t["to_status"])
         ]
+        refused = put_graph(client, graph["workflow"], body)
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["code"] == "CRM-1208"
 
+        archived = client.post(
+            f"/api/workflows/{graph['workflow']['id']}/statuses/{extra['id']}/archive",
+            json={"target_status_id": codes["won"]["id"]},
+            headers={"If-Match": str(graph["workflow"]["version"])},
+        )
+        assert archived.status_code == 200, archived.text
+        assert archived.json()["job_status"] == "completed"
+
+    def test_removing_a_draft_only_status_still_works(self, client) -> None:
+        # Статус, добавленный после публикации, в снимке ещё не значится: сделки о нём не знают,
+        # и убрать его из черновика можно как раньше.
+        login(client)
+        graph = create_published_workflow(client)
+        body = body_from_graph(graph)
+        body["statuses"].append({"code": "draft_only", "name": "Черновой", "type": "intermediate"})
         saved = put_graph(client, graph["workflow"], body)
         assert saved.status_code == 200, saved.text
-        assert {s["code"] for s in saved.json()["statuses"]} == {"new", "won"}
+        assert "draft_only" in {s["code"] for s in saved.json()["statuses"]}
+
+        again = body_from_graph(get_graph(client, graph["workflow"]["id"]))
+        again["statuses"] = [s for s in again["statuses"] if s["code"] != "draft_only"]
+        again["transitions"] = [
+            t for t in again["transitions"] if t["from_status"] and t["to_status"]
+        ]
+        latest = get_graph(client, graph["workflow"]["id"])["workflow"]
+        removed = put_graph(client, latest, again)
+        assert removed.status_code == 200, removed.text
+        assert {s["code"] for s in removed.json()["statuses"]} == {"new", "work", "won"}
 
     def test_transition_without_id_is_matched_by_status_pair(self, client) -> None:
         # Клиент, который id переходов не присылает (скрипты, старые формы), получает те же

@@ -54,7 +54,9 @@ class ReportJobCreateRequest(BaseModel):
             "ФТ.1/ФТ.4), поддержаны почти всеми видами, кроме `learning_progress`: "
             "`date_from`/`date_to` (YYYY-MM-DD, период включительно), "
             "`organization_ids`/`direction_ids`/`product_ids`/`owner_ids` "
-            "(списки UUID)."
+            "(списки UUID). Выгрузка для LMS (`lms_users_upload`, только xlsx) принимает "
+            "`product_id`, `stream_number`, `status_codes` (по умолчанию `payment_contract` и "
+            "`lms_enrollment`) и `date_from`/`date_to` по дате создания сделки."
         ),
     )
 

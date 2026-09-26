@@ -30,6 +30,8 @@ from app.modules.catalog.schemas import (
     ContactCreateRequest,
     ContactListResponse,
     ContactOut,
+    ContactProductListResponse,
+    ContactProductOut,
     ContactRevealOut,
     ContactUpdateRequest,
     CustomFieldDefCreateRequest,
@@ -46,6 +48,9 @@ from app.modules.catalog.schemas import (
     HolidayListResponse,
     HolidayOut,
     HolidayUpdateRequest,
+    LearnerProfileOut,
+    LearnerProfileRevealOut,
+    LearnerProfileUpdateRequest,
     LossReasonCreateRequest,
     LossReasonListResponse,
     LossReasonOut,
@@ -57,6 +62,9 @@ from app.modules.catalog.schemas import (
     OrganizationOut,
     OrganizationRevealOut,
     OrganizationUpdateRequest,
+    ProductContactLinkRequest,
+    ProductContactListResponse,
+    ProductContactOut,
     ProductCreateRequest,
     ProductListResponse,
     ProductOut,
@@ -71,10 +79,12 @@ from app.modules.catalog.service import (
     DirectionFilters,
     DirectionService,
     HolidayService,
+    LearnerProfileService,
     LossReasonService,
     OrganizationFilters,
     OrganizationLicenseService,
     OrganizationService,
+    ProductContactService,
     ProductFilters,
     ProductService,
     organization_in_scope,
@@ -409,9 +419,94 @@ async def reveal_contact(
         position=contact.position,
         email=contact.email,
         phone=contact.phone,
+        contact_methods=list(contact.contact_methods or []),
         is_decision_maker=contact.is_decision_maker,
         channels=channels,
     )
+
+
+@contacts_router.get(
+    "/{contact_id}/products",
+    summary="Продукты, за которые отвечает контакт",
+    description=(
+        "Каталог «Вендоры»: связи контакт — продукт. Доступ — как к карточке контакта "
+        "(чужой контакт — 404). Удалённые продукты не показываются."
+    ),
+    response_model=ContactProductListResponse,
+)
+async def list_contact_products(
+    session: DbSession, principal: ContactRead, contact_id: Annotated[uuid.UUID, Path()]
+) -> ContactProductListResponse:
+    contact = await ContactService(session).get_or_404(contact_id, principal)
+    rows = await ProductContactService(session).products_of_contact(contact)
+    names = await ProductService(session).vendor_names(product for product, _role in rows)
+    return ContactProductListResponse(
+        items=[
+            ContactProductOut(
+                product=ProductOut.from_model(product, names.get(product.vendor_id)), role=role
+            )
+            for product, role in rows
+        ]
+    )
+
+
+# --- Профиль учащегося (ПДн шаблона LMS) ---------------------------------------------------
+
+
+@contacts_router.get(
+    "/{contact_id}/learner-profile",
+    summary="Профиль учащегося (маскированный)",
+    description=(
+        "СНИЛС, паспорт, адрес регистрации и реквизиты диплома — `***` и три последних знака "
+        "(короткие значения закрыты целиком), даты — только год. Профиля нет — все поля `null`. "
+        "Полные значения — через `POST .../learner-profile/reveal`."
+    ),
+    response_model=LearnerProfileOut,
+)
+async def get_learner_profile(
+    session: DbSession, principal: ContactRead, contact_id: Annotated[uuid.UUID, Path()]
+) -> LearnerProfileOut:
+    contact = await ContactService(session).get_or_404(contact_id, principal)
+    return LearnerProfileOut.from_model(await LearnerProfileService(session).get(contact))
+
+
+@contacts_router.post(
+    "/{contact_id}/learner-profile/reveal",
+    summary="Раскрыть полный профиль учащегося",
+    description=(
+        "Каждый вызов пишет событие аудита PII_REVEALED (категория данных, без значений). "
+        "Профиля нет — все поля `null`."
+    ),
+    response_model=LearnerProfileRevealOut,
+)
+async def reveal_learner_profile(
+    session: DbSession, principal: ContactReveal, contact_id: Annotated[uuid.UUID, Path()]
+) -> LearnerProfileRevealOut:
+    contact = await ContactService(session).get_or_404(contact_id, principal)
+    return LearnerProfileRevealOut.from_model(await LearnerProfileService(session).reveal(contact))
+
+
+@contacts_router.put(
+    "/{contact_id}/learner-profile",
+    summary="Обновить профиль учащегося",
+    description=(
+        "Частичное обновление: меняются только переданные поля, пустая строка очищает поле. "
+        "Значения проверяются так же, как при импорте шаблона LMS; ошибки — 422 с перечнем "
+        "полей. В аудит попадают имена изменённых полей, но не значения. Ответ маскирован."
+    ),
+    response_model=LearnerProfileOut,
+)
+async def update_learner_profile(
+    payload: LearnerProfileUpdateRequest,
+    session: DbSession,
+    principal: ContactWrite,
+    contact_id: Annotated[uuid.UUID, Path()],
+) -> LearnerProfileOut:
+    contact = await ContactService(session).get_or_404(contact_id, principal)
+    profile = await LearnerProfileService(session).update(
+        contact, payload.model_dump(exclude_unset=True)
+    )
+    return LearnerProfileOut.from_model(profile)
 
 
 # =============================================================================
@@ -425,39 +520,53 @@ async def list_products(
     page: Pagination,
     principal: CatalogRead,
     direction_id: Annotated[uuid.UUID | None, Query()] = None,
+    vendor_id: Annotated[uuid.UUID | None, Query()] = None,
     code: Annotated[str | None, Query()] = None,
     is_active: Annotated[bool | None, Query()] = None,
     product_format: Annotated[str | None, Query(alias="format")] = None,
     q: Annotated[str | None, Query()] = None,
 ) -> ProductListResponse:
     filters = ProductFilters(
-        direction_id=direction_id, code=code, is_active=is_active, format=product_format, q=q
+        direction_id=direction_id,
+        vendor_id=vendor_id,
+        code=code,
+        is_active=is_active,
+        format=product_format,
+        q=q,
     )
-    stmt = (
-        ProductService(session)
-        .list_query(filters)
-        .order_by(Product.created_at.desc(), Product.id.desc())
-    )
+    service = ProductService(session)
+    stmt = service.list_query(filters).order_by(Product.created_at.desc(), Product.id.desc())
     cursor = page.decoded_cursor
     if cursor:
         stmt = stmt.where(keyset_before(Product.created_at, Product.id, cursor))
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
-    built = Page.build(rows, limit=page.limit, serializer=ProductOut.model_validate)
+    names = await service.vendor_names(rows)
+    built = Page.build(
+        rows,
+        limit=page.limit,
+        serializer=lambda product: ProductOut.from_model(product, names.get(product.vendor_id)),
+    )
     return ProductListResponse(items=built.items, next_cursor=built.next_cursor)
 
 
 @products_router.post(
     "",
     summary="Создать продукт",
-    description="`valid_from` не позже `valid_to`, иначе 422. Роль: запись каталога.",
+    description=(
+        "`valid_from` не позже `valid_to`, иначе 422. `vendor_id` — организация-вендор "
+        "(несуществующая или удалённая — 404). Код, занятый удалённым продуктом, — 409 CRM-1301. "
+        "Роль: запись каталога."
+    ),
     response_model=ProductOut,
     status_code=status.HTTP_201_CREATED,
 )
 async def create_product(
     payload: ProductCreateRequest, session: DbSession, principal: CatalogWrite
 ) -> ProductOut:
-    product = await ProductService(session).create(payload)
-    return ProductOut.model_validate(product)
+    service = ProductService(session)
+    product = await service.create(payload)
+    names = await service.vendor_names([product])
+    return ProductOut.from_model(product, names.get(product.vendor_id))
 
 
 @products_router.patch(
@@ -465,7 +574,7 @@ async def create_product(
     summary="Обновить продукт",
     description=(
         "`valid_from` не позже `valid_to` (новая дата сверяется с сохранённой), "
-        "иначе 422. Роль: запись каталога."
+        "иначе 422. `vendor_id: null` снимает вендора. Роль: запись каталога."
     ),
     response_model=ProductOut,
 )
@@ -479,7 +588,75 @@ async def update_product(
     service = ProductService(session)
     product = await service.get_or_404(product_id)
     product = await service.update(product, payload, expected_version=if_match)
-    return ProductOut.model_validate(product)
+    names = await service.vendor_names([product])
+    return ProductOut.from_model(product, names.get(product.vendor_id))
+
+
+# --- Ответственные за продукт: связь контакт — продукт -------------------------------------
+
+
+@products_router.get(
+    "/{product_id}/contacts",
+    summary="Ответственные за продукт",
+    description=(
+        "Каталог «Вендоры»: люди, к которым идут по вопросам продукта. Показываются только "
+        "контакты, видимые вызывающему по скоупу; телефон и email маскированы. "
+        "Роль: чтение каталога."
+    ),
+    response_model=ProductContactListResponse,
+)
+async def list_product_contacts(
+    session: DbSession, principal: CatalogRead, product_id: Annotated[uuid.UUID, Path()]
+) -> ProductContactListResponse:
+    product = await ProductService(session).get_or_404(product_id)
+    rows = await ProductContactService(session).contacts_of_product(product, principal)
+    return ProductContactListResponse(
+        items=[
+            ProductContactOut(contact=ContactOut.from_model(contact), role=role)
+            for contact, role in rows
+        ]
+    )
+
+
+@products_router.put(
+    "/{product_id}/contacts/{contact_id}",
+    summary="Назначить ответственного за продукт",
+    description=(
+        "Создаёт связь контакт — продукт или меняет роль у существующей (повтор идемпотентен). "
+        "Пишет событие аудита CONTACT_PRODUCT_LINKED. Роль: запись каталога."
+    ),
+    response_model=ProductContactOut,
+)
+async def link_product_contact(
+    payload: ProductContactLinkRequest,
+    session: DbSession,
+    principal: CatalogWrite,
+    product_id: Annotated[uuid.UUID, Path()],
+    contact_id: Annotated[uuid.UUID, Path()],
+) -> ProductContactOut:
+    product = await ProductService(session).get_or_404(product_id)
+    contact = await ContactService(session).get_or_404(contact_id, principal)
+    await ProductContactService(session).link(product, contact, payload.role)
+    return ProductContactOut(contact=ContactOut.from_model(contact), role=payload.role)
+
+
+@products_router.delete(
+    "/{product_id}/contacts/{contact_id}",
+    summary="Снять ответственного с продукта",
+    description=(
+        "Связи нет — 404. Пишет событие аудита CONTACT_PRODUCT_UNLINKED. Роль: запись каталога."
+    ),
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def unlink_product_contact(
+    session: DbSession,
+    principal: CatalogWrite,
+    product_id: Annotated[uuid.UUID, Path()],
+    contact_id: Annotated[uuid.UUID, Path()],
+) -> None:
+    product = await ProductService(session).get_or_404(product_id)
+    contact = await ContactService(session).get_or_404(contact_id, principal)
+    await ProductContactService(session).unlink(product, contact)
 
 
 # =============================================================================
@@ -778,7 +955,10 @@ async def list_regions(session: DbSession, principal: CatalogRead) -> RegionList
 @organization_licenses_router.get(
     "",
     summary="Список лицензий/договоров вуз-вендор-ПО",
-    description="Фильтр: organization_id. Роль: чтение каталога.",
+    description=(
+        "Фильтр: organization_id. Только организации из скоупа вызывающего (KAM/HEAD — свои "
+        "и по своим сделкам, ADMIN — все). Роль: чтение каталога."
+    ),
     response_model=OrganizationLicenseListResponse,
 )
 async def list_organization_licenses(
@@ -788,10 +968,10 @@ async def list_organization_licenses(
     organization_id: Annotated[uuid.UUID | None, Query()] = None,
 ) -> OrganizationLicenseListResponse:
     stmt = (
-        OrganizationLicenseService(session)
-        .list_query(organization_id=organization_id)
-        .order_by(OrganizationLicense.created_at.desc(), OrganizationLicense.id.desc())
-    )
+        await OrganizationLicenseService(session).list_query(
+            principal, organization_id=organization_id
+        )
+    ).order_by(OrganizationLicense.created_at.desc(), OrganizationLicense.id.desc())
     cursor = page.decoded_cursor
     if cursor:
         stmt = stmt.where(
@@ -810,5 +990,5 @@ async def list_organization_licenses(
 async def get_organization_license(
     session: DbSession, principal: CatalogRead, license_id: Annotated[uuid.UUID, Path()]
 ) -> OrganizationLicenseOut:
-    license_ = await OrganizationLicenseService(session).get_or_404(license_id)
+    license_ = await OrganizationLicenseService(session).get_or_404(license_id, principal)
     return OrganizationLicenseOut.model_validate(license_)

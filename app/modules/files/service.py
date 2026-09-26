@@ -12,12 +12,14 @@ PUT, клиент грузит объект напрямую в SeaweedFS, `comm
 from __future__ import annotations
 
 import datetime as dt
+import re
+import unicodedata
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
-from urllib.parse import quote
+from typing import NoReturn, Protocol, runtime_checkable
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -63,12 +65,136 @@ _FORBIDDEN_EXTENSIONS = frozenset({"svg"})
 _UPLOAD_URL_TTL_SECONDS = 900  # 15 минут, раздел 3.7
 _DOWNLOAD_URL_TTL_SECONDS = 300  # 5 минут, раздел 3.7
 
+_UTF8_BOM = b"\xef\xbb\xbf"
+# Пробельные символы, допустимые между BOM и началом JSON (RFC 8259, §2).
+_JSON_WHITESPACE = b" \t\r\n"
+_JSON_ROOT_OPENERS = frozenset(b"[{")
+
 
 def _extension(filename: str) -> str:
     return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
 
+# Символы, которых не должно быть в имени: кавычка ломает `Content-Disposition: filename="..."`,
+# остальные — запрещённые в именах файлов Windows (файл скачивают и на ней).
+_FILENAME_FORBIDDEN = frozenset(['"', "\\", "<", ">", ":", "|", "?", "*"])
+# Категории Unicode, которых нет в честном имени: управляющие (в том числе NUL, CR и LF —
+# внедрение заголовков), «форматирующие» (RLO и прочие двунаправленные метки: имя с такой
+# меткой показывается задом наперёд, и `fdp.exe` выглядит как `exe.pdf`), суррогаты, частное
+# использование и неназначенные.
+_FILENAME_BAD_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn"})
+_FILENAME_MAX = 255
+
+
+def sanitize_filename(name: str) -> str:
+    """Безопасное имя файла для БД, заголовков и скачивания.
+
+    Клиентское имя шло в `original_filename` и в `Content-Disposition` как есть: путь (`../`),
+    управляющие символы и кавычки, двунаправленные метки. Берётся только последний компонент
+    пути, выбрасываются опасные символы, схлопываются пробелы, обрезаются точки и пробелы по
+    краям, длина — не больше колонки (расширение сохраняется). Пустой результат — `file`."""
+    base = name.replace("\\", "/").rsplit("/", 1)[-1]
+    # Переводы строки и табуляция — пробелы, а не «ничего»: два слова не должны склеиваться.
+    base = base.translate({ord(ch): " " for ch in "\t\n\r\v\f"})
+    cleaned = "".join(
+        ch
+        for ch in base
+        if ch not in _FILENAME_FORBIDDEN
+        and unicodedata.category(ch) not in _FILENAME_BAD_CATEGORIES
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    if not cleaned:
+        return "file"
+    if len(cleaned) > _FILENAME_MAX:
+        stem, dot, ext = cleaned.rpartition(".")
+        if dot and 0 < len(ext) <= 16:
+            cleaned = stem[: _FILENAME_MAX - len(ext) - 1].rstrip(" .") + "." + ext
+        else:
+            cleaned = cleaned[:_FILENAME_MAX].rstrip(" .")
+    return cleaned or "file"
+
+
+# Форматы, у которых `commit` проверил содержимое по сигнатуре: MIME берётся отсюда, а не из
+# заявления клиента. Иначе `.pdf` с `mime_type: text/html` (или наоборот, чужой файл с
+# `application/pdf`) проходил бы в места, которые доверяют полю (подпись требует PDF по MIME).
+_VERIFIED_MIME: dict[str, str] = {
+    "pdf": "application/pdf",
+    "png": "image/png",
+    "jpeg": "image/jpeg",
+    "jpg": "image/jpeg",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "zip": "application/zip",
+    "gz": "application/gzip",
+    "gzip": "application/gzip",
+    "doc": "application/msword",
+    "xls": "application/vnd.ms-excel",
+}
+
+
+async def lock_storage_key(session: AsyncSession, bucket: str, key: str) -> None:
+    """Транзакционный замок на объект хранилища.
+
+    Несколько записей `files` могут ссылаться на один объект (дедупликация по `sha256`).
+    Привязка новой записи к чужому объекту и его физическое удаление (истёк срок отчёта, очистка)
+    идут под одним замком: иначе объект удалялся бы между «нашли, на что сослаться» и
+    «сослались», и живая запись оставалась бы без файла."""
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"{bucket}/{key}"},
+    )
+
+
+async def delete_object_if_unreferenced(
+    session: AsyncSession, *, bucket: str, key: str, excluding_file_id: uuid.UUID | None = None
+) -> bool:
+    """Физически удаляет объект, только если на него не ссылается ни одна другая живая запись
+    `files`. `True` — объект удалён.
+
+    Дедупликация направляла новые записи на уже лежащий объект, а очистка отчётов удаляла его
+    безусловно: файл пользователя оставался `ready` без содержимого. Вызывающий сам переводит
+    свою запись в `deleted` (в этой же транзакции), здесь она исключается из подсчёта."""
+    await lock_storage_key(session, bucket, key)
+    stmt = (
+        select(func.count())
+        .select_from(File)
+        .where(
+            File.bucket == bucket,
+            File.storage_key == key,
+            File.deleted_at.is_(None),
+            File.status != FileStatus.DELETED.value,
+        )
+    )
+    if excluding_file_id is not None:
+        stmt = stmt.where(File.id != excluding_file_id)
+    if await session.scalar(stmt):
+        return False
+    await delete_object(bucket=bucket, key=key)
+    return True
+
+
+def _looks_like_json(magic: bytes) -> bool:
+    """У JSON нет сигнатуры, но корень файла с данными — массив или объект: первый значащий байт
+    (после необязательного BOM и пробелов) — `[` или `{`. Так `.json`, за которым лежит PNG, HTML
+    или исполняемый файл, не проходит `commit`.
+
+    Проверяется только префикс, который снимает `storage.inspect_object` (16 байт). Если в нём
+    одни BOM и пробелы, значащий символ дальше — судить не по чему, файл принимается; битый JSON
+    отклонит уже импорт с внятным сообщением. Пустой объект (нет ни одного байта) — не JSON."""
+    if not magic:
+        return False
+    body = magic.removeprefix(_UTF8_BOM).lstrip(_JSON_WHITESPACE)
+    return not body or body[0] in _JSON_ROOT_OPENERS
+
+
+# Форматы без бинарной сигнатуры, у которых начало содержимого всё же проверяется.
+_CONTENT_CHECKS: dict[str, Callable[[bytes], bool]] = {"json": _looks_like_json}
+
+
 def _check_magic_bytes(extension: str, magic: bytes) -> bool:
+    content_check = _CONTENT_CHECKS.get(extension)
+    if content_check is not None:
+        return content_check(magic)
     signatures = _MAGIC_SIGNATURES.get(extension)
     if not signatures:
         return True
@@ -202,7 +328,10 @@ class FileService:
         self, principal: Principal, payload: UploadIntentRequest, *, deal_scope: bool = False
     ) -> tuple[File, str, dt.datetime]:
         settings = get_settings()
-        extension = _extension(payload.filename)
+        # Имя санитизируется до любых проверок: расширение берётся из очищенного имени, а в БД и
+        # в заголовок скачивания попадает только оно.
+        filename = sanitize_filename(payload.filename)
+        extension = _extension(filename)
         if extension in _FORBIDDEN_EXTENSIONS or extension not in settings.allowed_extensions:
             raise AppError(ErrorCode.FILE_TYPE_NOT_ALLOWED, f"Тип файла {extension!r} не разрешён")
 
@@ -216,12 +345,15 @@ class FileService:
         await ensure_bucket(bucket)
 
         file_id = uuid7()
-        storage_key = f"{file_id}/{quote(payload.filename)}"
+        # Ключ не содержит имени: `quote()` кириллицы даёт 6 символов на букву, и длинное имя
+        # (от ~80 букв) не помещалось в `storage_key` (500), а `..` в имени мог попасть в путь.
+        # Настоящее имя живёт только в БД (`original_filename`), расширение уже проверено.
+        storage_key = f"{file_id}/upload.{extension}"
         file = File(
             id=file_id,
             storage_key=storage_key,
             bucket=bucket,
-            original_filename=payload.filename,
+            original_filename=filename,
             mime_type=payload.mime_type,
             size_bytes=payload.size_bytes,
             status=FileStatus.PENDING.value,
@@ -242,11 +374,32 @@ class FileService:
             AuditAction.FILE_UPLOAD_INTENT,
             entity_type="file",
             entity_id=file.id,
-            changes={"original_filename": {"old": None, "new": payload.filename}},
+            changes={"original_filename": {"old": None, "new": filename}},
         )
         return file, upload_url, expires_at
 
+    async def _reject_commit(self, error: AppError) -> NoReturn:
+        """Фиксирует статус и аудит отказа и только потом бросает исключение.
+
+        `get_db_session` откатывает транзакцию на любом исключении: `infected`/`file_too_large` и
+        запись аудита, сделанные перед `raise`, исчезали вместе с ней. Файл оставался `pending`
+        (а при слишком большом размере ещё и указывал на удалённый объект), инцидент не
+        попадал в журнал. К этому моменту в транзакции только статус файла и аудит: проверка
+        идёт до любых других записей, поэтому немедленный коммит безопасен (так же устроен
+        `audit.service.record_denied_and_commit`)."""
+        await self._session.commit()
+        raise error
+
     async def commit(self, file: File, *, expected_sha256: str | None = None) -> File:
+        # Строка файла под замком: два одновременных `commit` одного файла не должны оба
+        # дойти до дедупликации и удаления объекта.
+        await self._session.refresh(file, with_for_update=True)
+        if file.status == FileStatus.INFECTED.value:
+            # Отказ теперь сохраняется, и повтор не должен «молча вернуть 200» с чужим статусом.
+            raise AppError(
+                ErrorCode.FILE_INFECTED,
+                "Файл отклонён проверкой при загрузке: загрузите его заново",
+            )
         if file.status != FileStatus.PENDING.value:
             return file
 
@@ -285,7 +438,9 @@ class FileService:
                     "limit_bytes": {"old": None, "new": max_size},
                 },
             )
-            raise AppError(ErrorCode.FILE_TOO_LARGE, "Превышен допустимый размер файла")
+            await self._reject_commit(
+                AppError(ErrorCode.FILE_TOO_LARGE, "Превышен допустимый размер файла")
+            )
 
         extension = _extension(file.original_filename)
         magic_ok = _check_magic_bytes(extension, inspection.magic_bytes)
@@ -302,8 +457,11 @@ class FileService:
                 entity_id=file.id,
                 changes={"reason": {"old": None, "new": "magic_bytes_or_hash_mismatch"}},
             )
-            raise AppError(
-                ErrorCode.FILE_INFECTED, "Содержимое файла не соответствует заявленному формату"
+            await self._reject_commit(
+                AppError(
+                    ErrorCode.FILE_INFECTED,
+                    "Содержимое файла не соответствует заявленному формату",
+                )
             )
 
         scan = await get_antivirus_scanner().scan(bucket=file.bucket, key=file.storage_key)
@@ -319,10 +477,16 @@ class FileService:
                 entity_id=file.id,
                 changes={"reason": {"old": None, "new": scan.detail}},
             )
-            raise AppError(ErrorCode.FILE_INFECTED, "Файл не прошёл антивирусную проверку")
+            await self._reject_commit(
+                AppError(ErrorCode.FILE_INFECTED, "Файл не прошёл антивирусную проверку")
+            )
 
         await self._dedup_storage(file)
 
+        # MIME — по проверенному содержимому, а не по заявлению клиента (см. `_VERIFIED_MIME`).
+        verified_mime = _VERIFIED_MIME.get(extension)
+        if verified_mime is not None:
+            file.mime_type = verified_mime
         file.status = FileStatus.READY.value
         await self._session.flush()
         await self._audit.record(
@@ -339,21 +503,34 @@ class FileService:
         ломает контракт `file_id` из ответа `upload-intent`), но если байты
         уже лежат в хранилище под другим, уже проверенным файлом — свежая
         копия объекта удаляется, а эта запись переиспользует существующий
-        `storage_key`. Физически объект хранится один раз; `refcount`
-        по-прежнему считает вложения на каждую запись `files` отдельно."""
-        existing = await self._session.scalar(
+        `storage_key`. Физически объект хранится один раз.
+
+        Только внутри одного бакета и только на живую запись: объект другого бакета живёт по
+        своим правилам (отчёты истекают через 7 дней, и очистка удаляла бы объект, на который
+        ссылается файл пользователя). Привязка идёт под замком ключа: очистка и удаление
+        (`delete_object_if_unreferenced`) берут тот же замок, поэтому объект не исчезнет между
+        выбором кандидата и ссылкой на него."""
+        candidate = (
             select(File)
             .where(
                 File.sha256 == file.sha256,
+                File.bucket == file.bucket,
                 File.status == FileStatus.READY.value,
+                File.deleted_at.is_(None),
                 File.id != file.id,
             )
+            .order_by(File.created_at, File.id)
             .limit(1)
         )
+        existing = await self._session.scalar(candidate)
+        if existing is None:
+            return
+        await lock_storage_key(self._session, existing.bucket, existing.storage_key)
+        # Пока ждали замок, кандидата могли удалить: проверяем заново, уже под замком.
+        existing = await self._session.scalar(candidate.execution_options(populate_existing=True))
         if existing is None:
             return
         await delete_object(bucket=file.bucket, key=file.storage_key)
-        file.bucket = existing.bucket
         file.storage_key = existing.storage_key
 
     async def download_url(self, file: File) -> tuple[str, dt.datetime]:
@@ -363,7 +540,9 @@ class FileService:
             bucket=file.bucket,
             key=file.storage_key,
             expires_seconds=_DOWNLOAD_URL_TTL_SECONDS,
-            filename=file.original_filename,
+            # Имя санитизируется и здесь: старые записи (до очистки при загрузке) могли
+            # сохранить кавычку или перевод строки, а хранилище вставляет имя в заголовок ответа.
+            filename=sanitize_filename(file.original_filename),
         )
         expires_at = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=_DOWNLOAD_URL_TTL_SECONDS)
         await self._audit.record(
@@ -383,12 +562,74 @@ class FileService:
             return
         raise ForbiddenError("Удалить файл может его автор или руководитель")
 
+    async def _referenced_by(self, file: File) -> str | None:
+        """Что удерживает файл: вложение, подпись, соглашение об ЭДО, отчёт, акт, импорт.
+
+        Счётчик `refcount` вели только вложения через API: файлы подписи, протоколы, вложения
+        импорта и подписанные копии создавались мимо него, и `DELETE /files/{id}` удалял их у
+        автора или руководителя. Поэтому смотрим на сами ссылки, а не на счётчик. Импорты
+        моделей — внутри метода: слой `files` не должен зависеть от них на уровне модуля."""
+        from app.modules.identity.models import DataErasureRequest
+        from app.modules.imports.models import ImportJob
+        from app.modules.registry.models import RegistryVersion
+        from app.modules.reporting.models import ReportJob
+        from app.modules.signing.models import EdmAgreement, SignatureDocument
+
+        session = self._session
+        if file.refcount > 0 or await session.scalar(
+            select(Attachment.id)
+            .where(Attachment.file_id == file.id, Attachment.deleted_at.is_(None))
+            .limit(1)
+        ):
+            return "вложениях"
+        checks = (
+            (
+                "документе на подпись (оригинал, подписанная копия или протокол)",
+                select(SignatureDocument.id).where(
+                    or_(
+                        SignatureDocument.file_id == file.id,
+                        SignatureDocument.signed_file_id == file.id,
+                        SignatureDocument.protocol_file_id == file.id,
+                    )
+                ),
+            ),
+            (
+                "соглашении об ЭДО",
+                select(EdmAgreement.id).where(EdmAgreement.agreement_file_id == file.id),
+            ),
+            ("отчёте", select(ReportJob.id).where(ReportJob.file_id == file.id)),
+            (
+                "акте уничтожения данных",
+                select(DataErasureRequest.id).where(DataErasureRequest.act_file_id == file.id),
+            ),
+            (
+                "задании импорта",
+                select(ImportJob.id).where(
+                    or_(ImportJob.file_id == file.id, ImportJob.result_file_id == file.id)
+                ),
+            ),
+            (
+                "версии реестра ЕГРЮЛ",
+                select(RegistryVersion.id).where(RegistryVersion.file_id == file.id),
+            ),
+        )
+        for label, stmt in checks:
+            if await session.scalar(stmt.limit(1)) is not None:
+                return label
+        return None
+
     async def soft_delete(self, file: File) -> None:
         # Раздел 3.7/9: подписанные документы и файлы, закрывающие пройденный
         # переход, не удаляются без административного действия — здесь это
         # выражено проще: пока есть хоть одна активная ссылка, удалить нельзя.
-        if file.refcount > 0:
-            raise AppError(ErrorCode.VALIDATION, "Файл привязан к вложениям, сначала отвяжите их")
+        reason = await self._referenced_by(file)
+        if reason is not None:
+            raise AppError(
+                ErrorCode.VALIDATION,
+                f"Файл используется в {reason}: сначала уберите ссылку, удалить его нельзя"
+                if reason != "вложениях"
+                else "Файл привязан к вложениям, сначала отвяжите их",
+            )
         file.status = FileStatus.DELETED.value
         file.deleted_at = dt.datetime.now(dt.UTC)
         await self._session.flush()
@@ -472,9 +713,17 @@ class AttachmentService:
             description=description,
             uploaded_by=principal.user_id,
         )
-        file.refcount += 1
         self._session.add(attachment)
+        # Счётчик растёт в самой БД: `refcount += 1` в Python при параллельных привязках терял
+        # инкременты, и файл с двумя вложениями считался привязанным к одному.
+        await self._session.execute(
+            update(File)
+            .where(File.id == file.id)
+            .values(refcount=File.refcount + 1)
+            .execution_options(synchronize_session=False)
+        )
         await self._session.flush()
+        await self._session.refresh(file, attribute_names=["refcount"])
         await self._audit.record(
             AuditAction.ATTACHMENT_CREATED,
             entity_type=entity_type,
@@ -500,9 +749,16 @@ class AttachmentService:
     async def delete(self, attachment: Attachment) -> None:
         file = await self._session.get(File, attachment.file_id)
         attachment.deleted_at = dt.datetime.now(dt.UTC)
-        if file is not None and file.refcount > 0:
-            file.refcount -= 1
+        if file is not None:
+            await self._session.execute(
+                update(File)
+                .where(File.id == file.id)
+                .values(refcount=func.greatest(File.refcount - 1, 0))
+                .execution_options(synchronize_session=False)
+            )
         await self._session.flush()
+        if file is not None:
+            await self._session.refresh(file, attribute_names=["refcount"])
         await self._audit.record(
             AuditAction.ATTACHMENT_DELETED,
             entity_type=attachment.entity_type,

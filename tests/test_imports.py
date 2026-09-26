@@ -359,16 +359,32 @@ class TestLicenseImportEndToEnd:
         monkeypatch.setattr(imports_service, "ensure_bucket", fake_ensure_bucket)
         monkeypatch.setattr(imports_service, "upload_object_bytes", fake_upload)
 
-    async def _seed_organization_and_file(self, org_name: str, content: bytes):
+    async def _seed_organization_and_file(
+        self,
+        org_name: str,
+        content: bytes,
+        uploaded_by: uuid.UUID | None = None,
+        create_org: bool = True,
+    ):
+        from sqlalchemy import select
+
         from app.core.db import session_scope
         from app.core.ids import uuid7
         from app.modules.catalog.models import Organization
         from app.modules.files.models import File, FileStatus
 
         async with session_scope() as session:
-            org = Organization(name=org_name, org_type="university", source="test")
-            session.add(org)
-            await session.flush()
+            if create_org:
+                org = Organization(name=org_name, org_type="university", source="test")
+                session.add(org)
+                await session.flush()
+            else:
+                # Повторный импорт того же вуза: организация уже есть, вторую с тем же названием не
+                # заводим — иначе разрешение «название -> вуз» становится неоднозначным.
+                org = (
+                    await session.execute(select(Organization).where(Organization.name == org_name))
+                ).scalar_one()
+            # Файл принадлежит тому, кто его загрузил: руководитель импортирует только свои файлы.
             file = File(
                 id=uuid7(),
                 storage_key="test/license-import.xlsx",
@@ -378,6 +394,7 @@ class TestLicenseImportEndToEnd:
                 size_bytes=len(content),
                 sha256=hashlib.sha256(content).hexdigest(),
                 status=FileStatus.READY.value,
+                uploaded_by=uploaded_by,
             )
             session.add(file)
             await session.flush()
@@ -416,9 +433,8 @@ class TestLicenseImportEndToEnd:
         ]
         content = self._xlsx_bytes(rows)
         self._stub_storage(monkeypatch, content)
-        _org_id, file_id = run(client, self._seed_organization_and_file, org_name, content)
-
         head = run(client, _make_user, "HEAD")
+        _org_id, file_id = run(client, self._seed_organization_and_file, org_name, content, head.id)
         csrf = authenticate(client, head)
         client.headers["X-CSRF-Token"] = csrf
 
@@ -491,9 +507,8 @@ class TestLicenseImportEndToEnd:
         ]
         content = self._xlsx_bytes(rows)
         self._stub_storage(monkeypatch, content)
-        _org_id, file_id = run(client, self._seed_organization_and_file, org_name, content)
-
         head = run(client, _make_user, "HEAD")
+        _org_id, file_id = run(client, self._seed_organization_and_file, org_name, content, head.id)
         csrf = authenticate(client, head)
         client.headers["X-CSRF-Token"] = csrf
 
@@ -551,7 +566,14 @@ class TestLicenseImportEndToEnd:
         ]
         content_v2 = self._xlsx_bytes(rows_v2)
         self._stub_storage(monkeypatch, content_v2)
-        _org_id2, file_id_v2 = run(client, self._seed_organization_and_file, org_name, content_v2)
+        _org_id2, file_id_v2 = run(
+            client,
+            self._seed_organization_and_file,
+            org_name,
+            content_v2,
+            head.id,
+            False,
+        )
 
         job_id_v2 = client.post(
             "/api/imports",
