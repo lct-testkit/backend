@@ -29769,6 +29769,72 @@
         ]
       }
     },
+    "/api/signature-documents/batch": {
+      "get": {
+        "description": "Карточки документов по `ids` (через запятую, до 100 уникальных — дубликаты схлопываются). Заменяет N запросов `GET /signature-documents/{document_id}` одним, когда вызывающая сторона уже знает интересующие id (вкладка «Документы» — свои созданные, свои задачи на подпись, для аудит-ролей — журнал), но списка «все мои документы» у бэкенда всё ещё нет (backend-issues C-5, часть про документы по пользователю — не про историю по сделке, та ручка уже выше). Права на каждый id — ровно как у одиночной карточки: недоступный или не найденный документ просто пропускается в ответе, запрос в целом не отказывает (тем же приёмом, что `fetchDocument` уже трактует 403/404 на фронте). Роль: KAM (свои сделки), HEAD, ADMIN — как и у одиночной карточки; этот маршрут объявлен раньше `/{document_id}`, чтобы `batch` не пытался распарситься как UUID.",
+        "operationId": "list_documents_batch_api_signature_documents_batch_get",
+        "parameters": [
+          {
+            "description": "UUID через запятую, до 100 уникальных",
+            "in": "query",
+            "name": "ids",
+            "required": true,
+            "schema": {
+              "description": "UUID через запятую, до 100 уникальных",
+              "title": "Ids",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignatureDocumentListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "summary": "Пачка документов по списку id",
+        "tags": [
+          "signing"
+        ]
+      }
+    },
     "/api/signature-documents/{document_id}": {
       "get": {
         "operationId": "get_document_api_signature_documents__document_id__get",

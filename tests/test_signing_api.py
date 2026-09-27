@@ -205,6 +205,125 @@ class TestDocumentCard:
         assert [sig["id"] for sig in item["signatures"]] == [str(built.signature_ids[0])]
 
 
+class TestDocumentsBatch:
+    """`GET /signature-documents/batch` (C-5): вкладка «Документы» знает только id
+    (свои созданные, свои задачи на подпись, для аудит-ролей — журнал) и раньше
+    добывала карточки N запросами `GET /signature-documents/{id}` — в проде 300
+    документов слали 300 GET. Права на каждый id — ровно как у одиночной карточки
+    (`TestDocumentCard` выше): недоступный или не найденный документ тихо
+    пропускается, запрос в целом не отказывает."""
+
+    def _batch(self, client, ids):
+        return client.get(
+            "/api/signature-documents/batch",
+            params={"ids": ",".join(str(i) for i in ids)},
+        )
+
+    def test_returns_only_accessible_documents(self, client) -> None:
+        # KAM видит свою (подписант), не видит чужую (не подписант, не ADMIN —
+        # entity_type="erasure_request" пускает только ADMIN, dop.md §10 п.
+        # `_check_entity_access`) и не видит несуществующую — все три молча
+        # опускаются кроме доступной, запрос не отказывает целиком.
+        signer = run(client, _make_user, "KAM")
+        _login(client, signer)
+        mine = _build(client, requests=[{"user": signer, "status": "sent"}])
+        someone_elses = _build(client, requests=[{"user": None, "status": "sent"}])
+        missing = uuid.uuid4()
+
+        response = self._batch(client, [mine.document_id, someone_elses.document_id, missing])
+
+        assert response.status_code == 200, response.text
+        ids = {item["id"] for item in response.json()["items"]}
+        assert ids == {str(mine.document_id)}
+
+    def test_admin_sees_everything_in_the_batch(self, client) -> None:
+        _login(client, run(client, _make_user, "ADMIN"))
+        a = _build(client, requests=[{"user": None, "status": "sent"}])
+        b = _build(
+            client,
+            status="signed",
+            requests=[{"user": None, "status": "signed"}],
+            with_results=True,
+        )
+
+        response = self._batch(client, [a.document_id, b.document_id])
+
+        assert response.status_code == 200, response.text
+        ids = {item["id"] for item in response.json()["items"]}
+        assert ids == {str(a.document_id), str(b.document_id)}
+
+    def test_duplicate_ids_are_deduplicated(self, client) -> None:
+        _login(client, run(client, _make_user, "ADMIN"))
+        built = _build(client, requests=[{"user": None, "status": "sent"}])
+
+        response = self._batch(client, [built.document_id, built.document_id, built.document_id])
+
+        assert response.status_code == 200, response.text
+        assert [item["id"] for item in response.json()["items"]] == [str(built.document_id)]
+
+    def test_limit_is_enforced(self, client) -> None:
+        _login(client, run(client, _make_user, "ADMIN"))
+        too_many = [uuid.uuid4() for _ in range(101)]
+
+        response = self._batch(client, too_many)
+
+        assert response.status_code == 422, response.text
+        assert response.json()["code"] == "CRM-1001"
+
+    def test_exactly_at_the_limit_is_accepted(self, client) -> None:
+        _login(client, run(client, _make_user, "ADMIN"))
+        at_limit = [uuid.uuid4() for _ in range(100)]
+
+        response = self._batch(client, at_limit)
+
+        assert response.status_code == 200, response.text
+        assert response.json()["items"] == []
+
+    def test_malformed_id_is_rejected_outright(self, client) -> None:
+        # Кривой UUID — опечатка вызывающей стороны, а не вопрос доступа: 422 на
+        # весь запрос, а не молчаливый пропуск (тем же приёмом, что
+        # `identity/router_directory.py`).
+        _login(client, run(client, _make_user, "ADMIN"))
+
+        response = client.get("/api/signature-documents/batch", params={"ids": "not-a-uuid"})
+
+        assert response.status_code == 422, response.text
+        assert response.json()["code"] == "CRM-1001"
+
+    def test_empty_ids_returns_an_empty_list_not_an_error(self, client) -> None:
+        _login(client, run(client, _make_user, "ADMIN"))
+
+        response = client.get("/api/signature-documents/batch", params={"ids": ""})
+
+        assert response.status_code == 200, response.text
+        assert response.json()["items"] == []
+
+    def test_permissions_match_the_single_card_endpoint(self, client) -> None:
+        # AUDITOR не имеет signature:create (TestPermissionMatrix, test_signing.py) —
+        # как и на одиночной карточке, весь запрос отказывает 403, а не «пустой список».
+        built = _build(client, requests=[{"user": None, "status": "sent"}])
+        _login(client, run(client, _make_user, "AUDITOR"))
+
+        response = self._batch(client, [built.document_id])
+
+        assert response.status_code == 403, response.text
+
+    def test_batch_card_matches_the_single_card(self, client) -> None:
+        signer = run(client, _make_user, "KAM")
+        _login(client, signer)
+        built = _build(
+            client,
+            status="signed",
+            requests=[{"user": signer, "status": "signed"}, {"user": None, "status": "signed"}],
+            with_results=True,
+        )
+
+        single = client.get(f"/api/signature-documents/{built.document_id}").json()
+        (batch_item,) = self._batch(client, [built.document_id]).json()["items"]
+
+        assert batch_item == single
+
+
 class TestReissueLink:
     """`POST /signature-requests/{id}/reissue-link`: токен внешнего подписанта
     не вернуть (в БД только sha256), а когда очередь доходит до него не из

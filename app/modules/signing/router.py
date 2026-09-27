@@ -17,7 +17,7 @@ from sqlalchemy import select
 from app.core.config import get_settings
 from app.core.context import get_client
 from app.core.deps import ConsentedUser, DbSession, require_permission
-from app.core.errors import ValidationError
+from app.core.errors import FieldError, ForbiddenError, NotFoundError, ValidationError
 from app.core.permissions import Permission
 from app.core.security import Principal
 from app.modules.signing.models import SignatureDocument
@@ -59,6 +59,10 @@ edm_agreements_router = APIRouter(prefix="/admin/edm-agreements", tags=["signing
 signatures_router = APIRouter(prefix="/signatures", tags=["signing"])
 
 _MAX_VERIFY_UPLOAD_BYTES = 52_428_800  # 50 МБ — тот же порядок, что files_max_size_bytes
+# Тот же порядок, что `_MAX_IDS` в `identity/router_directory.py`; здесь меньше,
+# потому что на каждый id ниже уходит объектная проверка доступа (раздел 4),
+# а не один SQL `IN` — сотня документов уже покрывает вкладку «Документы» (C-5).
+_MAX_BATCH_IDS = 100
 
 
 @signature_documents_router.post(
@@ -107,6 +111,86 @@ async def list_documents(
         for d in documents
     ]
     return SignatureDocumentListResponse(items=items)
+
+
+@signature_documents_router.get(
+    "/batch",
+    summary="Пачка документов по списку id",
+    description=(
+        "Карточки документов по `ids` (через запятую, до "
+        f"{_MAX_BATCH_IDS} уникальных — дубликаты схлопываются). Заменяет N "
+        "запросов `GET /signature-documents/{document_id}` одним, когда вызывающая "
+        "сторона уже знает интересующие id (вкладка «Документы» — свои созданные, "
+        "свои задачи на подпись, для аудит-ролей — журнал), но списка «все мои "
+        "документы» у бэкенда всё ещё нет (backend-issues C-5, часть про "
+        "документы по пользователю — не про историю по сделке, та ручка уже "
+        "выше). Права на каждый id — ровно как у одиночной карточки: недоступный "
+        "или не найденный документ просто пропускается в ответе, запрос в целом "
+        "не отказывает (тем же приёмом, что `fetchDocument` уже трактует 403/404 "
+        "на фронте). Роль: KAM (свои сделки), HEAD, ADMIN — как и у одиночной "
+        "карточки; этот маршрут объявлен раньше `/{document_id}`, чтобы `batch` "
+        "не пытался распарситься как UUID."
+    ),
+    response_model=SignatureDocumentListResponse,
+)
+async def list_documents_batch(
+    session: DbSession,
+    principal: Annotated[Principal, Depends(require_permission(Permission.SIGNATURE_CREATE))],
+    ids: Annotated[str, Query(description=f"UUID через запятую, до {_MAX_BATCH_IDS} уникальных")],
+) -> SignatureDocumentListResponse:
+    parsed = _parse_batch_ids(ids)
+    if not parsed:
+        return SignatureDocumentListResponse(items=[])
+
+    service = SignatureDocumentService(session)
+    by_id = await service.get_many(parsed)
+    accessible: list[SignatureDocument] = []
+    for document_id in parsed:
+        document = by_id.get(document_id)
+        if document is None:
+            continue  # не найден — тихо пропускаем, как fetchDocument на фронте
+        try:
+            await service.ensure_read_access(principal, document)
+        except (NotFoundError, ForbiddenError):
+            continue  # недоступен этому principal — тихо пропускаем, не 403 на весь запрос
+        accessible.append(document)
+
+    accessible_ids = [d.id for d in accessible]
+    requests_map = await service.requests_by_documents(accessible_ids)
+    signatures_map = await service.signatures_by_document(accessible_ids)
+    items = [
+        _document_out(d, requests_map.get(d.id, []), signatures=signatures_map.get(d.id))
+        for d in accessible
+    ]
+    return SignatureDocumentListResponse(items=items)
+
+
+def _parse_batch_ids(raw_ids: str) -> list[uuid.UUID]:
+    """Тот же разбор, что `ids` в `identity/router_directory.py`: некорректный UUID —
+    422 на весь запрос (это опечатка вызывающей стороны, а не вопрос доступа),
+    дубликаты схлопываются с сохранением порядка первого появления."""
+    parsed: list[uuid.UUID] = []
+    seen: set[uuid.UUID] = set()
+    for raw in raw_ids.split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            value = uuid.UUID(raw)
+        except ValueError:
+            raise ValidationError(
+                "Некорректный идентификатор в `ids`",
+                [FieldError(field="ids", reason=f"не UUID: {raw[:40]}")],
+            ) from None
+        if value not in seen:
+            seen.add(value)
+            parsed.append(value)
+    if len(parsed) > _MAX_BATCH_IDS:
+        raise ValidationError(
+            f"Слишком много идентификаторов (максимум {_MAX_BATCH_IDS})",
+            [FieldError(field="ids", reason="превышен лимит")],
+        )
+    return parsed
 
 
 @signature_documents_router.get(
