@@ -12,6 +12,7 @@ import datetime as dt
 import json
 from typing import Annotated
 
+import structlog
 from fastapi import APIRouter, Path, Request, Response, status
 from sqlalchemy import select
 
@@ -40,6 +41,7 @@ from app.modules.identity.schemas import (
     RecentListResponse,
     SessionInfo,
     SessionListResponse,
+    SessionsTerminatedResponse,
 )
 from app.modules.identity.service import IdentityService
 from app.modules.identity.session_store import session_store
@@ -53,6 +55,7 @@ from app.modules.signing.service import (
     get_signing_service,
 )
 
+logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/me", tags=["me"])
 
 
@@ -169,28 +172,124 @@ async def get_recent(principal: CurrentUser) -> RecentListResponse:
     return RecentListResponse(items=items)
 
 
+# Префикс публичного идентификатора сессии, которая живёт только в Keycloak (вход по Bearer).
+KC_SESSION_PREFIX = "kc-"
+
+
+def keycloak_session_info(raw: dict, *, current_state: str | None) -> SessionInfo:
+    """Сессия Keycloak в том же виде, что и серверная: без токенов, времена в ISO."""
+
+    def _iso(millis: object) -> str:
+        return dt.datetime.fromtimestamp(int(millis or 0) / 1000, dt.UTC).isoformat()  # type: ignore[call-overload]
+
+    return SessionInfo(
+        sid=f"{KC_SESSION_PREFIX}{raw['id']}",
+        # Keycloak не хранит User-Agent, поэтому подпись честная: откуда вход, а не браузер.
+        device="Вход в систему",
+        ip=raw.get("ipAddress"),
+        user_agent=None,
+        created_at=_iso(raw.get("start")),
+        last_seen_at=_iso(raw.get("lastAccess")),
+        is_current=bool(current_state) and raw["id"] == current_state,
+    )
+
+
+async def _keycloak_only_sessions(principal, known_states: set[str]) -> list[dict]:
+    """Сессии Keycloak пользователя, которых нет среди серверных.
+
+    В режиме Bearer (демо) SPA берёт токены у Keycloak сам и cookie-сессии в Redis не
+    создаётся — раньше список был пуст, хотя вход выполнен на нескольких устройствах.
+    Серверные сессии уже порождают свою сессию Keycloak (`kc_session_state`), её не дублируем.
+    Keycloak недоступен или admin-клиент не настроен — просто показываем то, что есть."""
+    try:
+        raw = await keycloak_client.list_user_sessions(principal.keycloak_id)
+    except Exception:
+        logger.warning("keycloak_sessions_unavailable")
+        return []
+    return [item for item in raw if item.get("id") and item["id"] not in known_states]
+
+
 @router.get(
     "/sessions",
     summary="Активные сессии",
     description=(
-        "Список серверных сессий пользователя из Redis: устройство, IP, User-Agent, "
-        "время создания и последняя активность. Токены не возвращаются, а `sid` — не "
-        "значение session-cookie, а необратимый публичный идентификатор сессии: по нему "
-        "работает `DELETE /me/sessions/{sid}`. Роль: любой аутентифицированный пользователь."
+        "Список входов пользователя: серверные сессии из Redis (устройство, IP, User-Agent, "
+        "время создания и последняя активность) и, для входа по Bearer-токену без серверной "
+        "сессии, сессии Keycloak (устройство и User-Agent там неизвестны). Токены не "
+        "возвращаются, а `sid` — не значение session-cookie, а необратимый публичный "
+        "идентификатор сессии: по нему работает `DELETE /me/sessions/{sid}`. "
+        "Роль: любой аутентифицированный пользователь."
     ),
     response_model=SessionListResponse,
 )
 async def list_sessions(principal: CurrentUser) -> SessionListResponse:
     sessions = await session_store.list_for_user(principal.user_id)
-    return SessionListResponse(
-        items=[
-            SessionInfo(
-                **stored.public_view(),
-                is_current=stored.sid == principal.session_id,
-            )
-            for stored in sessions
-        ]
-    )
+    items = [
+        SessionInfo(
+            **stored.public_view(),
+            is_current=stored.sid == principal.session_id,
+        )
+        for stored in sessions
+    ]
+    known = {stored.kc_session_state for stored in sessions if stored.kc_session_state}
+    current_state = principal.claims.session_state if principal.session_id is None else None
+    items += [
+        keycloak_session_info(raw, current_state=current_state)
+        for raw in await _keycloak_only_sessions(principal, known)
+    ]
+    return SessionListResponse(items=items)
+
+
+@router.post(
+    "/sessions/terminate-others",
+    summary="Завершить все остальные сессии",
+    description=(
+        "Гасит все сессии пользователя, кроме текущей: серверные (и их сессии в Keycloak) и, "
+        "при входе по Bearer, остальные сессии Keycloak. Текущая сессия остаётся рабочей. "
+        "Идемпотентно: если других сессий нет, возвращает `terminated: 0`. Факт пишется в "
+        "аудит (одна запись с числом завершённых сессий). Роль: любой аутентифицированный."
+    ),
+    response_model=SessionsTerminatedResponse,
+)
+async def terminate_other_sessions(
+    principal: CurrentUser, session: DbSession
+) -> SessionsTerminatedResponse:
+    own = await session_store.list_for_user(principal.user_id)
+    others = [item for item in own if item.sid != principal.session_id]
+    terminated = 0
+    for stored in others:
+        await session_store.delete(stored.sid)
+        terminated += 1
+        if stored.refresh_token:
+            try:
+                await keycloak_client.logout(stored.refresh_token)
+            except Exception:
+                # Локально сессия уже погашена; сбой Keycloak не должен оставить остальные.
+                logger.warning("keycloak_logout_failed", sid=stored.public_id)
+
+    # Сессии, живущие только в Keycloak (Bearer). Свою текущую (по sid из токена) и сессии,
+    # порождённые серверными, исключаем: первую нельзя рвать, вторые уже погашены выше.
+    keep = {stored.kc_session_state for stored in own if stored.kc_session_state}
+    if principal.session_id is None and principal.claims.session_state:
+        keep.add(principal.claims.session_state)
+    for raw in await _keycloak_only_sessions(principal, keep):
+        try:
+            await keycloak_client.delete_session(raw["id"])
+            terminated += 1
+        except Exception:
+            logger.warning("keycloak_session_delete_failed", kc_session=raw["id"])
+
+    if terminated:
+        await AuditService(session).record(
+            AuditAction.SESSION_TERMINATED,
+            entity_type="user",
+            entity_id=principal.user_id,
+            changes={
+                "self_service": {"old": None, "new": True},
+                "terminated_others": {"old": None, "new": terminated},
+            },
+        )
+    return SessionsTerminatedResponse(terminated=terminated)
 
 
 @router.delete(
@@ -209,6 +308,22 @@ async def delete_session(
     session: DbSession,
     sid: Annotated[str, Path(description="Идентификатор сессии")],
 ) -> OperationResult:
+    if sid.startswith(KC_SESSION_PREFIX):
+        # Сессия, которая есть только в Keycloak: гасим её там, но лишь если она принадлежит
+        # самому пользователю (ищем среди его собственных сессий, а не по голому id).
+        kc_id = sid[len(KC_SESSION_PREFIX) :]
+        own_kc = await _keycloak_only_sessions(principal, set())
+        if not any(item["id"] == kc_id for item in own_kc):
+            raise NotFoundError("Сессия", sid)
+        await keycloak_client.delete_session(kc_id)
+        await AuditService(session).record(
+            AuditAction.SESSION_TERMINATED,
+            entity_type="user",
+            entity_id=principal.user_id,
+            changes={"self_service": {"old": None, "new": True}},
+        )
+        return OperationResult(ok=True, detail="Сессия завершена")
+
     # Идентификатор из списка сессий — свёртка (`public_id`), не значение cookie; для совместимости
     # принимается и сам `sid`. Ищем среди сессий самого пользователя: чужая сессия по публичному
     # идентификатору неотличима от несуществующей.

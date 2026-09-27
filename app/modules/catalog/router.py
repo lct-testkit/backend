@@ -906,6 +906,17 @@ async def list_custom_field_defs(
 @custom_field_defs_router.post(
     "",
     summary="Создать пользовательское поле",
+    description=(
+        "Определение поля задаёт и проверку значений в `custom_fields` сделок, организаций и "
+        "продуктов (при создании и PATCH — 422 с `errors[].field = custom_fields.<код>`). "
+        "`select`/`multiselect`: варианты в `options.choices`; `number`: `validation.min` и "
+        "`validation.max`; `string`: `validation.max_length` и `validation.pattern` (regexp, "
+        "поиск по значению); `date` — `ГГГГ-ММ-ДД`; `bool` — true/false. Значения ключей без "
+        "определения (и выключенных полей) сохраняются без проверки; `null` сбрасывает значение. "
+        "`is_required` проверяется при создании записи (кроме `bool` и служебной учётки "
+        "интеграции), а при PATCH — только для присланного ключа. "
+        "Роль: `catalog:write`."
+    ),
     response_model=CustomFieldDefOut,
     status_code=status.HTTP_201_CREATED,
 )

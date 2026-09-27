@@ -428,6 +428,35 @@
         "title": "AttachmentCreateRequest",
         "type": "object"
       },
+      "AttachmentFileInfo": {
+        "description": "Сведения о файле вложения: чтобы список показывал имя и размер, а не голый `file_id`.",
+        "properties": {
+          "mime_type": {
+            "title": "Mime Type",
+            "type": "string"
+          },
+          "original_filename": {
+            "title": "Original Filename",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "original_filename",
+          "size_bytes",
+          "mime_type",
+          "status"
+        ],
+        "title": "AttachmentFileInfo",
+        "type": "object"
+      },
       "AttachmentListResponse": {
         "properties": {
           "items": {
@@ -485,6 +514,16 @@
           "entity_type": {
             "title": "Entity Type",
             "type": "string"
+          },
+          "file": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AttachmentFileInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "file_id": {
             "format": "uuid",
@@ -10917,6 +10956,25 @@
         "title": "SessionListResponse",
         "type": "object"
       },
+      "SessionsTerminatedResponse": {
+        "description": "Итог «завершить остальные сессии»: сколько входов погашено (0 — уже нечего гасить).",
+        "properties": {
+          "ok": {
+            "default": true,
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "terminated": {
+            "title": "Terminated",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "terminated"
+        ],
+        "title": "SessionsTerminatedResponse",
+        "type": "object"
+      },
       "SignRequest": {
         "properties": {
           "otp": {
@@ -20823,6 +20881,7 @@
         ]
       },
       "post": {
+        "description": "Определение поля задаёт и проверку значений в `custom_fields` сделок, организаций и продуктов (при создании и PATCH — 422 с `errors[].field = custom_fields.<код>`). `select`/`multiselect`: варианты в `options.choices`; `number`: `validation.min` и `validation.max`; `string`: `validation.max_length` и `validation.pattern` (regexp, поиск по значению); `date` — `ГГГГ-ММ-ДД`; `bool` — true/false. Значения ключей без определения (и выключенных полей) сохраняются без проверки; `null` сбрасывает значение. `is_required` проверяется при создании записи (кроме `bool` и служебной учётки интеграции), а при PATCH — только для присланного ключа. Роль: `catalog:write`.",
         "operationId": "create_custom_field_def_api_custom_field_defs_post",
         "parameters": [
           {
@@ -26226,7 +26285,7 @@
     },
     "/api/me/sessions": {
       "get": {
-        "description": "Список серверных сессий пользователя из Redis: устройство, IP, User-Agent, время создания и последняя активность. Токены не возвращаются, а `sid` — не значение session-cookie, а необратимый публичный идентификатор сессии: по нему работает `DELETE /me/sessions/{sid}`. Роль: любой аутентифицированный пользователь.",
+        "description": "Список входов пользователя: серверные сессии из Redis (устройство, IP, User-Agent, время создания и последняя активность) и, для входа по Bearer-токену без серверной сессии, сессии Keycloak (устройство и User-Agent там неизвестны). Токены не возвращаются, а `sid` — не значение session-cookie, а необратимый публичный идентификатор сессии: по нему работает `DELETE /me/sessions/{sid}`. Роль: любой аутентифицированный пользователь.",
         "operationId": "list_sessions_api_me_sessions_get",
         "parameters": [
           {
@@ -26274,6 +26333,76 @@
           }
         },
         "summary": "Активные сессии",
+        "tags": [
+          "me"
+        ]
+      }
+    },
+    "/api/me/sessions/terminate-others": {
+      "post": {
+        "description": "Гасит все сессии пользователя, кроме текущей: серверные (и их сессии в Keycloak) и, при входе по Bearer, остальные сессии Keycloak. Текущая сессия остаётся рабочей. Идемпотентно: если других сессий нет, возвращает `terminated: 0`. Факт пишется в аудит (одна запись с числом завершённых сессий). Роль: любой аутентифицированный.",
+        "operationId": "terminate_other_sessions_api_me_sessions_terminate_others_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionsTerminatedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Завершить все остальные сессии",
         "tags": [
           "me"
         ]

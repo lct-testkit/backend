@@ -99,6 +99,13 @@ class SessionListResponse(BaseModel):
     items: list[SessionInfo]
 
 
+class SessionsTerminatedResponse(BaseModel):
+    """Итог «завершить остальные сессии»: сколько входов погашено (0 — уже нечего гасить)."""
+
+    ok: bool = True
+    terminated: int
+
+
 class ConsentRequest(BaseModel):
     policy_version: str = Field(min_length=1, max_length=32)
     policy_text_hash: str = Field(min_length=64, max_length=64)
