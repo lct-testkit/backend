@@ -50,7 +50,11 @@ from app.modules.identity.session_store import (
     session_store,
 )
 
-DbSession = Annotated[AsyncSession, Depends(get_db_session)]
+# scope="function": коммит транзакции идёт сразу после возврата из обработчика, ДО отправки
+# ответа. Иначе FastAPI выполняет код после `yield` уже после ответа: 201 успевал прийти раньше
+# коммита (сид «удаление ПДн» на быстром CI получал 404 на только что созданный контакт), а сбой
+# коммита оставался незамеченным для клиента, уверенного, что запись сохранена.
+DbSession = Annotated[AsyncSession, Depends(get_db_session, scope="function")]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 
 # Статусы, при которых доступ закрыт немедленно, даже если токен ещё живой.
