@@ -70,6 +70,16 @@ class Permission(StrEnum):
 
     # --- ПЭП ---
     SIGNATURE_CREATE = "signature:create"
+    # Чтение карточки/пачки/протокола (`GET .../{id}`, `.../batch`,
+    # `.../protocol`) — отдельно от `SIGNATURE_CREATE`: KAM/HEAD/ADMIN держат
+    # оба права разом (см. `_KAM`), а AUDITOR — только это, без создания/
+    # отправки/аннулирования. Без него у AUDITOR не было бы пути к документу
+    # вообще: сделка, через которую он обычно виден, для этой роли всегда вне
+    # скоупа (`DealScope.NONE`), а вкладка «Документы» на фронте находит id
+    # именно через журнал аудита (`audit:read`) и должна уметь открыть саму
+    # карточку. `SignatureDocumentService.ensure_read_access` пропускает
+    # проверку скоупа сделки ровно по этому праву — см. комментарий там.
+    SIGNATURE_READ = "signature:read"
     SIGNATURE_SIGN = "signature:sign"
     SIGNATURE_VOID = "signature:void"
     EDM_ADMIN = "edm:admin"
@@ -118,6 +128,7 @@ _KAM: frozenset[Permission] = frozenset(
         Permission.REPORT_READ,
         Permission.REPORT_CREATE,
         Permission.SIGNATURE_CREATE,
+        Permission.SIGNATURE_READ,
         Permission.SIGNATURE_SIGN,
     }
 )
@@ -137,9 +148,15 @@ _HEAD: frozenset[Permission] = _KAM | {
 }
 
 # AUDITOR — только журнал, плюс явное «чтение» соглашений ЭДО из матрицы
-# dop.md §13 (разделение обязанностей: видит, но не управляет).
+# dop.md §13 и карточек документов на подпись, на которые этот же журнал
+# ссылается по id (разделение обязанностей: видит, но не управляет).
 _AUDITOR: frozenset[Permission] = frozenset(
-    {Permission.AUDIT_READ, Permission.AUDIT_EXPORT, Permission.EDM_READ}
+    {
+        Permission.AUDIT_READ,
+        Permission.AUDIT_EXPORT,
+        Permission.EDM_READ,
+        Permission.SIGNATURE_READ,
+    }
 )
 
 # INTEGRATION — сервисная учётка. new_spec часть 5, матрица прав: переход по

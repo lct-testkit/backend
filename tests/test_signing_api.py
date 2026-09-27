@@ -204,6 +204,20 @@ class TestDocumentCard:
         assert item["signed_file_id"] == str(built.signed_file_id)
         assert [sig["id"] for sig in item["signatures"]] == [str(built.signature_ids[0])]
 
+    def test_auditor_reads_a_document_without_signature_create(self, client) -> None:
+        # AUDITOR не имеет signature:create (TestPermissionMatrix, test_signing.py),
+        # не подписант и не ADMIN — раньше это означало 403 на самой ручке (гейт
+        # стоял на signature:create). Теперь ручка ждёт signature:read, а
+        # `ensure_read_access` не гоняет обычный скоуп сделки для роли без
+        # signature:create — карточка видна.
+        built = _build(client, requests=[{"user": None, "status": "sent"}])
+        _login(client, run(client, _make_user, "AUDITOR"))
+
+        response = client.get(f"/api/signature-documents/{built.document_id}")
+
+        assert response.status_code == 200, response.text
+        assert response.json()["id"] == str(built.document_id)
+
 
 class TestDocumentsBatch:
     """`GET /signature-documents/batch` (C-5): вкладка «Документы» знает только id
@@ -298,15 +312,19 @@ class TestDocumentsBatch:
         assert response.status_code == 200, response.text
         assert response.json()["items"] == []
 
-    def test_permissions_match_the_single_card_endpoint(self, client) -> None:
-        # AUDITOR не имеет signature:create (TestPermissionMatrix, test_signing.py) —
-        # как и на одиночной карточке, весь запрос отказывает 403, а не «пустой список».
+    def test_auditor_reads_documents_without_signature_create(self, client) -> None:
+        # AUDITOR не имеет signature:create (TestPermissionMatrix, test_signing.py),
+        # только signature:read. Раньше это означало 403 на всей ручке (гейт стоял
+        # на signature:create — том же праве, что у одиночной карточки); теперь, как
+        # и на одиночной карточке (`TestDocumentCard`), документ просто виден:
+        # `ensure_read_access` не гоняет скоуп сделки для роли без signature:create.
         built = _build(client, requests=[{"user": None, "status": "sent"}])
         _login(client, run(client, _make_user, "AUDITOR"))
 
         response = self._batch(client, [built.document_id])
 
-        assert response.status_code == 403, response.text
+        assert response.status_code == 200, response.text
+        assert [item["id"] for item in response.json()["items"]] == [str(built.document_id)]
 
     def test_batch_card_matches_the_single_card(self, client) -> None:
         signer = run(client, _make_user, "KAM")
