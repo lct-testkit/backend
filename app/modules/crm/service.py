@@ -76,6 +76,7 @@ from app.core.redis_client import (
 from app.core.security import Principal
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService, defer_denied_audit
+from app.modules.catalog.custom_fields import validate_custom_fields
 from app.modules.catalog.models import Contact, Holiday, LossReason, Organization, Product
 from app.modules.crm.models import (
     OPEN_TASK_STATUSES,
@@ -1640,6 +1641,18 @@ class DealService:
                 ],
             )
 
+        if principal.role != Role.INTEGRATION.value:
+            # Значения, присланные человеком или его клиентом, проверяем по определениям полей.
+            # Служебные потоки (вебхук сайта, импорт оплат) идут от учётки интеграции и пишут свои
+            # значения сами: отказ там потерял бы заявку или оплату, а не поправил опечатку.
+            await validate_custom_fields(
+                self._session,
+                "deal",
+                payload.custom_fields,
+                creating=True,
+                workflow_id=workflow.id,
+            )
+
         number = await self._next_number()
         now = dt.datetime.now(dt.UTC)
         deal = Deal(
@@ -1764,6 +1777,14 @@ class DealService:
         if "custom_fields" in data:
             new_custom = data.pop("custom_fields")
             if new_custom is not None:
+                if principal is None or principal.role != Role.INTEGRATION.value:
+                    await validate_custom_fields(
+                        self._session,
+                        "deal",
+                        new_custom,
+                        creating=False,
+                        workflow_id=deal.workflow_id,
+                    )
                 merged = {**deal.custom_fields, **new_custom}
                 if merged != deal.custom_fields:
                     changes["custom_fields"] = {"old": deal.custom_fields, "new": merged}
@@ -1970,6 +1991,21 @@ class DealService:
         # Поля, заданные вместе с переходом (сумма, причина отказа, `custom_fields.*`), меняют
         # карточку так же, как PATCH, — значит, попадают в аудит с прежним значением; раньше
         # в журнале оставалась лишь смена статуса.
+        if principal.role != Role.INTEGRATION.value:
+            # Только тип и границы: что обязательно при переходе, задаёт сама воронка
+            # (`required_fields`/условия), а не определения полей.
+            await validate_custom_fields(
+                self._session,
+                "deal",
+                {
+                    key.removeprefix("custom_fields."): value
+                    for key, value in (fields or {}).items()
+                    if key.startswith("custom_fields.")
+                },
+                creating=False,
+                workflow_id=deal.workflow_id,
+                check_required=False,
+            )
         field_changes: dict[str, dict[str, Any]] = {}
         for key, value in (fields or {}).items():
             old_value = _transition_field_value(deal, key)

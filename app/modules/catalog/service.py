@@ -36,6 +36,7 @@ from app.core.security import Principal
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService, defer_denied_audit
 from app.modules.catalog import learner
+from app.modules.catalog.custom_fields import validate_custom_fields
 from app.modules.catalog.drift import drift_new_value
 from app.modules.catalog.models import (
     Contact,
@@ -396,6 +397,9 @@ class OrganizationService:
         else:
             await self._reject_same_name(principal, payload.name)
 
+        await validate_custom_fields(
+            self._session, "organization", payload.custom_fields, creating=True
+        )
         organization = Organization(
             name=payload.name
             or (registry_entry.full_name if registry_entry else None)
@@ -482,6 +486,9 @@ class OrganizationService:
         if "custom_fields" in data:
             new_custom = data.pop("custom_fields")
             if new_custom is not None:
+                await validate_custom_fields(
+                    self._session, "organization", new_custom, creating=False
+                )
                 merged = {**organization.custom_fields, **new_custom}
                 if merged != organization.custom_fields:
                     changes["custom_fields"] = {"old": organization.custom_fields, "new": merged}
@@ -1476,6 +1483,7 @@ class ProductService:
         _check_validity_period(payload.valid_from, payload.valid_to)
         if payload.vendor_id is not None:
             await self._require_vendor(payload.vendor_id)
+        await validate_custom_fields(self._session, "product", payload.custom_fields, creating=True)
         product = Product(
             code=payload.code,
             name=payload.name,
@@ -1518,6 +1526,7 @@ class ProductService:
         if "custom_fields" in data:
             new_custom = data.pop("custom_fields")
             if new_custom is not None:
+                await validate_custom_fields(self._session, "product", new_custom, creating=False)
                 merged = {**product.custom_fields, **new_custom}
                 if merged != product.custom_fields:
                     changes["custom_fields"] = {"old": product.custom_fields, "new": merged}
