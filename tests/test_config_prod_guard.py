@@ -76,3 +76,41 @@ def test_prod_rejects_short_audit_hmac_key() -> None:
 def test_prod_accepts_strong_audit_hmac_key_and_blank_means_unset() -> None:
     assert _settings("prod", audit_hmac_key="Audit-strong-hmac-key-0123456789abcdef").audit_hmac_key
     assert _settings("prod", audit_hmac_key="   ").audit_hmac_key is None
+
+
+@pytest.mark.parametrize(
+    ("env_name", "value"),
+    [
+        ("POSTGRES_PASSWORD", "crm"),
+        ("KEYCLOAK_ADMIN_PASSWORD", "admin"),
+        ("CMS_WEBHOOK_SECRET", "short"),
+    ],
+)
+def test_prod_rejects_demo_or_short_secret_from_environment(
+    monkeypatch: pytest.MonkeyPatch, env_name: str, value: str
+) -> None:
+    """Постгрес и Keycloak читают эти пароли не через Settings, а прямо из окружения контейнера —
+    но раз переменная долетела и до api, демо-значение там так же недопустимо в prod."""
+    monkeypatch.setenv(env_name, value)
+    with pytest.raises(ValidationError) as exc:
+        _settings("prod")
+    assert env_name in str(exc.value)
+
+
+def test_prod_ignores_absent_or_blank_environment_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Эти три переменные не всегда доходят до контейнера api (например, Helm их туда не
+    пробрасывает) — их отсутствие не повод отказывать в запуске, в отличие от полей Settings."""
+    for env_name in ("POSTGRES_PASSWORD", "KEYCLOAK_ADMIN_PASSWORD", "CMS_WEBHOOK_SECRET"):
+        monkeypatch.delenv(env_name, raising=False)
+    assert _settings("prod").is_prod
+
+
+def test_prod_checks_cms_webhook_secret_at_its_configured_ref_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`CMS_WEBHOOK_SECRET_REF` может называть любую переменную — проверка идёт по ней, не по
+    жёстко зашитому имени."""
+    monkeypatch.setenv("CUSTOM_CMS_SECRET_VAR", "secret")
+    with pytest.raises(ValidationError) as exc:
+        _settings("prod", cms_webhook_secret_ref="CUSTOM_CMS_SECRET_VAR")
+    assert "CMS_WEBHOOK_SECRET" in str(exc.value)

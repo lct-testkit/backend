@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from typing import Literal
 from urllib.parse import unquote, urlsplit
@@ -298,6 +299,18 @@ class Settings(BaseSettings):
             secrets["DATABASE_URL (пароль)"] = unquote(db_password)
         if self.audit_hmac_key is not None:
             secrets["AUDIT_HMAC_KEY"] = self.audit_hmac_key.get_secret_value()
+        # POSTGRES_PASSWORD и KEYCLOAK_ADMIN_PASSWORD — не поля Settings (их читают контейнеры
+        # postgres/keycloak, не это приложение), но раз уж переменная всё равно долетела и до
+        # api (не у каждого способа деплоя это так — Helm её сюда не пробрасывает), грех не
+        # проверить: тот же демо-пароль тут означает то же самое, что и в остальных секретах.
+        # CMS_WEBHOOK_SECRET — по тому же принципу через ref (пусто — вебхук выключен, не секрет).
+        for env_name in ("POSTGRES_PASSWORD", "KEYCLOAK_ADMIN_PASSWORD"):
+            env_value = os.environ.get(env_name, "")
+            if env_value:
+                secrets[env_name] = env_value
+        webhook_secret = os.environ.get(self.cms_webhook_secret_ref or "CMS_WEBHOOK_SECRET", "")
+        if webhook_secret:
+            secrets["CMS_WEBHOOK_SECRET"] = webhook_secret
         problems = [
             f"{name}: демо-значение"
             if value in _DEMO_SECRET_VALUES
