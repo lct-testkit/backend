@@ -5,6 +5,16 @@
 причины отказов, соблюдение SLA, динамика по месяцам, прогресс обучения (из
 LMS), «зависшие сделки»».
 
+Девятый, `deal_register` — буквальное прочтение rtk_requiriments.md разд. 4
+(Функц.4/§4.2): «отчёт за период в разрезе вуз/направление/продукт/статус/
+ответственный». Ни один из восьми видов new_spec не даёт эти пять граней
+вместе как колонки одной таблицы (`stuck_deals` ближе всего, но без
+направления/продукта и только по просроченным); `deal_register` — построчный
+реестр сделок (при нескольких продуктах в сделке — по строке на пару
+сделка-продукт, у сделки без продуктов — одна строка с пустым продуктом и
+направлением), со всеми шестью общими фильтрами `_parse_report_filters`
+включая период.
+
 Каждый builder получает открытую сессию, принципала и параметры и возвращает
 `ReportDataset` — плоскую таблицу, которую `reporting.rendering` превращает в
 xlsx/pdf/png. Скоуп строк — тот же `deal_scope_clause`, что уже применяет
@@ -58,6 +68,7 @@ from app.modules.catalog import learner
 from app.modules.catalog.models import (
     Contact,
     ContactLearnerProfile,
+    Direction,
     LossReason,
     Organization,
     Product,
@@ -729,6 +740,100 @@ async def build_stuck_deals(
 
 
 # =============================================================================
+# 8а. Реестр сделок: вуз + направление + продукт + статус + ответственный
+# =============================================================================
+
+
+async def _deal_register_query(session: AsyncSession, principal: Principal, params: dict[str, Any]):
+    filters = _parse_report_filters(params)
+    clause = await deal_scope_clause(session, principal)
+    stmt = (
+        select(
+            Organization.name,
+            Direction.name,
+            Product.name,
+            WorkflowStatus.name,
+            func.coalesce(User.display_name, User.full_name),
+            Deal.number,
+            Deal.title,
+            Deal.amount,
+            Deal.created_at,
+            Deal.closed_at,
+        )
+        .select_from(Deal)
+        .join(User, User.id == Deal.owner_id)
+        .join(WorkflowStatus, WorkflowStatus.id == Deal.status_id)
+        .outerjoin(Organization, Organization.id == Deal.organization_id)
+        .outerjoin(DealProduct, DealProduct.deal_id == Deal.id)
+        .outerjoin(Product, Product.id == DealProduct.product_id)
+        .outerjoin(Direction, Direction.id == Product.direction_id)
+        .where(Deal.deleted_at.is_(None))
+        .order_by(Deal.created_at.desc(), Deal.number)
+    )
+    if clause is not None:
+        stmt = stmt.where(clause)
+    return _apply_deal_filters(stmt, filters)
+
+
+async def estimate_deal_register(
+    session: AsyncSession, principal: Principal, params: dict[str, Any]
+) -> int:
+    inner = await _deal_register_query(session, principal, params)
+    count_stmt = select(func.count()).select_from(inner.subquery())
+    return (await session.execute(count_stmt)).scalar_one() or 0
+
+
+async def build_deal_register(
+    session: AsyncSession, principal: Principal, params: dict[str, Any]
+) -> ReportDataset:
+    limit = _parse_int(params, "limit", default=1000, minimum=1, maximum=5000)
+    stmt = (await _deal_register_query(session, principal, params)).limit(limit)
+    result = (await session.execute(stmt)).all()
+    rows = [
+        [
+            org_name or "—",
+            direction_name or "—",
+            product_name or "—",
+            status_name,
+            owner_name,
+            number,
+            title,
+            float(amount) if amount is not None else None,
+            created_at,
+            closed_at,
+        ]
+        for (
+            org_name,
+            direction_name,
+            product_name,
+            status_name,
+            owner_name,
+            number,
+            title,
+            amount,
+            created_at,
+            closed_at,
+        ) in result
+    ]
+    return ReportDataset(
+        title="Сделки по вузам и направлениям",
+        columns=[
+            "Вуз",
+            "Направление",
+            "Продукт",
+            "Статус",
+            "Ответственный",
+            "Номер",
+            "Название",
+            "Сумма, ₽",
+            "Создана",
+            "Закрыта",
+        ],
+        rows=rows,
+    )
+
+
+# =============================================================================
 # 8. Прогресс обучения (LMS) — честная заглушка
 # =============================================================================
 
@@ -937,6 +1042,7 @@ REPORT_BUILDERS: dict[str, ReportBuilder] = {
     "sla_compliance": build_sla_compliance,
     "monthly_dynamics": build_monthly_dynamics,
     "stuck_deals": build_stuck_deals,
+    "deal_register": build_deal_register,
     "learning_progress": build_learning_progress,
     LMS_USERS_UPLOAD: build_lms_users_upload,
 }
@@ -944,4 +1050,5 @@ REPORT_BUILDERS: dict[str, ReportBuilder] = {
 #: Отсутствие ключа = отчёт всегда лёгкий (см. докстринг модуля).
 REPORT_ESTIMATORS: dict[str, ReportEstimator] = {
     "stuck_deals": estimate_stuck_deals,
+    "deal_register": estimate_deal_register,
 }
