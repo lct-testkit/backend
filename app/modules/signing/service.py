@@ -679,6 +679,17 @@ class SignatureDocumentService:
             raise NotFoundError("Документ на подпись", document_id)
         return document
 
+    async def get_many(self, document_ids: list[uuid.UUID]) -> dict[uuid.UUID, SignatureDocument]:
+        """Пачка документов одним `SELECT ... IN` (батч-ручка `/batch`, C-5): не
+        найденные просто отсутствуют в результате — вызывающая сторона (роутер)
+        решает, что с этим делать, объектная проверка доступа сюда не входит."""
+        if not document_ids:
+            return {}
+        rows = await self._session.execute(
+            select(SignatureDocument).where(SignatureDocument.id.in_(document_ids))
+        )
+        return {d.id: d for d in rows.scalars().all()}
+
     async def _check_entity_access(
         self, principal: Principal, entity_type: str, entity_id: uuid.UUID
     ) -> Deal | None:
@@ -973,6 +984,24 @@ class SignatureDocumentService:
     async def list_requests(self, document_id: uuid.UUID) -> list[SignatureRequest]:
         rows = await self._session.execute(self._requests_query(document_id))
         return list(rows.scalars().all())
+
+    async def requests_by_documents(
+        self, document_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, list[SignatureRequest]]:
+        """Запросы на подпись пачки документов одним запросом, по порядку
+        подписания — тот же приём, что `signatures_by_document` (батч-ручка
+        `/batch`, чтобы не повторять `list_requests` в цикле по каждому id)."""
+        grouped: dict[uuid.UUID, list[SignatureRequest]] = {}
+        if not document_ids:
+            return grouped
+        rows = await self._session.execute(
+            select(SignatureRequest)
+            .where(SignatureRequest.document_id.in_(document_ids))
+            .order_by(SignatureRequest.sign_order)
+        )
+        for request in rows.scalars():
+            grouped.setdefault(request.document_id, []).append(request)
+        return grouped
 
     async def send(
         self, document: SignatureDocument
