@@ -57,6 +57,21 @@ class Settings(BaseSettings):
 
     # --- Хранилища -------------------------------------------------------
     database_url: str
+    # Только для alembic: `database_url` — это роль приложения (`crm_app`), у
+    # которой сознательно нет DDL-прав (0012_audit_role_hardening); внутри
+    # docker compose сервис `migrate` получает отдельный DATABASE_URL
+    # суперпользователя через собственную переменную окружения, а этот override
+    # нужен только при локальном запуске `alembic` вне docker compose, где
+    # `.env` даёт один DATABASE_URL на всё. Тот же приём опционального
+    # оверрайда, что и `keycloak_internal_url`/`s3_public_endpoint_url` — и, в
+    # отличие от прежнего `os.environ.get("MIGRATIONS_DATABASE_URL")` в
+    # `migrations/env.py`, это поле Settings, поэтому подхватывается и из
+    # `.env`, а не только из настоящей переменной окружения (D6). Именно
+    # поэтому `.env.example` держит эту переменную пустой: CI копирует файл
+    # как есть и задаёт настоящий DATABASE_URL/TEST_DATABASE_URL сама
+    # (`crm_test`) — непустое демо-значение здесь увело бы alembic на другую
+    # базу молча.
+    migrations_database_url: str | None = None
     # Только для alembic (`migrations/versions/0012_audit_role_hardening.py`):
     # пароль, которым миграция переиздаёт `ALTER ROLE crm_app ... PASSWORD`.
     # api/worker его не читают — их database_url уже содержит пароль внутри
