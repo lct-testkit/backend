@@ -594,15 +594,30 @@ async def list_comments(
 @deals_router.post(
     "/{deal_id}/comments",
     summary="Добавить комментарий",
+    description="Поддерживает Idempotency-Key.",
     response_model=CommentOut,
     status_code=status.HTTP_201_CREATED,
 )
 async def create_comment(
     payload: CommentCreateRequest,
+    request: Request,
     session: DbSession,
     principal: DealUpdatePerm,
     deal_id: Annotated[uuid.UUID, Path()],
+    idempotency_key: IdempotencyKeyHeader,
 ) -> CommentOut:
+    guard = IdempotencyGuard(session, actor_id=principal.user_id)
+    body = await request.body()
+    if idempotency_key:
+        cached = await guard.lookup(
+            key=idempotency_key, method=request.method, path=request.url.path, body=body
+        )
+        if cached is not None:
+            return CommentOut.model_validate(cached.body)
+        await guard.reserve(
+            key=idempotency_key, method=request.method, path=request.url.path, body=body
+        )
+
     service = DealService(session)
     deal = await service.get_or_404(deal_id, principal, write=True)
     comment = await CommentService(session).create(
@@ -613,7 +628,13 @@ async def create_comment(
         mentions=payload.mentions,
         is_internal=payload.is_internal,
     )
-    return CommentOut.model_validate(comment)
+    result = CommentOut.model_validate(comment)
+
+    if idempotency_key:
+        await guard.store(
+            key=idempotency_key, status=status.HTTP_201_CREATED, body=result.model_dump(mode="json")
+        )
+    return result
 
 
 # =============================================================================
@@ -703,11 +724,31 @@ async def list_tasks(
 
 
 @tasks_router.post(
-    "", summary="Создать задачу", response_model=TaskOut, status_code=status.HTTP_201_CREATED
+    "",
+    summary="Создать задачу",
+    description="Поддерживает Idempotency-Key.",
+    response_model=TaskOut,
+    status_code=status.HTTP_201_CREATED,
 )
 async def create_task(
-    payload: TaskCreateRequest, session: DbSession, principal: DealUpdatePerm
+    payload: TaskCreateRequest,
+    request: Request,
+    session: DbSession,
+    principal: DealUpdatePerm,
+    idempotency_key: IdempotencyKeyHeader,
 ) -> TaskOut:
+    guard = IdempotencyGuard(session, actor_id=principal.user_id)
+    body = await request.body()
+    if idempotency_key:
+        cached = await guard.lookup(
+            key=idempotency_key, method=request.method, path=request.url.path, body=body
+        )
+        if cached is not None:
+            return TaskOut.model_validate(cached.body)
+        await guard.reserve(
+            key=idempotency_key, method=request.method, path=request.url.path, body=body
+        )
+
     # Проверяет и существование, и скоуп родительской сделки.
     deal = await DealService(session).get_or_404(payload.deal_id, principal, write=True)
     task = await TaskService(session).create(
@@ -719,7 +760,13 @@ async def create_task(
         due_at=payload.due_at,
         priority=payload.priority,
     )
-    return _task_out(task, deal.number, deal.title)
+    result = _task_out(task, deal.number, deal.title)
+
+    if idempotency_key:
+        await guard.store(
+            key=idempotency_key, status=status.HTTP_201_CREATED, body=result.model_dump(mode="json")
+        )
+    return result
 
 
 @tasks_router.patch("/{task_id}", summary="Обновить задачу", response_model=TaskOut)
