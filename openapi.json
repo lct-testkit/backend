@@ -10917,6 +10917,25 @@
         "title": "SessionListResponse",
         "type": "object"
       },
+      "SessionsTerminatedResponse": {
+        "description": "Итог «завершить остальные сессии»: сколько входов погашено (0 — уже нечего гасить).",
+        "properties": {
+          "ok": {
+            "default": true,
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "terminated": {
+            "title": "Terminated",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "terminated"
+        ],
+        "title": "SessionsTerminatedResponse",
+        "type": "object"
+      },
       "SignRequest": {
         "properties": {
           "otp": {
@@ -26226,7 +26245,7 @@
     },
     "/api/me/sessions": {
       "get": {
-        "description": "Список серверных сессий пользователя из Redis: устройство, IP, User-Agent, время создания и последняя активность. Токены не возвращаются, а `sid` — не значение session-cookie, а необратимый публичный идентификатор сессии: по нему работает `DELETE /me/sessions/{sid}`. Роль: любой аутентифицированный пользователь.",
+        "description": "Список входов пользователя: серверные сессии из Redis (устройство, IP, User-Agent, время создания и последняя активность) и, для входа по Bearer-токену без серверной сессии, сессии Keycloak (устройство и User-Agent там неизвестны). Токены не возвращаются, а `sid` — не значение session-cookie, а необратимый публичный идентификатор сессии: по нему работает `DELETE /me/sessions/{sid}`. Роль: любой аутентифицированный пользователь.",
         "operationId": "list_sessions_api_me_sessions_get",
         "parameters": [
           {
@@ -26274,6 +26293,76 @@
           }
         },
         "summary": "Активные сессии",
+        "tags": [
+          "me"
+        ]
+      }
+    },
+    "/api/me/sessions/terminate-others": {
+      "post": {
+        "description": "Гасит все сессии пользователя, кроме текущей: серверные (и их сессии в Keycloak) и, при входе по Bearer, остальные сессии Keycloak. Текущая сессия остаётся рабочей. Идемпотентно: если других сессий нет, возвращает `terminated: 0`. Факт пишется в аудит (одна запись с числом завершённых сессий). Роль: любой аутентифицированный.",
+        "operationId": "terminate_other_sessions_api_me_sessions_terminate_others_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionsTerminatedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Завершить все остальные сессии",
         "tags": [
           "me"
         ]

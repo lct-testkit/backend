@@ -389,6 +389,22 @@ class KeycloakClient:
         response = await self.admin_request("POST", f"/users/{keycloak_id}/logout")
         response.raise_for_status()
 
+    async def list_user_sessions(self, keycloak_id: str) -> list[dict[str, Any]]:
+        """Активные SSO-сессии пользователя в Keycloak (`start`/`lastAccess` — миллисекунды).
+
+        Нужны для режима Bearer: SPA получает токены напрямую, серверной cookie-сессии
+        в Redis нет, и единственное место, где видны входы, — сам Keycloak."""
+        response = await self.admin_request("GET", f"/users/{keycloak_id}/sessions")
+        response.raise_for_status()
+        found = response.json()
+        return found if isinstance(found, list) else []
+
+    async def delete_session(self, kc_session_id: str) -> None:
+        """Завершает одну SSO-сессию realm'а (её refresh-токены перестают работать)."""
+        response = await self.admin_request("DELETE", f"/sessions/{kc_session_id}")
+        if response.status_code not in (200, 204, 404):
+            response.raise_for_status()
+
     # --- Health ----------------------------------------------------------
 
     async def check(self) -> DependencyStatus:
