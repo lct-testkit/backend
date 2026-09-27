@@ -6,7 +6,8 @@
 
 Цепочка хэшей: каждая запись хранит `prev_hash` предыдущей и свой `hash`.
 Чтобы цепочка не рвалась при параллельных вставках, голова цепочки берётся
-под транзакционным advisory-локом.
+под транзакционным advisory-локом — из `audit_chain_head` (синглтон-таблица,
+`app.modules.audit.models.AuditChainHead`), не пересчётом по `audit_log`.
 
 Состав хэшируемых полей версионируется (`hash_version`): записи версии 1 (всё, что
 было до расширения) проверяются по-старому, новые — версии 2, где в хэш входят и роль
@@ -30,7 +31,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import structlog
-from sqlalchemy import Select, select, text
+from sqlalchemy import Select, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -47,7 +48,7 @@ from app.core.errors import AppError, ErrorCode
 from app.core.masking import mask_mapping
 from app.core.metrics import audit_records_total
 from app.modules.audit.actions import AuditAction
-from app.modules.audit.models import AuditLog, AuditResult
+from app.modules.audit.models import AuditChainHead, AuditLog, AuditResult
 
 logger = structlog.get_logger(__name__)
 
@@ -211,10 +212,10 @@ class AuditService:
         await self._session.execute(
             text("SELECT set_config('lock_timeout', :value, true)"), {"value": previous or "0"}
         )
-        result = await self._session.execute(
-            select(AuditLog.hash).order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(1)
-        )
-        return result.scalar_one_or_none()
+        # `audit_chain_head` — синглтон-таблица, не `ORDER BY ... LIMIT 1` по партиционированному
+        # audit_log (перф-диагностика 27.09, см. докстринг AuditChainHead в audit/models.py):
+        # то же самое значение, но без constraint exclusion по всем партициям на каждый вызов.
+        return await self._session.scalar(select(AuditChainHead.hash))
 
     async def record(
         self,
@@ -284,6 +285,10 @@ class AuditService:
 
         self._session.add(entry)
         await self._session.flush()
+        # Указатель обновляется в той же транзакции и под тем же локом: если транзакция
+        # откатится, откатится и он, а `_chain_head()` следующего писателя снова увидит
+        # прежнюю голову — цепочка не заметит несостоявшуюся запись.
+        await self._session.execute(update(AuditChainHead).values(hash=entry.hash))
 
         audit_records_total.labels(action=str(action), result=str(result)).inc()
         logger.info(

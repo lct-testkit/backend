@@ -92,10 +92,10 @@ async def _record_v2_and_verify() -> tuple[int, dict]:
 
 async def _legacy_head_then_new_record() -> dict:
     """Запись версии 1 (как в БД до расширения) становится головой, за ней — обычная запись."""
-    from sqlalchemy import text
+    from sqlalchemy import text, update
 
     from app.core.db import get_session_factory
-    from app.modules.audit.models import AuditLog
+    from app.modules.audit.models import AuditChainHead, AuditLog
     from app.modules.audit.service import AuditService
 
     factory = get_session_factory()
@@ -128,6 +128,10 @@ async def _legacy_head_then_new_record() -> dict:
         )
         session.add(entry)
         await session.flush()
+        # Ручной insert заменяет собой `AuditService.record()` — указатель головы цепочки должен
+        # продвинуться так же, иначе следующий блок (настоящий `record()`) свяжется со старой
+        # головой, а не с этой legacy-записью.
+        await session.execute(update(AuditChainHead).values(hash=entry.hash))
         await session.commit()
     async with factory() as session:
         await AuditService(session).record("HASH_AFTER_LEGACY", entity_type="hash_test")

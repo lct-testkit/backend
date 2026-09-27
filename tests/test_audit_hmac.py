@@ -99,9 +99,9 @@ def _set_key(monkeypatch, key: bytes | None) -> None:
 async def _add_raw(session, *, version: int, key: bytes | None, hashed_ip: str = "10.1.2.3") -> str:
     """Запись с явно заданной версией — так, как её писал бы код соответствующей эпохи.
     `hashed_ip` — адрес, с которым посчитан хэш; в строке всегда лежит 10.1.2.3."""
-    from sqlalchemy import text
+    from sqlalchemy import text, update
 
-    from app.modules.audit.models import AuditLog
+    from app.modules.audit.models import AuditChainHead, AuditLog
     from app.modules.audit.service import AuditService
 
     prev = await AuditService(session)._chain_head()
@@ -135,6 +135,10 @@ async def _add_raw(session, *, version: int, key: bytes | None, hashed_ip: str =
     )
     session.add(entry)
     await session.flush()
+    # `_add_raw` заменяет собой `AuditService.record()` (пишет «как код той эпохи») — значит,
+    # и указатель головы цепочки должен продвигаться так же, иначе следующий вызов в этом же
+    # цикле (`_chain_with` строит цепочку из нескольких версий подряд) увидит старую голову.
+    await session.execute(update(AuditChainHead).values(hash=entry.hash))
     return str(entry.id)
 
 
