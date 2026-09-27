@@ -669,3 +669,14 @@ class TestReportJobs:
 
         filtered = client.get("/api/reports", params={"template_code": "loss_reasons"}).json()
         assert [job["template_code"] for job in filtered["items"]] == ["loss_reasons"]
+
+
+class TestTemplateTexts:
+    """Тексты, которые видит пользователь, не ссылаются на внутренние документы."""
+
+    def test_seed_descriptions_have_no_spec_references(self) -> None:
+        from app.modules.reporting.seed import _DEFAULT_TEMPLATES
+
+        for code, _name, description, *_rest in _DEFAULT_TEMPLATES:
+            for marker in ("раздел", "new_spec", "§"):
+                assert marker not in description, (code, description)

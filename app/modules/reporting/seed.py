@@ -42,7 +42,7 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str, str, list[str], dict[str, Any], li
     (
         "deal_funnel",
         "Воронка по статусам",
-        "Конверсия и среднее время между шагами воронки (раздел 4.13).",
+        "Конверсия и среднее время между шагами воронки.",
         "deal_funnel",
         [],
         {"deal_type": "b2b"},
@@ -105,7 +105,7 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str, str, list[str], dict[str, Any], li
     (
         "learning_progress",
         "Прогресс обучения",
-        "Данные из LMS. Интеграция не реализована — отчёт пуст (new_spec §4.14).",
+        "Данные из LMS. Интеграция с LMS не собирает эти данные — отчёт пока пуст.",
         "learning_progress",
         [],
         {},

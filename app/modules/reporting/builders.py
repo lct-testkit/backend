@@ -563,7 +563,7 @@ async def build_sla_compliance(
         "ok": "В норме",
         "warning": "Под угрозой",
         "breached": "Нарушен",
-        "paused": "На паузе",
+        "paused": "Остановлен (сделка заморожена)",
     }
     rows = []
     for state in ("ok", "warning", "breached", "paused"):
