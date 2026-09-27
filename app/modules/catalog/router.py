@@ -592,6 +592,23 @@ async def update_product(
     return ProductOut.from_model(product, names.get(product.vendor_id))
 
 
+@products_router.delete(
+    "/{product_id}",
+    summary="Удалить продукт",
+    description=(
+        "Только если продукт не указан ни в одной сделке — иначе 409 CRM-1303. "
+        "Роль: запись каталога."
+    ),
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_product(
+    session: DbSession, principal: CatalogWrite, product_id: Annotated[uuid.UUID, Path()]
+) -> None:
+    service = ProductService(session)
+    product = await service.get_or_404(product_id)
+    await service.delete(product)
+
+
 # --- Ответственные за продукт: связь контакт — продукт -------------------------------------
 
 
@@ -875,6 +892,23 @@ async def update_holiday(
     return HolidayOut.model_validate(holiday)
 
 
+@holidays_router.delete(
+    "/{holiday_id}",
+    summary="Удалить дату календаря",
+    description=(
+        "Ничего на дату календаря не ссылается — удаление без ограничений. "
+        "Роль: запись каталога."
+    ),
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_holiday(
+    session: DbSession, principal: CatalogWrite, holiday_id: Annotated[uuid.UUID, Path()]
+) -> None:
+    service = HolidayService(session)
+    holiday = await service.get_or_404(holiday_id)
+    await service.delete(holiday)
+
+
 # =============================================================================
 # Пользовательские поля
 # =============================================================================
@@ -941,6 +975,23 @@ async def update_custom_field_def(
     field = await service.get_or_404(field_id)
     field = await service.update(field, payload, expected_version=if_match)
     return CustomFieldDefOut.model_validate(field)
+
+
+@custom_field_defs_router.delete(
+    "/{field_id}",
+    summary="Удалить пользовательское поле",
+    description=(
+        "Только если ни у одной сущности этого типа нет непустого значения по коду поля — "
+        "иначе 409 CRM-1303. Роль: запись каталога."
+    ),
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_custom_field_def(
+    session: DbSession, principal: CatalogWrite, field_id: Annotated[uuid.UUID, Path()]
+) -> None:
+    service = CustomFieldDefService(session)
+    field = await service.get_or_404(field_id)
+    await service.delete(field)
 
 
 # =============================================================================

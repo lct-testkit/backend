@@ -1552,6 +1552,30 @@ class ProductService:
         )
         return product
 
+    async def delete(self, product: Product) -> None:
+        """B-9: мягкое удаление (таблица с `deleted_at`, тот же приём, что у направлений) —
+        только если продукт не значится ни в одной сделке (`DealProduct.product_id`). Ответственные
+        за продукт (`ContactProduct`) не блокируют: это справочная связь «кому звонить», а не
+        коммерческая история, которую нельзя терять."""
+        from app.modules.crm.models import DealProduct
+
+        in_use = await self._session.scalar(
+            select(DealProduct.id).where(DealProduct.product_id == product.id).limit(1)
+        )
+        if in_use is not None:
+            raise AppError(
+                ErrorCode.ENTITY_IN_USE,
+                "Продукт указан в сделках — удаление невозможно",
+            )
+        product.deleted_at = dt.datetime.now(dt.UTC)
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.PRODUCT_DELETED,
+            entity_type="product",
+            entity_id=product.id,
+            changes={"code": {"old": product.code, "new": None}},
+        )
+
 
 # =============================================================================
 # Ответственные за продукты: связь контакт — продукт (каталог «Вендоры»)
@@ -1894,6 +1918,21 @@ class HolidayService:
         )
         return holiday
 
+    async def delete(self, holiday: Holiday) -> None:
+        """B-34: жёсткое удаление без `deleted_at` (как у причин отказа) — на `holidays`
+        никто не ссылается по FK, а `is_business_day` читает таблицу целиком при каждом
+        расчёте SLA, не хранит ссылку на конкретную запись. Проверять «использование» здесь
+        нечего: ошибочная дата — ровно тот случай, который эта ручка должна уметь чинить."""
+        holiday_id, date = holiday.id, holiday.date
+        await self._session.delete(holiday)
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.HOLIDAY_DELETED,
+            entity_type="holiday",
+            entity_id=holiday_id,
+            changes={"date": {"old": date.isoformat(), "new": None}},
+        )
+
 
 # =============================================================================
 # Пользовательские поля
@@ -1979,6 +2018,44 @@ class CustomFieldDefService:
             changes=changes,
         )
         return field
+
+    async def delete(self, field: CustomFieldDef) -> None:
+        """B-9: жёсткое удаление, только если значения нигде не «в диком виде» — определение
+        только описывает форму, сами значения лежат в `custom_fields jsonb` целевой сущности
+        (раздел 5.3), отдельной таблицы с FK на `custom_field_defs` нет, поэтому проверка идёт
+        не по ссылке, а по содержимому: есть ли хоть одна строка, где ключ `field.code`
+        существует и не JSON-`null` (`null` — это «сброшено», раздел `custom_fields.py`).
+
+        `deleted_at` целевой сущности не фильтруется: мягко удалённая организация/продукт
+        физически остаётся в БД со своим значением, и стереть определение, которое эта строка
+        всё ещё использует, было бы потерей данных, а не просто изменением видимости.
+
+        У контактов нет колонки `custom_fields` (её проверка/сохранение никогда не было
+        реализовано — только у сделок, организаций и продуктов), поэтому определения с
+        `entity_type='contact'` удаляются без проверки: значений для них не существует и не
+        может существовать."""
+        from app.modules.crm.models import Deal
+
+        models: dict[str, Any] = {"deal": Deal, "organization": Organization, "product": Product}
+        model = models.get(field.entity_type)
+        if model is not None:
+            in_use = await self._session.scalar(
+                select(model.id).where(model.custom_fields[field.code].astext.isnot(None)).limit(1)
+            )
+            if in_use is not None:
+                raise AppError(
+                    ErrorCode.ENTITY_IN_USE,
+                    "У поля есть непустые значения — удаление невозможно",
+                )
+        field_id, code = field.id, field.code
+        await self._session.delete(field)
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.CUSTOM_FIELD_DEF_DELETED,
+            entity_type="custom_field_def",
+            entity_id=field_id,
+            changes={"code": {"old": code, "new": None}},
+        )
 
 
 # =============================================================================
