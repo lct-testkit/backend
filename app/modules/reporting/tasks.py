@@ -1,13 +1,18 @@
 """Фоновые задачи отчётности (new_spec §3.4/§4.13).
 
 * `sweep_report_jobs` — раздел 4.13: «конкурентность воркеров ограничена
-  семафором (10)». Каждый job обрабатывается в собственной `session_scope()`
-  (а не одной сессией на весь тик, как `imports.tasks.sweep_import_jobs`):
-  там per-row ошибки перехватываются внутри самого сервиса и никогда не
-  всплывают исключением, а здесь `ReportJobService.generate` намеренно
-  исключения не глушит (см. её докстринг) — один job, "отравивший" сессию
-  неудачным flush, не должен утащить за собой обработку соседних в этом же
-  тике.
+  семафором (10)». Взятые за тик задания рендерятся конкурентно
+  (`asyncio.gather`), не одно за другим — иначе «10 параллельных отчётов»
+  было бы фикцией: капасити просто регулировал бы длину последовательной
+  очереди внутри тика, а не число одновременно рендерящихся отчётов
+  (пул соединений воркера — `db_pool_size`+`db_max_overflow`, по умолчанию
+  10+10, — с запасом на `reports_max_concurrent`=10). Каждый job — в
+  собственной `session_scope()` (а не одной сессией на весь тик, как
+  `imports.tasks.sweep_import_jobs`): там per-row ошибки перехватываются
+  внутри самого сервиса и никогда не всплывают исключением, а здесь
+  `ReportJobService.generate` намеренно исключения не глушит (см. её
+  докстринг) — один job, "отравивший" сессию неудачным flush, не должен
+  утащить за собой обработку соседних в этом же тике.
 * `expire_report_files` — раздел 4.13: «готовые файлы автоудаляются через
   7 дней». Удаляется файл, не запись `report_jobs` (история осталась,
   `file_id` — `ON DELETE SET NULL`, см. `reporting.models`).
@@ -17,6 +22,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import uuid
 from typing import Any
@@ -81,6 +87,44 @@ async def _claim_queued(session: Any, job_id: uuid.UUID) -> ReportJob | None:
     ).scalar_one_or_none()
 
 
+async def _generate_one(job_id: uuid.UUID) -> bool | None:
+    """Рендерит один взятый в тик job. `True` — успех, `False` — ушёл в `failed`,
+    `None` — уже забрано другим тиком/воркером (не считается ни успехом, ни сбоем).
+
+    Отдельная функция (а не тело цикла) — чтобы `sweep_report_jobs` мог запустить
+    несколько таких корутин конкурентно через `asyncio.gather`, а не одну за другой:
+    каждая — со своей `session_scope()`/`AsyncSession`, так что параллельный рендер
+    не делит одно соединение и не мешает друг другу через общий транзакционный стейт.
+    """
+    async with session_scope() as session:
+        service = ReportJobService(session)
+        job = await _claim_queued(session, job_id)
+        if job is None:
+            return None
+        user = await session.get(User, job.requested_by)
+        if user is None:
+            await service.mark_failed(job, "Пользователь, запросивший отчёт, не найден")
+            return False
+        principal = _principal_for_worker(user)
+        try:
+            await service.generate(job, principal)
+            return True
+        except Exception:  # noqa: BLE001 — сбой одного отчёта не должен ронять тик
+            # Клиент видит `report_jobs.error`: текст исключения (SQL, пути, данные) туда не
+            # попадает. Подробности — в логе, по коду ошибки из сообщения.
+            error_id = uuid.uuid4().hex[:12]
+            logger.exception("report_generation_failed", job_id=str(job_id), error_id=error_id)
+            # Неудачный flush внутри `generate()` мог оставить сессию в состоянии,
+            # требующем отката, прежде чем ей снова можно пользоваться.
+            await session.rollback()
+            job = await _claim_queued(session, job_id)
+            if job is not None:
+                await service.mark_failed(
+                    job, f"Не удалось сформировать отчёт. Код ошибки для поддержки: {error_id}"
+                )
+            return False
+
+
 async def sweep_report_jobs(ctx: dict[str, Any]) -> dict[str, int]:
     settings = get_settings()
 
@@ -106,37 +150,9 @@ async def sweep_report_jobs(ctx: dict[str, Any]) -> dict[str, int]:
             .all()
         )
 
-    processed = failed = 0
-    for job_id in job_ids:
-        async with session_scope() as session:
-            service = ReportJobService(session)
-            job = await _claim_queued(session, job_id)
-            if job is None:
-                continue
-            user = await session.get(User, job.requested_by)
-            if user is None:
-                await service.mark_failed(job, "Пользователь, запросивший отчёт, не найден")
-                failed += 1
-                continue
-            principal = _principal_for_worker(user)
-            try:
-                await service.generate(job, principal)
-                processed += 1
-            except Exception:  # noqa: BLE001 — сбой одного отчёта не должен ронять тик
-                # Клиент видит `report_jobs.error`: текст исключения (SQL, пути, данные) туда не
-                # попадает. Подробности — в логе, по коду ошибки из сообщения.
-                error_id = uuid.uuid4().hex[:12]
-                logger.exception("report_generation_failed", job_id=str(job_id), error_id=error_id)
-                # Неудачный flush внутри `generate()` мог оставить сессию в
-                # состоянии, требующем отката, прежде чем ей снова можно
-                # пользоваться — см. докстринг модуля.
-                await session.rollback()
-                job = await _claim_queued(session, job_id)
-                if job is not None:
-                    await service.mark_failed(
-                        job, f"Не удалось сформировать отчёт. Код ошибки для поддержки: {error_id}"
-                    )
-                    failed += 1
+    results = await asyncio.gather(*(_generate_one(job_id) for job_id in job_ids))
+    processed = sum(1 for ok in results if ok is True)
+    failed = sum(1 for ok in results if ok is False)
 
     background_tasks_total.labels(task="sweep_report_jobs", result="success").inc()
     if job_ids:
