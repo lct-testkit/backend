@@ -18100,6 +18100,77 @@
       }
     },
     "/api/admin/teams/{team_id}": {
+      "delete": {
+        "description": "Мягкое удаление, только если в команде нет ни одного активного сотрудника и нет живых дочерних команд — иначе 409 CRM-1303. Открытые сделки участников отдельно не проверяются: у сделки нет ссылки на команду, только на владельца, а проверка «нет активных сотрудников» уже покрывает случай, когда сделками некому распоряжаться от имени команды. Роль: ADMIN.",
+        "operationId": "delete_team_api_admin_teams__team_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Удалить команду",
+        "tags": [
+          "admin-users"
+        ]
+      },
       "get": {
         "description": "Команда с версией и временем последней правки. Роль: ADMIN.",
         "operationId": "get_team_api_admin_teams__team_id__get",
@@ -18167,7 +18238,7 @@
         ]
       },
       "patch": {
-        "description": "Меняет название, родителя, руководителя или регион. `If-Match` с версией команды необязателен: с ним устаревшая версия даёт 409 (CRM-1002), без него правка применяется как раньше. Каждая правка поднимает `version`. Роль: ADMIN.",
+        "description": "Меняет название, родителя, руководителя или регион. Обязателен `If-Match` с текущей версией команды (без него — 422, как у сделок/организаций); устаревшая версия — 409 CRM-1002. Каждая правка поднимает `version`. Роль: ADMIN.",
         "operationId": "patch_team_api_admin_teams__team_id__patch",
         "parameters": [
           {

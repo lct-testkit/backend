@@ -32,6 +32,9 @@ class AuditAction(StrEnum):
 
     TEAM_CREATED = "TEAM_CREATED"
     TEAM_UPDATED = "TEAM_UPDATED"
+    # C-22: мягкое удаление, только если нет активных сотрудников и живых
+    # дочерних команд. См. `identity.router_admin.delete_team`.
+    TEAM_DELETED = "TEAM_DELETED"
 
     # --- Сделки ---
     DEAL_CREATED = "DEAL_CREATED"
