@@ -2127,6 +2127,33 @@ class DealService:
             )
         await self._session.flush()
 
+        # Раздел 4.9 п.6, дословно: «Транзакция: UPDATE deals ... + INSERT
+        # outbox_events» — на КАЖДОМ переходе, не только там, где DSL
+        # объявляет `integration_event` (см. докстринг в `create()` выше).
+        await get_outbox_service().publish(
+            self._session,
+            aggregate_type="deal",
+            aggregate_id=deal.id,
+            event_type="DEAL_STATUS_CHANGED",
+            payload={"status_code": to_status["code"]},
+            target="bitrix24",
+        )
+
+        await self._run_actions(deal, transition.get("actions") or [], principal, now)
+
+        # Запись аудита — последней перед возвратом, не первой. Лок цепочки аудита
+        # (`AuditService._chain_head`, `_AUDIT_CHAIN_LOCK_ID`) транзакционный: держится до
+        # коммита владельца транзакции, а не до возврата из `record()`. Раньше лок захватывался
+        # ЗДЕСЬ, и publish в outbox выше и `_run_actions` (создание задач, публикация
+        # LMS-событий, запрос подписи — у каждого свои DB round trips, а `_run_create_task`/
+        # `create_from_workflow_action` изнутри сами пишут аудит) исполнялись, уже держа лок:
+        # каждый параллельный переход или комментарий стоял в очереди не за сам аудит (медиана
+        # захвата лока — доли миллисекунды), а за весь этот хвост. Перф-диагностика 27.09: p95
+        # `transition` 1400мс вместо целевых 300 при 50 параллельных запросах и нулевых ошибках —
+        # чистая задержка под общим локом, не ошибки конкурентности. Значения ниже
+        # (`previous_status_id`, `deal.status_id`, `field_changes`, `to_status["code"]`) не
+        # зависят от кода выше: ни `_run_actions`, ни outbox-publish не трогают статус или
+        # закрытие сделки — переставлен только порядок вызовов, не то, что они читают.
         await self._audit.record(
             AuditAction.DEAL_STATUS_CHANGED,
             entity_type="deal",
@@ -2143,20 +2170,6 @@ class DealService:
                 entity_id=deal.id,
                 changes={"status_code": {"old": None, "new": to_status["code"]}},
             )
-
-        # Раздел 4.9 п.6, дословно: «Транзакция: UPDATE deals ... + INSERT
-        # outbox_events» — на КАЖДОМ переходе, не только там, где DSL
-        # объявляет `integration_event` (см. докстринг в `create()` выше).
-        await get_outbox_service().publish(
-            self._session,
-            aggregate_type="deal",
-            aggregate_id=deal.id,
-            event_type="DEAL_STATUS_CHANGED",
-            payload={"status_code": to_status["code"]},
-            target="bitrix24",
-        )
-
-        await self._run_actions(deal, transition.get("actions") or [], principal, now)
         return deal
 
     # --- Действия перехода (раздел 8 DSL) -----------------------------------
@@ -2680,13 +2693,17 @@ class CommentService:
         )
         self._session.add(comment)
         await self._session.flush()
+        await self._notify_mentions(deal, comment, principal, mention_ids)
+        # Аудит — последним перед возвратом: тот же принцип, что в `DealService.transition`
+        # выше (см. комментарий там про транзакционный лок цепочки аудита). `_notify_mentions`
+        # не зависит от записи аудита — ему нужны только `comment.id` (уже есть, флашнули выше)
+        # и `author.user_id` — и должен исполниться до захвата глобального лока, а не после.
         await self._audit.record(
             AuditAction.COMMENT_CREATED,
             entity_type="deal_comment",
             entity_id=comment.id,
             changes={"deal_id": {"old": None, "new": str(deal.id)}},
         )
-        await self._notify_mentions(deal, comment, principal, mention_ids)
         await drop_deal_card_after_commit(self._session, deal.id)
         return comment
 
