@@ -1,0 +1,8 @@
+self-hosted-runner:
+  # lct-server: self-hosted runner (see D:\testkit-lct memory / RUNBOOK) — one process per repo,
+  # registered as backend/frontend/deploy separately since our token lacks admin:org for a single
+  # org-wide runner. Excluded on purpose: loadtest.yml (backend) and e2e.yml (deploy) — both spin
+  # up a full docker-compose stack that would collide with the live lct.velikoss.ru deployment on
+  # the same box (same ports). Everything else here is pure lint/test/build, no port binding.
+  labels:
+    - lct
