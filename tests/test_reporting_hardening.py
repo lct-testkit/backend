@@ -9,6 +9,7 @@ import asyncio
 import datetime as dt
 import functools
 import threading
+import time
 import uuid
 
 import pytest
@@ -115,6 +116,37 @@ class TestQueue:
 
         assert run(client, _scenario) == (0, 1)
         assert generated == [job_id]
+
+    def test_jobs_in_one_tick_render_concurrently_not_one_by_one(self, client, monkeypatch) -> None:
+        """Раздел 4.13: «конкурентность воркеров ограничена семафором (10)» — если тик
+        рендерит взятые задания одно за другим (было так до фикса), два задания по 0.3с
+        займут ~0.6с суммарно; конкурентно — оба идут внахлёст и тик укладывается в ~0.3с."""
+        from app.modules.reporting.service import ReportJobService
+        from app.modules.reporting.tasks import sweep_report_jobs
+
+        started: list[float] = []
+
+        async def overlapping_generate(self, job, principal):
+            started.append(asyncio.get_running_loop().time())
+            await asyncio.sleep(0.3)
+            job.status = "completed"
+            await self._session.flush()
+
+        monkeypatch.setattr(ReportJobService, "generate", overlapping_generate)
+        owner = run(client, _make_user, "KAM")
+        run(client, _clear_queue)
+        job_ids = [run(client, _queued_job, owner.id) for _ in range(2)]
+
+        t0 = time.monotonic()
+        result = run(client, sweep_report_jobs, {})
+        elapsed = time.monotonic() - t0
+
+        assert result["processed"] == 2
+        assert all(run(client, _job, jid).status == "completed" for jid in job_ids)
+        # И оба рендера стартовали до того, как первый успел завершиться — не строго
+        # последовательно (иначе второй начался бы не раньше t=0.3с).
+        assert max(started) - min(started) < 0.3
+        assert elapsed < 0.55, f"тик занял {elapsed:.2f}с — похоже, задания шли одно за другим"
 
     def test_overlapping_ticks_build_a_report_once(self, client, monkeypatch) -> None:
         from app.modules.reporting.service import ReportJobService
