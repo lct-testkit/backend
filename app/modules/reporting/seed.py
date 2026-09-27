@@ -103,6 +103,18 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str, str, list[str], dict[str, Any], li
         ["xlsx", "pdf"],
     ),
     (
+        "deal_register",
+        "Сделки по вузам и направлениям",
+        "Реестр сделок за период в разрезе вуза, направления, продукта, статуса и ответственного. "
+        "Строка на пару сделка-продукт (у сделки без продуктов — одна строка с пустым продуктом и "
+        "направлением). Параметры: date_from/date_to, organization_ids, direction_ids, "
+        "product_ids, owner_ids, limit.",
+        "deal_register",
+        [],
+        {"limit": 1000},
+        ["xlsx", "pdf"],
+    ),
+    (
         "learning_progress",
         "Прогресс обучения",
         "Данные из LMS. Интеграция с LMS не собирает эти данные — отчёт пока пуст.",

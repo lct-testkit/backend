@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import select
@@ -43,6 +44,7 @@ from app.modules.reporting.builders import (
     _parse_report_filters,
     _parse_uuid,
     _parse_uuid_list,
+    build_deal_register,
     build_learning_progress,
 )
 from app.modules.reporting.rendering import (
@@ -294,23 +296,98 @@ class TestLearningProgressStub:
 
 class TestBuilderRegistry:
     def test_eight_builders_match_new_spec_4_13_literal_list_plus_the_lms_upload(self) -> None:
-        # Восемь видов раздела 4.13 и девятый — выгрузка учащихся для LMS (`lms_users_upload`).
-        assert len(REPORT_BUILDERS) == 9
+        # Восемь видов раздела 4.13, девятый — выгрузка учащихся для LMS (`lms_users_upload`),
+        # десятый — `deal_register` (буквальное прочтение Функц.4/§4.2, см. докстринг модуля).
+        assert len(REPORT_BUILDERS) == 10
         assert "lms_users_upload" in REPORT_BUILDERS
+        assert "deal_register" in REPORT_BUILDERS
 
-    def test_only_stuck_deals_has_a_real_row_estimator(self) -> None:
+    def test_only_listings_have_a_real_row_estimator(self) -> None:
         # Раздел 4.13: агрегаты структурно малы (статусы/регионы/КАМы/
         # месяцы/причины отказов) и всегда идут по лёгкому пути — только
-        # листинг `stuck_deals` может реально превысить порог.
-        assert set(REPORT_ESTIMATORS) == {"stuck_deals"}
+        # построчные листинги (`stuck_deals`, `deal_register`) могут реально
+        # превысить порог.
+        assert set(REPORT_ESTIMATORS) == {"stuck_deals", "deal_register"}
 
     def test_sync_threshold_matches_spec_literal_number(self) -> None:
         assert SYNC_ROW_THRESHOLD == 1000
 
 
+class TestDealRegisterReport:
+    """`deal_register` (раздел 3 докстринга модуля) — реестр сделок в разрезе вуза, направления,
+    продукта, статуса и ответственного. Сам билдер (`_deal_register_query`) требует настоящую БД
+    (`deal_scope_clause`, JOIN'ы на `deal_products`/`products`/`directions`) — как и у его
+    ближайшего родственника `stuck_deals`, для этого в файле нет отдельного теста (см. докстринг
+    модуля: чистые функции тестируются без БД, остальное — там, где уже поднята инфраструктура ради
+    другого теста). Здесь проверяется то, что не требует сессии: порядок колонок и построчное
+    отображение результата запроса, включая замену отсутствующих продукта/направления на «—»."""
+
+    async def test_maps_rows_with_dashes_for_missing_product_and_direction(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.modules.reporting import builders
+
+        class _Stmt:
+            def limit(self, _n: int) -> _Stmt:
+                return self
+
+        async def fake_query(session: object, principal: object, params: dict) -> _Stmt:
+            return _Stmt()
+
+        class _Result:
+            def all(self) -> list[tuple]:
+                return [
+                    (
+                        "ООО «Ромашка»",
+                        None,
+                        None,
+                        "Квалификация",
+                        "Иван Иванов",
+                        "D-2026-000001",
+                        "Курс Python",
+                        Decimal("150000.00"),
+                        dt.datetime(2026, 1, 5, tzinfo=dt.UTC),
+                        None,
+                    )
+                ]
+
+        class _Session:
+            async def execute(self, _stmt: object) -> _Result:
+                return _Result()
+
+        monkeypatch.setattr(builders, "_deal_register_query", fake_query)
+        dataset = await build_deal_register(_Session(), object(), {})  # type: ignore[arg-type]
+        assert dataset.columns == [
+            "Вуз",
+            "Направление",
+            "Продукт",
+            "Статус",
+            "Ответственный",
+            "Номер",
+            "Название",
+            "Сумма, ₽",
+            "Создана",
+            "Закрыта",
+        ]
+        assert dataset.rows == [
+            [
+                "ООО «Ромашка»",
+                "—",
+                "—",
+                "Квалификация",
+                "Иван Иванов",
+                "D-2026-000001",
+                "Курс Python",
+                150000.0,
+                dt.datetime(2026, 1, 5, tzinfo=dt.UTC),
+                None,
+            ]
+        ]
+
+
 class TestSeedTemplates:
-    def test_nine_templates_seeded(self) -> None:
-        assert len(_DEFAULT_TEMPLATES) == 9
+    def test_ten_templates_seeded(self) -> None:
+        assert len(_DEFAULT_TEMPLATES) == 10
 
     def test_no_duplicate_codes(self) -> None:
         codes = [row[0] for row in _DEFAULT_TEMPLATES]
