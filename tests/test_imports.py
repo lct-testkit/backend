@@ -143,6 +143,16 @@ class TestSuggestMapping:
         mapping = suggest_mapping(["Наимнование"], list(ORGANIZATION_FIELDS))
         assert mapping.get("Наимнование") == "name"
 
+    def test_organization_name_headers_from_real_files(self) -> None:
+        mapping = suggest_mapping(
+            ["Название организации", "Краткое название"], list(ORGANIZATION_FIELDS)
+        )
+        assert mapping["Название организации"] == "name"
+        assert mapping["Краткое название"] == "short_name"
+        assert suggest_mapping(["Наименование вуза"], list(ORGANIZATION_FIELDS)) == {
+            "Наименование вуза": "name"
+        }
+
     def test_unmatched_header_absent_from_mapping(self) -> None:
         mapping = suggest_mapping(["Совершенно постороннее поле xyz"], list(ORGANIZATION_FIELDS))
         assert "Совершенно постороннее поле xyz" not in mapping
