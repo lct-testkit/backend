@@ -1,0 +1,8 @@
+self-hosted-runner:
+  # Project self-hosted runner (GitHub Actions billing is down org-wide — see PR description
+  # for the full story). 3 parallel instances registered per repo for concurrency; each instance
+  # has its own isolated $HOME (see runner's .env) so parallel jobs don't race on shared npm/pip
+  # caches. Host is whichever box currently runs it — check the runner's own registration
+  # (repo Settings -> Actions -> Runners) rather than assuming from this comment.
+  labels:
+    - lct
