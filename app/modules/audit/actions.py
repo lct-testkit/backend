@@ -139,6 +139,10 @@ class AuditAction(StrEnum):
     CONTACT_PRODUCT_UNLINKED = "CONTACT_PRODUCT_UNLINKED"
     PRODUCT_CREATED = "PRODUCT_CREATED"
     PRODUCT_UPDATED = "PRODUCT_UPDATED"
+    # B-9: мягкое удаление (`deleted_at`, тот же приём, что у направлений) —
+    # только если продукт не указан ни в одной сделке. См.
+    # `catalog.service.ProductService.delete`.
+    PRODUCT_DELETED = "PRODUCT_DELETED"
     DIRECTION_CREATED = "DIRECTION_CREATED"
     DIRECTION_UPDATED = "DIRECTION_UPDATED"
     # П4: мягкое удаление (`deleted_at`) — только если нет дочерних
@@ -153,8 +157,17 @@ class AuditAction(StrEnum):
     LOSS_REASON_DELETED = "LOSS_REASON_DELETED"
     HOLIDAY_CREATED = "HOLIDAY_CREATED"
     HOLIDAY_UPDATED = "HOLIDAY_UPDATED"
+    # B-34: жёсткое удаление (таблица без `deleted_at`) — ничего не
+    # ссылается на `holidays` по FK, проверять использование нечего. См.
+    # `catalog.service.HolidayService.delete`.
+    HOLIDAY_DELETED = "HOLIDAY_DELETED"
     CUSTOM_FIELD_DEF_CREATED = "CUSTOM_FIELD_DEF_CREATED"
     CUSTOM_FIELD_DEF_UPDATED = "CUSTOM_FIELD_DEF_UPDATED"
+    # B-9: жёсткое удаление, только если ни у одной сущности этого типа нет
+    # непустого значения по коду поля (значения лежат в её `custom_fields
+    # jsonb`, не в отдельной таблице). См.
+    # `catalog.service.CustomFieldDefService.delete`.
+    CUSTOM_FIELD_DEF_DELETED = "CUSTOM_FIELD_DEF_DELETED"
 
     # --- Уведомления (раздел 5.7, спринт 7) ---
     NOTIFICATION_TEMPLATE_CREATED = "NOTIFICATION_TEMPLATE_CREATED"
