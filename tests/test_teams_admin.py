@@ -88,15 +88,19 @@ class TestTeamOptimisticLock:
         assert (body["code"], body["current_version"]) == ("CRM-1002", 2)
         assert client.get(f"/api/admin/teams/{team['id']}").json()["name"] == "Первая правка"
 
-    def test_without_if_match_the_edit_still_goes_through(self, client) -> None:
-        # Заголовок необязателен: клиенты, которые его не шлют, продолжают работать.
+    def test_without_if_match_the_request_is_rejected(self, client) -> None:
+        # C-22: заголовок стал обязательным — той же формой ошибки, что у сделок/организаций.
         _login(client, run(client, _make_user, "ADMIN"))
         team = _create_team(client)
 
         response = self._patch(client, team, {"name": "Без заголовка"})
 
-        assert response.status_code == 200, response.text
-        assert response.json()["version"] == 2
+        assert response.status_code == 422, response.text
+        body = response.json()
+        assert body["code"] == "CRM-1001"
+        assert body["errors"][0]["field"] == "If-Match"
+        # Правка не применилась.
+        assert client.get(f"/api/admin/teams/{team['id']}").json()["version"] == 1
 
     def test_edit_that_changes_nothing_keeps_the_version(self, client) -> None:
         _login(client, run(client, _make_user, "ADMIN"))
@@ -114,3 +118,93 @@ class TestTeamOptimisticLock:
         response = self._patch(client, team, {"name": "X"}, **{"If-Match": "abc"})
 
         assert response.status_code == 422, response.text
+
+
+def _add_member(client, team_id: str, *, status: str = "active") -> uuid.UUID:
+    async def _create() -> uuid.UUID:
+        from app.core.db import session_scope
+        from app.modules.identity.models import User
+
+        async with session_scope() as session:
+            user = User(
+                keycloak_id=str(uuid.uuid4()),
+                email=f"{uuid.uuid4().hex[:12]}@rt-it-school.ru",
+                full_name="Член команды",
+                role="KAM",
+                status=status,
+                team_id=uuid.UUID(team_id),
+                consent_version="1.0",
+            )
+            session.add(user)
+            await session.flush()
+            return user.id
+
+    return run(client, _create)
+
+
+class TestTeamDelete:
+    """C-22: `DELETE /api/admin/teams/{id}` — только без активных сотрудников и живых
+    дочерних команд."""
+
+    def test_deletes_a_team_without_members(self, client) -> None:
+        _login(client, run(client, _make_user, "ADMIN"))
+        team = _create_team(client)
+
+        response = client.delete(f"/api/admin/teams/{team['id']}")
+
+        assert response.status_code == 204, response.text
+        assert client.get(f"/api/admin/teams/{team['id']}").status_code == 404
+        # Мягкое удаление — не видна и в списке.
+        listing = client.get("/api/admin/teams", params={"limit": 100}).json()["items"]
+        assert all(item["id"] != team["id"] for item in listing)
+
+    def test_team_with_an_active_member_cannot_be_deleted(self, client) -> None:
+        _login(client, run(client, _make_user, "ADMIN"))
+        team = _create_team(client)
+        _add_member(client, team["id"])
+
+        response = client.delete(f"/api/admin/teams/{team['id']}")
+
+        assert response.status_code == 409, response.text
+        assert response.json()["code"] == "CRM-1303"
+        # Не удалилась.
+        assert client.get(f"/api/admin/teams/{team['id']}").status_code == 200
+
+    def test_team_with_only_terminated_members_can_be_deleted(self, client) -> None:
+        _login(client, run(client, _make_user, "ADMIN"))
+        team = _create_team(client)
+        _add_member(client, team["id"], status="terminated")
+
+        response = client.delete(f"/api/admin/teams/{team['id']}")
+
+        assert response.status_code == 204, response.text
+
+    def test_team_with_a_child_team_cannot_be_deleted(self, client) -> None:
+        _login(client, run(client, _make_user, "ADMIN"))
+        parent = _create_team(client)
+        child = client.post(
+            "/api/admin/teams",
+            json={"name": f"Дочерняя {uuid.uuid4().hex[:6]}", "parent_id": parent["id"]},
+        )
+        assert child.status_code == 201, child.text
+
+        response = client.delete(f"/api/admin/teams/{parent['id']}")
+
+        assert response.status_code == 409, response.text
+        assert response.json()["code"] == "CRM-1303"
+
+    def test_unknown_team_is_not_found(self, client) -> None:
+        _login(client, run(client, _make_user, "ADMIN"))
+
+        response = client.delete(f"/api/admin/teams/{uuid.uuid4()}")
+
+        assert response.status_code == 404, response.text
+
+    def test_kam_cannot_delete_a_team(self, client) -> None:
+        _login(client, run(client, _make_user, "ADMIN"))
+        team = _create_team(client)
+        _login(client, run(client, _make_user, "KAM"))
+
+        response = client.delete(f"/api/admin/teams/{team['id']}")
+
+        assert response.status_code == 403, response.text

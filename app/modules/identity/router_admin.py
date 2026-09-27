@@ -11,7 +11,7 @@ import datetime as dt
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, Path, Query, status
+from fastapi import APIRouter, Depends, Path, Query, status
 from sqlalchemy import select
 
 from app.core.config import get_settings
@@ -20,7 +20,6 @@ from app.core.deps import (
     DbSession,
     IfMatch,
     Pagination,
-    get_if_match,
     require_permission,
 )
 from app.core.errors import AppError, ErrorCode, NotFoundError, VersionConflictError
@@ -780,17 +779,6 @@ async def _get_team(session: DbSession, team_id: uuid.UUID) -> Team:
     return team
 
 
-async def _optional_if_match(
-    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
-) -> int | None:
-    """У команд `If-Match` необязателен: без него правка идёт как раньше, с ним — с
-    проверкой версии."""
-    return None if if_match is None else await get_if_match(if_match)
-
-
-OptionalIfMatch = Annotated[int | None, Depends(_optional_if_match)]
-
-
 @router.get(
     "/teams/{team_id}",
     summary="Карточка команды",
@@ -846,9 +834,9 @@ async def create_team(
     "/teams/{team_id}",
     summary="Изменить команду",
     description=(
-        "Меняет название, родителя, руководителя или регион. `If-Match` с версией "
-        "команды необязателен: с ним устаревшая версия даёт 409 (CRM-1002), без него "
-        "правка применяется как раньше. Каждая правка поднимает `version`. Роль: ADMIN."
+        "Меняет название, родителя, руководителя или регион. Обязателен `If-Match` с "
+        "текущей версией команды (без него — 422, как у сделок/организаций); устаревшая "
+        "версия — 409 CRM-1002. Каждая правка поднимает `version`. Роль: ADMIN."
     ),
     response_model=TeamOut,
 )
@@ -858,10 +846,10 @@ async def patch_team(
     audit: AuditDep,
     _: AdminWrite,
     team_id: Annotated[uuid.UUID, Path()],
-    if_match: OptionalIfMatch,
+    if_match: IfMatch,
 ) -> TeamOut:
     team = await _get_team(session, team_id)
-    if if_match is not None and team.version != if_match:
+    if team.version != if_match:
         raise VersionConflictError(team.version, {"name": team.name})
 
     updates = payload.model_dump(exclude_unset=True)
@@ -891,8 +879,8 @@ async def patch_team(
 
     changes = diff_changes(before, after)
     if changes:
-        # Атомарно и с версией клиента, если он её прислал: два параллельных PATCH команды не
-        # проходят проверку версии оба.
+        # Атомарно, с версией клиента: два параллельных PATCH команды не проходят проверку
+        # версии оба.
         await claim_version(session, team, if_match)
         await session.flush()
     await audit.record(
@@ -902,6 +890,53 @@ async def patch_team(
         changes=changes,
     )
     return TeamOut.model_validate(team)
+
+
+@router.delete(
+    "/teams/{team_id}",
+    summary="Удалить команду",
+    description=(
+        "Мягкое удаление, только если в команде нет ни одного активного сотрудника и нет "
+        "живых дочерних команд — иначе 409 CRM-1303. Открытые сделки участников отдельно не "
+        "проверяются: у сделки нет ссылки на команду, только на владельца, а проверка «нет "
+        "активных сотрудников» уже покрывает случай, когда сделками некому распоряжаться от "
+        "имени команды. Роль: ADMIN."
+    ),
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_team(
+    session: DbSession,
+    audit: AuditDep,
+    _: AdminWrite,
+    team_id: Annotated[uuid.UUID, Path()],
+) -> None:
+    team = await _get_team(session, team_id)
+    active_member = await session.scalar(
+        select(User.id)
+        .where(User.team_id == team.id, User.status == UserStatus.ACTIVE.value)
+        .limit(1)
+    )
+    if active_member is not None:
+        raise AppError(
+            ErrorCode.ENTITY_IN_USE,
+            "В команде есть активные сотрудники — удаление невозможно",
+        )
+    child_team = await session.scalar(
+        select(Team.id).where(Team.parent_id == team.id, Team.deleted_at.is_(None)).limit(1)
+    )
+    if child_team is not None:
+        raise AppError(
+            ErrorCode.ENTITY_IN_USE,
+            "У команды есть дочерние команды — удаление невозможно",
+        )
+    team.deleted_at = dt.datetime.now(dt.UTC)
+    await session.flush()
+    await audit.record(
+        AuditAction.TEAM_DELETED,
+        entity_type="team",
+        entity_id=team.id,
+        changes={"name": {"old": team.name, "new": None}},
+    )
 
 
 async def _has_team_cycle(session: DbSession, team_id: uuid.UUID) -> bool:
