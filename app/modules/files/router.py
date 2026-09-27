@@ -5,10 +5,17 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Path, Query, status
+from fastapi import APIRouter, Depends, Path, Query, Request, status
 
-from app.core.deps import ConsentedUser, DbSession, Pagination, require_permission
+from app.core.deps import (
+    ConsentedUser,
+    DbSession,
+    IdempotencyKeyHeader,
+    Pagination,
+    require_permission,
+)
 from app.core.errors import AppError, ErrorCode, ForbiddenError
+from app.core.idempotency import IdempotencyGuard
 from app.core.pagination import Page, keyset_before
 from app.core.permissions import Permission
 from app.core.security import Principal
@@ -174,12 +181,29 @@ async def list_attachments(
 @attachments_router.post(
     "",
     summary="Привязать файл к сущности",
+    description="Поддерживает Idempotency-Key.",
     response_model=AttachmentOut,
     status_code=status.HTTP_201_CREATED,
 )
 async def create_attachment(
-    payload: AttachmentCreateRequest, session: DbSession, principal: FileUploadPerm
+    payload: AttachmentCreateRequest,
+    request: Request,
+    session: DbSession,
+    principal: FileUploadPerm,
+    idempotency_key: IdempotencyKeyHeader,
 ) -> AttachmentOut:
+    guard = IdempotencyGuard(session, actor_id=principal.user_id)
+    body = await request.body()
+    if idempotency_key:
+        cached = await guard.lookup(
+            key=idempotency_key, method=request.method, path=request.url.path, body=body
+        )
+        if cached is not None:
+            return AttachmentOut.model_validate(cached.body)
+        await guard.reserve(
+            key=idempotency_key, method=request.method, path=request.url.path, body=body
+        )
+
     await check_entity_access(
         session, principal, entity_type=payload.entity_type, entity_id=payload.entity_id
     )
@@ -192,7 +216,13 @@ async def create_attachment(
         category=payload.category,
         description=payload.description,
     )
-    return (await AttachmentService(session).to_out([attachment]))[0]
+    result = (await AttachmentService(session).to_out([attachment]))[0]
+
+    if idempotency_key:
+        await guard.store(
+            key=idempotency_key, status=status.HTTP_201_CREATED, body=result.model_dump(mode="json")
+        )
+    return result
 
 
 @attachments_router.delete(

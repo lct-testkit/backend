@@ -27,6 +27,9 @@ IDEMPOTENT_OPERATIONS = {
     ("post", "/api/contacts"),
     ("post", "/api/deals"),
     ("post", "/api/organizations"),
+    ("post", "/api/deals/{deal_id}/comments"),
+    ("post", "/api/tasks"),
+    ("post", "/api/attachments"),
     ("post", "/api/v1/integrations/cms/leads"),
 }
 
