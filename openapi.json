@@ -428,6 +428,35 @@
         "title": "AttachmentCreateRequest",
         "type": "object"
       },
+      "AttachmentFileInfo": {
+        "description": "Сведения о файле вложения: чтобы список показывал имя и размер, а не голый `file_id`.",
+        "properties": {
+          "mime_type": {
+            "title": "Mime Type",
+            "type": "string"
+          },
+          "original_filename": {
+            "title": "Original Filename",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "original_filename",
+          "size_bytes",
+          "mime_type",
+          "status"
+        ],
+        "title": "AttachmentFileInfo",
+        "type": "object"
+      },
       "AttachmentListResponse": {
         "properties": {
           "items": {
@@ -485,6 +514,16 @@
           "entity_type": {
             "title": "Entity Type",
             "type": "string"
+          },
+          "file": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AttachmentFileInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "file_id": {
             "format": "uuid",

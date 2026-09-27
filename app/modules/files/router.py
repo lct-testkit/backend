@@ -165,8 +165,10 @@ async def list_attachments(
     if cursor:
         stmt = stmt.where(keyset_before(Attachment.created_at, Attachment.id, cursor))
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
-    built = Page.build(rows, limit=page.limit, serializer=AttachmentOut.model_validate)
-    return AttachmentListResponse(items=built.items, next_cursor=built.next_cursor)
+    built = Page.build(rows, limit=page.limit)
+    return AttachmentListResponse(
+        items=await AttachmentService(session).to_out(built.items), next_cursor=built.next_cursor
+    )
 
 
 @attachments_router.post(
@@ -190,7 +192,7 @@ async def create_attachment(
         category=payload.category,
         description=payload.description,
     )
-    return AttachmentOut.model_validate(attachment)
+    return (await AttachmentService(session).to_out([attachment]))[0]
 
 
 @attachments_router.delete(

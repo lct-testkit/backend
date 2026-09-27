@@ -15,7 +15,7 @@ import datetime as dt
 import re
 import unicodedata
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import NoReturn, Protocol, runtime_checkable
 
@@ -37,7 +37,7 @@ from app.core.storage import (
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
 from app.modules.files.models import Attachment, File, FileStatus
-from app.modules.files.schemas import UploadIntentRequest
+from app.modules.files.schemas import AttachmentFileInfo, AttachmentOut, UploadIntentRequest
 
 # Сигнатуры разрешённых форматов (раздел 9: «расширение врёт», нужна
 # проверка по факту). docx/xlsx неотличимы от zip по первым байтам — это
@@ -647,6 +647,23 @@ class AttachmentService:
             Attachment.entity_id == entity_id,
             Attachment.deleted_at.is_(None),
         )
+
+    async def to_out(self, attachments: Sequence[Attachment]) -> list[AttachmentOut]:
+        """Вложения со сведениями о файлах: один запрос `files IN (...)` на весь список,
+        а не по запросу на строку (иначе страница вложений сделала бы N+1)."""
+        file_ids = {item.file_id for item in attachments}
+        files: dict[uuid.UUID, File] = {}
+        if file_ids:
+            rows = await self._session.execute(select(File).where(File.id.in_(file_ids)))
+            files = {file.id: file for file in rows.scalars()}
+        result: list[AttachmentOut] = []
+        for item in attachments:
+            out = AttachmentOut.model_validate(item)
+            file = files.get(item.file_id)
+            if file is not None:
+                out.file = AttachmentFileInfo.model_validate(file)
+            result.append(out)
+        return result
 
     async def get_or_404(self, attachment_id: uuid.UUID) -> Attachment:
         attachment = await self._session.get(Attachment, attachment_id)

@@ -73,6 +73,17 @@ class AttachmentCreateRequest(BaseModel):
     description: str | None = None
 
 
+class AttachmentFileInfo(BaseModel):
+    """Сведения о файле вложения: чтобы список показывал имя и размер, а не голый `file_id`."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    original_filename: str
+    size_bytes: int
+    mime_type: str
+    status: str
+
+
 class AttachmentOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -82,6 +93,8 @@ class AttachmentOut(BaseModel):
     entity_id: uuid.UUID
     category: str
     description: str | None = None
+    # Аддитивное поле: клиенты, которые его не знают, продолжают работать по `file_id`.
+    file: AttachmentFileInfo | None = None
     uploaded_by: uuid.UUID | None = None
     created_at: dt.datetime
 
