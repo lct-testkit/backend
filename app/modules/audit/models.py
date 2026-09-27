@@ -72,3 +72,28 @@ class AuditLog(Base):
     hash_version: Mapped[int] = mapped_column(
         SmallInteger, nullable=False, server_default=text("1")
     )
+
+
+class AuditChainHead(Base):
+    """Указатель на хэш последней записи цепочки — вынесен из `audit_log` отдельной
+
+    синглтон-таблицей (перф-диагностика 27.09): `SELECT hash FROM audit_log ORDER BY
+    created_at DESC, id DESC LIMIT 1` под advisory-локом цепочки планировался ~15-30мс —
+    Postgres должен рассмотреть constraint exclusion по ВСЕМ месячным партициям на каждый
+    вызов, а партиций со временем становится больше, а не меньше. Под нагрузкой (лок держит
+    транзакцию целиком) это напрямую умножается на глубину очереди ожидающих. Эта таблица —
+    не партиционирована и всегда одна строка: планирование и выполнение — доли миллисекунды
+    независимо от размера `audit_log`.
+
+    `id` — singleton-паттерн (`CHECK (id)`, миграция гарантирует ровно одну строку). Источник
+    истины по-прежнему `audit_log.hash`: verify_chain() читает `audit_log` напрямую и никогда
+    не смотрит на эту таблицу — она только ускоряет write-путь (`AuditService.record`), синхронно
+    обновляется в той же транзакции, что и вставка, и откатывается вместе с ней."""
+
+    __tablename__ = "audit_chain_head"
+
+    id: Mapped[bool] = mapped_column(primary_key=True, default=True)
+    hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )

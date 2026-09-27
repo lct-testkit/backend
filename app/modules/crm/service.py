@@ -1062,20 +1062,31 @@ async def deal_writable(session: AsyncSession, principal: Principal, deal: Deal)
     return bool(working_participant)
 
 
-async def touch_recent(
-    user_id: uuid.UUID, *, entity_type: str, entity_id: uuid.UUID, title: str
+def touch_recent(
+    session: AsyncSession, user_id: uuid.UUID, *, entity_type: str, entity_id: uuid.UUID, title: str
 ) -> None:
-    """`recent:{user_id}` ZSET — «кэш действий пользователя» раздела 3.4."""
-    member = json.dumps(
-        {"type": entity_type, "id": str(entity_id), "title": title}, ensure_ascii=False
-    )
-    try:
-        client = get_redis()
-        score = dt.datetime.now(dt.UTC).timestamp()
-        await client.zadd(key_recent(user_id), {member: score})
-        await client.zremrangebyrank(key_recent(user_id), 0, -(RECENT_MAX_ITEMS + 1))
-    except Exception:  # noqa: BLE001 — кэш не источник истины
-        pass
+    """`recent:{user_id}` ZSET — «кэш действий пользователя» раздела 3.4.
+
+    Redis, не Postgres: писать «рядом», пока запрос ещё держит транзакцию (а на переходе —
+    вместе с ней advisory-лок цепочки аудита, см. `AuditService._chain_head`), не нужно ни для
+    какой гарантии — только продлевает критическую секцию под глобальным локом на два лишних
+    круга к Redis. Поэтому `run_after_commit`, как и `drop_deal_card_after_commit` рядом: тот же
+    приём, та же причина (docstring `run_after_commit`) — запрос, откатившийся после этого
+    вызова, не должен оставить в кэше запись о том, чего не произошло."""
+
+    async def _write() -> None:
+        member = json.dumps(
+            {"type": entity_type, "id": str(entity_id), "title": title}, ensure_ascii=False
+        )
+        try:
+            client = get_redis()
+            score = dt.datetime.now(dt.UTC).timestamp()
+            await client.zadd(key_recent(user_id), {member: score})
+            await client.zremrangebyrank(key_recent(user_id), 0, -(RECENT_MAX_ITEMS + 1))
+        except Exception:  # noqa: BLE001 — кэш не источник истины
+            pass
+
+    run_after_commit(session, _write)
 
 
 async def get_cached_deal_card(deal_id: uuid.UUID, version: int) -> dict[str, Any] | None:

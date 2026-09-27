@@ -269,7 +269,9 @@ async def get_deal(
         # берутся данные, кэша или БД.
         await audit.record(AuditAction.PII_ACCESS, entity_type="deal", entity_id=deal.id)
 
-    await touch_recent(principal.user_id, entity_type="deal", entity_id=deal.id, title=deal.title)
+    touch_recent(
+        session, principal.user_id, entity_type="deal", entity_id=deal.id, title=deal.title
+    )
 
     cached = await get_cached_deal_card(deal.id, deal.version)
     if cached is not None:
@@ -449,7 +451,9 @@ async def transition_deal(
             expected_version=if_match,
         )
 
-    await touch_recent(principal.user_id, entity_type="deal", entity_id=deal.id, title=deal.title)
+    touch_recent(
+        session, principal.user_id, entity_type="deal", entity_id=deal.id, title=deal.title
+    )
     return TransitionResponse(deal=(await _deal_outs(service, principal, [deal]))[0])
 
 
