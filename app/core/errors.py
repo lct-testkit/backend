@@ -55,6 +55,10 @@ class ErrorCode(StrEnum):
     # `detail`/`extra` (раздел 4: «разрешай удаление только когда ничего не
     # сломает»).
     ENTITY_IN_USE = "CRM-1303"
+    # `POST /organizations/{id}/restore` на организации, которая не удалена
+    # (нет смысла восстанавливать активную запись — не no-op, а конфликт
+    # состояния: если вызывающий перепутал id, тихий успех это бы скрыл).
+    ORGANIZATION_NOT_DELETED = "CRM-1304"
 
     # --- Файлы ---
     FILE_TYPE_NOT_ALLOWED = "CRM-1401"
@@ -143,6 +147,7 @@ ERROR_CATALOG: dict[ErrorCode, ErrorSpec] = {
     ErrorCode.DUPLICATE: ErrorSpec(409, "Найден дубликат сущности"),
     ErrorCode.ORGANIZATION_INN_EXISTS: ErrorSpec(409, "Организация с таким ИНН уже существует"),
     ErrorCode.ENTITY_IN_USE: ErrorSpec(409, "Сущность используется и не может быть удалена"),
+    ErrorCode.ORGANIZATION_NOT_DELETED: ErrorSpec(409, "Организация не удалена"),
     ErrorCode.FILE_TYPE_NOT_ALLOWED: ErrorSpec(415, "Недопустимый тип файла"),
     ErrorCode.FILE_TOO_LARGE: ErrorSpec(413, "Превышен размер файла"),
     ErrorCode.FILE_INFECTED: ErrorSpec(422, "Файл не прошёл антивирусную проверку"),

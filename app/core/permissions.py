@@ -32,6 +32,10 @@ class Permission(StrEnum):
     # `org_type='individual_entrepreneur'` тем же приёмом, что `ContactOut` —
     # отдельное право на раскрытие, не совпадающее с `ORG_WRITE`.
     ORG_REVEAL = "organization:reveal"
+    # A-18: восстановление мягко удалённой организации — админское действие,
+    # не входит в `ORG_WRITE` (которым владеет и KAM), тем же приёмом, что
+    # `DEAL_REASSIGN` отделён от обычного `DEAL_UPDATE`.
+    ORG_RESTORE = "organization:restore"
     CONTACT_READ = "contact:read"
     CONTACT_WRITE = "contact:write"
     CONTACT_REVEAL = "contact:reveal"
@@ -124,6 +128,7 @@ _KAM: frozenset[Permission] = frozenset(
 _HEAD: frozenset[Permission] = _KAM | {
     Permission.DEAL_REASSIGN,
     Permission.DEAL_REASSIGN_BULK,
+    Permission.ORG_RESTORE,
     Permission.AUDIT_READ,
     Permission.SIGNATURE_VOID,
     Permission.FILE_DELETE,
