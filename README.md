@@ -7,7 +7,7 @@
 <sub>Команда **«Тесткит»** — [github.com/lct-testkit](https://github.com/lct-testkit)</sub>
 
 <!--STATS-->
-**203** операции API &nbsp;·&nbsp; **13** модулей &nbsp;·&nbsp; **67** таблиц &nbsp;·&nbsp; **20** миграций &nbsp;·&nbsp; **2143** теста &nbsp;·&nbsp; **11** сервисов Compose
+**203** операции API &nbsp;·&nbsp; **13** модулей &nbsp;·&nbsp; **67** таблиц &nbsp;·&nbsp; **21** миграция &nbsp;·&nbsp; **2152** теста &nbsp;·&nbsp; **11** сервисов Compose
 <!--/STATS-->
 
 [Быстрый старт](#быстрый-старт) · [Примеры](#примеры-использования) · [Приём данных](#приём-данных-вендоры-оплаты-учащиеся) · [Как устроено](#как-устроено) · [Модули](#что-внутри) · [Настройка](#настройка) · [Разработка](#разработка) · [Безопасность](#безопасность) · [Ограничения](#ограничения-и-известные-проблемы)
@@ -178,10 +178,10 @@ curl -s "http://localhost:8080/api/admin/audit/verify-chain?limit=1000" -H "Auth
 ```
 
 ```json
-{"checked":1000,"ok":false,"problems":["01a0c4a1-…: разрыв цепочки с предыдущей записью", …]}
+{"checked":1000,"ok":true,"problems":[]}
 ```
 
-На этом стенде хвост цепочки честно показал разрывы (интерактивная проверка эндпоинтов из этого README писала записи из нескольких параллельных запросов почти одновременно, а голова цепочки берётся под advisory-локом только на запись — гонка обнаруживается самой проверкой, что и есть цель ручки). Короткие окна (`limit=10..20`) в тот же момент были целыми (`"ok":true`) — разрывы сосредоточены в конкретных секундах параллельной нагрузки, не во всей цепочке.
+Проверка идёт по хэшам подряд идущих записей; при разрыве `ok` равен `false`, а `problems` перечисляет записи. Раньше при параллельных записях цепочка рвалась (время брали как начало транзакции, а не момент захвата замка); теперь порядок хэшей и времени совпадает, а тест `test_audit_chain_concurrency.py` держит это под нагрузкой.
 
 ### Скачать контракт OpenAPI
 
@@ -303,7 +303,7 @@ flowchart LR
 | **sms-gateway-mock** | мок внешнего SMS-провайдера для доставки OTP ПЭП внутри закрытого контура (тот же образ `api`, команда `sms-gateway-mock`) |
 | **web** *(профиль `web`)* | статический SPA-образ фронтенда за тем же Caddy |
 
-Приложение — модульный монолит: один деплоймент-артефакт (`app/main.py`, 39 вызовов `include_router`), внутри — 13 независимых пакетов в `app/modules/`. Модуль не импортирует репозитории другого модуля напрямую; кросс-модульные вызовы идут через сервисные Protocol-интерфейсы (`OwnershipService`, `DealStatusService`, `NotificationService`, `OutboxService`, `SigningService`, `AntivirusScanner`, `OrgLookupProvider`) с регистрацией реализации на старте `api`/`worker` — так любой модуль можно вынести отдельным сервисом без переписывания вызывающего кода.
+Приложение — модульный монолит: один деплоймент-артефакт (`app/main.py`, 40 вызовов `include_router`), внутри — 13 независимых пакетов в `app/modules/`. Модуль не импортирует репозитории другого модуля напрямую; кросс-модульные вызовы идут через сервисные Protocol-интерфейсы (`OwnershipService`, `DealStatusService`, `NotificationService`, `OutboxService`, `SigningService`, `AntivirusScanner`, `OrgLookupProvider`) с регистрацией реализации на старте `api`/`worker` — так любой модуль можно вынести отдельным сервисом без переписывания вызывающего кода.
 
 ## Что внутри
 
@@ -339,8 +339,8 @@ app/
 │                        integration, notification, registry, reporting, signing, workflow
 ├── assets/fonts/        DejaVu Sans — кириллица в PDF (xhtml2pdf) и графиках (matplotlib)
 └── worker/main.py       arq: воркер и планировщик периодических задач
-migrations/versions/     20 миграций Alembic: 0001_baseline … 0020_signature_unique_request
-tests/                   83 файлов, 2143 теста (офлайн + сквозные с TEST_DATABASE_URL)
+migrations/versions/     21 миграция Alembic: 0001_baseline … 0021_external_lookup_flag
+tests/                   91 файл, 2152 теста (офлайн + сквозные с TEST_DATABASE_URL)
 loadtest/                Locust: provision.py + 2 locustfile, README со своими результатами
 deploy/                  Caddyfile, entrypoint.sh, keycloak/realm-crm.json, postgres/, seaweedfs/
 ```
@@ -349,7 +349,7 @@ deploy/                  Caddyfile, entrypoint.sh, keycloak/realm-crm.json, post
 
 Полный список переменных — `.env.example`; код читает их в `app/core/config.py` (`Settings`, pydantic-settings) и в `docker-compose.yml`. Приложение не стартует без `APP_PROFILE` и строк подключения — падение на старте лучше, чем работа с половиной конфига.
 
-**Важная оговорка про Docker.** В контейнеры `api`, `worker`, `migrate` и `seed` попадают только переменные из явного списка `x-api-env` в `docker-compose.yml` (32 имени) — `env_file` не используется совсем. Значения `.env`, которых нет в этом списке (лимиты файлов, TTL сессии/CSRF/идемпотентности, параметры ПЭП, импорта, приглашений, 152-ФЗ и другие), в контейнерах не действуют: работает дефолт из `Settings`, даже если в `.env` записано другое.
+**Важная оговорка про Docker.** В контейнеры `api`, `worker`, `migrate` и `seed` попадают только переменные из явного списка `x-api-env` в `docker-compose.yml` (42 имени) — `env_file` не используется совсем. Значения `.env`, которых нет в этом списке (лимиты файлов, TTL сессии/CSRF/идемпотентности, параметры ПЭП, импорта, приглашений, 152-ФЗ и другие), в контейнерах не действуют: работает дефолт из `Settings`, даже если в `.env` записано другое.
 
 | Переменная | Значение по умолчанию | Зачем |
 |---|---|---|
@@ -373,6 +373,12 @@ deploy/                  Caddyfile, entrypoint.sh, keycloak/realm-crm.json, post
 | `WEB_UPSTREAM` | `web:3000` | куда Caddy отдаёт всё, что не `/api`, `/public`, `/health`, `/static`, `/auth` |
 | `CSP_SCRIPT_SRC` | `'self'` | `script-src` в CSP; ослабляется для Vite в разработке |
 | `APP_MODE` | `demo` | режим клиента `web`: выбор демо-роли или одна кнопка входа; читает только образ `web`, не `Settings` |
+| `AUDIT_HMAC_KEY` | пусто | ключ HMAC цепочки аудита (хэш v3); пусто — цепочка без ключа (v2); в prod задать вместе с `SETTINGS_ENCRYPTION_KEY` |
+| `SETTINGS_ENCRYPTION_KEY` | пусто | ключ шифрования секретных системных настроек (`PUT /api/admin/system-settings/{key}`) |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` / `SMTP_STARTTLS` | пусто / 587 / пусто / пусто / пусто / `true` | почтовый сервер: без `SMTP_HOST` письма (в том числе ссылки подписантам) остаются в очереди |
+| `SIGNATURE_EXPOSE_DEBUG_OTP` | `false` | отдавать код подтверждения в ответе (только для демо и тестов) |
+| `BITRIX_SOURCE_ID` | `OTHER` | код источника сделки при передаче в Битрикс24 |
+| `FNS_LOOKUP_BASE_URL` / `FNS_LOOKUP_TIMEOUT_SECONDS` | `https://egrul.nalog.ru` / 8 | внешний источник автоподстановки по ИНН (публичный поиск ФНС); включается флагом `external_org_lookup` в админке |
 | `CRM_TLS_HOST` | `localhost` | имя TLS-сайта в Caddyfile (SNI сертификата `tls internal`); смените, если стенд открывается не по `localhost` |
 | `SESSION_TTL`, `SESSION_IDLE_TIMEOUT`, `CSRF_*`, `ALLOW_BEARER_AUTH`, лимиты файлов, `PASSWORD_CHANGE_*`, `ERASURE_*`, `INVITE_*` и другие | см. `.env.example` | объявлены в `Settings` и документированы в `.env.example`, но **не входят в `x-api-env`** — в контейнерах всегда действует дефолт `config.py`, значение из `.env` игнорируется |
 | `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_ECHO`, `SESSION_COOKIE_NAME`, `PAGINATION_MAX_LIMIT`, `APP_NAME`, `APP_VERSION`, `API_PREFIX`, `PUBLIC_PREFIX`, `LLM_*` | см. `config.py` | есть в `Settings`, но ❌ отсутствуют в `.env.example`; `LLM_*` дополнительно не используется ни в одном модуле кода |
@@ -506,7 +512,7 @@ locust -f loadtest/locustfile_transition.py --headless -u 50 -r 25 -t 60s --host
 | Автоподстановка по ИНН не имеет реального внешнего провайдера | цепочка «локальный реестр → подтверждённые организации → мок» — мок работает только вне `prod`; в `prod` доступен только локальный реестр и уже подтверждённые организации |
 | Мастер передачи дел (offboard) принимает только одного преемника, «по-сделочно» нет | точечное распределение — через отдельную массовую ручку `POST /deals/bulk/reassign` |
 
-Открытыми остаются: отсутствующая `DELETE`-ручка у производственного календаря (остальные справочники и воронки её получили), построчные результаты и причина сбоя импорта, запись аудита на каждый вызов `POST /workflows/{id}/validate`, вход по приглашению в закрытом контуре (оценка — около дня работы бэкенда), удаление сделки, отдельная ручка архивации воронки целиком — в [`frontend/docs/backend-issues.md`](https://github.com/lct-testkit/frontend/blob/main/docs/backend-issues.md), с привязкой к файлу и строке. Данные отчёта в JSON, не только файлом, — `GET /api/reports/{report_id}/data`.
+Открытыми остаются: отсутствующая `DELETE`-ручка у производственного календаря (остальные справочники и воронки её получили), причина сбоя импорта (статус `failed` не присваивается), запись аудита на каждый вызов `POST /workflows/{id}/validate`, вход по приглашению в закрытом контуре (оценка — около дня работы бэкенда), удаление сделки, отдельная ручка архивации воронки целиком — в [`frontend/docs/backend-issues.md`](https://github.com/lct-testkit/frontend/blob/main/docs/backend-issues.md), с привязкой к файлу и строке. Данные отчёта в JSON, не только файлом, — `GET /api/reports/{report_id}/data`.
 
 | Документ | Что внутри |
 |---|---|
