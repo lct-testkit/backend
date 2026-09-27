@@ -106,6 +106,7 @@ organization_licenses_router = APIRouter(
 OrgRead = Annotated[Principal, Depends(require_permission(Permission.ORG_READ))]
 OrgWrite = Annotated[Principal, Depends(require_permission(Permission.ORG_WRITE))]
 OrgReveal = Annotated[Principal, Depends(require_permission(Permission.ORG_REVEAL))]
+OrgRestore = Annotated[Principal, Depends(require_permission(Permission.ORG_RESTORE))]
 ContactRead = Annotated[Principal, Depends(require_permission(Permission.CONTACT_READ))]
 ContactWrite = Annotated[Principal, Depends(require_permission(Permission.CONTACT_WRITE))]
 ContactReveal = Annotated[Principal, Depends(require_permission(Permission.CONTACT_REVEAL))]
@@ -303,6 +304,24 @@ async def reveal_organization(
     organization = await service.get_or_404(organization_id, principal)
     await service.reveal(organization)
     return OrganizationRevealOut.model_validate(organization)
+
+
+@organizations_router.post(
+    "/{organization_id}/restore",
+    summary="Восстановить удалённую организацию",
+    description=(
+        "Возвращает мягко удалённую организацию в активное состояние (A-18). "
+        "Активную организацию — 409 CRM-1304. Роль: ADMIN, HEAD."
+    ),
+    response_model=OrganizationOut,
+)
+async def restore_organization(
+    session: DbSession, principal: OrgRestore, organization_id: Annotated[uuid.UUID, Path()]
+) -> OrganizationOut:
+    service = OrganizationService(session)
+    organization = await service.get_deleted_or_404(organization_id, principal)
+    organization = await service.restore(organization)
+    return OrganizationOut.from_model(organization)
 
 
 # =============================================================================

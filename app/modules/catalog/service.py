@@ -261,6 +261,47 @@ class OrganizationService:
             raise NotFoundError("Организация", organization_id)
         return organization
 
+    async def get_deleted_or_404(
+        self, organization_id: uuid.UUID, principal: Principal
+    ) -> Organization:
+        """Как `get_or_404`, но для восстановления (A-18): удалённая запись — это ровно то, что
+        ищет вызывающий, поэтому здесь её не прячем. Скоуп проверяется как обычно — `deleted_at`
+        на видимость по владельцу/сделкам не влияет, `organization_in_scope` его не смотрит."""
+        organization = await self._session.get(Organization, organization_id)
+        if organization is None:
+            raise NotFoundError("Организация", organization_id)
+        if not await organization_in_scope(self._session, principal, organization):
+            defer_denied_audit(
+                self._session,
+                entity_type="organization",
+                entity_id=organization_id,
+                reason="out_of_scope",
+            )
+            raise NotFoundError("Организация", organization_id)
+        return organization
+
+    async def restore(self, organization: Organization) -> Organization:
+        """Возвращает мягко удалённую организацию в активное состояние (A-18).
+
+        Активную организацию не трогаем и не делаем тихий no-op: повторный вызов или ошибка в
+        id у вызывающего должны быть видны, а не молча «успешны» — тот же принцип, что у
+        `VersionConflictError` (409, не «и так сделано»)."""
+        if organization.deleted_at is None:
+            raise AppError(
+                ErrorCode.ORGANIZATION_NOT_DELETED,
+                "Организация не удалена",
+                extra={"organization_id": str(organization.id)},
+            )
+        organization.deleted_at = None
+        await claim_version(self._session, organization)
+        await self._audit.record(
+            AuditAction.ORGANIZATION_RESTORED,
+            entity_type="organization",
+            entity_id=organization.id,
+        )
+        await self._session.flush()
+        return organization
+
     async def _find_by_inn(self, inn: str) -> Organization | None:
         return await self._session.scalar(select(Organization).where(Organization.inn == inn))
 

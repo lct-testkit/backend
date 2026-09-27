@@ -28008,6 +28008,86 @@
         ]
       }
     },
+    "/api/organizations/{organization_id}/restore": {
+      "post": {
+        "description": "Возвращает мягко удалённую организацию в активное состояние (A-18). Активную организацию — 409 CRM-1304. Роль: ADMIN, HEAD.",
+        "operationId": "restore_organization_api_organizations__organization_id__restore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Восстановить удалённую организацию",
+        "tags": [
+          "organizations"
+        ]
+      }
+    },
     "/api/organizations/{organization_id}/reveal": {
       "post": {
         "description": "Для org_type='individual_entrepreneur' — полные телефон/email (dop.md §11.8). Для остальных типов маскировать нечего, но ручка работает единообразно. Каждый вызов пишет PII_REVEALED.",
