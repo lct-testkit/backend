@@ -213,10 +213,11 @@ jobs:
     # Общий конвейер закреплён по SHA, а не по @main: иначе любой коммит в чужом репозитории
     # исполнялся бы здесь с `secrets: inherit` и правом писать в GHCR. SHA — main
     # lct-testkit/deploy на 2026-09-28 (`gh api repos/lct-testkit/deploy/commits/main --jq .sha`);
-    # единственное отличие от прежнего пина (a134fcf) — publish теперь на self-hosted раннере
-    # (та же причина, что у lint/test/security здесь). Обновляйте осознанно, прочитав изменения
-    # файла: `gh api "repos/lct-testkit/deploy/commits?path=.github/workflows/docker-publish.yml"`.
-    uses: lct-testkit/deploy/.github/workflows/docker-publish.yml@69a4a780894e83ce56851227c7a874f80a42b1c3
+    # отличия от пина a134fcf: publish на self-hosted раннере (та же причина, что у lint/test/security
+    # здесь) и публикация multi-arch (amd64 + arm64) вместо образа под архитектуру раннера — раннер
+    # aarch64, прод x86_64. Обновляйте осознанно, прочитав изменения файла:
+    # `gh api "repos/lct-testkit/deploy/commits?path=.github/workflows/docker-publish.yml"`.
+    uses: lct-testkit/deploy/.github/workflows/docker-publish.yml@2ad9589e6076b167b635bab23d028483ed8ee548
     with:
       image: api
       event-type: backend-image-built
