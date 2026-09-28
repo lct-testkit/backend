@@ -165,11 +165,17 @@ class TestProductCode:
         assert body["deleted"] is True
         assert body["errors"][0]["field"] == "code"
 
-    def test_code_of_an_active_product_is_still_a_field_error(self, client) -> None:
+    def test_code_of_an_active_product_is_also_a_conflict(self, client) -> None:
+        """До этого PR дубль кода активного товара отдавал 422 (просто ошибка валидации),
+        а дубль кода УДАЛЁННОГО — 409 CRM-1301 (тест выше): одна и та же проблема двумя
+        разными кодами в зависимости от состояния существующей строки. Теперь оба случая
+        симметричны — 409 CRM-1301 с полем в errors[], как и для удалённого."""
         _admin(client)
         code = f"prod-{uuid.uuid4().hex[:10]}"
         assert _product(client, code=code).status_code == 201
 
         again = _product(client, code=code)
-        assert again.status_code == 422, again.text
-        assert again.json()["errors"][0]["field"] == "code"
+        assert again.status_code == 409, again.text
+        body = again.json()
+        assert body["code"] == "CRM-1301"
+        assert body["errors"][0]["field"] == "code"
