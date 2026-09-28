@@ -469,7 +469,7 @@ async def change_password(
                 value=rotated.sid,
                 max_age=settings.session_ttl,
                 httponly=True,
-                secure=settings.app_profile != "dev",
+                secure=settings.cookies_secure,
                 samesite="lax",
                 path="/",
             )
