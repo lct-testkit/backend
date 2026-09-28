@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import structlog
-from sqlalchemy import Select, select, text, update
+from sqlalchemy import Select, insert, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,6 +45,7 @@ from app.core.context import (
     set_request_id,
 )
 from app.core.errors import AppError, ErrorCode
+from app.core.ids import uuid7
 from app.core.masking import mask_mapping
 from app.core.metrics import audit_records_total
 from app.modules.audit.actions import AuditAction
@@ -190,6 +191,20 @@ class AuditService:
         время захвата и потом возвращается прежним): владелец лока, застрявший на медленном
         внешнем вызове, не должен замораживать запись аудита у всей системы.
         """
+        head, _now = await self._lock_chain()
+        return head
+
+    async def _lock_chain(self) -> tuple[str | None, dt.datetime]:
+        """Берёт лок цепочки и возвращает (голова, `clock_timestamp()` под локом).
+
+        Всё, что идёт после захвата лока, исполняется, пока держат ВСЕ остальные писатели аудита
+        (перф-диагностика 28.09, живой стенд, 50 RPS): в очереди за локом стояло 15–47 сессий, а
+        время ожидания задавали не запросы БД (сами по себе доли миллисекунды), а число обращений
+        между ними — после каждого `await` управление возвращается в цикл событий, где ещё десятки
+        корутин, и каждое обращение стоило ~3 мс. Поэтому под локом остаются четыре обращения:
+        этот запрос, INSERT записи, UPDATE указателя и COMMIT владельца транзакции (раньше — шесть:
+        возврат `lock_timeout`, чтение головы и чтение времени были тремя отдельными запросами).
+        """
         previous = await self._session.scalar(text("SELECT current_setting('lock_timeout')"))
         await self._session.execute(
             text("SELECT set_config('lock_timeout', :value, true)"),
@@ -209,13 +224,21 @@ class AuditService:
                     headers={"Retry-After": "1"},
                 ) from exc
             raise
-        await self._session.execute(
-            text("SELECT set_config('lock_timeout', :value, true)"), {"value": previous or "0"}
-        )
-        # `audit_chain_head` — синглтон-таблица, не `ORDER BY ... LIMIT 1` по партиционированному
-        # audit_log (перф-диагностика 27.09, см. докстринг AuditChainHead в audit/models.py):
-        # то же самое значение, но без constraint exclusion по всем партициям на каждый вызов.
-        return await self._session.scalar(select(AuditChainHead.hash))
+        # Один запрос вместо трёх: возврат прежнего `lock_timeout`, голова цепочки и время под
+        # локом. `audit_chain_head` — синглтон-таблица, не `ORDER BY ... LIMIT 1` по
+        # партиционированному audit_log (перф-диагностика 27.09, см. докстринг AuditChainHead в
+        # audit/models.py). `clock_timestamp()` берётся именно после захвата лока (см. `record`).
+        row = (
+            await self._session.execute(
+                text(
+                    "SELECT set_config('lock_timeout', :value, true) AS restored, "
+                    "(SELECT hash FROM audit_chain_head) AS head, "
+                    "clock_timestamp() AS locked_at"
+                ),
+                {"value": previous or "0"},
+            )
+        ).one()
+        return row.head, row.locked_at
 
     async def record(
         self,
@@ -236,7 +259,17 @@ class AuditService:
         resolved_role = actor_role or (actor.role if actor else None)
         masked_changes = mask_mapping(changes) if changes else None
 
-        prev_hash = await self._chain_head()
+        # created_at нужен до вставки: он входит в хэш и в первичный ключ. Берётся именно
+        # `clock_timestamp()` и именно ПОСЛЕ захвата лока цепочки: `now()` — это время начала
+        # транзакции. Долгая транзакция, начавшаяся раньше, но получившая лок позже, писала бы
+        # запись «в прошлое» с `prev_hash` более поздней, а следующая находила бы голову по
+        # `created_at` уже не там, где она в цепочке: цепочка ветвилась и рвалась (26 разрывов и
+        # 7 ветвлений на 96 параллельных записях). Время под локом растёт в порядке захвата
+        # лока — порядок по `created_at` и порядок хэшей совпадают.
+        # То, что вызывающий уже наменял в сессии (сделка, задачи, outbox), уходит в БД ДО захвата
+        # лока: иначе этот сброс исполнялся бы под локом, в очереди всех остальных писателей аудита.
+        await self._session.flush()
+        prev_hash, now = await self._lock_chain()
         # С ключом запись подписывается HMAC (версия 3), без ключа — как раньше (версия 2).
         hmac_key = audit_hmac_key()
         hash_version = AUDIT_HASH_VERSION_HMAC if hmac_key else AUDIT_HASH_VERSION
@@ -256,14 +289,7 @@ class AuditService:
             prev_hash=prev_hash,
             hash_version=hash_version,
         )
-        # created_at нужен до вставки: он входит в хэш и в первичный ключ. Берётся именно
-        # `clock_timestamp()` и именно ПОСЛЕ захвата лока цепочки: `now()` — это время начала
-        # транзакции. Долгая транзакция, начавшаяся раньше, но получившая лок позже, писала бы
-        # запись «в прошлое» с `prev_hash` более поздней, а следующая находила бы голову по
-        # `created_at` уже не там, где она в цепочке: цепочка ветвилась и рвалась (26 разрывов и
-        # 7 ветвлений на 96 параллельных записях). Время под локом растёт в порядке захвата
-        # лока — порядок по `created_at` и порядок хэшей совпадают.
-        now = await self._session.scalar(text("SELECT clock_timestamp()"))
+        entry.id = uuid7()
         entry.created_at = now  # type: ignore[assignment]
         entry.hash = compute_hash(
             prev_hash=prev_hash,
@@ -283,12 +309,39 @@ class AuditService:
             hmac_key=hmac_key,
         )
 
-        self._session.add(entry)
-        await self._session.flush()
-        # Указатель обновляется в той же транзакции и под тем же локом: если транзакция
-        # откатится, откатится и он, а `_chain_head()` следующего писателя снова увидит
-        # прежнюю голову — цепочка не заметит несостоявшуюся запись.
-        await self._session.execute(update(AuditChainHead).values(hash=entry.hash))
+        # Вставка записи и продвижение указателя головы — ОДНИМ запросом (`WITH ins AS (INSERT ...)
+        # UPDATE ...`; Postgres исполняет data-modifying CTE до конца, даже если на него нет
+        # ссылок): ещё одно обращение под глобальным локом стоило бы ~3 мс всем писателям аудита.
+        # Указатель обновляется в той же транзакции и под тем же локом: если транзакция откатится,
+        # откатится и он, а `_lock_chain()` следующего писателя снова увидит прежнюю голову —
+        # цепочка не заметит несостоявшуюся запись.
+        columns = (
+            "id",
+            "created_at",
+            "actor_id",
+            "actor_role",
+            "impersonated_by",
+            "action",
+            "entity_type",
+            "entity_id",
+            "changes",
+            "result",
+            "ip",
+            "user_agent",
+            "request_id",
+            "prev_hash",
+            "hash",
+            "hash_version",
+        )
+        inserted = (
+            insert(AuditLog.__table__)  # type: ignore[arg-type]
+            .values({name: getattr(entry, name) for name in columns})
+            .returning(AuditLog.__table__.c.id)
+            .cte("audit_insert")
+        )
+        await self._session.execute(
+            update(AuditChainHead).values(hash=entry.hash).add_cte(inserted)
+        )
 
         audit_records_total.labels(action=str(action), result=str(result)).inc()
         logger.info(
