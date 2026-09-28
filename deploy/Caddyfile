@@ -65,14 +65,17 @@
 	# Не для /auth/*: страницы входа и консоль Keycloak используют inline-скрипты (importmap), и наша
 	# script-src 'self' их блокировала. Там действует собственная CSP Keycloak (frame-ancestors 'self',
 	# object-src 'none'). `>` — отложенная установка: перекрывает CSP апстрима, как и раньше.
-	@app_csp not path /auth/*
+	# И не для /grafana/*: интерфейс Grafana грузит inline-скрипты (grafanaBootData, тема), правит <base href>
+	# и использует eval — наши script-src 'self' и base-uri 'none' оставляли страницу пустой («Failed to
+	# start Grafana»). У Grafana свои заголовки (X-Frame-Options: deny), поэтому политику сюда не ставим.
+	@app_csp not path /auth/* /grafana/*
 	header @app_csp >Content-Security-Policy "default-src 'self'; img-src 'self' data: blob: {$S3_ORIGIN}; connect-src 'self' {$S3_ORIGIN}; style-src 'self' 'unsafe-inline'; script-src {$CSP_SCRIPT_SRC:'self'}; worker-src 'self' blob:; object-src 'self' blob:; frame-src 'self' blob: {$S3_ORIGIN}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 
 	# X-Frame-Options по той же причине не для /auth/*: консоль администратора Keycloak сама
 	# встраивает свои страницы (3p-cookies/step1.html, login-status-iframe.html) в iframe, и наш
 	# DENY блокировал их — консоль вечно крутила индикатор загрузки. Keycloak отдаёт там свой
 	# SAMEORIGIN вместе с frame-ancestors 'self'.
-	@app_frame not path /auth/*
+	@app_frame not path /auth/* /grafana/*
 	header @app_frame >X-Frame-Options "DENY"
 
 	# Прокидываем идентификатор запроса или создаём новый.
@@ -114,6 +117,18 @@
 	# Метрики наружу не выставляются: их собирает Prometheus внутри сети.
 	handle /metrics {
 		respond "Not Found" 404
+	}
+
+	# Grafana (профиль compose `monitoring`, см. docker-compose.yml) — дашборды по метрикам Prometheus.
+	# `handle`, не `handle_path`: префикс НЕ срезаем, ровно как у /auth/* — Grafana сама знает, что живёт
+	# под /grafana (GF_SERVER_SERVE_FROM_SUB_PATH=true + GF_SERVER_ROOT_URL=.../grafana/), и сама строит
+	# абсолютные ссылки/редиректы/куки с этим префиксом. Срезать префикс здесь (handle_path) с этими
+	# двумя переменными означало бы двойной префикс либо битые редиректы — у Grafana свой вход
+	# (администратора), отдельного IP-ограничения, в отличие от консоли Keycloak, здесь не заводим.
+	# `/grafana` без слэша иначе не совпал бы с `/grafana/*` и ушёл в SPA-фолбэк клиента (200 с интерфейсом CRM).
+	redir /grafana /grafana/ 308
+	handle /grafana/* {
+		reverse_proxy grafana:3000
 	}
 
 	# API, публичные ручки подписания/проверки, health и статика Swagger UI (`/static/swagger/*`, `app/api/docs.py`,
