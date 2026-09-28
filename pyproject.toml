@@ -97,7 +97,7 @@ dev = [
     "fakeredis==2.38.0",
     "ruff==0.8.6",
     # Гейты качества CI (см. .github/workflows/ci.yml).
-    "mypy==1.14.1",
+    "mypy==2.3.1",
     "import-linter==2.1",
     "pytest-cov==6.0.0",
     "pip-audit==2.8.0",
