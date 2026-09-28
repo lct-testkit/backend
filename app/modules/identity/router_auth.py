@@ -78,8 +78,8 @@ def _set_session_cookie(response: Response, sid: str) -> None:
         value=sid,
         max_age=settings.session_ttl,
         httponly=True,
-        # В dev по http Secure-cookie браузер не примет, поэтому только в prod/demo.
-        secure=settings.app_profile != "dev",
+        # Secure по реальной схеме install.sh-адреса (base_url), не по профилю — cookies_secure.
+        secure=settings.cookies_secure,
         samesite="lax",
         path="/",
     )

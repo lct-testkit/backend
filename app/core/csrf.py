@@ -36,7 +36,7 @@ def set_csrf_cookie(response: Response, token: str) -> None:
         max_age=settings.session_ttl,
         # Читается JavaScript намеренно: это вторая половина double-submit.
         httponly=False,
-        secure=settings.app_profile != "dev",
+        secure=settings.cookies_secure,
         samesite="lax",
         path="/",
     )
