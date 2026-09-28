@@ -18,7 +18,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import session_scope
-from app.core.metrics import background_tasks_total
+from app.core.metrics import track_task
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
 from app.modules.crm.models import Deal
@@ -48,6 +48,7 @@ logger = structlog.get_logger(__name__)
 OTP_RETENTION_DAYS = 30
 
 
+@track_task
 async def sweep_signature_deadlines(ctx: dict[str, Any]) -> dict[str, int]:
     now = dt.datetime.now(dt.UTC)
     expired = 0
@@ -117,7 +118,6 @@ async def sweep_signature_deadlines(ctx: dict[str, Any]) -> dict[str, int]:
 
         agreements_expired = await _expire_edm_agreements(session, today=dt.date.today())
 
-    background_tasks_total.labels(task="sweep_signature_deadlines", result="success").inc()
     if expired or agreements_expired:
         logger.info(
             "signature_deadlines_swept", expired=expired, agreements_expired=agreements_expired
@@ -151,6 +151,7 @@ async def _expire_edm_agreements(session: AsyncSession, *, today: dt.date) -> in
     return len(agreements)
 
 
+@track_task
 async def sweep_signature_otp_cleanup(ctx: dict[str, Any]) -> dict[str, int]:
     cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(days=OTP_RETENTION_DAYS)
     async with session_scope() as session:
@@ -158,6 +159,5 @@ async def sweep_signature_otp_cleanup(ctx: dict[str, Any]) -> dict[str, int]:
             delete(SignatureOtpCode).where(SignatureOtpCode.created_at < cutoff)
         )
     removed = result.rowcount or 0
-    background_tasks_total.labels(task="sweep_signature_otp_cleanup", result="success").inc()
     logger.info("signature_otp_codes_purged", removed=removed)
     return {"removed": removed}

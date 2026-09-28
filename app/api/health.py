@@ -10,11 +10,13 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Response, status
 from prometheus_client import CONTENT_TYPE_LATEST
 
 from app.core.config import get_settings
 from app.core.db import check_database
+from app.core.dependency_metrics import DependencyMetricsRefresher
 from app.core.errors import DependencyStatus
 from app.core.metrics import dependency_up, render_metrics
 from app.core.redis_client import check_queue, check_redis
@@ -22,10 +24,24 @@ from app.core.security import jwks_cache
 from app.core.storage import check_storage
 from app.modules.identity.keycloak import keycloak_client
 
+logger = structlog.get_logger(__name__)
+
 router = APIRouter(tags=["health"])
 
 # Без этих зависимостей приложение не может обслуживать запросы.
 CRITICAL = frozenset({"postgres", "redis"})
+
+# Ключ — имя, под которым проверка отдаёт результат (`DependencyStatus.name`, метка `dependency`).
+# Лямбды, а не сами функции: проверки подменяются в тестах по имени в этом модуле.
+_dependency_metrics = DependencyMetricsRefresher(
+    {
+        "postgres": lambda: check_database(),
+        "redis": lambda: check_redis(),
+        "keycloak_jwks": lambda: jwks_cache.check(),
+        "seaweedfs": lambda: check_storage(),
+        "queue": lambda: check_queue(),
+    }
+)
 
 
 @router.get(
@@ -98,11 +114,17 @@ async def ready(response: Response) -> dict[str, Any]:
     summary="Prometheus-метрики",
     description=(
         "RED-метрики, длина очереди, время импорта, нарушения SLA и hit-rate кэша. "
+        "Перед ответом обновляет `crm_dependency_up` и `crm_queue_depth` (проверки с таймаутом "
+        "1 с, результат кэшируется на 5 с). "
         "Роль: доступно без аутентификации внутри контура."
     ),
     include_in_schema=False,
 )
 async def metrics() -> Response:
+    try:
+        await _dependency_metrics.refresh()
+    except Exception:  # noqa: BLE001 — метрики отдаём, даже если проверки зависимостей сломались
+        logger.warning("dependency_metrics_refresh_failed", exc_info=True)
     return Response(content=render_metrics(), media_type=CONTENT_TYPE_LATEST)
 
 

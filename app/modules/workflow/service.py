@@ -41,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import run_after_commit
 from app.core.errors import AppError, ErrorCode, FieldError, NotFoundError, ValidationError
+from app.core.metrics import record_cache
 from app.core.optimistic import claim_version
 from app.core.redis_client import TTL_WORKFLOW_GRAPH, get_redis, key_workflow_graph
 from app.core.security import Principal
@@ -87,6 +88,10 @@ class Graph:
     sla_rules: list[SlaRule]
 
 
+#: Значение метки `cache` в `crm_cache_requests_total`.
+WORKFLOW_GRAPH_CACHE = "workflow_graph"
+
+
 async def invalidate_workflow_cache(workflow_id: uuid.UUID) -> None:
     try:
         await get_redis().delete(key_workflow_graph(workflow_id))
@@ -123,10 +128,13 @@ async def get_cached_published_graph(workflow: Workflow) -> dict[str, Any]:
         if cached:
             entry = json.loads(cached)
             if isinstance(entry, dict) and entry.get("h") == workflow.graph_hash and "g" in entry:
+                record_cache(WORKFLOW_GRAPH_CACHE, hit=True)
                 return entry["g"]
     except Exception:  # noqa: BLE001 — кэш не источник истины
         pass
 
+    # Устаревшая по хэшу запись и недоступный Redis — тоже промах: граф пришлось брать из БД.
+    record_cache(WORKFLOW_GRAPH_CACHE, hit=False)
     graph = workflow.published_graph
     try:
         await get_redis().setex(

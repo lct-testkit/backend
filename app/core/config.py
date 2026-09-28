@@ -12,7 +12,7 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import unquote, urlsplit
 
-from pydantic import SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 AppProfile = Literal["dev", "demo", "prod"]
@@ -265,6 +265,11 @@ class Settings(BaseSettings):
     # --- Прочее ----------------------------------------------------------
     log_level: str = "INFO"
     log_json: bool = True
+    # Порт /metrics воркера arq (prometheus_client.start_http_server в on_startup). У воркера нет
+    # HTTP-сервера, а его метрики (crm_background_tasks_total, SLA, отчёты, импорт) живут в его
+    # процессе и до api не долетают. 0 — не поднимать. Наружу порт не публикуется: Prometheus ходит
+    # по внутренней сети (compose: сервис `worker`, k8s: headless Service).
+    worker_metrics_port: int = Field(default=9101, ge=0, le=65535)
     idempotency_ttl_seconds: int = 86400
     pagination_max_limit: int = 100
     # Версия политики по умолчанию. Действующая версия публикуется через

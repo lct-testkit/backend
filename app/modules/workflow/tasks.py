@@ -26,7 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import session_scope
-from app.core.metrics import background_tasks_total
+from app.core.metrics import track_task
 from app.modules.workflow.models import MappingJobStatus, StatusMappingJob
 from app.modules.workflow.service import WorkflowService
 
@@ -41,6 +41,7 @@ async def _process_one_batch(session: AsyncSession, job: StatusMappingJob) -> No
     await WorkflowService(session).advance_mapping_job(job)
 
 
+@track_task
 async def sweep_status_mapping_jobs(ctx: dict[str, Any]) -> dict[str, int]:
     """Обрабатывает по одной партии для каждой незавершённой задачи сопоставления."""
     touched = 0
@@ -73,7 +74,6 @@ async def sweep_status_mapping_jobs(ctx: dict[str, Any]) -> dict[str, int]:
                 job.error = f"{type(exc).__name__}: перенос остановлен, подробности в журнале"
             touched += 1
 
-    background_tasks_total.labels(task="sweep_status_mapping_jobs", result="success").inc()
     if touched:
         logger.info("status_mapping_jobs_swept", jobs_touched=touched)
     return {"jobs_touched": touched}

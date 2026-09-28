@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.db import session_scope
-from app.core.metrics import background_tasks_total
+from app.core.metrics import track_task
 from app.modules.admin.models import FeatureFlag
 from app.modules.integration import bitrix, lms
 from app.modules.integration.models import IntegrationSource, OutboxEvent, OutboxStatus
@@ -60,6 +60,7 @@ _KNOWN_TARGETS = frozenset({"lms", "bitrix24"})
 _BITRIX_FLAG_CODE = "bitrix_connector"
 
 
+@track_task
 async def sweep_outbox_events(ctx: dict[str, Any]) -> dict[str, int]:
     """Два шага, а не одна транзакция на всю пачку.
 
@@ -84,7 +85,6 @@ async def sweep_outbox_events(ctx: dict[str, Any]) -> dict[str, int]:
     claimed = await _claim_events(settings, counters)
     for event_id, lease in claimed:
         await _deliver_event(event_id, lease, counters)
-    background_tasks_total.labels(task="sweep_outbox_events", result="success").inc()
     return counters
 
 
@@ -276,6 +276,7 @@ async def _deliver(
     raise RuntimeError(f"no deliverer for target={event.target!r}")
 
 
+@track_task
 async def sweep_lms_progress_pull(ctx: dict[str, Any]) -> dict[str, int]:
     """Раз в 30 минут (раздел 4.14): `GET /students/progress?updated_since=`
     с курсором в `sync_cursors`."""
@@ -309,5 +310,4 @@ async def sweep_lms_progress_pull(ctx: dict[str, Any]) -> dict[str, int]:
                 session, source_code="lms", resource="students_progress", value=latest_cursor
             )
 
-    background_tasks_total.labels(task="sweep_lms_progress_pull", result="success").inc()
     return {"pulled": batch.applied, "skipped": batch.skipped, "failed": batch.failed}

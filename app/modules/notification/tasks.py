@@ -35,7 +35,7 @@ from sqlalchemy import case, func, literal_column, or_, select
 
 from app.core.config import get_settings
 from app.core.db import session_scope
-from app.core.metrics import background_tasks_total
+from app.core.metrics import track_task
 from app.modules.identity.models import User
 from app.modules.notification.models import (
     DeliveryStatus,
@@ -71,6 +71,7 @@ _PRIORITY_RANK = case(
 )
 
 
+@track_task
 async def dispatch_pending_notifications(ctx: dict[str, Any]) -> dict[str, int]:
     settings = get_settings()
     sent = failed = skipped = deferred = 0
@@ -209,7 +210,6 @@ async def dispatch_pending_notifications(ctx: dict[str, Any]) -> dict[str, int]:
                 delivery.error = None
                 sent += 1
 
-    background_tasks_total.labels(task="dispatch_pending_notifications", result="success").inc()
     if deliveries:
         logger.info(
             "notifications_dispatched",
