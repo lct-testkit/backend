@@ -60,6 +60,7 @@ from app.core.errors import (
 )
 from app.core.ids import uuid7
 from app.core.masking import mask_email, mask_phone
+from app.core.permissions import Permission, has_permission
 from app.core.rate_limit import enforce as rate_limit_enforce
 from app.core.security import Principal
 from app.core.storage import (
@@ -733,7 +734,20 @@ class SignatureDocumentService:
         собственной подписи (протокол, dop.md §10.5) даже если сделка вне его
         скоупа по раздела 3.2 (например, HEAD подписывает по роли для
         сделки чужой команды). Живые подписанты определяются через
-        `signature_requests`, а не через сам факт наличия подписи."""
+        `signature_requests`, а не через сам факт наличия подписи.
+
+        AUDITOR держит `SIGNATURE_READ`, но не `SIGNATURE_CREATE` — этим она и
+        отличается от KAM/HEAD/ADMIN, у которых оба права идут вместе (раздел
+        4, `core/permissions.py`). Именно поэтому она не может пройти обычную
+        проверку ниже: сделка для этой роли всегда вне скоупа (`DealScope.
+        NONE`), так что `_check_entity_access` отказал бы на любом документе,
+        а не только на чужом. Право читать документ на подпись у AUDITOR не
+        привязано к сделке — тем же приёмом, что `EDM_READ` не привязан к
+        стороне соглашения (`list_edm_agreements` тоже без скоупа)."""
+        if not has_permission(principal.role, Permission.SIGNATURE_CREATE) and has_permission(
+            principal.role, Permission.SIGNATURE_READ
+        ):
+            return
         is_signer = await self._session.scalar(
             select(SignatureRequest.id).where(
                 SignatureRequest.document_id == document.id,

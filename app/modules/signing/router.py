@@ -127,15 +127,16 @@ async def list_documents(
         "выше). Права на каждый id — ровно как у одиночной карточки: недоступный "
         "или не найденный документ просто пропускается в ответе, запрос в целом "
         "не отказывает (тем же приёмом, что `fetchDocument` уже трактует 403/404 "
-        "на фронте). Роль: KAM (свои сделки), HEAD, ADMIN — как и у одиночной "
-        "карточки; этот маршрут объявлен раньше `/{document_id}`, чтобы `batch` "
-        "не пытался распарситься как UUID."
+        "на фронте). Роль: KAM (свои сделки), HEAD, ADMIN, и AUDITOR без скоупа "
+        "сделки — как и у одиночной карточки (`signature:read`); этот маршрут "
+        "объявлен раньше `/{document_id}`, чтобы `batch` не пытался распарситься "
+        "как UUID."
     ),
     response_model=SignatureDocumentListResponse,
 )
 async def list_documents_batch(
     session: DbSession,
-    principal: Annotated[Principal, Depends(require_permission(Permission.SIGNATURE_CREATE))],
+    principal: Annotated[Principal, Depends(require_permission(Permission.SIGNATURE_READ))],
     ids: Annotated[str, Query(description=f"UUID через запятую, до {_MAX_BATCH_IDS} уникальных")],
 ) -> SignatureDocumentListResponse:
     parsed = _parse_batch_ids(ids)
@@ -196,11 +197,17 @@ def _parse_batch_ids(raw_ids: str) -> list[uuid.UUID]:
 @signature_documents_router.get(
     "/{document_id}",
     summary="Карточка документа на подпись",
+    description=(
+        "Права — как на саму сделку (KAM/HEAD/ADMIN), плюс AUDITOR без скоупа "
+        "сделки: журнал аудита ссылается на документы по id (`audit:read`), и роль "
+        "должна уметь открыть карточку по этой ссылке — `signature:read`, а не "
+        "`signature:create` (см. `core/permissions.py`)."
+    ),
     response_model=SignatureDocumentOut,
 )
 async def get_document(
     session: DbSession,
-    principal: Annotated[Principal, Depends(require_permission(Permission.SIGNATURE_CREATE))],
+    principal: Annotated[Principal, Depends(require_permission(Permission.SIGNATURE_READ))],
     document_id: Annotated[uuid.UUID, Path()],
 ) -> SignatureDocumentOut:
     service = SignatureDocumentService(session)
@@ -252,11 +259,15 @@ async def void_document(
 @signature_documents_router.get(
     "/{document_id}/protocol",
     summary="Ссылка на протокол подписания",
+    description=(
+        "Права — как у карточки документа (`signature:read`): та же "
+        "`ensure_read_access`, включая AUDITOR без скоупа сделки."
+    ),
     response_model=DownloadUrlOut,
 )
 async def get_protocol(
     session: DbSession,
-    principal: Annotated[Principal, Depends(require_permission(Permission.SIGNATURE_CREATE))],
+    principal: Annotated[Principal, Depends(require_permission(Permission.SIGNATURE_READ))],
     document_id: Annotated[uuid.UUID, Path()],
 ) -> DownloadUrlOut:
     service = SignatureDocumentService(session)

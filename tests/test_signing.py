@@ -232,6 +232,15 @@ class TestPermissionMatrix:
     def test_signature_create_denied_for_auditor(self) -> None:
         assert not has_permission(Role.AUDITOR.value, Permission.SIGNATURE_CREATE)
 
+    @pytest.mark.parametrize("role", [Role.KAM, Role.HEAD, Role.ADMIN, Role.AUDITOR])
+    def test_signature_read_granted(self, role: Role) -> None:
+        # В отличие от SIGNATURE_CREATE, этим правом владеет и AUDITOR — карточка
+        # документа не завязана на скоуп сделки (`ensure_read_access`).
+        assert has_permission(role.value, Permission.SIGNATURE_READ)
+
+    def test_signature_read_denied_for_integration(self) -> None:
+        assert not has_permission(Role.INTEGRATION.value, Permission.SIGNATURE_READ)
+
     @pytest.mark.parametrize("role", [Role.HEAD, Role.ADMIN])
     def test_signature_void_granted(self, role: Role) -> None:
         assert has_permission(role.value, Permission.SIGNATURE_VOID)
