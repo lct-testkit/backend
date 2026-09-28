@@ -47,6 +47,12 @@ x-api-env: &api-env
   # `aud` включена. Выключать нельзя: без неё подойдёт любой токен realm'а,
   # выданный другому клиенту, и BFF-контур обходится целиком.
   KEYCLOAK_VERIFY_AUDIENCE: ${KEYCLOAK_VERIFY_AUDIENCE:-true}
+  # Прямой вход по Authorization: Bearer в обход серверной сессии (нужен нагрузочному тесту —
+  # loadtest/README.md); в prod бэкенд сам ограничивает его ролью INTEGRATION. Без этой строки
+  # якорь не пробрасывал переменную в контейнер api/worker, и Bearer молча получал 401 даже на
+  # profile=demo — тот же класс пропуска, что #17 закрыл для AUDIT_HMAC_KEY/SETTINGS_ENCRYPTION_KEY/
+  # SMTP_*. lct-testkit/deploy держит копию этого списка (scripts/check_drift.py сверяет их).
+  ALLOW_BEARER_AUTH: ${ALLOW_BEARER_AUTH:-false}
   S3_ENDPOINT_URL: http://seaweedfs:8333
   # Presigned-ссылки разыменовывает браузер клиента, а не контейнеры —
   # внутренний docker-хостнейм seaweedfs ему не резолвится. Caddy
