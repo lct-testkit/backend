@@ -8,6 +8,7 @@ workflow, catalog, reporting, integration, notification, audit, signing, admin.
 from __future__ import annotations
 
 import asyncio
+import gc
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -20,6 +21,7 @@ from app.api.health import router as health_router
 from app.core.config import get_settings
 from app.core.db import dispose_engine
 from app.core.logging import configure_logging
+from app.core.metrics import install_gc_metrics
 from app.core.problem import register_exception_handlers
 from app.core.redis_client import close_redis
 from app.core.security import jwks_cache
@@ -136,6 +138,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:  # noqa: BLE001
         # Keycloak может подниматься дольше API: не валим старт, /health/ready покажет.
         logger.warning("jwks_warmup_failed", error=type(exc).__name__)
+
+    # Пауза полной сборки мусора останавливает событийный цикл, а за время старта в процессе
+    # накоплены сотни тысяч долгоживущих объектов (модули, роутеры, схемы Pydantic, модели
+    # SQLAlchemy). Пока держится глобальный лок аудита, пауза одного процесса ставит в очередь
+    # запросы ВСЕХ реплик (перф-диагностика 28.09: периодические провалы p50 с 40 мс до ~1 с на
+    # 5–15 секунд). `gc.freeze()` выводит накопленное из сборки навсегда: полные сборки видят
+    # только объекты, созданные после старта. Реальные паузы показывает `crm_gc_pause_seconds`.
+    install_gc_metrics()
+    gc.collect()
+    gc.freeze()
 
     try:
         yield

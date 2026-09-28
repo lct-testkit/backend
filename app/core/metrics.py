@@ -11,10 +11,11 @@ arq, у которого свой `/metrics` (`start_worker_metrics_server`, п�
 from __future__ import annotations
 
 import functools
+import gc
 import os
 import time
 from collections.abc import Awaitable, Callable, Coroutine
-from typing import Any, ParamSpec, TypeVar
+from typing import Any
 from wsgiref.simple_server import WSGIServer
 
 import structlog
@@ -29,9 +30,6 @@ from prometheus_client import (
 from prometheus_client import generate_latest as _generate_latest
 
 logger = structlog.get_logger(__name__)
-
-_P = ParamSpec("_P")
-_R = TypeVar("_R")
 
 # --- RED ------------------------------------------------------------------
 
@@ -136,11 +134,39 @@ dependency_up = Gauge(
 )
 
 
+# --- Процесс --------------------------------------------------------------
+
+gc_pause_seconds = Histogram(
+    "crm_gc_pause_seconds",
+    "Пауза сборщика мусора Python по поколениям: событийный цикл стоит всё это время",
+    labelnames=("generation",),
+    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0),
+)
+
+_gc_started: dict[int, float] = {}
+
+
+def _observe_gc(phase: str, info: dict[str, Any]) -> None:
+    generation = int(info["generation"])
+    if phase == "start":
+        _gc_started[generation] = time.perf_counter()
+        return
+    started = _gc_started.pop(generation, None)
+    if started is not None:
+        gc_pause_seconds.labels(generation=str(generation)).observe(time.perf_counter() - started)
+
+
+def install_gc_metrics() -> None:
+    """Подписывает `gc_pause_seconds` на сборки мусора; повторный вызов ничего не делает."""
+    if _observe_gc not in gc.callbacks:
+        gc.callbacks.append(_observe_gc)
+
+
 def record_cache(cache: str, *, hit: bool) -> None:
     cache_requests_total.labels(cache=cache, result="hit" if hit else "miss").inc()
 
 
-def track_task(func: Callable[_P, Awaitable[_R]]) -> Callable[_P, Coroutine[Any, Any, _R]]:
+def track_task[**P, R](func: Callable[P, Awaitable[R]]) -> Callable[P, Coroutine[Any, Any, R]]:
     """Декоратор фоновой задачи arq: длительность и итог (`success`/`failure`) под её именем.
 
     Итог считается один раз на запуск, в том числе для досрочного возврата из задачи; отмена
@@ -150,7 +176,7 @@ def track_task(func: Callable[_P, Awaitable[_R]]) -> Callable[_P, Coroutine[Any,
     task = func.__name__
 
     @functools.wraps(func)
-    async def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         started = time.perf_counter()
         result = "success"
         try:
