@@ -8,7 +8,6 @@ URL подключения берётся из настроек приложен
 from __future__ import annotations
 
 import asyncio
-import os
 from logging.config import fileConfig
 
 from alembic import context
@@ -30,10 +29,14 @@ if config.config_file_name is not None:
 # переменная ниже не нужна; она нужна только при локальном запуске `alembic`
 # вне docker compose, где `.env` даёт один `DATABASE_URL` на всё — тот же
 # приём опционального оверрайда, что и `KEYCLOAK_INTERNAL_URL`/
-# `S3_PUBLIC_ENDPOINT_URL`.
+# `S3_PUBLIC_ENDPOINT_URL`. Читаем через `Settings` (`migrations_database_url`),
+# не напрямую из `os.environ`: значение из `.env` тоже должно подхватываться,
+# а не только настоящая переменная окружения (D6 — раньше `os.environ.get`
+# здесь молча игнорировал `MIGRATIONS_DATABASE_URL`, заданный только в `.env`).
+_settings = get_settings()
 config.set_main_option(
     "sqlalchemy.url",
-    os.environ.get("MIGRATIONS_DATABASE_URL") or get_settings().database_url,
+    _settings.migrations_database_url or _settings.database_url,
 )
 
 
