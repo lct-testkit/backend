@@ -88,7 +88,7 @@ curl http://localhost:8080/health/ready
 | localhost:5433 | PostgreSQL для pgAdmin (`POSTGRES_PORT`): база `crm`, пользователь `crm` |
 | https://localhost:8443 | то же по TLS (`tls internal`, самоподписанный сертификат — предупреждение браузера ожидаемо) |
 
-Метрики Prometheus доступны только внутри сети (`api:8000/metrics`): через Caddy `/metrics` отвечает `404`.
+Метрики Prometheus доступны только внутри сети (`api:8000/metrics`, воркер — `worker:9101/metrics`): через Caddy `/metrics` отвечает `404`.
 
 Демо-учётки создаются при импорте realm `crm` (`deploy/keycloak/realm-crm.json`). **Только для демо**, в настоящей эксплуатации заменить:
 
@@ -369,6 +369,7 @@ deploy/                  Caddyfile, entrypoint.sh, keycloak/realm-crm.json, post
 | `INTEGRATION_WEBHOOK_RATE_LIMIT_PER_MIN` | 60 | лимит запросов на вебхуки CMS/LMS/Bitrix24 |
 | `LOG_LEVEL` / `LOG_JSON` | `INFO` / `true` | уровень и формат логов (structlog + JSON) |
 | `UVICORN_WORKERS` | 1 | воркеров uvicorn на контейнер `api`; масштабирование — только репликами |
+| `WORKER_METRICS_PORT` | 9101 | порт `/metrics` воркера arq внутри сети (наружу не публикуется); `0` — выключить |
 | `HTTP_PORT` / `HTTPS_PORT` / `S3_PROXY_PORT` / `POSTGRES_PORT` | 8080 / 8443 / 8333 / 5433 | порты на хосте (`caddy`, `postgres`) |
 | `WEB_UPSTREAM` | `web:3000` | куда Caddy отдаёт всё, что не `/api`, `/public`, `/health`, `/static`, `/auth` |
 | `CSP_SCRIPT_SRC` | `'self'` | `script-src` в CSP; ослабляется для Vite в разработке |
@@ -463,7 +464,15 @@ locust -f loadtest/locustfile_transition.py --headless -u 50 -r 25 -t 60s --host
 
 **Логи.** `structlog` + stdlib в одном конвейере (`app/core/logging.py`), JSON по умолчанию (`LOG_JSON=true`); `request_id` попадает в каждую запись через contextvars.
 
-**Метрики.** Prometheus на `GET /metrics` — только внутри docker-сети (`api:8000/metrics`), через Caddy отвечает `404` (проверено). RED-метрики (`crm_http_requests_total`, `crm_http_request_duration_seconds`, `crm_http_errors_total`), плюс `crm_queue_depth`, `crm_sla_violations_total`, `crm_sla_breaching_deals`, `crm_import_duration_seconds`, `crm_cache_requests_total`, `crm_audit_records_total`, `crm_dependency_up` — полный список в `app/core/metrics.py`.
+**Метрики.** Prometheus на `GET /metrics` — только внутри docker-сети (`api:8000/metrics`), через Caddy отвечает `404` (проверено). Метрики живут в памяти процесса, поэтому их отдают оба процесса: у воркера arq свой `/metrics` на порту `WORKER_METRICS_PORT` (по умолчанию 9101, `0` — выключить; сервер поднимается в `on_startup`, занятый порт воркер не останавливает, только пишет предупреждение в лог).
+
+| Процесс | Метрики |
+|---|---|
+| api | RED: `crm_http_requests_total`, `crm_http_request_duration_seconds`, `crm_http_errors_total`; `crm_cache_requests_total` (кэш графа воронки `workflow_graph`); `crm_dependency_up`, `crm_queue_depth` |
+| api и worker | `crm_audit_records_total{action,result}` — записи аудита делают оба процесса, поэтому Prometheus суммирует оба источника |
+| worker | `crm_background_tasks_total{task,result}` и `crm_background_task_duration_seconds{task}` (декоратор `@track_task` на каждой задаче arq, в том числе неудачи и отмены); `crm_sla_violations_total{workflow,status}` (вход сделки в `breached`), `crm_sla_breaching_deals{sla_state}` (число открытых сделок по состояниям, обновляется каждым проходом SLA-скана); `crm_reports_in_progress` (рендеры в работе); `crm_import_rows_total{entity_type,status}`, `crm_import_duration_seconds{entity_type,phase}` (`validate`, `apply`) |
+
+`crm_dependency_up` и `crm_queue_depth` обновляются при каждом scrape `/metrics`, а не только в `/health/ready`: проверки идут с таймаутом 1 с, результат кэшируется на 5 с, зависшая проба не запускается повторно. Если Redis не отвечает, ряд `crm_queue_depth` пропадает, а не застывает на старом значении. Реплик воркера может быть несколько, а cron-задача каждый тик выполняется на одной из них, поэтому gauge SLA у остальных реплик устаревает — в Grafana агрегируйте `max`, а не `sum`. Полный список — в `app/core/metrics.py`.
 
 ## CI/CD
 

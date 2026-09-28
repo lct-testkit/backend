@@ -2,14 +2,36 @@
 
 Спецификация требует RED-метрики (Rate, Errors, Duration), длину очереди,
 время импорта, нарушения SLA и hit-rate кэша.
+
+Метрики живут в памяти процесса. HTTP-метрики, `crm_cache_requests_total`, `crm_dependency_up` и
+`crm_queue_depth` ведёт api (`GET /metrics`), метрики фоновых задач, SLA, отчётов и импорта — воркер
+arq, у которого свой `/metrics` (`start_worker_metrics_server`, порт `WORKER_METRICS_PORT`).
 """
 
 from __future__ import annotations
 
+import functools
 import os
+import time
+from collections.abc import Awaitable, Callable, Coroutine
+from typing import Any, ParamSpec, TypeVar
+from wsgiref.simple_server import WSGIServer
 
-from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, multiprocess
+import structlog
+from prometheus_client import (
+    CollectorRegistry,
+    Counter,
+    Gauge,
+    Histogram,
+    multiprocess,
+    start_http_server,
+)
 from prometheus_client import generate_latest as _generate_latest
+
+logger = structlog.get_logger(__name__)
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
 
 # --- RED ------------------------------------------------------------------
 
@@ -56,6 +78,8 @@ background_tasks_total = Counter(
 
 # --- Импорт ---------------------------------------------------------------
 
+# `phase="validate"` — вызов проверки (dry-run) целиком, `phase="apply"` — задание от `started_at`
+# до `finished_at`. У отката момента старта в задании нет, поэтому его длительность не измеряется.
 import_duration_seconds = Histogram(
     "crm_import_duration_seconds",
     "Время выполнения импорта каталога",
@@ -65,7 +89,8 @@ import_duration_seconds = Histogram(
 
 import_rows_total = Counter(
     "crm_import_rows_total",
-    "Обработанные строки импорта",
+    "Обработанные строки импорта: applied/skipped/error при применении, "
+    "rolled_back/rollback_blocked при откате",
     labelnames=("entity_type", "status"),
 )
 
@@ -113,6 +138,58 @@ dependency_up = Gauge(
 
 def record_cache(cache: str, *, hit: bool) -> None:
     cache_requests_total.labels(cache=cache, result="hit" if hit else "miss").inc()
+
+
+def track_task(func: Callable[_P, Awaitable[_R]]) -> Callable[_P, Coroutine[Any, Any, _R]]:
+    """Декоратор фоновой задачи arq: длительность и итог (`success`/`failure`) под её именем.
+
+    Итог считается один раз на запуск, в том числе для досрочного возврата из задачи; отмена
+    (таймаут задания, остановка воркера) — тоже `failure`. Имя и `__qualname__` сохраняются: arq
+    регистрирует функцию по ним, а `WorkerSettings` и тесты сравнивают саму функцию.
+    """
+    task = func.__name__
+
+    @functools.wraps(func)
+    async def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        started = time.perf_counter()
+        result = "success"
+        try:
+            return await func(*args, **kwargs)
+        except BaseException:
+            result = "failure"
+            raise
+        finally:
+            background_task_duration_seconds.labels(task=task).observe(
+                time.perf_counter() - started
+            )
+            background_tasks_total.labels(task=task, result=result).inc()
+
+    return wrapper
+
+
+def start_worker_metrics_server(port: int) -> WSGIServer | None:
+    """Поднимает `/metrics` воркера на `port`; `0` — выключено.
+
+    Воркер не слушает HTTP, поэтому его метрики иначе никто не заберёт. Занятый порт не должен
+    ронять воркер: очередь важнее метрик, поэтому ошибка только пишется в лог. Возвращает сервер
+    для `stop_worker_metrics_server` или `None`, если он не запущен.
+    """
+    if port == 0:
+        return None
+    try:
+        server, _thread = start_http_server(port)
+    except OSError:
+        logger.warning("worker_metrics_server_failed", port=port, exc_info=True)
+        return None
+    logger.info("worker_metrics_server_started", port=port)
+    return server
+
+
+def stop_worker_metrics_server(server: WSGIServer | None) -> None:
+    if server is None:
+        return
+    server.shutdown()
+    server.server_close()
 
 
 def render_metrics() -> bytes:

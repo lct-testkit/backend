@@ -78,6 +78,7 @@ x-api-env: &api-env
   SMS_GATEWAY_URL: http://sms-gateway-mock:8090
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   LOG_JSON: ${LOG_JSON:-true}
+  WORKER_METRICS_PORT: ${WORKER_METRICS_PORT:-9101}
   # Раздел 4.14/7.8: до спринта 9 эти шесть переменных были объявлены в
   # `Settings`/`.env.example` (часть — ещё в спринте 7), но ни одна не
   # была прокинута через этот anchor — живая проверка спринта 9 поймала,

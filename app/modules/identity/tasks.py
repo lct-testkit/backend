@@ -28,7 +28,7 @@ import structlog
 from sqlalchemy import func, select
 
 from app.core.db import session_scope
-from app.core.metrics import background_tasks_total
+from app.core.metrics import track_task
 from app.modules.identity.admin_service import AdminUserService
 from app.modules.identity.erasure_service import ErasureExecutionService
 from app.modules.identity.models import DataErasureRequest, ErasureStatus, User, UserStatus
@@ -40,6 +40,7 @@ INVITE_EXPIRE_DAYS = 30
 AUTO_UNBLOCK_REASON = "Срок блокировки истёк"
 
 
+@track_task
 async def sweep_erasure_requests(ctx: dict[str, Any]) -> dict[str, int]:
     now = dt.datetime.now(dt.UTC)
     async with session_scope() as session:
@@ -75,12 +76,12 @@ async def sweep_erasure_requests(ctx: dict[str, Any]) -> dict[str, int]:
             failed += 1
             logger.exception("erasure_execution_failed", request_id=str(request_id))
 
-    background_tasks_total.labels(task="sweep_erasure_requests", result="success").inc()
     if executed or blocked or failed:
         logger.info("erasure_sweep_completed", executed=executed, blocked=blocked, failed=failed)
     return {"executed": executed, "blocked": blocked, "failed": failed}
 
 
+@track_task
 async def sweep_user_lifecycle(ctx: dict[str, Any]) -> dict[str, int]:
     """Автоматика учётных записей по времени.
 
@@ -152,7 +153,6 @@ async def sweep_user_lifecycle(ctx: dict[str, Any]) -> dict[str, int]:
             failed += 1
             logger.exception("user_invite_expiry_failed", user_id=str(user_id))
 
-    background_tasks_total.labels(task="sweep_user_lifecycle", result="success").inc()
     if unblocked or invites_expired or failed:
         logger.info(
             "user_lifecycle_swept",

@@ -30,14 +30,14 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from typing import Any
+from typing import Any, NamedTuple
 
 import structlog
-from sqlalchemy import and_, not_, select
+from sqlalchemy import and_, func, not_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import session_scope
-from app.core.metrics import background_tasks_total
+from app.core.metrics import sla_breaching_deals, sla_violations_total, track_task
 from app.modules.crm.models import Deal, SlaState
 from app.modules.identity.models import Team, User, UserStatus
 from app.modules.notification.service import NotificationPriority, get_notification_service
@@ -63,20 +63,31 @@ _DEFAULT_RULE: dict[str, Any] = {
 }
 
 
-async def _sla_rules(
-    session: AsyncSession, workflow_ids: set[uuid.UUID]
-) -> dict[tuple[uuid.UUID, str], dict[str, Any]]:
+class _SlaSnapshots(NamedTuple):
+    """Что воркеру нужно знать о воронках партии: правила и коды для меток метрики."""
+
+    rules: dict[tuple[uuid.UUID, str], dict[str, Any]]
+    #: (воронка, id статуса) → (код воронки, код статуса).
+    codes: dict[tuple[uuid.UUID, str], tuple[str, str]]
+
+
+async def _sla_snapshots(session: AsyncSession, workflow_ids: set[uuid.UUID]) -> _SlaSnapshots:
     """Правила SLA: (воронка, id статуса) → правило. Сделки живут по снимку воронки на момент
     публикации, поэтому и правила берутся из него, а не из живых `sla_rules` черновика. Поля,
     которых нет в старом снимке, добираются умолчаниями."""
     rows = await session.execute(
-        select(Workflow.id, Workflow.published_graph).where(Workflow.id.in_(workflow_ids))
+        select(Workflow.id, Workflow.code, Workflow.published_graph).where(
+            Workflow.id.in_(workflow_ids)
+        )
     )
-    return {
-        (workflow_id, rule["status_id"]): {**_DEFAULT_RULE, **rule}
-        for workflow_id, graph in rows.all()
-        for rule in (graph or {}).get("sla_rules", [])
-    }
+    rules: dict[tuple[uuid.UUID, str], dict[str, Any]] = {}
+    codes: dict[tuple[uuid.UUID, str], tuple[str, str]] = {}
+    for workflow_id, workflow_code, graph in rows.all():
+        for status in (graph or {}).get("statuses", []):
+            codes[(workflow_id, status["id"])] = (workflow_code, status["code"])
+        for rule in (graph or {}).get("sla_rules", []):
+            rules[(workflow_id, rule["status_id"])] = {**_DEFAULT_RULE, **rule}
+    return _SlaSnapshots(rules, codes)
 
 
 async def _escalation_recipients(
@@ -139,14 +150,14 @@ async def _process_deal(
     session: AsyncSession,
     deal: Deal,
     now: dt.datetime,
-    rules: dict[tuple[uuid.UUID, str], dict[str, Any]],
+    snapshots: _SlaSnapshots,
     counters: dict[str, int],
 ) -> None:
     total = (deal.sla_due_at - deal.status_changed_at).total_seconds()  # type: ignore[operator]
     if total <= 0:
         return
     fraction = (now - deal.status_changed_at).total_seconds() / total
-    rule = rules.get((deal.workflow_id, str(deal.status_id)))
+    rule = snapshots.rules.get((deal.workflow_id, str(deal.status_id)))
     effective = rule or _DEFAULT_RULE
     warn_threshold = effective["warn_threshold_pct"] / 100
     escalate_threshold = effective["escalate_threshold_pct"] / 100
@@ -174,6 +185,13 @@ async def _process_deal(
                 )
         elif new_state == SlaState.BREACHED.value:
             counters["breached"] += 1
+            # Вход в `breached` — одно нарушение: повторный проход по уже нарушенной сделке
+            # состояние не меняет. Статус, которого нет в снимке (архивирован после публикации), —
+            # `unknown`, а не id: число значений метки не должно расти вместе с числом статусов.
+            workflow_code, status_code = snapshots.codes.get(
+                (deal.workflow_id, str(deal.status_id)), ("unknown", "unknown")
+            )
+            sla_violations_total.labels(workflow=workflow_code, status=status_code).inc()
             recipients = {deal.owner_id}
             owner = await session.get(User, deal.owner_id)
             if owner and owner.manager_id:
@@ -212,6 +230,34 @@ async def _process_deal(
                 )
 
 
+async def _publish_sla_gauges() -> None:
+    """Выставляет `crm_sla_breaching_deals{sla_state}` по всем открытым сделкам с таймером.
+
+    Скан выше видит не всё (нарушенные и эскалированные пропускает), поэтому считаем отдельным
+    агрегатом по открытым сделкам, уже после коммитов партий. Ряд выставляется для каждого
+    состояния, в том числе нулём: иначе исчезнувшие нарушения висели бы в Prometheus старым
+    значением. Сбой подсчёта метрики не должен ронять сам скан.
+    """
+    try:
+        async with session_scope() as session:
+            rows = await session.execute(
+                select(Deal.sla_state, func.count(Deal.id))
+                .where(
+                    Deal.sla_due_at.is_not(None),
+                    Deal.closed_at.is_(None),
+                    Deal.deleted_at.is_(None),
+                )
+                .group_by(Deal.sla_state)
+            )
+            counts = dict(rows.tuples().all())
+    except Exception:  # noqa: BLE001 — метрика вторична
+        logger.warning("sla_gauges_failed", exc_info=True)
+        return
+    for state in SlaState:
+        sla_breaching_deals.labels(sla_state=state.value).set(counts.get(state.value, 0))
+
+
+@track_task
 async def sweep_sla_breaches(ctx: dict[str, Any]) -> dict[str, int]:
     now = dt.datetime.now(dt.UTC)
     counters = {"warned": 0, "breached": 0, "escalated": 0}
@@ -245,13 +291,13 @@ async def sweep_sla_breaches(ctx: dict[str, Any]) -> dict[str, int]:
             if not deals:
                 break
             after_id = deals[-1].id
-            rules = await _sla_rules(session, {deal.workflow_id for deal in deals})
+            snapshots = await _sla_snapshots(session, {deal.workflow_id for deal in deals})
             for deal in deals:
-                await _process_deal(session, deal, now, rules, counters)
+                await _process_deal(session, deal, now, snapshots, counters)
         if len(deals) < BATCH_SIZE:
             break
 
-    background_tasks_total.labels(task="sweep_sla_breaches", result="success").inc()
+    await _publish_sla_gauges()
     if counters["warned"] or counters["breached"] or counters["escalated"]:
         logger.info("sla_sweep_completed", **counters)
     return counters

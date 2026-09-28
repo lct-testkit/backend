@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.db import session_scope
-from app.core.metrics import background_tasks_total
+from app.core.metrics import track_task
 from app.core.optimistic import claim_version
 from app.core.storage import download_object_to_file
 from app.modules.audit.actions import AuditAction
@@ -218,6 +218,7 @@ async def _fail_stale_running_versions() -> int:
         return len(stale)
 
 
+@track_task
 async def sweep_registry_imports(ctx: dict[str, Any]) -> dict[str, int]:
     """Обрабатывает не более одной версии реестра за тик — импорт запускается
     вручную администратором и редко идёт параллельно (см. `RegistryImportService.
@@ -225,7 +226,6 @@ async def sweep_registry_imports(ctx: dict[str, Any]) -> dict[str, int]:
     await _fail_stale_running_versions()
     claimed = await _claim_pending_version()
     if claimed is None:
-        background_tasks_total.labels(task="sweep_registry_imports", result="success").inc()
         return {"processed": 0}
     version_id, source, file_id = claimed
 
@@ -276,7 +276,6 @@ async def sweep_registry_imports(ctx: dict[str, Any]) -> dict[str, int]:
                 },
             )
 
-    background_tasks_total.labels(task="sweep_registry_imports", result="success").inc()
     logger.info("registry_import_processed", status=outcome.status)
     return {"processed": 1}
 
@@ -387,6 +386,7 @@ def _compute_drift(organization: Organization, entry: EgrulEntry) -> dict[str, d
     return drift
 
 
+@track_task
 async def sweep_registry_drift(ctx: dict[str, Any]) -> dict[str, int]:
     """Раз в сутки (dop.md §11.7 говорит «раз в 30 дней или при обновлении
     реестра» — здесь дневной cron с проверкой `registry_checked_at`, тот же
@@ -463,7 +463,6 @@ async def sweep_registry_drift(ctx: dict[str, Any]) -> dict[str, int]:
                 await _handle_liquidation(session, organization)
                 liquidations += 1
 
-    background_tasks_total.labels(task="sweep_registry_drift", result="success").inc()
     if checked:
         logger.info(
             "registry_drift_swept", checked=checked, drifted=drifted, liquidations=liquidations

@@ -24,7 +24,7 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.db import session_scope
-from app.core.metrics import background_tasks_total
+from app.core.metrics import track_task
 from app.modules.imports.models import ImportJob, ImportJobStatus
 from app.modules.imports.service import ImportService
 
@@ -69,6 +69,7 @@ async def _run_one_batch(job_id: uuid.UUID, status: ImportJobStatus, batch_size:
         return "more" if processed else "done"
 
 
+@track_task
 async def sweep_import_jobs(ctx: dict[str, Any]) -> dict[str, int]:
     settings = get_settings()
     deadline = time.monotonic() + _TICK_BUDGET_SECONDS
@@ -88,7 +89,6 @@ async def sweep_import_jobs(ctx: dict[str, Any]) -> dict[str, int]:
                     counters[done_key] += 1
                     break
 
-    background_tasks_total.labels(task="sweep_import_jobs", result="success").inc()
     if counters["applied_batches"] or counters["rollback_batches"]:
         logger.info("import_jobs_swept", **counters)
     return counters

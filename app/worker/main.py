@@ -19,7 +19,7 @@ from sqlalchemy import delete, text
 from app.core.config import get_settings
 from app.core.db import dispose_engine, session_scope
 from app.core.logging import configure_logging
-from app.core.metrics import background_tasks_total
+from app.core.metrics import start_worker_metrics_server, stop_worker_metrics_server, track_task
 from app.core.redis_client import close_redis
 from app.modules.admin.models import IdempotencyKey
 from app.modules.crm.tasks import sweep_sla_breaches
@@ -41,6 +41,7 @@ from app.modules.workflow.tasks import sweep_status_mapping_jobs
 logger = structlog.get_logger(__name__)
 
 
+@track_task
 async def ensure_audit_partitions(ctx: dict[str, Any]) -> dict[str, int]:
     """Создаёт партиции audit_log на ближайшие месяцы.
 
@@ -58,11 +59,11 @@ async def ensure_audit_partitions(ctx: dict[str, Any]) -> dict[str, int]:
                 {"offset": offset},
             )
             created += 1
-    background_tasks_total.labels(task="ensure_audit_partitions", result="success").inc()
     logger.info("audit_partitions_ensured", months=created)
     return {"months": created}
 
 
+@track_task
 async def purge_expired_idempotency_keys(ctx: dict[str, Any]) -> dict[str, int]:
     """Удаляет идемпотентные ключи с истёкшим сроком (TTL 24 часа)."""
     async with session_scope() as session:
@@ -70,7 +71,6 @@ async def purge_expired_idempotency_keys(ctx: dict[str, Any]) -> dict[str, int]:
             delete(IdempotencyKey).where(IdempotencyKey.expires_at < dt.datetime.now(dt.UTC))
         )
     removed = result.rowcount or 0
-    background_tasks_total.labels(task="purge_expired_idempotency_keys", result="success").inc()
     logger.info("idempotency_keys_purged", removed=removed)
     return {"removed": removed}
 
@@ -86,9 +86,12 @@ async def startup(ctx: dict[str, Any]) -> None:
     # процессе, публикация (crm/signing) — в `api`. Оба обязаны
     # зарегистрировать реализацию независимо.
     register_outbox_service(RealOutboxService())
+    # Метрики фоновых задач считаются в этом процессе, api их не видит: отдаём сами.
+    ctx["metrics_server"] = start_worker_metrics_server(settings.worker_metrics_port)
 
 
 async def shutdown(ctx: dict[str, Any]) -> None:
+    stop_worker_metrics_server(ctx.get("metrics_server"))
     await dispose_engine()
     await close_redis()
     logger.info("worker_stopped")

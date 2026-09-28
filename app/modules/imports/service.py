@@ -16,7 +16,10 @@ import copy
 import datetime as dt
 import hashlib
 import io
+import time
 import uuid
+from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -30,6 +33,7 @@ from app.core.config import get_settings
 from app.core.context import ActorContext, set_actor
 from app.core.errors import AppError, ErrorCode, NotFoundError
 from app.core.ids import uuid7
+from app.core.metrics import import_duration_seconds, import_rows_total
 from app.core.normalize import parse_contact_methods, split_full_name
 from app.core.security import Principal
 from app.core.storage import (
@@ -92,6 +96,21 @@ _MODEL_BY_ENTITY: dict[str, type] = {
     ImportEntityType.LICENSE.value: OrganizationLicense,
 }
 _PENDING_STATUSES = (ImportRowStatus.OK.value, ImportRowStatus.WARN.value)
+
+
+def _apply_outcome(row: ImportRowResult) -> str:
+    """Итог строки после `apply_batch` для `crm_import_rows_total`: применена, пропущена или ошибка.
+    Применённая строка остаётся `ok`/`warn` — отличается от ожидающей только `entity_id`."""
+    if row.status == ImportRowStatus.SKIPPED.value:
+        return "skipped"
+    if row.status == ImportRowStatus.ERROR.value:
+        return "error"
+    return "applied"
+
+
+def _count_rows(entity_type: str, outcomes: Iterable[str]) -> None:
+    for status, count in Counter(outcomes).items():
+        import_rows_total.labels(entity_type=entity_type, status=status).inc(count)
 
 
 def _json_safe(value: Any) -> Any:
@@ -292,6 +311,14 @@ class ImportService:
     # -- фаза 4: dry-run ---------------------------------------------------
 
     async def dry_run(self, job: ImportJob) -> ImportJob:
+        started = time.perf_counter()
+        job = await self._dry_run(job)
+        import_duration_seconds.labels(entity_type=job.entity_type, phase="validate").observe(
+            time.perf_counter() - started
+        )
+        return job
+
+    async def _dry_run(self, job: ImportJob) -> ImportJob:
         if job.status not in (ImportJobStatus.MAPPED.value, ImportJobStatus.VALIDATED.value):
             raise AppError(ErrorCode.IMPORT_MAPPING_INCOMPLETE, "Сначала сохраните маппинг колонок")
 
@@ -776,6 +803,8 @@ class ImportService:
                 self._fail_row(job, row, exc, previous_status, previous_errors)
         job.processed_rows += len(pending)
         await self._session.flush()
+        # После flush, а не в цикле: строки ушедшей в откат партии не должны попадать в счётчик.
+        _count_rows(job.entity_type, (_apply_outcome(row) for row in pending))
         return len(pending)
 
     async def _set_actor(self, job: ImportJob) -> None:
@@ -1095,6 +1124,10 @@ class ImportService:
         job.finished_at = dt.datetime.now(dt.UTC)
         job.rollback_available = True
         await self._session.flush()
+        if job.started_at is not None:
+            import_duration_seconds.labels(entity_type=job.entity_type, phase="apply").observe(
+                (job.finished_at - job.started_at).total_seconds()
+            )
         await self._audit.record(
             AuditAction.IMPORT_APPLIED,
             entity_type="import_job",
@@ -1165,6 +1198,7 @@ class ImportService:
                 row.status = ImportRowStatus.ROLLBACK_BLOCKED.value
                 row.errors = [*previous_errors, "Откат строки не удался: внутренняя ошибка"]
         await self._session.flush()
+        _count_rows(job.entity_type, (row.status for row in pending))
         return len(pending)
 
     async def _rollback_row(self, job: ImportJob, row: ImportRowResult) -> None:

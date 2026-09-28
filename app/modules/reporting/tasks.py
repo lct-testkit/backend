@@ -32,7 +32,7 @@ from sqlalchemy import func, select, text
 
 from app.core.config import get_settings
 from app.core.db import session_scope
-from app.core.metrics import background_tasks_total
+from app.core.metrics import reports_in_progress, track_task
 from app.core.security import Principal, TokenClaims
 from app.modules.files.models import File, FileStatus
 from app.modules.files.service import delete_object_if_unreferenced
@@ -107,7 +107,11 @@ async def _generate_one(job_id: uuid.UUID) -> bool | None:
             return False
         principal = _principal_for_worker(user)
         try:
-            await service.generate(job, principal)
+            # `sweep_report_jobs` берёт за тик не больше `reports_max_concurrent` заданий, но
+            # тики перекрываются, пока отчёт считается дольше минуты: тогда
+            # `crm_reports_in_progress` честно покажет значение выше лимита.
+            with reports_in_progress.track_inprogress():
+                await service.generate(job, principal)
             return True
         except Exception:  # noqa: BLE001 — сбой одного отчёта не должен ронять тик
             # Клиент видит `report_jobs.error`: текст исключения (SQL, пути, данные) туда не
@@ -125,6 +129,7 @@ async def _generate_one(job_id: uuid.UUID) -> bool | None:
             return False
 
 
+@track_task
 async def sweep_report_jobs(ctx: dict[str, Any]) -> dict[str, int]:
     settings = get_settings()
 
@@ -154,12 +159,12 @@ async def sweep_report_jobs(ctx: dict[str, Any]) -> dict[str, int]:
     processed = sum(1 for ok in results if ok is True)
     failed = sum(1 for ok in results if ok is False)
 
-    background_tasks_total.labels(task="sweep_report_jobs", result="success").inc()
     if job_ids:
         logger.info("report_jobs_swept", processed=processed, failed=failed)
     return {"processed": processed, "failed": failed}
 
 
+@track_task
 async def expire_report_files(ctx: dict[str, Any]) -> dict[str, int]:
     now = dt.datetime.now(dt.UTC)
     expired = 0
@@ -196,12 +201,12 @@ async def expire_report_files(ctx: dict[str, Any]) -> dict[str, int]:
         if jobs:
             await session.flush()
 
-    background_tasks_total.labels(task="expire_report_files", result="success").inc()
     if expired:
         logger.info("report_files_expired", expired=expired)
     return {"expired": expired}
 
 
+@track_task
 async def refresh_report_materialized_views(ctx: dict[str, Any]) -> dict[str, int]:
     async with session_scope() as session:
         # REFRESH MATERIALIZED VIEW не грантится — только владельцу или
@@ -209,5 +214,4 @@ async def refresh_report_materialized_views(ctx: dict[str, Any]) -> dict[str, in
         # `refresh_mv_deal_status_summary()` — SECURITY DEFINER, заведена
         # миграцией 0013_reporting_mv_refresh_definer.
         await session.execute(text("SELECT refresh_mv_deal_status_summary()"))
-    background_tasks_total.labels(task="refresh_report_materialized_views", result="success").inc()
     return {"refreshed": 1}
