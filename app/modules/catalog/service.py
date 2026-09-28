@@ -1353,9 +1353,10 @@ class DirectionService:
             select(Direction).where(Direction.code == payload.code, Direction.deleted_at.is_(None))
         )
         if existing is not None:
-            raise ValidationError(
+            raise AppError(
+                ErrorCode.DUPLICATE,
                 "Направление с таким кодом уже существует",
-                [FieldError(field="code", reason="код уже используется")],
+                errors=[FieldError(field="code", reason="код уже используется")],
             )
         if payload.parent_id is not None:
             await self._check_parent(None, payload.parent_id)
@@ -1517,9 +1518,10 @@ class ProductService:
                 extra={"product_id": str(existing.id), "deleted": True},
             )
         if existing is not None:
-            raise ValidationError(
+            raise AppError(
+                ErrorCode.DUPLICATE,
                 "Продукт с таким кодом уже существует",
-                [FieldError(field="code", reason="код уже используется")],
+                errors=[FieldError(field="code", reason="код уже используется")],
             )
         _check_validity_period(payload.valid_from, payload.valid_to)
         if payload.vendor_id is not None:
@@ -1817,9 +1819,10 @@ class LossReasonService:
             select(LossReason).where(LossReason.code == payload.code)
         )
         if existing is not None:
-            raise ValidationError(
+            raise AppError(
+                ErrorCode.DUPLICATE,
                 "Причина с таким кодом уже существует",
-                [FieldError(field="code", reason="код уже используется")],
+                errors=[FieldError(field="code", reason="код уже используется")],
             )
         reason = LossReason(
             code=payload.code,
@@ -1918,9 +1921,10 @@ class HolidayService:
     async def create(self, payload: Any) -> Holiday:
         existing = await self._session.scalar(select(Holiday).where(Holiday.date == payload.date))
         if existing is not None:
-            raise ValidationError(
+            raise AppError(
+                ErrorCode.DUPLICATE,
                 "Дата уже есть в производственном календаре",
-                [FieldError(field="date", reason="дата уже существует")],
+                errors=[FieldError(field="date", reason="дата уже существует")],
             )
         holiday = Holiday(
             date=payload.date, name=payload.name, is_working_day=payload.is_working_day
@@ -2009,9 +2013,10 @@ class CustomFieldDefService:
             )
         )
         if existing is not None:
-            raise ValidationError(
+            raise AppError(
+                ErrorCode.DUPLICATE,
                 "Поле с таким кодом уже существует для этого типа сущности",
-                [FieldError(field="code", reason="код уже используется")],
+                errors=[FieldError(field="code", reason="код уже используется")],
             )
         field = CustomFieldDef(
             entity_type=payload.entity_type,
