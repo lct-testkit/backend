@@ -6,7 +6,10 @@
 
 from __future__ import annotations
 
+import gc
 import os
+import time
+from typing import Any
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, multiprocess
 from prometheus_client import generate_latest as _generate_latest
@@ -109,6 +112,34 @@ dependency_up = Gauge(
     "Доступность внешней зависимости по данным /health/ready",
     labelnames=("dependency",),
 )
+
+
+# --- Процесс --------------------------------------------------------------
+
+gc_pause_seconds = Histogram(
+    "crm_gc_pause_seconds",
+    "Пауза сборщика мусора Python по поколениям: событийный цикл стоит всё это время",
+    labelnames=("generation",),
+    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0),
+)
+
+_gc_started: dict[int, float] = {}
+
+
+def _observe_gc(phase: str, info: dict[str, Any]) -> None:
+    generation = int(info["generation"])
+    if phase == "start":
+        _gc_started[generation] = time.perf_counter()
+        return
+    started = _gc_started.pop(generation, None)
+    if started is not None:
+        gc_pause_seconds.labels(generation=str(generation)).observe(time.perf_counter() - started)
+
+
+def install_gc_metrics() -> None:
+    """Подписывает `gc_pause_seconds` на сборки мусора; повторный вызов ничего не делает."""
+    if _observe_gc not in gc.callbacks:
+        gc.callbacks.append(_observe_gc)
 
 
 def record_cache(cache: str, *, hit: bool) -> None:
