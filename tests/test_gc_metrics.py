@@ -26,16 +26,24 @@ def test_gc_pause_is_recorded_per_generation() -> None:
     assert count >= 1
 
 
+def _gc_lines() -> list[str]:
+    return [
+        line
+        for line in generate_latest().decode().splitlines()
+        if line.startswith("crm_gc_pause_seconds")
+    ]
+
+
 def test_gc_callback_ignores_stop_without_start() -> None:
-    # Сборщик отключён на время проверки: иначе сама `generate_latest()` могла бы запустить сборку и
-    # изменить счётчики между двумя снимками.
+    # Сборщик отключён на время проверки: иначе сборка между двумя снимками изменила бы счётчики.
+    # Сравниваем только строки этой метрики: остальные (`process_cpu_seconds_total`) меняются сами.
     was_enabled = gc.isenabled()
     gc.disable()
     try:
         metrics._gc_started.clear()
-        before = generate_latest().decode()
+        before = _gc_lines()
         metrics._observe_gc("stop", {"generation": 1})  # старт не видели — не падаем и не считаем
-        assert generate_latest().decode() == before
+        assert _gc_lines() == before
     finally:
         if was_enabled:
             gc.enable()
