@@ -78,15 +78,19 @@ jobs:
           POSTGRES_PASSWORD: crm
           POSTGRES_DB: crm_test
         ports:
-          - 5432:5432
+          # Порт хоста НЕ фиксирован (было 5432:5432): self-hosted раннер —
+          # это несколько параллельных инстансов на ОДНОЙ машине с общим
+          # Docker-демоном, и второй/третий одновременный `test`-job падал за
+          # 12 секунд на "port is already allocated" при попытке снова занять
+          # 5432 на хосте. Docker сам выбирает свободный порт, конкретный
+          # порт этого запуска — через контекст job.services ниже.
+          - 5432/tcp
         options: >-
           --health-cmd "pg_isready -U crm -d crm_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
     env:
-      DATABASE_URL: postgresql+asyncpg://crm:crm@localhost:5432/crm_test
-      TEST_DATABASE_URL: postgresql+asyncpg://crm:crm@localhost:5432/crm_test
       # Любой пропущенный тест = красный прогон (иначе сквозные тесты с БД
       # молча превращались бы в skip).
       REQUIRE_NO_SKIPS: "1"
@@ -98,6 +102,13 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
           cache-dependency-path: requirements-dev.lock
+
+      - name: Порт Postgres этого запуска -> DATABASE_URL/TEST_DATABASE_URL
+        run: |
+          port="${{ job.services.postgres.ports['5432'] }}"
+          url="postgresql+asyncpg://crm:crm@localhost:${port}/crm_test"
+          echo "DATABASE_URL=${url}" >> "$GITHUB_ENV"
+          echo "TEST_DATABASE_URL=${url}" >> "$GITHUB_ENV"
 
       - run: pip install --require-hashes -r requirements-dev.lock
 
