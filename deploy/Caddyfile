@@ -21,6 +21,12 @@
 
 {
 	admin off
+	# Клиент без SNI в ClientHello (браузер/curl на bare IP — у IP-литералов нет "имени" для SNI, это
+	# ровно то, что шлёт любой клиент на --host <IP> --tls internal/acme) иначе получал TLS alert
+	# internal error: certmagic не находит сертификат без SNI-подсказки (проверено: TCP доходит,
+	# handshake рвётся именно на этом, независимо от сети/докера — тот же сертификат по имени хоста
+	# работает). caddyserver/caddy#6364, caddy.community "Default certificate when no matching SNI".
+	default_sni {$CRM_TLS_HOST}
 	servers {
 		trusted_proxies static private_ranges
 	}
