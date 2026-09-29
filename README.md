@@ -56,6 +56,8 @@ flowchart LR
   F -->|токен из сессии, права из кэша| E
 ```
 
+Скринкаст: работа в платформе по ролям — [vkvideo.ru](https://vkvideo.ru/video-241860435_456239017?list=ln-WPmur2CyZgH6NB3xN1) (полный список — [`docs/SCREENCASTS.md`](https://github.com/lct-testkit/.github/blob/main/docs/SCREENCASTS.md) в README организации).
+
 ## Быстрый старт
 
 Нужны Docker с Compose v2. Интернет требуется только на сборке образов, в рантайме контур закрыт.
