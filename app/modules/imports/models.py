@@ -15,7 +15,7 @@ import uuid
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, String, text
+from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -111,6 +111,10 @@ class ImportJob(UuidPkMixin, TimestampMixin, Base):
     finished_at: Mapped[dt.datetime | None] = mapped_column(nullable=True)
     rollback_available: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
     rolled_back_at: Mapped[dt.datetime | None] = mapped_column(nullable=True)
+    # Причина ухода в `FAILED` — партия упала вне построчного try/except (см. `imports.tasks.
+    # _run_one_batch`): баг обработчика, обрыв соединения с БД и т.п. Название и тип — как у
+    # `last_error` в `integration.models` (тот же приём для фоновых заданий).
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ImportRowResult(UuidPkMixin, Base):
