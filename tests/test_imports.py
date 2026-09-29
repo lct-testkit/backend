@@ -611,3 +611,80 @@ class TestLicenseImportEndToEnd:
         assert not has_permission("KAM", Permission.IMPORT_ROLLBACK)
         assert has_permission("HEAD", Permission.IMPORT_ROLLBACK)
         assert has_permission("ADMIN", Permission.IMPORT_ROLLBACK)
+
+    def test_batch_exception_outside_row_loop_marks_job_failed(self, client, monkeypatch) -> None:
+        """Регрессия: `apply_batch`, упавший вне построчного try/except (сам SQL-запрос партии,
+        а не ошибка конкретной строки — та ловится и превращается в `ImportRowStatus.ERROR`
+        внутри `apply_batch`), раньше оставлял задание в `applying` навсегда — `ImportJobStatus.
+        FAILED` был объявлен, но нигде не присваивался. `imports.tasks._run_one_batch` теперь
+        ловит такое исключение и переводит задание в `failed` с причиной в `last_error`."""
+        from app.core.db import session_scope
+        from app.modules.imports import service as imports_service
+        from app.modules.imports import tasks as imports_tasks
+        from app.modules.imports.models import ImportJob, ImportJobStatus
+
+        org_name = f"Тестовый университет П3 {uuid.uuid4().hex[:8]}"
+        rows = [
+            [
+                org_name,
+                "ВендорА",
+                "ПродуктА",
+                f"TU-{uuid.uuid4().hex[:10]}",
+                "2026-01-10",
+                "3",
+                "transferred",
+                "Иванов И.И.",
+                "Петров П.П.",
+                "строка для теста падения партии",
+            ],
+        ]
+        content = self._xlsx_bytes(rows)
+        self._stub_storage(monkeypatch, content)
+        head = run(client, _make_user, "HEAD")
+        _org_id, file_id = run(client, self._seed_organization_and_file, org_name, content, head.id)
+        csrf = authenticate(client, head)
+        client.headers["X-CSRF-Token"] = csrf
+
+        job_id = client.post(
+            "/api/imports",
+            json={
+                "file_id": str(file_id),
+                "entity_type": "license",
+                "mode": "upsert",
+                "source_format": "xlsx",
+            },
+        ).json()["id"]
+        client.put(f"/api/imports/{job_id}/mapping", json={"mapping": self._MAPPING})
+        dry = client.post(f"/api/imports/{job_id}/dry-run").json()
+        assert dry["ok_rows"] == 1, dry
+
+        async def _start_apply() -> None:
+            async with session_scope() as session:
+                service = imports_service.ImportService(session)
+                job = await service.get_or_404(uuid.UUID(job_id))
+                await service.start_apply(job)
+
+        run(client, _start_apply)
+
+        async def _boom(self, job, *, batch_size):  # noqa: ARG001 — сигнатура apply_batch
+            raise RuntimeError("сорвался запрос партии, не строки")
+
+        monkeypatch.setattr(imports_service.ImportService, "apply_batch", _boom)
+
+        outcome = run(
+            client,
+            imports_tasks._run_one_batch,
+            uuid.UUID(job_id),
+            ImportJobStatus.APPLYING,
+            500,
+        )
+        assert outcome == "skip"
+
+        async def _fetch_job() -> ImportJob:
+            async with session_scope() as session:
+                return await session.get(ImportJob, uuid.UUID(job_id))
+
+        job = run(client, _fetch_job)
+        assert job.status == ImportJobStatus.FAILED.value
+        assert job.last_error
+        assert job.finished_at is not None

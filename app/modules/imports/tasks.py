@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import time
 import uuid
 from typing import Any
@@ -33,6 +34,11 @@ logger = structlog.get_logger(__name__)
 # Тик cron — раз в минуту; бюджет оставляет запас, чтобы следующий тик не наложился.
 _TICK_BUDGET_SECONDS = 40.0
 
+# Текст исключения в `last_error` не кладём: там бывает SQL и значения чужих строк (как и
+# `_row_error_text`/`_GENERIC_ROW_ERROR` в `imports.service` для отдельной строки) — подробности
+# только в структурированном логе выше, по `job_id` их легко найти.
+_GENERIC_BATCH_ERROR = "Не удалось обработать партию импорта (подробности в журнале сервера)"
+
 
 async def _job_ids(status: ImportJobStatus) -> list[uuid.UUID]:
     async with session_scope() as session:
@@ -45,28 +51,48 @@ async def _job_ids(status: ImportJobStatus) -> list[uuid.UUID]:
 
 
 async def _run_one_batch(job_id: uuid.UUID, status: ImportJobStatus, batch_size: int) -> str:
-    """Одна партия одного задания в собственной транзакции. Возвращает `skip` (задание занято или
-    сменило статус), `more` (есть ещё работа) или `done` (задание завершено)."""
-    async with session_scope() as session:
-        job = (
-            await session.execute(
-                select(ImportJob)
-                .where(ImportJob.id == job_id, ImportJob.status == status.value)
-                .with_for_update(skip_locked=True)
-            )
-        ).scalar_one_or_none()
-        if job is None:
-            return "skip"
-        service = ImportService(session)
-        if status is ImportJobStatus.APPLYING:
-            processed = await service.apply_batch(job, batch_size=batch_size)
-            finished = await service.finalize_apply_if_done(job)
-        else:
-            processed = await service.rollback_batch(job, batch_size=batch_size)
-            finished = await service.finalize_rollback_if_done(job)
-        if finished:
-            return "done"
-        return "more" if processed else "done"
+    """Одна партия одного задания в собственной транзакции. Возвращает `skip` (задание занято,
+    сменило статус или упало — см. ниже), `more` (есть ещё работа) или `done` (задание
+    завершено)."""
+    try:
+        async with session_scope() as session:
+            job = (
+                await session.execute(
+                    select(ImportJob)
+                    .where(ImportJob.id == job_id, ImportJob.status == status.value)
+                    .with_for_update(skip_locked=True)
+                )
+            ).scalar_one_or_none()
+            if job is None:
+                return "skip"
+            service = ImportService(session)
+            if status is ImportJobStatus.APPLYING:
+                processed = await service.apply_batch(job, batch_size=batch_size)
+                finished = await service.finalize_apply_if_done(job)
+            else:
+                processed = await service.rollback_batch(job, batch_size=batch_size)
+                finished = await service.finalize_rollback_if_done(job)
+            if finished:
+                return "done"
+            return "more" if processed else "done"
+    except Exception:
+        # Ошибка строки `apply_batch`/`rollback_batch` ловит сама (по SAVEPOINT'у — падает только
+        # эта строка), сюда долетает лишь то, что сломалось вне построчного цикла: сам запрос
+        # партии, `finalize_*_if_done`, обрыв соединения с БД. Раньше исключение просто улетало
+        # через `sweep_import_jobs`/`track_task` (там только метрика и повторный raise) — статус
+        # `import_jobs` оставался как был (`applying`/`rolling_back`) навсегда, а пользователь
+        # никогда не узнавал, что импорт сломался. `session_scope` уже откатил транзакцию партии
+        # выше — здесь отдельная, короткая, только на смену статуса.
+        logger.exception("import_job_batch_failed", job_id=str(job_id), status=status.value)
+        async with session_scope() as session:
+            job = await session.get(ImportJob, job_id)
+            # Статус мог уже уйти вперёд (другой тик успел завершить/откатить) — тогда трогать
+            # его не нужно, иначе можно затереть terminал `completed`/`rolled_back` на `failed`.
+            if job is not None and job.status == status.value:
+                job.status = ImportJobStatus.FAILED.value
+                job.finished_at = dt.datetime.now(dt.UTC)
+                job.last_error = _GENERIC_BATCH_ERROR
+        return "skip"
 
 
 @track_task
