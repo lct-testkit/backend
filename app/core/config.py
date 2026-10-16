@@ -215,8 +215,17 @@ class Settings(BaseSettings):
 
     # --- Интеграции ------------------------------------------------------
     cms_webhook_secret_ref: str | None = None
+    # B5-1: забор данных по API (pull) — у сайта и LMS раньше не было ни адреса,
+    # ни места для Bearer-токена в `x-api-env` (CMS_BASE_URL отсутствовал вовсе,
+    # LMS_AUTH_REF указывал на переменную, которой не было ни в одном compose).
+    cms_base_url: str | None = None
+    cms_auth_ref: str | None = "CMS_AUTH_TOKEN"
     lms_base_url: str | None = None
-    lms_auth_ref: str | None = None
+    lms_auth_ref: str | None = "LMS_AUTH_TOKEN"
+    # Размер страницы и число страниц за один запуск забора (B5-2/B5-6):
+    # ограничивают и нагрузку на источник, и память одного тика cron.
+    integration_pull_page_size: int = Field(default=100, ge=1, le=500)
+    integration_pull_max_pages: int = Field(default=20, ge=1, le=500)
     bitrix_connector_enabled: bool = False
     # Секрет живёт преимущественно на `integration_sources.credentials_ref`
     # (раздел 7.8, админ настраивает без деплоя) — это в `.env` только
@@ -280,14 +289,28 @@ class Settings(BaseSettings):
     # OpenAPI-схема нужна фронтенду и в prod; закрывается только UI.
     openapi_enabled: bool = True
 
-    @field_validator("signature_expose_debug_otp", "audit_hmac_key", "smtp_password", mode="before")
+    @field_validator(
+        "signature_expose_debug_otp",
+        "audit_hmac_key",
+        "smtp_password",
+        "cms_base_url",
+        "lms_base_url",
+        mode="before",
+    )
     @classmethod
     def _blank_is_unset(cls, value: object) -> object:
         """docker-compose передаёт незаданную переменную пустой строкой (`${VAR:-}`): для
-        необязательных значений это «не задано», а не пустой ключ и не ошибка разбора булева."""
+        необязательных значений это «не задано», а не пустой ключ и не ошибка разбора булева.
+        `CMS_BASE_URL=`/`LMS_BASE_URL=` в `.env` без значения — то же самое: `urlsplit('')`
+        не даёт `not settings.cms_base_url`, поэтому пустая строка отдельно сводится к `None`."""
         if isinstance(value, str) and not value.strip():
             return None
         return value
+
+    @field_validator("cms_base_url", "lms_base_url", mode="after")
+    @classmethod
+    def _strip_trailing_slash(cls, value: str | None) -> str | None:
+        return value.rstrip("/") if value else value
 
     @field_validator("database_url", "kc_database_url", mode="after")
     @classmethod

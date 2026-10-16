@@ -25,6 +25,7 @@ from app.modules.admin.models import IdempotencyKey
 from app.modules.crm.tasks import sweep_sla_breaches
 from app.modules.identity.tasks import sweep_erasure_requests, sweep_user_lifecycle
 from app.modules.imports.tasks import sweep_import_jobs
+from app.modules.integration.security import resolve_secret
 from app.modules.integration.service import RealOutboxService, register_outbox_service
 from app.modules.integration.tasks import sweep_lms_progress_pull, sweep_outbox_events
 from app.modules.notification.service import RealNotificationService, register_notification_service
@@ -88,6 +89,22 @@ async def startup(ctx: dict[str, Any]) -> None:
     register_outbox_service(RealOutboxService())
     # Метрики фоновых задач считаются в этом процессе, api их не видит: отдаём сами.
     ctx["metrics_server"] = start_worker_metrics_server(settings.worker_metrics_port)
+
+    # B5-1: `*_AUTH_REF` указывает ИМЯ переменной с токеном, а не сам токен — если
+    # такой переменной нет в окружении (забыли добавить в `x-api-env` compose/Helm,
+    # см. риски B5-1), `resolve_secret` молча вернёт `None`, и запрос к источнику
+    # уйдёт без `Authorization`. Старт не блокируем: без токена моки тоже работают.
+    for base_url, auth_ref, source_code in (
+        (settings.cms_base_url, settings.cms_auth_ref, "cms"),
+        (settings.lms_base_url, settings.lms_auth_ref, "lms"),
+    ):
+        if base_url and auth_ref and not resolve_secret(auth_ref):
+            logger.warning(
+                "integration_auth_token_missing",
+                source=source_code,
+                auth_ref=auth_ref,
+                detail=f"{auth_ref} не задан в окружении — запросы уйдут без Authorization",
+            )
 
 
 async def shutdown(ctx: dict[str, Any]) -> None:
