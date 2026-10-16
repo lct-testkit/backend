@@ -194,8 +194,10 @@ class WorkerSettings:
         # 1s/5s/30s/5m/30m/2h — минутный тик приближает «доставить как можно
         # быстрее» для первой, самой короткой ступени).
         cron(sweep_outbox_events, minute=set(range(60))),
-        # Раз в 30 минут (раздел 4.14, дословно).
-        cron(sweep_lms_progress_pull, minute={0, 30}),
+        # B5-6: тик раз в минуту, реальный интервал задаёт integration_sources.
+        # pull_interval_seconds источника lms (по умолчанию 1800 с = раз в 30 минут,
+        # раздел 4.14, дословно) — тот же приём, что sweep_cms_leads_pull ниже.
+        cron(sweep_lms_progress_pull, minute=set(range(60))),
         # Раз в минуту: реальный интервал задаёт integration_sources.pull_interval_seconds
         # (B5-2), тик, пришедшийся раньше срока, сам себя пропускает.
         cron(sweep_cms_leads_pull, minute=set(range(60))),

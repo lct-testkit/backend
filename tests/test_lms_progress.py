@@ -82,7 +82,7 @@ async def _progress(deal_id: uuid.UUID) -> dict[str, dict[str, Any]]:
         }
 
 
-async def _set_lms_source(*, active: bool = True) -> None:
+async def _set_lms_source(*, active: bool = True, pull_enabled: bool = True) -> None:
     from sqlalchemy import select
 
     from app.core.db import session_scope
@@ -96,8 +96,12 @@ async def _set_lms_source(*, active: bool = True) -> None:
             source = IntegrationSource(code="lms", name="LMS")
             session.add(source)
         source.is_active = active
+        # B5-6: забор по расписанию теперь требует ещё и pull_enabled (раньше хватало
+        # непустого LMS_BASE_URL) — источник без него тик пропускает молча.
+        source.pull_enabled = pull_enabled
         source.credentials_ref = _SECRET_ENV
         source.base_url = LMS_URL
+        source.last_sync_at = None
 
 
 async def _inbound(key: str) -> dict[str, Any] | None:
@@ -144,9 +148,111 @@ def _row(scene: dict[str, Any], course: str = "c-1", **fields: Any) -> dict[str,
     return {"deal_id": str(scene["deal_id"]), "course_external_id": course, **fields}
 
 
+def _mock_row(scene: dict[str, Any], *, product_index: int = 0, **fields: Any) -> dict[str, Any]:
+    """B5-6 (BUG-16): форма строки МОКА — `external_course_id`/`email`/`external_student_id`,
+    без `deal_id` вовсе (привязка к сделке — по контакту и продукту, не по готовому id)."""
+    return {
+        "external_course_id": scene["products"][product_index]["code"],
+        "email": scene["contact"]["email"],
+        "external_student_id": f"stu-{uuid.uuid4().hex[:8]}",
+        **fields,
+    }
+
+
 # =============================================================================================
 # apply_progress_rows / upsert_progress
 # =============================================================================================
+
+
+class TestMatchByEmailAndCourse:
+    """B5-6 (BUG-16): мок не присылает `deal_id` — строка привязывается к сделке по email
+    учащегося и коду курса."""
+
+    def test_mock_shaped_row_without_deal_id_is_matched_and_applied(self, client) -> None:
+        scene = run(client, make_scene)
+        row = _mock_row(scene, progress_pct=42)
+
+        result = run(client, _apply, [row])
+
+        assert result == {"outcomes": ["applied"], "applied": 1, "skipped": 0, "failed": 0}
+        progress = run(client, _progress, scene["deal_id"])
+        assert progress[scene["products"][0]["code"]]["progress_pct"] == 42
+
+    def test_unknown_email_is_unmatched_not_an_error(self, client) -> None:
+        scene = run(client, make_scene)
+        row = _mock_row(scene, email="nobody@example.ru", progress_pct=10)
+
+        result = run(client, _apply, [row])
+
+        assert result["outcomes"] == ["unmatched"]
+
+    def test_unknown_course_code_is_unmatched(self, client) -> None:
+        scene = run(client, make_scene)
+        row = _mock_row(scene, external_course_id="no-such-product", progress_pct=10)
+
+        result = run(client, _apply, [row])
+
+        assert result["outcomes"] == ["unmatched"]
+
+    def test_deal_id_takes_priority_over_email_and_course(self, client) -> None:
+        """Строка со старым `deal_id` продолжает работать как раньше, даже если в ней же
+        присутствуют новые ключи мока — `deal_id` не переопределяется привязкой по контакту."""
+        scene = run(client, make_scene)
+        other = run(client, make_scene)
+        row = {
+            "deal_id": str(scene["deal_id"]),
+            "course_external_id": scene["products"][0]["code"],
+            "email": other["contact"]["email"],
+            "progress_pct": 77,
+        }
+
+        result = run(client, _apply, [row])
+
+        assert result["outcomes"] == ["applied"]
+        progress = run(client, _progress, scene["deal_id"])
+        assert progress[scene["products"][0]["code"]]["progress_pct"] == 77
+        assert run(client, _progress, other["deal_id"]) == {}
+
+    def test_prefers_the_open_deal_over_a_closed_one_with_the_same_product(
+        self, client, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        scene = run(client, make_scene)
+
+        async def _close_and_duplicate() -> uuid.UUID:
+            from app.core.db import session_scope
+            from app.modules.crm.models import Deal, DealProduct
+
+            async with session_scope() as session:
+                old = await session.get(Deal, scene["deal_id"])
+                assert old is not None
+                old.closed_at = dt.datetime.now(dt.UTC)
+                new_deal = Deal(
+                    number=f"D-{uuid.uuid4().hex[:12]}",
+                    title="Повторное обучение",
+                    deal_type="b2c",
+                    workflow_id=old.workflow_id,
+                    status_id=old.status_id,
+                    contact_id=old.contact_id,
+                    owner_id=old.owner_id,
+                )
+                session.add(new_deal)
+                await session.flush()
+                session.add(
+                    DealProduct(
+                        deal_id=new_deal.id,
+                        product_id=scene["products"][0]["id"],
+                        quantity=1,
+                    )
+                )
+                return new_deal.id
+
+        new_deal_id = run(client, _close_and_duplicate)
+        row = _mock_row(scene, progress_pct=55)
+
+        run(client, _apply, [row])
+
+        assert run(client, _progress, new_deal_id)
+        assert run(client, _progress, scene["deal_id"]) == {}
 
 
 class TestApplyRows:
@@ -516,14 +622,19 @@ class TestPull:
         monkeypatch.setattr(get_settings(), "lms_base_url", LMS_URL)
         monkeypatch.setattr(get_settings(), "lms_auth_ref", None)
         run(client, _reset_cursor)
+        run(client, _set_lms_source)
 
     def _serve(self, rows: Any) -> None:
         body = rows if isinstance(rows, dict) else {"items": rows}
         self.network.respond = lambda request: httpx.Response(200, json=body)
 
     def _pull(self) -> dict[str, int]:
+        """B5-6: тик теперь уважает `pull_interval_seconds` по `last_sync_at` — сбрасываем его
+        перед каждым вызовом, иначе второй `_pull()` в одном тесте (вызван сразу после первого,
+        не дожидаясь реального времени) был бы молча пропущен как «слишком рано»."""
         from app.modules.integration.tasks import sweep_lms_progress_pull
 
+        run(self.client, _set_lms_source)
         return run(self.client, functools.partial(sweep_lms_progress_pull, {}))
 
     def test_cursor_moves_to_the_latest_row(self) -> None:
@@ -571,8 +682,9 @@ class TestPull:
         self._pull()
 
         first, second = (c for c in self.network.calls if c["url"].endswith("/students/progress"))
-        assert first["params"] == {}
-        assert second["params"] == {"updated_since": "2026-09-20T10:00:00Z"}
+        # B5-6: пагинация — `limit` в каждом запросе (раньше это был просто словарь без него).
+        assert first["params"] == {"limit": "100"}
+        assert second["params"] == {"updated_since": "2026-09-20T10:00:00Z", "limit": "100"}
 
     def test_cursor_does_not_move_when_the_first_row_fails(self) -> None:
         scene = run(self.client, make_scene)

@@ -279,19 +279,41 @@ async def _deliver(
 
 @track_task
 async def sweep_lms_progress_pull(ctx: dict[str, Any]) -> dict[str, int]:
-    """Раз в 30 минут (раздел 4.14): `GET /students/progress?updated_since=`
-    с курсором в `sync_cursors`."""
+    """Раз в минуту проверяет `pull_interval_seconds` источника `lms` (по умолчанию 1800 с —
+    «раз в 30 минут», раздел 4.14, дословно; миграция 0027). `GET /students/progress?
+    updated_since=&cursor=&limit=` с курсором в `sync_cursors`, постранично (B5-6/BUG-16).
+
+    B5-6: раньше хватало непустого `LMS_BASE_URL`, теперь нужны ещё `is_active` и
+    `pull_enabled` источника — ЭТО ИЗМЕНЕНИЕ ПОВЕДЕНИЯ (см. релиз-заметки B5-13.1): источник,
+    у которого раньше опрос шёл «по факту адреса», нужно явно включить в настройках."""
     settings = get_settings()
     if not settings.lms_base_url:
+        logger.info("lms_progress_pull_skipped", reason="base_url_empty")
         return {"pulled": 0, "skipped": 1}
 
     async with session_scope() as session:
+        source = await session.scalar(
+            select(IntegrationSource).where(IntegrationSource.code == "lms")
+        )
+        if source is None or not source.is_active or not source.pull_enabled:
+            return {"pulled": 0, "skipped": 1}
+        if source.last_sync_at is not None:
+            elapsed = (dt.datetime.now(dt.UTC) - source.last_sync_at).total_seconds()
+            if elapsed < source.pull_interval_seconds:
+                return {"pulled": 0, "skipped": 1}
+
         cursor = await lms.get_cursor(session, source_code="lms", resource="students_progress")
-        client = lms.LmsClient(settings.lms_base_url, resolve_secret(settings.lms_auth_ref))
+        base_url = source.base_url or settings.lms_base_url
+        client = lms.LmsClient(base_url, resolve_secret(settings.lms_auth_ref))
         try:
-            rows = await client.pull_progress(updated_since=cursor)
+            rows = await client.pull_progress(
+                updated_since=cursor,
+                max_pages=settings.integration_pull_max_pages,
+                page_size=settings.integration_pull_page_size,
+            )
         except Exception as exc:  # noqa: BLE001 — как sweep_registry_drift: не роняем cron
             logger.warning("lms_progress_pull_failed", error=str(exc))
+            source.last_error = str(exc)
             return {"pulled": 0, "error": 1}
 
         # Каждая строка — в своём SAVEPOINT: одна битая строка не откатывает остальные, а курсор не
@@ -310,6 +332,18 @@ async def sweep_lms_progress_pull(ctx: dict[str, Any]) -> dict[str, int]:
             await lms.set_cursor(
                 session, source_code="lms", resource="students_progress", value=latest_cursor
             )
+
+        now = dt.datetime.now(dt.UTC)
+        source.last_sync_at = now
+        source.last_error = None
+        source.last_run = {
+            "trigger": "cron",
+            "finished_at": now.isoformat(),
+            "fetched": len(rows),
+            "applied": batch.applied,
+            "skipped": batch.skipped,
+            "failed": batch.failed,
+        }
 
     return {"pulled": batch.applied, "skipped": batch.skipped, "failed": batch.failed}
 

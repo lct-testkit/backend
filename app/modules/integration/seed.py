@@ -80,6 +80,10 @@ async def seed_integration_sources(session: AsyncSession) -> int:
         source = IntegrationSource(code=code, name=name, is_active=False)
         if code == IntegrationSourceCode.CMS.value:
             _configure_cms_source(source)
+        elif code == IntegrationSourceCode.LMS.value:
+            # Раздел 4.14, дословно: «раз в 30 минут» — колонка общая для всех источников
+            # (по умолчанию 300 с), у lms переопределяется сидом (B5-6).
+            source.pull_interval_seconds = 1800
         session.add(source)
         created += 1
     if created:
