@@ -25,7 +25,11 @@ from app.modules.admin.models import IdempotencyKey
 from app.modules.crm.tasks import sweep_sla_breaches
 from app.modules.files.antivirus import build_scanner as build_antivirus_scanner
 from app.modules.files.service import register_antivirus_scanner
-from app.modules.identity.tasks import sweep_erasure_requests, sweep_user_lifecycle
+from app.modules.identity.tasks import (
+    sweep_erasure_requests,
+    sweep_keycloak_events,
+    sweep_user_lifecycle,
+)
 from app.modules.imports.tasks import sweep_import_jobs
 from app.modules.integration.service import RealOutboxService, register_outbox_service
 from app.modules.integration.tasks import sweep_lms_progress_pull, sweep_outbox_events
@@ -131,6 +135,7 @@ class WorkerSettings:
         sweep_lms_progress_pull,
         sweep_erasure_requests,
         sweep_user_lifecycle,
+        sweep_keycloak_events,
     ]
     cron_jobs = [
         # Раз в сутки: партиции аудита на будущее.
@@ -188,6 +193,10 @@ class WorkerSettings:
         # Раз в 5 минут: снятие блокировки по `auto_unblock_at` и `INVITE_EXPIRED`
         # (приглашение не принято за 30 дней) — new_spec §4.5, §4.1.
         cron(sweep_user_lifecycle, minute=set(range(0, 60, 5))),
+        # Раз в минуту: опрос Admin API Keycloak на LOGIN_ERROR -> LOGIN_FAILED/
+        # BRUTE_FORCE_LOCK (B6-3, группа АУД). Нет-оп, пока KEYCLOAK_EVENTS_POLL_ENABLED=false
+        # (дефолт, до включения событий в realm — спринт D1).
+        cron(sweep_keycloak_events, minute=set(range(60))),
     ]
     on_startup = startup
     on_shutdown = shutdown
