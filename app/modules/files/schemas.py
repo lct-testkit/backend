@@ -95,6 +95,11 @@ class AttachmentOut(BaseModel):
     description: str | None = None
     # Аддитивное поле: клиенты, которые его не знают, продолжают работать по `file_id`.
     file: AttachmentFileInfo | None = None
+    # B2-6: статус сделки, в котором файл был приложен (`null` до первого перехода и
+    # для вложений не-сделок), и запись истории перехода, с которой он был передан
+    # (`null`, пока файл не привязан к переходу).
+    status_id: uuid.UUID | None = None
+    status_history_id: uuid.UUID | None = None
     uploaded_by: uuid.UUID | None = None
     created_at: dt.datetime
 

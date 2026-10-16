@@ -210,10 +210,17 @@ class TransitionRequest(BaseModel):
     to_status_id: uuid.UUID
     comment: str | None = None
     fields: dict[str, Any] = Field(default_factory=dict)
-    # Поле принимается ради стабильности контракта и не обрабатывается: условия
-    # `attachments.*` перехода считаются по вложениям, уже привязанным к сделке
-    # (`POST /api/attachments`), а не по этому списку.
-    attachments: list[uuid.UUID] = Field(default_factory=list)
+    # B2-7: id вложений этой сделки (уже созданных через `POST /api/attachments`),
+    # которые прикладываются к переходу — они привязываются к записи истории и засчитываются
+    # условиям `step_attachments.<категория>` как «приложенные на этом шаге».
+    attachments: list[uuid.UUID] = Field(
+        default_factory=list,
+        max_length=20,
+        description=(
+            "id вложений этой сделки (POST /api/attachments), которые прикладываются "
+            "к этому переходу"
+        ),
+    )
 
 
 class TransitionResponse(BaseModel):
@@ -236,6 +243,10 @@ class DealStatusHistoryOut(BaseModel):
     duration_in_prev: dt.timedelta | None = None
     sla_state_at_change: str | None = None
     changed_at: dt.datetime
+    # B2-8: число неудалённых вложений, привязанных к ЭТОЙ записи истории (не ко всей сделке).
+    # Выставляется роутером после `model_validate`: запись истории — ORM-объект без такого
+    # атрибута, считается одним дополнительным запросом на всю страницу (не на запись).
+    attachments_count: int = 0
 
 
 class DealEventOut(BaseModel):

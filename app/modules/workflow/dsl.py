@@ -9,7 +9,7 @@
   дыру: администратор описал бы условие по чужому полю, а интерпретатор
   прочитал бы его из проекции сделки. Поэтому поле обязано быть либо в
   точном списке, либо в разрешённом префиксе (`custom_fields.*`,
-  `attachments.*`);
+  `attachments.*`, `step_attachments.*` — B2-7, файлы текущего шага);
 * **отсутствующее значение не ломает вычисление**. Условие `amount > 0` при
   пустой сумме должно дать «не выполнено», а не 500 из-за сравнения `None`
   с числом.
@@ -49,7 +49,16 @@ ALLOWED_FIELDS: frozenset[str] = frozenset(
 
 #: Префиксы, внутри которых имя задаёт администратор: пользовательские поля и
 #: категории вложений. Дальше одного сегмента вложенность не разрешена.
-ALLOWED_FIELD_PREFIXES: tuple[str, ...] = ("custom_fields.", "attachments.")
+#: `step_attachments.<категория>` (B2-7) — файлы, приложенные именно в текущем
+#: статусе сделки (`Attachment.status_id == deal.status_id`), в отличие от
+#: `attachments.<категория>`, который считается по всем вложениям сделки
+#: независимо от шага. Семантика `attachments.*` старых воронок (v1, b2c)
+#: не меняется — новый префикс добавлен рядом, а не взамен.
+ALLOWED_FIELD_PREFIXES: tuple[str, ...] = (
+    "custom_fields.",
+    "attachments.",
+    "step_attachments.",
+)
 
 #: Категории вложений из раздела 1 (contract, act, license, presentation, other).
 ATTACHMENT_CATEGORIES: frozenset[str] = frozenset(
@@ -247,7 +256,7 @@ def _validate_field_name(
         tail = field_name[len(prefix) :]
         if not tail or "." in tail:
             return [f"{path}.field: после {prefix} ожидается одно имя без точек"]
-        if prefix == "attachments." and tail not in ATTACHMENT_CATEGORIES:
+        if prefix in ("attachments.", "step_attachments.") and tail not in ATTACHMENT_CATEGORIES:
             return [
                 f"{path}.field: неизвестная категория вложения {tail!r}; "
                 f"допустимы {', '.join(sorted(ATTACHMENT_CATEGORIES))}"
