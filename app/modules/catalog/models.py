@@ -612,6 +612,11 @@ class OrganizationLicense(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteM
     contract_key: Mapped[str] = mapped_column(String(128), nullable=False, server_default="")
     # --- B3-3: разобранные значения «Подписание лицензии» / «Срок действия» ---
     is_signed: Mapped[bool | None] = mapped_column(nullable=True)
-    license_term_years: Mapped[int | None] = mapped_column(nullable=True)
+    # B1-7 (между делом, при прогоне `alembic check` для своей миграции 0027): `int` без явного
+    # типа резолвится в `BigInteger` через `Base.type_annotation_map` (`app/db/base.py`), а
+    # миграция 0026 создала колонку как `SMALLINT` — `alembic check` падал на этом рассинхроне
+    # для любой следующей миграции, не только нашей. Явный `Integer` — как у соседнего
+    # `license_valid_year` чуть выше; миграция 0028 приводит колонку к тому же типу.
+    license_term_years: Mapped[int | None] = mapped_column(Integer, nullable=True)
     license_valid_until: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
     is_perpetual: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
