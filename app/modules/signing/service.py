@@ -1395,9 +1395,15 @@ class SignatureRequestService:
                 changes={"viewed_at": {"old": None, "new": request.viewed_at.isoformat()}},
             )
 
-        file = await self._session.get(File, document.file_id)
+        # B7-2: страница подписанта показывает подписанный файл (со штампом и QR), а не
+        # исходник, если документ уже подписан.
+        is_signed = document.status == SignatureDocumentStatus.SIGNED.value
+        preview_file_id = (
+            document.signed_file_id if is_signed and document.signed_file_id else document.file_id
+        )
+        file = await self._session.get(File, preview_file_id)
         if file is None:
-            raise NotFoundError("Файл документа", document.file_id)
+            raise NotFoundError("Файл документа", preview_file_id)
         preview_url = await generate_presigned_get(
             bucket=file.bucket,
             key=file.storage_key,
@@ -1414,6 +1420,8 @@ class SignatureRequestService:
                 deadline_at=document.deadline_at,
                 status=document.status,
                 preview_url=preview_url,
+                is_signed=is_signed,
+                has_protocol=bool(document.protocol_file_id),
             ),
             signers=[
                 SigningSignerPreview(
@@ -1429,16 +1437,44 @@ class SignatureRequestService:
             agreement_text=AGREEMENT_TEXT,
         )
 
-    async def load_document_pdf(self, request: SignatureRequest) -> tuple[bytes, str]:
-        """PDF документа запроса и его имя — для просмотра с origin приложения."""
+    async def load_document_pdf(
+        self, request: SignatureRequest, *, variant: str = "auto"
+    ) -> tuple[bytes, str]:
+        """PDF документа запроса и его имя — для просмотра с origin приложения (B7-2:
+        подписанный файл вместо исходного после последней подписи).
+
+        `variant`:
+        * `auto` (по умолчанию) — документ `signed` со `signed_file_id` отдаёт подписанный
+          файл со штампом и QR; иначе (включая документы без подписи) — исходный;
+        * `original` — всегда исходный `document.file_id`, явно, для сравнения с подписанным;
+        * `protocol` — протокол подписания; доступен только у `signed`-документа с
+          заполненным `protocol_file_id`, иначе `DOCUMENT_NOT_SIGNABLE` (та же ошибка, что у
+          `protocol_download`).
+        """
         document = await self._session.get(SignatureDocument, request.document_id)
         if document is None:
             raise NotFoundError("Документ на подпись", request.document_id)
-        file = await self._session.get(File, document.file_id)
+        is_signed = document.status == SignatureDocumentStatus.SIGNED.value
+
+        name_prefix: str | None
+        if variant == "protocol":
+            if not (is_signed and document.protocol_file_id):
+                raise AppError(
+                    ErrorCode.DOCUMENT_NOT_SIGNABLE,
+                    "Протокол подписания доступен только у подписанного документа",
+                )
+            file_id, name_prefix = document.protocol_file_id, "protocol"
+        elif variant == "original" or not (is_signed and document.signed_file_id):
+            file_id, name_prefix = document.file_id, None
+        else:
+            file_id, name_prefix = document.signed_file_id, "signed"
+
+        file = await self._session.get(File, file_id)
         if file is None:
-            raise NotFoundError("Файл документа", document.file_id)
+            raise NotFoundError("Файл документа", file_id)
         data = await download_object_bytes(bucket=file.bucket, key=file.storage_key)
-        return data, file.original_filename
+        filename = f"{name_prefix}-{document.id}.pdf" if name_prefix else file.original_filename
+        return data, filename
 
     # --- OTP ---------------------------------------------------------------
 

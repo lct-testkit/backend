@@ -31,9 +31,9 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Path, Request, Response
+from fastapi import APIRouter, Depends, Path, Query, Request, Response
 
 from app.core.config import get_settings
 from app.core.context import get_client
@@ -148,16 +148,23 @@ async def get_sign_page(
     summary="PDF документа для просмотра (внешний подписант)",
     description=(
         "Тот же PDF, что по `preview_url`, но с origin приложения: `inline`, без CORS и "
-        "без ссылки на хранилище. Доступ — по той же ссылке подписи, лимит — общий с ней."
+        "без ссылки на хранилище. По умолчанию (`variant=auto`) после подписи отдаёт файл "
+        "со штампом, а не исходник (B7-2); `variant=original` — всегда исходник; "
+        "`variant=protocol` — протокол подписания (только у подписанного документа). "
+        "Доступ — по той же ссылке подписи, лимит — общий с ней."
     ),
     response_class=Response,
     responses={200: {"content": {"application/pdf": {}}}},
     dependencies=[Depends(_rate_limited)],
 )
-async def get_sign_file(session: DbSession, token: Annotated[str, Path()]) -> Response:
+async def get_sign_file(
+    session: DbSession,
+    token: Annotated[str, Path()],
+    variant: Annotated[Literal["auto", "original", "protocol"], Query()] = "auto",
+) -> Response:
     service = SignatureRequestService(session)
     signature_request = await service.get_by_token(token)
-    data, filename = await service.load_document_pdf(signature_request)
+    data, filename = await service.load_document_pdf(signature_request, variant=variant)
     return Response(
         content=data, media_type="application/pdf", headers=pdf_inline_headers(filename)
     )

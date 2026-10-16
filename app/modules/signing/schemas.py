@@ -220,6 +220,11 @@ class SigningDocumentPreview(BaseModel):
     preview_url: str
     # Тот же PDF с origin приложения (без CORS и без ссылки на S3): проставляют роутеры.
     file_url: str | None = None
+    # B7-2: `preview_url`/`file_url` ведут на подписанный файл, когда документ подписан —
+    # эти два поля говорят фронтенду, что показать («подписан», «есть протокол»), не заставляя
+    # его угадывать по `status`.
+    is_signed: bool = False
+    has_protocol: bool = False
 
 
 class SigningSignerPreview(BaseModel):
