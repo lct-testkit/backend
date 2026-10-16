@@ -5703,6 +5703,10 @@
       },
       "InboundMessageOut": {
         "properties": {
+          "channel": {
+            "title": "Channel",
+            "type": "string"
+          },
           "error": {
             "anyOf": [
               {
@@ -5792,6 +5796,7 @@
           "source_code",
           "external_id",
           "message_type",
+          "channel",
           "status",
           "signature_valid",
           "error",
@@ -5872,6 +5877,18 @@
             ],
             "title": "Last Error"
           },
+          "last_run": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Run"
+          },
           "last_sync_at": {
             "anyOf": [
               {
@@ -5887,6 +5904,26 @@
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "pull_enabled": {
+            "title": "Pull Enabled",
+            "type": "boolean"
+          },
+          "pull_interval_seconds": {
+            "title": "Pull Interval Seconds",
+            "type": "integer"
+          },
+          "pull_request": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pull Request"
           },
           "updated_at": {
             "format": "date-time",
@@ -5905,6 +5942,10 @@
           "config",
           "last_sync_at",
           "last_error",
+          "pull_enabled",
+          "pull_interval_seconds",
+          "pull_request",
+          "last_run",
           "created_at",
           "updated_at"
         ],
@@ -5984,6 +6025,30 @@
               }
             ],
             "title": "Name"
+          },
+          "pull_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pull Enabled"
+          },
+          "pull_interval_seconds": {
+            "anyOf": [
+              {
+                "maximum": 86400.0,
+                "minimum": 60.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pull Interval Seconds"
           }
         },
         "title": "IntegrationSourceUpdateRequest",

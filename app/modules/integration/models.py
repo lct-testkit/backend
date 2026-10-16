@@ -119,6 +119,16 @@ class IntegrationSource(UuidPkMixin, TimestampMixin, Base):
     )
     last_sync_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # B5-2/B5-5: забор по API (pull) — включатель, период опроса, запрос ручного запуска
+    # («Забрать сейчас») и итог последнего прогона. Миграция 0027.
+    pull_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    pull_interval_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("300")
+    )
+    pull_request: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    last_run: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
 
 class InboundMessage(UuidPkMixin, Base):
@@ -130,11 +140,17 @@ class InboundMessage(UuidPkMixin, Base):
             "status IN ('received','processed','failed','duplicate')",
             name="inbound_messages_status_valid",
         ),
+        CheckConstraint(
+            "channel IN ('webhook','pull','manual')", name="inbound_messages_channel_valid"
+        ),
     )
 
     source_code: Mapped[str] = mapped_column(String(16), nullable=False)
     external_id: Mapped[str] = mapped_column(String(255), nullable=False)
     message_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # B5-2: как заявка попала в журнал — вебхук (как раньше, значение по умолчанию для старых
+    # строк), забор по расписанию (B5-2) или кнопка «Забрать сейчас» (B5-5).
+    channel: Mapped[str] = mapped_column(String(16), nullable=False, server_default="webhook")
     raw_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     signature_valid: Mapped[bool] = mapped_column(Boolean, nullable=False)
     status: Mapped[str] = mapped_column(

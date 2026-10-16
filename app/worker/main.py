@@ -27,7 +27,11 @@ from app.modules.identity.tasks import sweep_erasure_requests, sweep_user_lifecy
 from app.modules.imports.tasks import run_import_job, sweep_import_jobs
 from app.modules.integration.security import resolve_secret
 from app.modules.integration.service import RealOutboxService, register_outbox_service
-from app.modules.integration.tasks import sweep_lms_progress_pull, sweep_outbox_events
+from app.modules.integration.tasks import (
+    sweep_cms_leads_pull,
+    sweep_lms_progress_pull,
+    sweep_outbox_events,
+)
 from app.modules.notification.service import RealNotificationService, register_notification_service
 from app.modules.notification.tasks import dispatch_pending_notifications
 from app.modules.registry.tasks import sweep_registry_drift, sweep_registry_imports
@@ -141,6 +145,7 @@ class WorkerSettings:
         refresh_report_materialized_views,
         sweep_outbox_events,
         sweep_lms_progress_pull,
+        sweep_cms_leads_pull,
         sweep_erasure_requests,
         sweep_user_lifecycle,
     ]
@@ -191,6 +196,9 @@ class WorkerSettings:
         cron(sweep_outbox_events, minute=set(range(60))),
         # Раз в 30 минут (раздел 4.14, дословно).
         cron(sweep_lms_progress_pull, minute={0, 30}),
+        # Раз в минуту: реальный интервал задаёт integration_sources.pull_interval_seconds
+        # (B5-2), тик, пришедшийся раньше срока, сам себя пропускает.
+        cron(sweep_cms_leads_pull, minute=set(range(60))),
         # Раз в 15 минут: исполнение удаления/обезличивания по истечении
         # отсрочки режима A (new_spec §4.8.4 шаг 4-5, 30 дней по умолчанию) —
         # та же периодичность, что и SLA-скан: отсрочка считается днями, чаще

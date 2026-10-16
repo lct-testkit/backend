@@ -35,8 +35,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
@@ -48,28 +47,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.catalog.models import Contact, Organization, Product
 from app.modules.crm.models import Deal, DealProduct
+from app.modules.integration.http import TIMEOUT as _TIMEOUT
+from app.modules.integration.http import http_errors_without_url as _http_errors_without_url_base
 from app.modules.integration.models import LearningProgress, SyncCursor
 
 logger = structlog.get_logger(__name__)
 
-_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 
-
-@asynccontextmanager
-async def _http_errors_without_url(operation: str) -> AsyncIterator[None]:
-    """Ошибка HTTP без адреса в тексте. `raise_for_status()` вшивает `response.url` в сообщение,
-    а оно уходит в `outbox_events.last_error` и оттуда в ответ админской ручки и в лог; адрес
-    LMS, заданный с логином или ключом в строке, не должен там оказаться (так же устроен
-    `BitrixClient._call`). Наружу — только операция и статус либо тип сбоя."""
-    try:
-        yield
-    except httpx.HTTPStatusError as exc:
-        raise RuntimeError(
-            f"lms {operation} http error: "
-            f"{exc.response.status_code} {exc.response.reason_phrase}"
-        ) from None
-    except httpx.HTTPError as exc:
-        raise RuntimeError(f"lms {operation} request failed: {type(exc).__name__}") from None
+def _http_errors_without_url(operation: str) -> AbstractAsyncContextManager[None]:
+    """B5-2: обёртка вынесена в `integration.http` (общая с `CmsClient`) — тонкая прокладка здесь,
+    чтобы не трогать остальные вызовы этого модуля."""
+    return _http_errors_without_url_base("lms", operation)
 
 
 #: События воронки, при доставке которых LMS получает сведения об учащемся.
