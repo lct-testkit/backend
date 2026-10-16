@@ -20,13 +20,14 @@ from dataclasses import dataclass
 from typing import Any
 
 import structlog
-from sqlalchemy import func, select, text
+from sqlalchemy import Select, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import invalidate_principal_after_commit
 from app.core.config import get_settings
 from app.core.context import get_client
 from app.core.errors import AppError, ErrorCode
+from app.core.masking import mask_mapping
 from app.core.optimistic import claim_version
 from app.core.redis_client import get_redis
 from app.core.security import TokenClaims
@@ -59,6 +60,22 @@ class PolicyVersion:
 
     version: str
     text_hash: str | None = None
+
+
+@dataclass(slots=True)
+class SecurityEventFilters:
+    """Фильтры `GET /admin/security-events` (B6-2)."""
+
+    event_types: list[str] | None = None
+    min_severity: str | None = None
+    user_id: uuid.UUID | None = None
+    ip: str | None = None
+    date_from: dt.datetime | None = None
+    date_to: dt.datetime | None = None
+
+
+#: Порядок строгости для `min_severity` — «не ниже уровня».
+_SEVERITY_ORDER: dict[str, int] = {"info": 0, "warning": 1, "critical": 2}
 
 
 #: Домен служебных записей (владелец демо-истории отчётов и т.п.): реальному человеку они не
@@ -464,13 +481,17 @@ class IdentityService:
         details: dict[str, object] | None = None,
     ) -> SecurityEvent:
         client = get_client()
+        # B6-2: до этой правки `details` писался как есть — поле произвольное (вызывающий
+        # код собирает его сам), и секрет или ПДн, случайно попавший туда, уходил бы в журнал
+        # безопасности в открытом виде. `mask_mapping` — тот же фильтр, что у `audit.service`.
+        masked_details = mask_mapping(details) if details is not None else None
         event = SecurityEvent(
             user_id=user_id,
             event_type=event_type.value,
             severity=severity.value,
             ip=client.ip if client else None,
             user_agent=client.user_agent if client else None,
-            details=details,  # type: ignore[arg-type]
+            details=masked_details,  # type: ignore[arg-type]
         )
         self._session.add(event)
         await self._session.flush()
@@ -481,6 +502,30 @@ class IdentityService:
             user_id=str(user_id) if user_id else None,
         )
         return event
+
+    def security_events_query(self, filters: SecurityEventFilters) -> Select[tuple[SecurityEvent]]:
+        """Выборка `security_events` по фильтрам `GET /admin/security-events` (B6-2) —
+        чистая функция построения запроса, тем же приёмом, что `AuditService.query`."""
+        stmt = select(SecurityEvent)
+        if filters.event_types:
+            stmt = stmt.where(SecurityEvent.event_type.in_(filters.event_types))
+        if filters.min_severity:
+            rank = _SEVERITY_ORDER.get(filters.min_severity, 0)
+            allowed = [s for s, r in _SEVERITY_ORDER.items() if r >= rank]
+            stmt = stmt.where(SecurityEvent.severity.in_(allowed))
+        if filters.user_id is not None:
+            stmt = stmt.where(SecurityEvent.user_id == filters.user_id)
+        if filters.ip:
+            if "/" in filters.ip:
+                # Сеть (CIDR): `inet <<= inet` — «содержится в сети».
+                stmt = stmt.where(SecurityEvent.ip.op("<<=")(filters.ip))
+            else:
+                stmt = stmt.where(SecurityEvent.ip == filters.ip)
+        if filters.date_from is not None:
+            stmt = stmt.where(SecurityEvent.created_at >= filters.date_from)
+        if filters.date_to is not None:
+            stmt = stmt.where(SecurityEvent.created_at < filters.date_to)
+        return stmt
 
     # --- Скоуп руководителя ----------------------------------------------
 

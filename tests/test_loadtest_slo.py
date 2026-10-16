@@ -78,7 +78,9 @@ def test_loadtest_pair_has_no_guards() -> None:
 
     spec = _b2b_spec()
     pair = next(
-        t for t in spec.transitions if t.from_code == "meeting" and t.to_code == "documents_exchange"
+        t
+        for t in spec.transitions
+        if t.from_code == "meeting" and t.to_code == "documents_exchange"
     )
     assert pair.conditions in (None, {})
     assert pair.actions in (None, [])

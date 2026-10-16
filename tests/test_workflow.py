@@ -492,9 +492,12 @@ class TestSeedGraphs:
             "lost",
             "parked",
         }
-        # ПЭП-согласование КП — исключительно в v1, действие на переходе kp_preparation -> kp_approval.
+        # ПЭП-согласование КП — исключительно в v1, действие на переходе
+        # kp_preparation -> kp_approval.
         kp_transition = next(
-            t for t in spec.transitions if t.from_code == "kp_preparation" and t.to_code == "kp_approval"
+            t
+            for t in spec.transitions
+            if t.from_code == "kp_preparation" and t.to_code == "kp_approval"
         )
         assert any(a.get("type") == "request_signature" for a in kp_transition.actions)
 

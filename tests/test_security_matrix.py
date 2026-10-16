@@ -74,9 +74,7 @@ class TestMeasuresMatrix:
             line_count = sum(1 for _ in full_path.open(encoding="utf-8", errors="replace"))
             for number in _line_numbers(line_spec):
                 if number > line_count:
-                    problems.append(
-                        f"{path}:{number}: в файле только {line_count} строк"
-                    )
+                    problems.append(f"{path}:{number}: в файле только {line_count} строк")
         assert not problems, "Устаревшие ссылки в матрице:\n" + "\n".join(problems)
 
     def test_status_есть_has_at_least_one_code_reference(self) -> None:
@@ -84,9 +82,5 @@ class TestMeasuresMatrix:
         rows = _table_rows(text)
         data_rows = [r for r in rows if len(r) >= 3 and r[1] in {"есть", "частично", "нет"}]
         assert data_rows, "Не нашлось строк со статусом"
-        missing = [
-            row[0]
-            for row in data_rows
-            if row[1] == "есть" and not _REF_RE.search(row[2])
-        ]
+        missing = [row[0] for row in data_rows if row[1] == "есть" and not _REF_RE.search(row[2])]
         assert not missing, f"Статус «есть» без ссылки на код: {missing}"

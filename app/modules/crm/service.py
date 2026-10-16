@@ -2605,7 +2605,7 @@ class DealService:
                 )
                 .group_by(Attachment.status_history_id)
             )
-            attachments_counts = {history_id: count for history_id, count in rows.all()}
+            attachments_counts = dict(rows.all())
         return HistoryPage(statuses, events, next_statuses, next_events, attachments_counts)
 
     # --- Счётчики карточки -------------------------------------------------

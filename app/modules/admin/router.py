@@ -11,7 +11,7 @@ import uuid
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Path, Query, Response, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.deps import AuditDep, DbSession, Pagination, require_permission
 from app.core.errors import AppError, ErrorCode, NotFoundError
@@ -28,6 +28,10 @@ from app.modules.admin.schemas import (
     FeatureFlagListResponse,
     FeatureFlagOut,
     FeatureFlagPatch,
+    SecurityEventListResponse,
+    SecurityEventOut,
+    SecurityEventSummaryOut,
+    SecurityEventTypeCount,
     SystemSettingListResponse,
     SystemSettingOut,
     SystemSettingPut,
@@ -36,8 +40,8 @@ from app.modules.admin.setting_crypto import decrypt_value, encrypt_value
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.models import AuditLog
 from app.modules.audit.service import AuditFilters, AuditService, diff_changes
-from app.modules.identity.models import Role, SecurityEventType, Severity
-from app.modules.identity.service import IdentityService
+from app.modules.identity.models import Role, SecurityEvent, SecurityEventType, Severity, User
+from app.modules.identity.service import IdentityService, SecurityEventFilters
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -428,3 +432,183 @@ async def verify_audit_chain(
 ) -> AuditChainReport:
     report = await AuditService(session).verify_chain(limit=limit)
     return AuditChainReport(**report)
+
+
+# =============================================================================
+# Журнал безопасности (B6-2): ТЗ §Безопасность требует «регистрации событий», до этой
+# задачи события писались (IdentityService.record_security_event), но прочитать их можно
+# было только SQL-запросом. Право отдельное от audit:read (SECURITY_EVENT_READ) — HEAD его
+# не получает, иначе руководитель видел бы IP и попытки входа чужих команд.
+# =============================================================================
+
+SecurityEventReadPerm = Annotated[
+    Principal, Depends(require_permission(Permission.SECURITY_EVENT_READ))
+]
+
+
+async def _user_display_map(session: DbSession, user_ids: set[uuid.UUID]) -> dict[uuid.UUID, str]:
+    """Один запрос на всю страницу (не на строку, НФР 1): `effective_name` — свойство Python
+    (display_name или full_name), а не колонка, поэтому имя строится после выборки."""
+    if not user_ids:
+        return {}
+    rows = (await session.execute(select(User).where(User.id.in_(user_ids)))).scalars()
+    return {row.id: row.effective_name for row in rows}
+
+
+@router.get(
+    "/security-events",
+    summary="Журнал безопасности",
+    description=(
+        "Неудачные входы, блокировки перебора, обнаруженный вредонос и другие события "
+        "безопасности. Фильтры: event_type (повторяемый параметр), min_severity, user_id, "
+        "ip (точный адрес или сеть вида 203.0.113.0/24), период. Курсорная пагинация, до 100 "
+        "записей на страницу. Роль: ADMIN, AUDITOR."
+    ),
+    response_model=SecurityEventListResponse,
+)
+async def list_security_events(
+    session: DbSession,
+    page: Pagination,
+    _: SecurityEventReadPerm,
+    event_type: Annotated[list[str] | None, Query()] = None,
+    min_severity: Annotated[str | None, Query()] = None,
+    user_id: Annotated[uuid.UUID | None, Query()] = None,
+    ip: Annotated[str | None, Query()] = None,
+    date_from: Annotated[dt.datetime | None, Query(alias="from")] = None,
+    date_to: Annotated[dt.datetime | None, Query(alias="to")] = None,
+) -> SecurityEventListResponse:
+    if min_severity is not None and min_severity not in {s.value for s in Severity}:
+        raise AppError(ErrorCode.VALIDATION, f"Неизвестный уровень важности {min_severity!r}")
+    filters = SecurityEventFilters(
+        event_types=event_type,
+        min_severity=min_severity,
+        user_id=user_id,
+        ip=ip,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    stmt = (
+        IdentityService(session)
+        .security_events_query(filters)
+        .order_by(SecurityEvent.created_at.desc(), SecurityEvent.id.desc())
+    )
+    cursor = page.decoded_cursor
+    if cursor:
+        stmt = stmt.where(keyset_before(SecurityEvent.created_at, SecurityEvent.id, cursor))
+    rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
+    built: Page = Page.build(rows, limit=page.limit)
+
+    user_ids = {row.user_id for row in built.items if row.user_id is not None}
+    display_map = await _user_display_map(session, user_ids)
+    items = []
+    for row in built.items:
+        out = SecurityEventOut.model_validate(row)
+        out.user_display = display_map.get(row.user_id) if row.user_id else None
+        items.append(out)
+    return SecurityEventListResponse(items=items, next_cursor=built.next_cursor)
+
+
+@router.get(
+    "/security-events/summary",
+    summary="Сводка журнала безопасности",
+    description=(
+        "Число событий по типу за последние `hours` часов (до 720) — данные для плитки "
+        "дашборда администратора. Роль: ADMIN, AUDITOR."
+    ),
+    response_model=SecurityEventSummaryOut,
+)
+async def security_events_summary(
+    session: DbSession,
+    _: SecurityEventReadPerm,
+    hours: Annotated[int, Query(ge=1, le=720)] = 24,
+) -> SecurityEventSummaryOut:
+    since = dt.datetime.now(dt.UTC) - dt.timedelta(hours=hours)
+    stmt = (
+        select(
+            SecurityEvent.event_type,
+            SecurityEvent.severity,
+            func.count().label("count"),
+            func.max(SecurityEvent.created_at).label("last_at"),
+        )
+        .where(SecurityEvent.created_at >= since)
+        .group_by(SecurityEvent.event_type, SecurityEvent.severity)
+        .order_by(func.count().desc())
+    )
+    rows = (await session.execute(stmt)).all()
+    by_type = [
+        SecurityEventTypeCount(
+            event_type=row.event_type, severity=row.severity, count=row.count, last_at=row.last_at
+        )
+        for row in rows
+    ]
+    critical_count = sum(r.count for r in by_type if r.severity == Severity.CRITICAL.value)
+    return SecurityEventSummaryOut(since=since, by_type=by_type, critical_count=critical_count)
+
+
+@router.get(
+    "/security-events/export",
+    summary="Экспорт журнала безопасности",
+    description=(
+        "Построчный JSON (NDJSON) по тем же фильтрам, что у списка. Экспорт — массовая "
+        "выгрузка: пишется событие MASS_EXPORT и запись аудита AUDIT_EXPORTED. "
+        "Роль: ADMIN, AUDITOR."
+    ),
+)
+async def export_security_events(
+    session: DbSession,
+    audit: AuditDep,
+    principal: SecurityEventReadPerm,
+    event_type: Annotated[list[str] | None, Query()] = None,
+    min_severity: Annotated[str | None, Query()] = None,
+    user_id: Annotated[uuid.UUID | None, Query()] = None,
+    ip: Annotated[str | None, Query()] = None,
+    date_from: Annotated[dt.datetime | None, Query(alias="from")] = None,
+    date_to: Annotated[dt.datetime | None, Query(alias="to")] = None,
+    limit: Annotated[int, Query(ge=1, le=100_000)] = 10_000,
+) -> Response:
+    filters = SecurityEventFilters(
+        event_types=event_type,
+        min_severity=min_severity,
+        user_id=user_id,
+        ip=ip,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    stmt = (
+        IdentityService(session)
+        .security_events_query(filters)
+        .order_by(SecurityEvent.created_at.desc(), SecurityEvent.id.desc())
+        .limit(limit)
+    )
+    rows = list((await session.execute(stmt)).scalars().all())
+
+    await IdentityService(session).record_security_event(
+        SecurityEventType.MASS_EXPORT,
+        user_id=principal.user_id,
+        severity=Severity.WARNING,
+        details={"kind": "security_events_export", "rows": len(rows)},
+    )
+    await audit.record(
+        AuditAction.AUDIT_EXPORTED,
+        entity_type="security_event",
+        entity_id=None,
+        changes={
+            "rows": {"old": None, "new": len(rows)},
+            "filters": {
+                "old": None,
+                "new": {
+                    "event_type": event_type,
+                    "min_severity": min_severity,
+                    "from": date_from.isoformat() if date_from else None,
+                    "to": date_to.isoformat() if date_to else None,
+                },
+            },
+        },
+    )
+
+    body = "\n".join(SecurityEventOut.model_validate(row).model_dump_json() for row in rows)
+    return Response(
+        content=body,
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": 'attachment; filename="security-events-export.ndjson"'},
+    )

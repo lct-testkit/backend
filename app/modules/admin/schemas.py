@@ -115,3 +115,41 @@ class AuditEntryOut(BaseModel):
 class AuditListResponse(BaseModel):
     items: list[AuditEntryOut]
     next_cursor: str | None = None
+
+
+# --- Журнал безопасности (B6-2) --------------------------------------------
+
+
+class SecurityEventOut(BaseModel):
+    """Запись `security_events`. `details` уже маскированы на записи (B6-2)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    created_at: dt.datetime
+    event_type: str
+    severity: str
+    user_id: uuid.UUID | None = None
+    # Проставляется роутером одним LEFT JOIN на весь список, не на запись (НФР 1).
+    user_display: str | None = None
+    ip: str | None = None
+    user_agent: str | None = None
+    details: dict[str, Any] | None = None
+
+
+class SecurityEventListResponse(BaseModel):
+    items: list[SecurityEventOut]
+    next_cursor: str | None = None
+
+
+class SecurityEventTypeCount(BaseModel):
+    event_type: str
+    severity: str
+    count: int
+    last_at: dt.datetime
+
+
+class SecurityEventSummaryOut(BaseModel):
+    since: dt.datetime
+    by_type: list[SecurityEventTypeCount]
+    critical_count: int
