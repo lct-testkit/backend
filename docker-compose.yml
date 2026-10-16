@@ -93,8 +93,15 @@ x-api-env: &api-env
   # независимо от `.env`, потому что этот whitelist, а не `.env` целиком,
   # определяет, что реально долетает до процесса.
   CMS_WEBHOOK_SECRET_REF: ${CMS_WEBHOOK_SECRET_REF:-}
+  # B5-1: забор по API (pull) — у сайта и LMS; раньше LMS_AUTH_REF указывал на
+  # переменную, которой не было ни в одном из этих семи имён, то есть воркер
+  # никогда не видел токен LMS, даже если он был в `.env`.
+  CMS_BASE_URL: ${CMS_BASE_URL:-}
+  CMS_AUTH_REF: ${CMS_AUTH_REF:-}
   LMS_BASE_URL: ${LMS_BASE_URL:-}
   LMS_AUTH_REF: ${LMS_AUTH_REF:-}
+  INTEGRATION_PULL_PAGE_SIZE: ${INTEGRATION_PULL_PAGE_SIZE:-100}
+  INTEGRATION_PULL_MAX_PAGES: ${INTEGRATION_PULL_MAX_PAGES:-20}
   BITRIX_CONNECTOR_ENABLED: ${BITRIX_CONNECTOR_ENABLED:-false}
   BITRIX_WEBHOOK_URL_REF: ${BITRIX_WEBHOOK_URL_REF:-}
   BITRIX_SOURCE_ID: ${BITRIX_SOURCE_ID:-OTHER}
@@ -105,6 +112,8 @@ x-api-env: &api-env
   # тот же принцип, что уже применён к `SIGNATURE_SERVER_SECRET`/
   # `S3_SECRET_KEY` этим же anchor'ом.
   CMS_WEBHOOK_SECRET: ${CMS_WEBHOOK_SECRET:-}
+  CMS_AUTH_TOKEN: ${CMS_AUTH_TOKEN:-}
+  LMS_AUTH_TOKEN: ${LMS_AUTH_TOKEN:-}
   BITRIX_WEBHOOK_URL: ${BITRIX_WEBHOOK_URL:-}
 
 services:
