@@ -78,6 +78,10 @@ class SecurityEventType(StrEnum):
     FILE_REJECTED = "FILE_REJECTED"
     MASS_EXPORT = "MASS_EXPORT"
     SIGNATURE_OTP_FAILED = "SIGNATURE_OTP_FAILED"
+    # B7-5: не меньше 5 неверных токенов подписи с одного IP за 10 минут — перебор ссылок,
+    # главный вектор атаки на публичные ручки ПЭП. Строка без CHECK (String(48) без
+    # ограничения значений) — новый тип не требует миграции.
+    SIGNATURE_TOKEN_PROBE = "SIGNATURE_TOKEN_PROBE"
     SIGNATURE_KEY_COMPROMISED = "SIGNATURE_KEY_COMPROMISED"
     # Раздел 4.14: HMAC-подпись входящего вебхука (CMS/LMS/Bitrix) не сошлась —
     # тот же класс события, что и неверный OTP при подписании, только для
