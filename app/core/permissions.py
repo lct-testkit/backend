@@ -91,6 +91,12 @@ class Permission(StrEnum):
     SIGNATURE_READ = "signature:read"
     SIGNATURE_SIGN = "signature:sign"
     SIGNATURE_VOID = "signature:void"
+    # B4-7: AUDITOR читает комментарии сделки (dop.md §13 даёт ей это в матрице прав, код не
+    # пускал — несоответствие из ACCOMPANYING-DOCUMENTATION.md). Не `DEAL_READ`: эта роль не
+    # должна получить доступ к самой сделке и связанным с ней сущностям (раздел 4, DealScope.
+    # NONE) — тем же приёмом, что `SIGNATURE_READ` выше даёт доступ к документу на подпись без
+    # доступа к сделке целиком.
+    COMMENT_AUDIT_READ = "comment:audit_read"
     EDM_ADMIN = "edm:admin"
     # dop.md §13 матрица прав: «Управление соглашениями ЭДО» — ADMIN пишет,
     # AUDITOR только читает (KAM/HEAD — ни то, ни другое). Отдельное право,
@@ -168,6 +174,7 @@ _AUDITOR: frozenset[Permission] = frozenset(
         Permission.AUDIT_EXPORT,
         Permission.EDM_READ,
         Permission.SIGNATURE_READ,
+        Permission.COMMENT_AUDIT_READ,
     }
 )
 

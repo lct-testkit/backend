@@ -25,6 +25,7 @@ from pydantic import (
     model_validator,
 )
 
+from app.core.masking import mask_contacts_text
 from app.core.patch import reject_null
 
 DealTypeLiteral = Literal["b2b", "b2c"]
@@ -340,6 +341,65 @@ class CommentOut(BaseModel):
 
 class CommentListResponse(BaseModel):
     items: list[CommentOut]
+    next_cursor: str | None = None
+
+
+# --- B4-7: комментарии сделки для AUDITOR (comment:audit_read) -----------------------------
+
+
+class AuditCommentOut(BaseModel):
+    """Тот же набор, что `CommentOut`, плюс `author_name` (у AUDITOR нет `user:read`, своей
+    ручки для имён ему не хватило бы) и `is_deleted` явно. Текст живого комментария —
+    замаскированный (`mask_contacts_text`: email/телефон/ФИО внутри свободного текста);
+    удалённого — не отдаётся вовсе (`body=None`), иначе эта ручка была бы обходом
+    `CommentService.delete`, который помечает комментарий удалённым именно ради исключения
+    текста из интерфейса."""
+
+    id: uuid.UUID
+    author_id: uuid.UUID | None = None
+    author_name: str | None = None
+    parent_id: uuid.UUID | None = None
+    body: str | None = None
+    body_format: str
+    is_system: bool
+    is_internal: bool
+    is_deleted: bool
+    edited_at: dt.datetime | None = None
+    created_at: dt.datetime
+    deleted_at: dt.datetime | None = None
+
+    @classmethod
+    def from_model(cls, comment: Any, *, author_name: str | None) -> AuditCommentOut:
+        deleted = comment.deleted_at is not None
+        return cls(
+            id=comment.id,
+            author_id=comment.author_id,
+            author_name=author_name,
+            parent_id=comment.parent_id,
+            body=None if deleted else mask_contacts_text(comment.body),
+            body_format=comment.body_format,
+            is_system=comment.is_system,
+            is_internal=comment.is_internal,
+            is_deleted=deleted,
+            edited_at=comment.edited_at,
+            created_at=comment.created_at,
+            deleted_at=comment.deleted_at,
+        )
+
+
+class AuditDealRef(BaseModel):
+    """Минимум для контекста ответа без открытия самой сделки (она вне скоупа AUDITOR) —
+    `deleted` вместо полной карточки: B4-3 мягко удаляет сделки, и история переписки по ним
+    должна оставаться читаемой аудитору."""
+
+    id: uuid.UUID
+    number: str
+    deleted: bool
+
+
+class AuditCommentListResponse(BaseModel):
+    deal: AuditDealRef
+    items: list[AuditCommentOut]
     next_cursor: str | None = None
 
 

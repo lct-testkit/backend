@@ -2791,6 +2791,24 @@ class CommentService:
             raise NotFoundError("Комментарий", comment_id)
         return comment
 
+    async def list_for_audit(
+        self, deal_id: uuid.UUID, *, limit: int | None = None, cursor: Cursor | None = None
+    ) -> tuple[list[DealComment], str | None]:
+        """B4-7: то же, что `list`, но для `comment:audit_read` (AUDITOR) — включает мягко
+        удалённые комментарии (без текста — см. `AuditCommentOut.from_model`: удаление делают
+        именно ради исключения текста, и эта ручка не должна быть обходом того решения, только
+        подтверждением, что запись когда-то была). `is_internal`/`is_system` не фильтруются —
+        тот же набор, что видит обычный читатель сделки в `list`."""
+        limit = min(limit, MAX_LIMIT) if limit is not None else MAX_LIMIT
+        return await _ascending_page(
+            self._session,
+            select(DealComment).where(DealComment.deal_id == deal_id),
+            DealComment.created_at,
+            DealComment.id,
+            limit=limit,
+            cursor=cursor,
+        )
+
     async def create(
         self,
         deal: Deal,
