@@ -24,7 +24,7 @@ from app.core.redis_client import close_redis
 from app.modules.admin.models import IdempotencyKey
 from app.modules.crm.tasks import sweep_sla_breaches
 from app.modules.identity.tasks import sweep_erasure_requests, sweep_user_lifecycle
-from app.modules.imports.tasks import sweep_import_jobs
+from app.modules.imports.tasks import run_import_job, sweep_import_jobs
 from app.modules.integration.security import resolve_secret
 from app.modules.integration.service import RealOutboxService, register_outbox_service
 from app.modules.integration.tasks import sweep_lms_progress_pull, sweep_outbox_events
@@ -34,6 +34,7 @@ from app.modules.registry.tasks import sweep_registry_drift, sweep_registry_impo
 from app.modules.reporting.tasks import (
     expire_report_files,
     refresh_report_materialized_views,
+    render_report_job,
     sweep_report_jobs,
 )
 from app.modules.signing.tasks import sweep_signature_deadlines, sweep_signature_otp_cleanup
@@ -129,6 +130,9 @@ class WorkerSettings:
         sweep_registry_imports,
         sweep_registry_drift,
         sweep_import_jobs,
+        # B8-11: не cron — ставятся из API сразу после коммита (`enqueue_after_commit`).
+        run_import_job,
+        render_report_job,
         sweep_signature_deadlines,
         sweep_signature_otp_cleanup,
         dispatch_pending_notifications,

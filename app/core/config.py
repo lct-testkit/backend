@@ -153,7 +153,21 @@ class Settings(BaseSettings):
     allowed_file_extensions: str = "png,jpeg,jpg,pdf,zip,gz,gzip,rar,doc,docx,xls,xlsx,xml,csv,json"
 
     # --- Отчёты ----------------------------------------------------------
+    # B8-11: раньше одна переменная (`reports_max_concurrent`) и ограничивала одновременные
+    # рендеры воркера, и была личным лимитом «незавершённых» на пользователя — теперь два
+    # разных смысла под разными именами, плюс общий потолок очереди на всех.
     reports_max_concurrent: int = 10
+    reports_max_per_user: int = 10
+    reports_queue_max: int = 200
+    # `false` — поведение «только cron» (откат без деплоя): API не ставит задание в arq,
+    # `sweep_report_jobs`/`sweep_import_jobs` рендерят/обрабатывают сами, как раньше.
+    reports_enqueue: bool = True
+    # Добор: `queued` старше этого порога считается потерянным (сбой постановки в Redis)
+    # и переставляется в очередь тем же `job_id` — arq отбрасывает дубль.
+    reports_enqueue_retry_after_s: int = 30
+    # `processing` старше этого порога — воркер упал посреди рендера; порог заметно больше
+    # таймаута самой задачи (600 с), чтобы живой рендер не был переотдан добором.
+    reports_stale_processing_minutes: int = 15
     reports_link_ttl_minutes: int = 15
     reports_retention_days: int = 7
 

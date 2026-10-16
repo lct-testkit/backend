@@ -330,14 +330,20 @@ async def test_report_in_progress_is_released_when_rendering_fails(
 async def test_report_in_progress_does_not_exceed_reports_max_concurrent(
     render_probe: type[_RenderProbe], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Тик берёт `reports_max_concurrent` за вычетом уже обрабатываемых, и метрика видит ровно
-    столько одновременных рендеров."""
+    """B8-11: при `reports_enqueue=false` (откат «только cron») `sweep_report_jobs` ведёт себя
+    как раньше — тик берёт `reports_max_concurrent` за вычетом уже обрабатываемых, и метрика
+    видит ровно столько одновременных рендеров. Первый `execute` в этой ветке — безусловный
+    добор зависших `processing` (`UPDATE ... RETURNING`, без `_limit_clause`), поэтому он
+    отличается от SELECT'а кандидатов по наличию этого атрибута, а не по порядку вызова."""
     job_ids = [uuid.uuid4() for _ in range(7)]
     statements: list[object] = []
 
     async def execute(statement: object) -> object:
         statements.append(statement)
-        limit = statement._limit_clause.value  # type: ignore[attr-defined]
+        limit_clause = getattr(statement, "_limit_clause", None)
+        if limit_clause is None or limit_clause.value is None:
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=list))
+        limit = limit_clause.value
         return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: job_ids[:limit]))
 
     session = SimpleNamespace(
@@ -348,15 +354,20 @@ async def test_report_in_progress_does_not_exceed_reports_max_concurrent(
     )
     monkeypatch.setattr(reporting_tasks, "session_scope", _fake_scope(session))
     monkeypatch.setattr(
-        reporting_tasks, "get_settings", lambda: SimpleNamespace(reports_max_concurrent=3)
+        reporting_tasks,
+        "get_settings",
+        lambda: SimpleNamespace(
+            reports_max_concurrent=3, reports_enqueue=False, reports_stale_processing_minutes=15
+        ),
     )
     _RenderProbe.seen = []
     before = _in_progress()
 
     result = await reporting_tasks.sweep_report_jobs({})
 
-    assert result == {"processed": 2, "failed": 0}
-    assert "LIMIT 2" in str(statements[0].compile(compile_kwargs={"literal_binds": True}))  # type: ignore[attr-defined]
+    assert result == {"processed": 2, "failed": 0, "requeued": 0}
+    select_stmt = next(s for s in statements if getattr(s, "_limit_clause", None) is not None)
+    assert "LIMIT 2" in str(select_stmt.compile(compile_kwargs={"literal_binds": True}))  # type: ignore[attr-defined]
     assert max(render_probe.seen) == before + 2
     assert _in_progress() == before
 

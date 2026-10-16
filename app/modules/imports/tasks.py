@@ -96,6 +96,32 @@ async def _run_one_batch(job_id: uuid.UUID, status: ImportJobStatus, batch_size:
 
 
 @track_task
+async def run_import_job(ctx: dict[str, Any], job_id: str, mode: str) -> dict[str, int]:
+    """B8-11: задача arq, поставленная `ImportService`-роутером сразу после `start_apply`/
+    `start_rollback` — не ждать минутного тика `sweep_import_jobs`. Доводит одно задание до
+    `done`/`skip` без собственного бюджета времени (ограничено только `job_timeout` воркера,
+    3600 с в `WorkerSettings`): `sweep_import_jobs` остаётся добором на случай, если эта
+    постановка потерялась (сбой Redis) — `FOR UPDATE SKIP LOCKED` в `_run_one_batch` защищает
+    от повторной обработки, если тик и эта задача пересекутся."""
+    status = ImportJobStatus.APPLYING if mode == "apply" else ImportJobStatus.ROLLING_BACK
+    batch_key = "applied_batches" if mode == "apply" else "rollback_batches"
+    done_key = "completed" if mode == "apply" else "rolled_back"
+    settings = get_settings()
+    counters = {batch_key: 0, done_key: 0}
+    job_uuid = uuid.UUID(job_id)
+    while True:
+        outcome = await _run_one_batch(job_uuid, status, settings.import_batch_size)
+        if outcome == "skip":
+            break
+        counters[batch_key] += 1
+        if outcome == "done":
+            counters[done_key] += 1
+            break
+    logger.info("import_job_run", job_id=job_id, mode=mode, **counters)
+    return counters
+
+
+@track_task
 async def sweep_import_jobs(ctx: dict[str, Any]) -> dict[str, int]:
     settings = get_settings()
     deadline = time.monotonic() + _TICK_BUDGET_SECONDS

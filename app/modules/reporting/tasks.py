@@ -1,18 +1,20 @@
 """Фоновые задачи отчётности (new_spec §3.4/§4.13).
 
-* `sweep_report_jobs` — раздел 4.13: «конкурентность воркеров ограничена
-  семафором (10)». Взятые за тик задания рендерятся конкурентно
-  (`asyncio.gather`), не одно за другим — иначе «10 параллельных отчётов»
-  было бы фикцией: капасити просто регулировал бы длину последовательной
-  очереди внутри тика, а не число одновременно рендерящихся отчётов
-  (пул соединений воркера — `db_pool_size`+`db_max_overflow`, по умолчанию
-  10+10, — с запасом на `reports_max_concurrent`=10). Каждый job — в
-  собственной `session_scope()` (а не одной сессией на весь тик, как
-  `imports.tasks.sweep_import_jobs`): там per-row ошибки перехватываются
-  внутри самого сервиса и никогда не всплывают исключением, а здесь
-  `ReportJobService.generate` намеренно исключения не глушит (см. её
-  докстринг) — один job, "отравивший" сессию неудачным flush, не должен
-  утащить за собой обработку соседних в этом же тике.
+* `render_report_job` (B8-11) — задача arq, которую `ReportJobService.create`
+  ставит в очередь сразу после коммита (`enqueue_after_commit`): не ждать
+  минутного тика, пока жюри смотрит на «зависший» тяжёлый отчёт. Захват —
+  короткая транзакция `UPDATE ... WHERE status='queued' RETURNING`,
+  рендер — отдельная транзакция без `FOR UPDATE` (строка уже уникально
+  захвачена этим UPDATE). Модульный семафор ограничивает число одновременных
+  рендеров ЭТОГО процесса воркера (раздел 4.13: «конкурентность воркеров
+  ограничена семафором (10)»; несколько реплик воркера делят общий пул БД).
+* `sweep_report_jobs` — теперь добор, а не основной рендер (DEBT-8):
+  возвращает в `queued` задания `processing`, зависшие дольше
+  `reports_stale_processing_minutes` (воркер упал посреди рендера), и
+  переставляет в очередь arq `queued`-задания старше
+  `reports_enqueue_retry_after_s` (постановка потерялась — сбой Redis). При
+  `settings.reports_enqueue=false` (откат без деплоя) ведёт себя как раньше:
+  сам рендерит пачку конкурентно (`asyncio.gather`), без arq вовсе.
 * `expire_report_files` — раздел 4.13: «готовые файлы автоудаляются через
   7 дней». Удаляется файл, не запись `report_jobs` (история осталась,
   `file_id` — `ON DELETE SET NULL`, см. `reporting.models`).
@@ -28,7 +30,7 @@ import uuid
 from typing import Any
 
 import structlog
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 
 from app.core.config import get_settings
 from app.core.db import session_scope
@@ -41,6 +43,18 @@ from app.modules.reporting.models import ReportJob, ReportJobStatus
 from app.modules.reporting.service import ReportJobService
 
 logger = structlog.get_logger(__name__)
+
+# B8-11: ограничивает одновременные рендеры ЭТОГО процесса воркера (модульный, не per-job) —
+# создаётся лениво, чтобы размер читался из настроек в момент первого использования, а не при
+# импорте модуля (важно для тестов, подменяющих `get_settings`).
+_render_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_render_semaphore() -> asyncio.Semaphore:
+    global _render_semaphore
+    if _render_semaphore is None:
+        _render_semaphore = asyncio.Semaphore(get_settings().reports_max_concurrent)
+    return _render_semaphore
 
 
 def _principal_for_worker(user: User) -> Principal:
@@ -129,39 +143,156 @@ async def _generate_one(job_id: uuid.UUID) -> bool | None:
             return False
 
 
+async def _render_claimed(job_id: uuid.UUID, requested_by: uuid.UUID) -> bool:
+    """Рендерит задание, уже атомарно переведённое в `processing` (см. `render_report_job`) —
+    без `FOR UPDATE`: строку уникально захватил атомарный `UPDATE ... RETURNING` выше, повторный
+    захват здесь не нужен и не предохранил бы от того, от чего уже предохранил тот `UPDATE`."""
+    async with session_scope() as session:
+        service = ReportJobService(session)
+        job = await session.get(ReportJob, job_id)
+        if job is None:
+            return False
+        user = await session.get(User, requested_by)
+        if user is None:
+            await service.mark_failed(job, "Пользователь, запросивший отчёт, не найден")
+            return False
+        principal = _principal_for_worker(user)
+        try:
+            with reports_in_progress.track_inprogress():
+                await service.generate(job, principal)
+            return True
+        except Exception:  # noqa: BLE001 — сбой одного отчёта не должен ронять задачу arq
+            error_id = uuid.uuid4().hex[:12]
+            logger.exception("report_generation_failed", job_id=str(job_id), error_id=error_id)
+            await session.rollback()
+            job = await session.get(ReportJob, job_id)
+            if job is not None:
+                await service.mark_failed(
+                    job, f"Не удалось сформировать отчёт. Код ошибки для поддержки: {error_id}"
+                )
+            return False
+
+
+@track_task
+async def render_report_job(ctx: dict[str, Any], job_id: str) -> bool | None:
+    """B8-11: задача arq, поставленная `ReportJobService.create` сразу после коммита.
+
+    `None` — задание уже взято (дубль постановки, повторная доставка arq, добор опередил):
+    не ошибка. Таймаут 600 с — заметно больше бюджета самого тяжёлого builder'а; превышение
+    переводит задание в `failed`, а не оставляет «вечно processing»."""
+    job_uuid = uuid.UUID(job_id)
+    async with session_scope() as session:
+        requested_by = await session.scalar(
+            update(ReportJob)
+            .where(ReportJob.id == job_uuid, ReportJob.status == ReportJobStatus.QUEUED.value)
+            .values(status=ReportJobStatus.PROCESSING.value, started_at=dt.datetime.now(dt.UTC))
+            .returning(ReportJob.requested_by)
+        )
+    if requested_by is None:
+        return None
+
+    async with _get_render_semaphore():
+        try:
+            return await asyncio.wait_for(_render_claimed(job_uuid, requested_by), timeout=600)
+        except TimeoutError:
+            async with session_scope() as session:
+                job = await session.get(ReportJob, job_uuid)
+                if job is not None and job.status == ReportJobStatus.PROCESSING.value:
+                    await ReportJobService(session).mark_failed(
+                        job, "Превышено время рендера отчёта"
+                    )
+            return False
+
+
 @track_task
 async def sweep_report_jobs(ctx: dict[str, Any]) -> dict[str, int]:
     settings = get_settings()
+    now = dt.datetime.now(dt.UTC)
 
     async with session_scope() as session:
-        currently_processing = await session.scalar(
-            select(func.count(ReportJob.id)).where(
-                ReportJob.status == ReportJobStatus.PROCESSING.value
-            )
-        )
-        capacity = max(0, settings.reports_max_concurrent - (currently_processing or 0))
-        if capacity == 0:
-            return {"processed": 0, "failed": 0}
-        job_ids = (
+        # Воркер упал посреди рендера: `processing` навсегда не коммитится сам — возвращаем в
+        # очередь, чтобы его забрал либо следующий добор (ниже), либо сам следующий тик при
+        # `reports_enqueue=false`. Порог заметно больше таймаута `render_report_job` (600 с).
+        stale_cutoff = now - dt.timedelta(minutes=settings.reports_stale_processing_minutes)
+        requeued = (
             (
                 await session.execute(
-                    select(ReportJob.id)
-                    .where(ReportJob.status == ReportJobStatus.QUEUED.value)
-                    .order_by(ReportJob.created_at)
-                    .limit(capacity)
+                    update(ReportJob)
+                    .where(
+                        ReportJob.status == ReportJobStatus.PROCESSING.value,
+                        ReportJob.started_at.is_not(None),
+                        ReportJob.started_at < stale_cutoff,
+                    )
+                    .values(status=ReportJobStatus.QUEUED.value, started_at=None)
+                    .returning(ReportJob.id)
                 )
             )
             .scalars()
             .all()
         )
 
-    results = await asyncio.gather(*(_generate_one(job_id) for job_id in job_ids))
-    processed = sum(1 for ok in results if ok is True)
-    failed = sum(1 for ok in results if ok is False)
+        if not settings.reports_enqueue:
+            # Откат «только cron»: без arq вовсе, тик сам рендерит пачку конкурентно —
+            # поведение до B8-11.
+            currently_processing = await session.scalar(
+                select(func.count(ReportJob.id)).where(
+                    ReportJob.status == ReportJobStatus.PROCESSING.value
+                )
+            )
+            capacity = max(0, settings.reports_max_concurrent - (currently_processing or 0))
+            job_ids = (
+                []
+                if capacity == 0
+                else (
+                    await session.execute(
+                        select(ReportJob.id)
+                        .where(ReportJob.status == ReportJobStatus.QUEUED.value)
+                        .order_by(ReportJob.created_at)
+                        .limit(capacity)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        else:
+            # Добор: `queued` старше порога — постановка в arq потерялась (сбой Redis на
+            # коммите) или задача ещё не добралась до воркера. Тот же `job_id`, что при
+            # постановке из API: arq отбрасывает дубль, если оригинал всё же дошёл.
+            retry_cutoff = now - dt.timedelta(seconds=settings.reports_enqueue_retry_after_s)
+            job_ids = (
+                (
+                    await session.execute(
+                        select(ReportJob.id).where(
+                            ReportJob.status == ReportJobStatus.QUEUED.value,
+                            ReportJob.created_at < retry_cutoff,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
 
-    if job_ids:
-        logger.info("report_jobs_swept", processed=processed, failed=failed)
-    return {"processed": processed, "failed": failed}
+    if not settings.reports_enqueue:
+        results = await asyncio.gather(*(_generate_one(job_id) for job_id in job_ids))
+        processed = sum(1 for ok in results if ok is True)
+        failed = sum(1 for ok in results if ok is False)
+        if job_ids or requeued:
+            logger.info(
+                "report_jobs_swept", processed=processed, failed=failed, requeued=len(requeued)
+            )
+        return {"processed": processed, "failed": failed, "requeued": len(requeued)}
+
+    pool = ctx.get("redis")
+    enqueued = 0
+    for job_id in job_ids:
+        if pool is None:
+            break
+        await pool.enqueue_job("render_report_job", str(job_id), _job_id=f"report:{job_id}")
+        enqueued += 1
+
+    if job_ids or requeued:
+        logger.info("report_jobs_swept", enqueued=enqueued, requeued=len(requeued))
+    return {"processed": 0, "failed": 0, "enqueued": enqueued, "requeued": len(requeued)}
 
 
 @track_task

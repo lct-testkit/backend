@@ -23,6 +23,7 @@ from app.core.db import dispose_engine
 from app.core.logging import configure_logging
 from app.core.metrics import install_gc_metrics
 from app.core.problem import register_exception_handlers
+from app.core.queue import close_arq_pool
 from app.core.redis_client import close_redis
 from app.core.security import jwks_cache
 from app.middleware.request_context import RequestContextMiddleware
@@ -153,6 +154,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         logger.info("api_stopping")
+        await close_arq_pool()
         await dispose_engine()
         await close_redis()
 
