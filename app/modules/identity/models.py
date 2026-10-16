@@ -72,6 +72,10 @@ class SecurityEventType(StrEnum):
     SESSION_HIJACK_SUSPECT = "SESSION_HIJACK_SUSPECT"
     PERMISSION_DENIED = "PERMISSION_DENIED"
     MALWARE_DETECTED = "MALWARE_DETECTED"
+    # B6-5: расхождение сигнатуры файла с заявленным расширением (`.pdf`, а внутри не PDF) —
+    # не обязательно вредонос (переименованный файл), отдельный уровень тревоги от
+    # MALWARE_DETECTED, чтобы не путать «подозрительно» с «обнаружен вредонос».
+    FILE_REJECTED = "FILE_REJECTED"
     MASS_EXPORT = "MASS_EXPORT"
     SIGNATURE_OTP_FAILED = "SIGNATURE_OTP_FAILED"
     SIGNATURE_KEY_COMPROMISED = "SIGNATURE_KEY_COMPROMISED"

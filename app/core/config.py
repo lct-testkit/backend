@@ -120,6 +120,9 @@ class Settings(BaseSettings):
     s3_bucket_reports: str = "reports"
     s3_bucket_signatures: str = "signatures"
     s3_bucket_registry: str = "registry"
+    # B6-5: карантин заражённых объектов — download_url никогда не выдаётся на этот бакет
+    # (требует status=ready, а карантинная запись files удаляется из активных).
+    s3_bucket_quarantine: str = "quarantine"
 
     # --- Сессии и токены -------------------------------------------------
     session_ttl: int = 43200
@@ -151,6 +154,23 @@ class Settings(BaseSettings):
     # оплат: без него файл нельзя было бы загрузить вовсе (проверка содержимого
     # json — `files.service._check_magic_bytes`).
     allowed_file_extensions: str = "png,jpeg,jpg,pdf,zip,gz,gzip,rar,doc,docx,xls,xlsx,xml,csv,json"
+
+    # --- Антивирус (B6-4) -------------------------------------------------
+    # Выключен по умолчанию (dev/demo без clamd поднятого рядом): `FileService.commit`
+    # остаётся на `NullAntivirusScanner`, пока явно не включено. Группа АВЗ приказа № 117.
+    clamav_enabled: bool = False
+    clamav_host: str = "clamav"
+    clamav_port: int = 3310
+    clamav_connect_timeout_seconds: float = 3.0
+    clamav_scan_timeout_seconds: float = 120.0
+    # closed — commit отказывает/ставит quarantined, пока антивирус недоступен (prod);
+    # open — принимает файл со скана, пропущенного по недоступности сервиса (dev/demo),
+    # с предупреждением в логе и метрике.
+    clamav_fail_mode: Literal["open", "closed"] = "open"
+    # Больше этого — скан не держит HTTP-запрос синхронно (B6-4 п.6, воркер `sweep_
+    # quarantined_files` не реализован в этом эпике, см. отчёт — файл остаётся quarantined
+    # до ручной проверки).
+    clamav_sync_max_bytes: int = 26214400
 
     # --- Отчёты ----------------------------------------------------------
     reports_max_concurrent: int = 10
