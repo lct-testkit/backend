@@ -32,6 +32,9 @@ NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length
 
 OrgTypeLiteral = Literal["university", "college", "company", "individual_entrepreneur"]
 ProductFormatLiteral = Literal["online", "offline", "blended"]
+# B3-7: "course" — ИТ-программа/курс Школы, "software" — ИТ-продукт (ПО)
+# вендора, лицензируемый вузу (см. OrganizationLicense, ProductKind).
+ProductKindLiteral = Literal["course", "software"]
 LossReasonCategoryLiteral = Literal[
     "price", "timing", "competitor", "no_need", "no_budget", "no_contact", "other"
 ]
@@ -393,6 +396,9 @@ class ProductCreateRequest(BaseModel):
     name: NonEmptyStr = Field(max_length=255)
     description: str | None = None
     direction_id: uuid.UUID | None = None
+    # B3-7: ИТ-программа (курс) или ИТ-продукт (ПО) вендора; по умолчанию —
+    # курс, как и раньше у всех продуктов до этой задачи.
+    kind: ProductKindLiteral = "course"
     # Вендор продукта — организация каталога; несуществующая или удалённая — 404.
     vendor_id: uuid.UUID | None = None
     duration_hours: int | None = Field(default=None, ge=0)
@@ -409,6 +415,9 @@ class ProductUpdateRequest(BaseModel):
     name: NonEmptyStr | None = Field(default=None, max_length=255)
     description: str | None = None
     direction_id: uuid.UUID | None = None
+    # B3-7: смена типа у продукта, уже использованного в сделке или
+    # лицензии, — 409 ENTITY_IN_USE (см. ProductService.update).
+    kind: ProductKindLiteral | None = None
     # `null` снимает вендора с продукта.
     vendor_id: uuid.UUID | None = None
     duration_hours: int | None = Field(default=None, ge=0)
@@ -429,6 +438,7 @@ class ProductOut(BaseModel):
     name: str
     description: str | None = None
     direction_id: uuid.UUID | None = None
+    kind: ProductKindLiteral = "course"
     vendor_id: uuid.UUID | None = None
     # Только чтение: название вендора берётся из организации `vendor_id` при выдаче.
     vendor_name: str | None = None

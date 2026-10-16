@@ -45,6 +45,8 @@ FieldKind = Literal[
     "direction_code",
     "org_type",
     "format",
+    # B3-7: «Тип» продукта — курс/программа ИЛИ ИТ-продукт (ПО) вендора.
+    "product_kind",
     # П3 (rtk_requiriments.md разд. 4, Треб.1): `organization_name` — тот же
     # приём FK-резолва, что `region_code`/`direction_code` (перехватывается
     # в `imports.service._extract_row` до `validate_field`, см. `_FK_TARGETS`
@@ -112,6 +114,8 @@ PRODUCT_FIELDS: tuple[FieldSpec, ...] = (
     FieldSpec("direction_code", "Код направления", "direction_code"),
     FieldSpec("duration_hours", "Длительность, часы", "int"),
     FieldSpec("format", "Формат", "format"),
+    # B3-7: пусто -> «course» (как и раньше у всех продуктов до этой задачи).
+    FieldSpec("kind", "Тип", "product_kind"),
     FieldSpec("base_price", "Цена", "decimal"),
     FieldSpec("currency", "Валюта", "currency"),
 )
@@ -249,7 +253,7 @@ def missing_mapping_labels(entity_type: str, mapped_targets: set[str]) -> list[s
 
 ENTITY_TYPE_LABELS: dict[str, str] = {
     "organization": "Организации (реестр вузов)",
-    "product": "Продукты и курсы",
+    "product": "Каталог продуктов: ИТ-продукты (ПО) и курсы",
     "license": "Лицензии и договоры вуз — вендор — ПО",
     "vendor_contact": "Вендоры и ответственные за продукты",
     "payment": "Оплаты (заказы физлиц на курсы)",
@@ -360,6 +364,14 @@ def validate_field(spec: FieldSpec, raw: str) -> tuple[object | None, str | None
         if value not in allowed:
             return None, f"«{spec.label}»: допустимые значения — {', '.join(sorted(allowed))}"
         return value, None
+    if spec.kind == "product_kind":
+        # B3-7: «курс»/«программа» -> course, «ПО»/«ИТ-продукт»/«software» -> software.
+        lowered = value.strip().casefold()
+        if lowered in ("course", "курс", "программа"):
+            return "course", None
+        if lowered in ("software", "по", "ит-продукт", "ит продукт"):
+            return "software", None
+        return None, (f"«{spec.label}»: допустимые значения — курс, программа, ПО, ИТ-продукт")
     if spec.kind == "transfer_status":
         # B3-3 (BUG-10): русские синонимы («Передано», «В работе», …) вместо
         # только английских кодов — разбор в `catalog.license_values`.
