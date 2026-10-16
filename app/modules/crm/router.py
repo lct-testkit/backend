@@ -18,6 +18,7 @@ from collections.abc import Sequence
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Query, Request, status
+from sqlalchemy import select
 
 from app.core.deps import (
     AuditDep,
@@ -34,7 +35,10 @@ from app.core.permissions import Permission
 from app.core.redis_client import distributed_lock
 from app.core.security import Principal
 from app.modules.audit.actions import AuditAction
-from app.modules.crm.models import Deal, Task
+from app.modules.crm.models import Deal, DealStatusHistory, Task
+from app.modules.files.models import Attachment
+from app.modules.files.schemas import AttachmentListResponse
+from app.modules.files.service import AttachmentService
 from app.modules.crm.schemas import (
     AvailableTransitionOut,
     AvailableTransitionsResponse,
@@ -95,6 +99,9 @@ DealReassignPerm = Annotated[Principal, Depends(require_permission(Permission.DE
 DealReassignBulkPerm = Annotated[
     Principal, Depends(require_permission(Permission.DEAL_REASSIGN_BULK))
 ]
+# B2-8: вложения записи истории читает тот, у кого file:download, не DEAL_READ — иначе AUDITOR
+# (у которой нет file:download) видел бы файлы сделки через эту ручку обойдя общую проверку.
+FileDownloadPerm = Annotated[Principal, Depends(require_permission(Permission.FILE_DOWNLOAD))]
 
 
 # =============================================================================
@@ -449,6 +456,7 @@ async def transition_deal(
             comment=payload.comment,
             fields=payload.fields,
             expected_version=if_match,
+            attachment_ids=payload.attachments,
         )
 
     touch_recent(
@@ -484,12 +492,56 @@ async def get_deal_history(
         statuses_cursor=Cursor.decode(statuses_cursor) if statuses_cursor else None,
         events_cursor=Cursor.decode(events_cursor) if events_cursor else None,
     )
+    statuses_out = []
+    for row in history.statuses:
+        out = DealStatusHistoryOut.model_validate(row)
+        out.attachments_count = history.attachments_counts.get(row.id, 0)
+        statuses_out.append(out)
     return DealHistoryResponse(
-        statuses=[DealStatusHistoryOut.model_validate(s) for s in history.statuses],
+        statuses=statuses_out,
         events=[DealEventOut.model_validate(e) for e in history.events],
         next_statuses_cursor=history.next_statuses_cursor,
         next_events_cursor=history.next_events_cursor,
     )
+
+
+@deals_router.get(
+    "/{deal_id}/history/{history_id}/attachments",
+    summary="Файлы, приложенные к записи истории",
+    description=(
+        "Вложения, привязанные к конкретному переходу (B2-7/B2-8): не более 20 на переход, "
+        "без пагинации, в порядке created_at. `history_id` обязан принадлежать этой сделке, "
+        "иначе 404. Роль: file:download."
+    ),
+    response_model=AttachmentListResponse,
+)
+async def get_deal_history_attachments(
+    session: DbSession,
+    principal: FileDownloadPerm,
+    deal_id: Annotated[uuid.UUID, Path()],
+    history_id: Annotated[uuid.UUID, Path()],
+) -> AttachmentListResponse:
+    deal_service = DealService(session)
+    deal = await deal_service.get_or_404(deal_id, principal)
+    history_row = await session.get(DealStatusHistory, history_id)
+    if history_row is None or history_row.deal_id != deal.id:
+        raise NotFoundError("Запись истории", history_id)
+    attachment_service = AttachmentService(session)
+    rows = list(
+        (
+            await session.execute(
+                select(Attachment)
+                .where(
+                    Attachment.status_history_id == history_id,
+                    Attachment.deleted_at.is_(None),
+                )
+                .order_by(Attachment.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return AttachmentListResponse(items=await attachment_service.to_out(rows), next_cursor=None)
 
 
 @deals_router.post(

@@ -235,7 +235,12 @@ def get_antivirus_scanner() -> AntivirusScanner:
 
 
 async def check_entity_access(
-    session: AsyncSession, principal: Principal, *, entity_type: str, entity_id: uuid.UUID
+    session: AsyncSession,
+    principal: Principal,
+    *,
+    entity_type: str,
+    entity_id: uuid.UUID,
+    write: bool = False,
 ) -> None:
     """Раздел 9: право на скачивание/привязку проверяется по родительской
     сущности, не только по праву на файлы вообще. Импорты сервисов других
@@ -243,6 +248,11 @@ async def check_entity_access(
     `workflow.service`/`crm.service` уже используют друг для друга): иначе
     `files → crm`/`files → catalog` на уровне модуля рискует зациклиться,
     если эти модули когда-нибудь начнут ссылаться на файлы при импорте.
+
+    `write=True` (B2-M): привязка и отвязка вложения сделки — это изменение
+    сделки, а не только её чтение. Без этого параметра участник-наблюдатель
+    (роль `watcher`, видит сделку, но не может её менять) мог бы прикрепить
+    или убрать файл, обходя `deal_writable`.
 
     Для типов сущностей без собственного, реально построенного конвейера
     (`erasure_request` — исполнение запросов на удаление ещё не реализовано)
@@ -253,7 +263,7 @@ async def check_entity_access(
     if entity_type == "deal":
         from app.modules.crm.service import DealService
 
-        await DealService(session).get_or_404(entity_id, principal)
+        await DealService(session).get_or_404(entity_id, principal, write=write)
         return
     if entity_type == "organization":
         from app.modules.catalog.service import OrganizationService
@@ -641,12 +651,19 @@ class AttachmentService:
         self._session = session
         self._audit = AuditService(session)
 
-    def list_query(self, *, entity_type: str, entity_id: uuid.UUID) -> Select[tuple[Attachment]]:
-        return select(Attachment).where(
+    def list_query(
+        self, *, entity_type: str, entity_id: uuid.UUID, status_id: uuid.UUID | None = None
+    ) -> Select[tuple[Attachment]]:
+        # B2-8: вкладка «Файлы в статусе» — `status_id` фильтрует вложения этого шага. Параметр
+        # имеет смысл только для сделок: роутер отклоняет его при другом `entity_type` (422).
+        stmt = select(Attachment).where(
             Attachment.entity_type == entity_type,
             Attachment.entity_id == entity_id,
             Attachment.deleted_at.is_(None),
         )
+        if status_id is not None:
+            stmt = stmt.where(Attachment.status_id == status_id)
+        return stmt
 
     async def to_out(self, attachments: Sequence[Attachment]) -> list[AttachmentOut]:
         """Вложения со сведениями о файлах: один запрос `files IN (...)` на весь список,
@@ -722,12 +739,25 @@ class AttachmentService:
                 "Привязать можно только файл, загруженный вами, или как администратор"
             )
 
+        status_id: uuid.UUID | None = None
+        deal: Any = None
+        if entity_type == "deal":
+            # B2-6: вложение сделки несёт статус, в котором оно приложено — клиент этот статус
+            # не передаёт (подделать нельзя), он берётся из текущей сделки. Импорт `Deal` внутри
+            # функции — тот же приём, что `check_entity_access` выше (модуль `files` не
+            # импортирует `crm` на уровне модуля).
+            from app.modules.crm.models import Deal
+
+            deal = await self._session.get(Deal, entity_id)
+            status_id = deal.status_id if deal is not None else None
+
         attachment = Attachment(
             file_id=file.id,
             entity_type=entity_type,
             entity_id=entity_id,
             category=category,
             description=description,
+            status_id=status_id,
             uploaded_by=principal.user_id,
         )
         self._session.add(attachment)
@@ -750,6 +780,27 @@ class AttachmentService:
                 "category": {"old": None, "new": category},
             },
         )
+        if deal is not None:
+            # B2-8: карточка сделки должна показать «кто, когда и какой файл добавил» в ленте —
+            # до этого вложение падало «в общую кучу» без следа в `deal_events`.
+            from app.modules.crm.models import DealEvent, DealEventType
+
+            self._session.add(
+                DealEvent(
+                    deal_id=deal.id,
+                    event_type=DealEventType.FILE_ADDED.value,
+                    actor_id=principal.user_id,
+                    payload={
+                        "attachment_id": str(attachment.id),
+                        "file_id": str(file.id),
+                        "filename": file.original_filename,
+                        "category": category,
+                        "status_id": str(status_id) if status_id else None,
+                        "size_bytes": file.size_bytes,
+                    },
+                )
+            )
+            await self._session.flush()
         return attachment
 
     def ensure_can_delete(self, principal: Principal, attachment: Attachment) -> None:
@@ -763,7 +814,7 @@ class AttachmentService:
             return
         raise ForbiddenError("Отвязать вложение может его автор или руководитель")
 
-    async def delete(self, attachment: Attachment) -> None:
+    async def delete(self, attachment: Attachment, *, actor_id: uuid.UUID | None = None) -> None:
         file = await self._session.get(File, attachment.file_id)
         attachment.deleted_at = dt.datetime.now(dt.UTC)
         if file is not None:
@@ -782,3 +833,20 @@ class AttachmentService:
             entity_id=attachment.entity_id,
             changes={"file_id": {"old": str(attachment.file_id), "new": None}},
         )
+        if attachment.entity_type == "deal":
+            # B2-8: симметрично FILE_ADDED — отвязка тоже оставляет след в ленте сделки.
+            from app.modules.crm.models import DealEvent, DealEventType
+
+            self._session.add(
+                DealEvent(
+                    deal_id=attachment.entity_id,
+                    event_type=DealEventType.FILE_REMOVED.value,
+                    actor_id=actor_id,
+                    payload={
+                        "attachment_id": str(attachment.id),
+                        "filename": file.original_filename if file is not None else None,
+                        "category": attachment.category,
+                    },
+                )
+            )
+            await self._session.flush()
