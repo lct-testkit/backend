@@ -26,6 +26,7 @@ from app.core.errors import AppError, ErrorCode
 from app.core.masking import mask_email, mask_phone
 from app.core.pagination import Cursor, Page, keyset_before
 from app.core.permissions import Permission
+from app.core.rate_limit import enforce as rate_limit_enforce
 from app.core.security import Principal
 from app.modules.catalog.lookup import ProductIndex
 from app.modules.integration.cms_client import CmsClient
@@ -38,11 +39,14 @@ from app.modules.integration.schemas import (
     InboundMessageOut,
     IntegrationSourceOut,
     IntegrationSourceUpdateRequest,
+    IntegrationStatusOut,
     MappingGetResponse,
     MappingPreviewRequest,
     MappingPreviewResponse,
     MappingValidationErrorOut,
     OutboxEventOut,
+    PullRequestBody,
+    PullRequestResponse,
     RoutingGetResponse,
     TargetOut,
 )
@@ -267,6 +271,64 @@ async def delete_source_routing(
     session: DbSession, _principal: IntegrationAdminPerm, code: Annotated[str, Path()]
 ) -> None:
     await IntegrationSourceService(session).reset_routing(code)
+
+
+# =============================================================================
+# B5-5: ручной запуск «Забрать сейчас» и статус синхронизации
+# =============================================================================
+
+_PULL_RATE_LIMIT_ROUTE = "integration_pull"
+_PULL_RATE_LIMIT_PER_MIN = 6
+_PULL_RATE_WINDOW_SECONDS = 60
+
+
+@integration_admin_router.post(
+    "/sources/{code}/pull",
+    summary="Забрать сейчас",
+    description=(
+        "Ручной запуск забора по API вне расписания cron — следующий тик (не больше минуты, "
+        "`worker/main.py`) выполнит его независимо от `pull_enabled` и интервала источника. "
+        "Источник выключен или адрес не настроен — 409 (CRM-1703); запрос уже стоит в очереди "
+        "— 409 (CRM-1705). Лимит 6 запросов в минуту на пользователя."
+    ),
+    response_model=PullRequestResponse,
+    status_code=202,
+)
+async def request_source_pull(
+    session: DbSession,
+    principal: IntegrationAdminPerm,
+    code: Annotated[str, Path()],
+    payload: PullRequestBody,
+) -> PullRequestResponse:
+    await rate_limit_enforce(
+        str(principal.user_id),
+        _PULL_RATE_LIMIT_ROUTE,
+        limit=_PULL_RATE_LIMIT_PER_MIN,
+        window_seconds=_PULL_RATE_WINDOW_SECONDS,
+        detail="Слишком много запросов «Забрать сейчас», повторите позже",
+    )
+    pull_request = await IntegrationSourceService(session).request_pull(
+        code, principal, updated_since=payload.updated_since
+    )
+    return PullRequestResponse(
+        status="queued", requested_at=dt.datetime.fromisoformat(pull_request["requested_at"])
+    )
+
+
+@integration_admin_router.get(
+    "/sources/{code}/status",
+    summary="Статус синхронизации источника",
+    description=(
+        "Настройки забора, курсоры, итог последнего прогона (`last_run`) и живые счётчики за "
+        "последние 24 часа по журналу входящих и очереди исходящих."
+    ),
+    response_model=IntegrationStatusOut,
+)
+async def get_source_status(
+    session: DbSession, _principal: IntegrationAdminPerm, code: Annotated[str, Path()]
+) -> IntegrationStatusOut:
+    status = await IntegrationSourceService(session).get_status(code)
+    return IntegrationStatusOut(**status)
 
 
 @integration_admin_router.get(

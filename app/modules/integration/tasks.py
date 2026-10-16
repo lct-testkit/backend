@@ -285,7 +285,11 @@ async def sweep_lms_progress_pull(ctx: dict[str, Any]) -> dict[str, int]:
 
     B5-6: раньше хватало непустого `LMS_BASE_URL`, теперь нужны ещё `is_active` и
     `pull_enabled` источника — ЭТО ИЗМЕНЕНИЕ ПОВЕДЕНИЯ (см. релиз-заметки B5-13.1): источник,
-    у которого раньше опрос шёл «по факту адреса», нужно явно включить в настройках."""
+    у которого раньше опрос шёл «по факту адреса», нужно явно включить в настройках.
+
+    B5-5: «Забрать сейчас» — `pull_request` проверяется первым делом и запись очищается до
+    запуска (аренда теряется при падении воркера — это ок, кнопку нажмут снова); такой запуск
+    идёт сразу, минуя `pull_enabled` и интервал, с `updated_since` из запроса, если он был."""
     settings = get_settings()
     if not settings.lms_base_url:
         logger.info("lms_progress_pull_skipped", reason="base_url_empty")
@@ -295,14 +299,26 @@ async def sweep_lms_progress_pull(ctx: dict[str, Any]) -> dict[str, int]:
         source = await session.scalar(
             select(IntegrationSource).where(IntegrationSource.code == "lms")
         )
-        if source is None or not source.is_active or not source.pull_enabled:
+        if source is None or not source.is_active:
             return {"pulled": 0, "skipped": 1}
-        if source.last_sync_at is not None:
+
+        trigger = "cron"
+        updated_since: str | None = None
+        if source.pull_request:
+            trigger = "manual"
+            updated_since = source.pull_request.get("updated_since")
+            source.pull_request = None
+        elif not source.pull_enabled:
+            return {"pulled": 0, "skipped": 1}
+        elif source.last_sync_at is not None:
             elapsed = (dt.datetime.now(dt.UTC) - source.last_sync_at).total_seconds()
             if elapsed < source.pull_interval_seconds:
                 return {"pulled": 0, "skipped": 1}
 
-        cursor = await lms.get_cursor(session, source_code="lms", resource="students_progress")
+        persisted_cursor = await lms.get_cursor(
+            session, source_code="lms", resource="students_progress"
+        )
+        cursor = updated_since if updated_since is not None else persisted_cursor
         base_url = source.base_url or settings.lms_base_url
         client = lms.LmsClient(base_url, resolve_secret(settings.lms_auth_ref))
         try:
@@ -313,7 +329,13 @@ async def sweep_lms_progress_pull(ctx: dict[str, Any]) -> dict[str, int]:
             )
         except Exception as exc:  # noqa: BLE001 — как sweep_registry_drift: не роняем cron
             logger.warning("lms_progress_pull_failed", error=str(exc))
+            now = dt.datetime.now(dt.UTC)
             source.last_error = str(exc)
+            source.last_run = {
+                "trigger": trigger,
+                "finished_at": now.isoformat(),
+                "error": str(exc),
+            }
             return {"pulled": 0, "error": 1}
 
         # Каждая строка — в своём SAVEPOINT: одна битая строка не откатывает остальные, а курсор не
@@ -328,7 +350,13 @@ async def sweep_lms_progress_pull(ctx: dict[str, Any]) -> dict[str, int]:
                 cursor_held=latest_cursor == cursor,
             )
 
-        if latest_cursor and latest_cursor != cursor:
+        # B5-5: курсор не откатывается назад — `updated_since` ручного запроса может быть раньше
+        # уже сохранённого курсора (подбор упавших строк), итог — максимум старого и нового.
+        if (
+            latest_cursor is not None
+            and latest_cursor != persisted_cursor
+            and (persisted_cursor is None or latest_cursor > persisted_cursor)
+        ):
             await lms.set_cursor(
                 session, source_code="lms", resource="students_progress", value=latest_cursor
             )
@@ -337,7 +365,7 @@ async def sweep_lms_progress_pull(ctx: dict[str, Any]) -> dict[str, int]:
         source.last_sync_at = now
         source.last_error = None
         source.last_run = {
-            "trigger": "cron",
+            "trigger": trigger,
             "finished_at": now.isoformat(),
             "fetched": len(rows),
             "applied": batch.applied,
@@ -352,19 +380,33 @@ async def sweep_lms_progress_pull(ctx: dict[str, Any]) -> dict[str, int]:
 async def sweep_cms_leads_pull(ctx: dict[str, Any]) -> dict[str, int]:
     """B5-2 (Функц.5 ТЗ): забор лидов с сайта по расписанию. Тик раз в минуту
     (`worker/main.py`), реальный интервал задаёт `integration_sources.
-    pull_interval_seconds` — тик, пришедшийся раньше срока, молча пропускается."""
+    pull_interval_seconds` — тик, пришедшийся раньше срока, молча пропускается.
+
+    B5-5: «Забрать сейчас» — `pull_request` проверяется первым делом; если он есть, запуск идёт
+    сразу (минуя `pull_enabled` и интервал — `force=True`), а запись очищается до запуска
+    (аренда теряется при падении воркера — это ок, кнопку нажмут снова)."""
+    trigger = "cron"
+    updated_since: str | None = None
+    force = False
     async with session_scope() as session:
         source = await session.scalar(
             select(IntegrationSource).where(IntegrationSource.code == "cms")
         )
-        if source is None or not source.is_active or not source.pull_enabled:
+        if source is None or not source.is_active:
             return {"status": "skipped"}
-        if source.last_sync_at is not None:
+        if source.pull_request:
+            trigger = "manual"
+            updated_since = source.pull_request.get("updated_since")
+            force = True
+            source.pull_request = None
+        elif not source.pull_enabled:
+            return {"status": "skipped"}
+        elif source.last_sync_at is not None:
             elapsed = (dt.datetime.now(dt.UTC) - source.last_sync_at).total_seconds()
             if elapsed < source.pull_interval_seconds:
                 return {"status": "too_soon"}
 
-    result = await CmsPullService().run("cron")
+    result = await CmsPullService().run(trigger, updated_since=updated_since, force=force)
     return {
         "status": result.status,
         "fetched": result.fetched,

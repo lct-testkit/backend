@@ -82,6 +82,41 @@ async def _progress(deal_id: uuid.UUID) -> dict[str, dict[str, Any]]:
         }
 
 
+async def _write_pull_request(updated_since: str | None) -> None:
+    """B5-5: симулирует «Забрать сейчас» прямо в БД (сама ручка — то же
+    `IntegrationSourceService.request_pull`, уже покрыто `tests/test_integration_pull_manual.py`
+    для `cms`; здесь проверяется только то, что читает сторону LMS в `sweep_lms_progress_pull`)."""
+    from sqlalchemy import select
+
+    from app.core.db import session_scope
+    from app.modules.integration.models import IntegrationSource
+
+    async with session_scope() as session:
+        source = (
+            await session.execute(select(IntegrationSource).where(IntegrationSource.code == "lms"))
+        ).scalar_one_or_none()
+        assert source is not None
+        source.pull_request = {
+            "requested_at": "2026-09-16T08:00:00Z",
+            "requested_by": str(uuid.uuid4()),
+            "updated_since": updated_since,
+        }
+
+
+async def _pull_request_is_cleared() -> bool:
+    from sqlalchemy import select
+
+    from app.core.db import session_scope
+    from app.modules.integration.models import IntegrationSource
+
+    async with session_scope() as session:
+        source = (
+            await session.execute(select(IntegrationSource).where(IntegrationSource.code == "lms"))
+        ).scalar_one_or_none()
+        assert source is not None
+        return source.pull_request is None
+
+
 async def _set_lms_source(*, active: bool = True, pull_enabled: bool = True) -> None:
     from sqlalchemy import select
 
@@ -791,4 +826,36 @@ class TestPull:
         monkeypatch.setattr(get_settings(), "lms_base_url", None)
 
         assert self._pull() == {"pulled": 0, "skipped": 1}
-        assert self.network.calls == []
+
+    def test_pull_request_runs_immediately_even_when_pull_disabled(self) -> None:
+        """B5-5: «Забрать сейчас» — тик уважает `pull_request` первым делом, минуя
+        `pull_enabled` и интервал, и очищает запись до запуска."""
+        run(self.client, functools.partial(_set_lms_source, pull_enabled=False))
+        run(self.client, _write_pull_request, None)
+        scene = run(self.client, make_scene)
+        self._serve([_row(scene, "a", progress_pct=10, updated_at="2026-09-20T10:00:00Z")])
+
+        from app.modules.integration.tasks import sweep_lms_progress_pull
+
+        result = run(self.client, functools.partial(sweep_lms_progress_pull, {}))
+
+        assert result == {"pulled": 1, "skipped": 0, "failed": 0}
+        assert run(self.client, _pull_request_is_cleared)
+
+    def test_pull_request_updated_since_does_not_move_the_cursor_back(self) -> None:
+        scene = run(self.client, make_scene)
+        self._serve([_row(scene, "a", progress_pct=10, updated_at="2026-09-20T10:00:00Z")])
+        assert self._pull()["pulled"] == 1
+        assert run(self.client, _cursor) == "2026-09-20T10:00:00Z"
+
+        run(self.client, _write_pull_request, "2026-09-01T00:00:00Z")
+        self._serve([_row(scene, "b", progress_pct=50, updated_at="2026-09-10T10:00:00Z")])
+
+        from app.modules.integration.tasks import sweep_lms_progress_pull
+
+        result = run(self.client, functools.partial(sweep_lms_progress_pull, {}))
+
+        assert result["pulled"] == 1
+        sent_params = [c["params"] for c in self.network.calls if c["method"] == "GET"]
+        assert any(p.get("updated_since") == "2026-09-01T00:00:00Z" for p in sent_params)
+        assert run(self.client, _cursor) == "2026-09-20T10:00:00Z"

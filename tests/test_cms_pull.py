@@ -237,7 +237,9 @@ class TestCmsPull:
     def test_temporary_failure_holds_the_cursor(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import app.modules.integration.cms_pull as cms_pull_module
 
-        async def boom(self: Any, record: dict[str, Any], key: str) -> tuple[str, bool]:
+        async def boom(
+            self: Any, record: dict[str, Any], key: str, **_kwargs: Any
+        ) -> tuple[str, bool]:
             return "failed", True
 
         monkeypatch.setattr(cms_pull_module.CmsPullService, "_ingest_one", boom)

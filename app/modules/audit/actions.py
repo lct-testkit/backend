@@ -94,6 +94,8 @@ class AuditAction(StrEnum):
     INTEGRATION_SOURCE_UPDATED = "INTEGRATION_SOURCE_UPDATED"
     # Ручной возврат события outbox из failed/dead в очередь доставки.
     INTEGRATION_OUTBOX_RETRIED = "INTEGRATION_OUTBOX_RETRIED"
+    # B5-5: «Забрать сейчас» — ручной запрос забора по API вне расписания cron.
+    INTEGRATION_PULL_REQUESTED = "INTEGRATION_PULL_REQUESTED"
     # B5-3: настраиваемый маппинг «утверждённых полей».
     INTEGRATION_MAPPING_UPDATED = "INTEGRATION_MAPPING_UPDATED"
     INTEGRATION_MAPPING_RESET = "INTEGRATION_MAPPING_RESET"

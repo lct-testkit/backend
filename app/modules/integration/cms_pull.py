@@ -113,14 +113,23 @@ class CmsPullResult:
 
 
 class CmsPullService:
-    async def run(self, trigger: str) -> CmsPullResult:
-        """`trigger` — `cron` или `manual` (B5-5): попадает в `integration_sources.last_run`."""
+    async def run(
+        self, trigger: str, *, updated_since: str | None = None, force: bool = False
+    ) -> CmsPullResult:
+        """`trigger` — `cron` или `manual` (B5-5): попадает в `integration_sources.last_run`.
+
+        `updated_since` (B5-5, «Забрать сейчас» с явной датой) переопределяет сохранённый
+        курсор ТОЛЬКО для этого запуска — используется для постраничного запроса и для
+        подсчёта нового курсора, но персистентный курсор не откатывается назад (см.
+        `_run_locked`: итоговое значение — максимум из старого курсора и вычисленного).
+        `force=True` (ручной запуск) пропускает проверку `pull_enabled` — кнопка должна
+        сработать даже когда расписание выключено; `is_active` проверяется всегда."""
         settings = get_settings()
         async with session_scope() as session:
             source = await session.scalar(
                 select(IntegrationSource).where(IntegrationSource.code == _SOURCE)
             )
-            if source is None or not source.is_active or not source.pull_enabled:
+            if source is None or not source.is_active or (not force and not source.pull_enabled):
                 return CmsPullResult(status="skipped")
             base_url = source.base_url or settings.cms_base_url
             if not base_url:
@@ -132,24 +141,43 @@ class CmsPullService:
                 return CmsPullResult(status="error", error=str(exc))
             token = resolve_secret(settings.cms_auth_ref)
 
+        # B5-5: журнал входящих различает плановый прогон и «Забрать сейчас» по `channel`
+        # записи (`pull`/`manual`), отдельно от `trigger` в `last_run` — так администратор
+        # видит источник КОНКРЕТНОЙ заявки, а не только итог последнего прогона целиком.
+        channel = "pull" if trigger == "cron" else "manual"
         async with distributed_lock(_LOCK_RESOURCE, ttl=_LOCK_TTL, blocking_timeout=_LOCK_WAIT) as (
             acquired
         ):
             if not acquired:
                 return CmsPullResult(status="busy")
-            result = await self._run_locked(base_url, token, settings)
+            result = await self._run_locked(
+                base_url, token, settings, updated_since=updated_since, channel=channel
+            )
         await self._record_run(trigger, result)
         return result
 
-    async def _run_locked(self, base_url: str, token: str | None, settings: Any) -> CmsPullResult:
+    async def _run_locked(
+        self,
+        base_url: str,
+        token: str | None,
+        settings: Any,
+        *,
+        updated_since: str | None = None,
+        channel: str = "pull",
+    ) -> CmsPullResult:
         client = CmsClient(base_url, token)
         async with session_scope() as session:
-            cursor = await get_cursor(session, source_code=_SOURCE, resource=_CURSOR_RESOURCE)
-        started_cursor = cursor
+            persisted_cursor = await get_cursor(
+                session, source_code=_SOURCE, resource=_CURSOR_RESOURCE
+            )
+        # B5-5: запрос с явной `updated_since` читает из этой точки (например, чтобы подобрать
+        # заявки, упавшие раньше), но персистентный курсор двигается только вперёд — см. ниже.
+        started_cursor = updated_since if updated_since is not None else persisted_cursor
 
         result = CmsPullResult()
         rows: list[tuple[str | None, bool]] = []
         page_cursor: str | None = None
+        cursor = started_cursor
 
         for _page in range(settings.integration_pull_max_pages):
             try:
@@ -173,7 +201,7 @@ class CmsPullService:
                     continue
                 key = _lead_key(record)
                 updated_at = _updated_at(record)
-                outcome, temporary = await self._ingest_one(record, key)
+                outcome, temporary = await self._ingest_one(record, key, channel=channel)
                 rows.append((updated_at, temporary))
                 if outcome == "created":
                     result.created += 1
@@ -187,14 +215,23 @@ class CmsPullService:
                 break
 
         final_cursor = advance_cursor(started_cursor, rows)
-        if final_cursor and final_cursor != started_cursor:
+        # Курсор не откатывается назад: `updated_since` из ручного запроса может быть раньше
+        # уже сохранённого курсора (повторная выборка упавших заявок), и персистентный курсор
+        # должен остаться максимумом из старого значения и того, что реально обработано сейчас.
+        if (
+            final_cursor is not None
+            and final_cursor != persisted_cursor
+            and (persisted_cursor is None or final_cursor > persisted_cursor)
+        ):
             async with session_scope() as session:
                 await set_cursor(
                     session, source_code=_SOURCE, resource=_CURSOR_RESOURCE, value=final_cursor
                 )
         return result
 
-    async def _ingest_one(self, record: dict[str, Any], key: str) -> tuple[str, bool]:
+    async def _ingest_one(
+        self, record: dict[str, Any], key: str, *, channel: str = "pull"
+    ) -> tuple[str, bool]:
         """`(исход, временный_ли_сбой)`: `исход` — `created`/`duplicate`/`failed`. `duplicate` —
         и повтор уже обработанного ключа (идемпотентность, например тот же лид во второй
         странице или во втором прогоне), и бизнес-дубль (`_open_duplicate`: открытая сделка
@@ -203,7 +240,7 @@ class CmsPullService:
         mapped = apply_interim_mapping(record)
         async with session_scope() as session:
             try:
-                ingested = await CmsLeadService(session).ingest_pulled(mapped, key)
+                ingested = await CmsLeadService(session).ingest_pulled(mapped, key, channel=channel)
             except AppError as exc:
                 return "failed", exc.status >= 500
             except Exception:  # noqa: BLE001 — одна битая строка не должна ронять прогон
