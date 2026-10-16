@@ -90,6 +90,11 @@ class AuditAction(StrEnum):
     INTEGRATION_SOURCE_UPDATED = "INTEGRATION_SOURCE_UPDATED"
     # Ручной возврат события outbox из failed/dead в очередь доставки.
     INTEGRATION_OUTBOX_RETRIED = "INTEGRATION_OUTBOX_RETRIED"
+    # B5-3: настраиваемый маппинг «утверждённых полей».
+    INTEGRATION_MAPPING_UPDATED = "INTEGRATION_MAPPING_UPDATED"
+    INTEGRATION_MAPPING_RESET = "INTEGRATION_MAPPING_RESET"
+    # B5-4: маршрутизация (воронка/тип сделки на источник, правила по значению поля).
+    INTEGRATION_ROUTING_UPDATED = "INTEGRATION_ROUTING_UPDATED"
 
     # --- Отчётность и дашборды (спринт 8, §4.13/§7.9) ---
     DASHBOARD_CREATED = "DASHBOARD_CREATED"

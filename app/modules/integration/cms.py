@@ -48,13 +48,19 @@ from app.modules.catalog.service import ContactService
 from app.modules.crm.models import Deal, DealComment, DealProduct
 from app.modules.crm.schemas import DealCreateRequest, DealProductIn
 from app.modules.crm.service import DealService
+from app.modules.integration.field_mapping import FieldMapping, apply_mapping
 from app.modules.integration.lead_payload import (
     LeadPayload,
     parse_json_object,
     parse_lead_payload,
     raw_evidence,
 )
-from app.modules.integration.models import InboundMessage, InboundStatus, IntegrationSourceCode
+from app.modules.integration.models import (
+    InboundMessage,
+    InboundStatus,
+    IntegrationSource,
+    IntegrationSourceCode,
+)
 from app.modules.integration.orders import OrderData, OrderIngestService
 from app.modules.integration.security import record_signature_failure, verify_signature
 from app.modules.integration.service import get_integration_principal, pick_least_loaded_owner
@@ -320,8 +326,20 @@ class CmsLeadService:
 
     # --- Обработка ---------------------------------------------------------------------
 
+    async def _load_field_mapping(self) -> FieldMapping | None:
+        """B5-3: `None` — администратор ничего не настраивал, поведение как раньше
+        (`lead_payload._ALIASES` без изменений)."""
+        source = await self._session.scalar(
+            select(IntegrationSource).where(IntegrationSource.code == _SOURCE)
+        )
+        if source is None or not source.field_mapping:
+            return None
+        return FieldMapping.model_validate(source.field_mapping)
+
     async def _process(self, payload: dict[str, Any], key: str) -> _Outcome:
-        lead = parse_lead_payload(payload)
+        mapping = await self._load_field_mapping()
+        mapped = apply_mapping(payload, mapping, _SOURCE)
+        lead = parse_lead_payload(mapped.payload)
         principal = await get_integration_principal(self._session)
         products = ProductIndex(self._session)
         if lead.is_order:
@@ -413,6 +431,9 @@ class CmsLeadService:
                 amount=lead.amount,
                 source=_SOURCE,
                 external_ids=deal_external_ids,
+                # B5-3: собрано настраиваемым маппингом (`custom_fields.<код>`); без мапппинга
+                # сохранённого на источнике — всегда пусто, поведение не меняется.
+                custom_fields=lead.custom_fields,
                 products=(
                     [
                         DealProductIn(
