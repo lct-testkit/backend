@@ -70,7 +70,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Поднимутся 11 сервисов: `postgres`, `redis`, `seaweedfs`, `keycloak`, `ntp`, `sms-gateway-mock`, разовые `migrate` (миграции) и `seed` (две демо-воронки: `b2b_university_v1` на 14 шагов, `b2c_individual_v1` на 6), затем `api`, `worker` и `caddy`. `migrate` и `seed` после завершения видны только в `docker compose ps -a` (`Exited (0)`); `api` и `worker` стартуют после успешного `seed`, `api` дополнительно ждёт готовности Keycloak. На чистой машине это около минуты, дольше всего поднимается Keycloak.
+Поднимутся 11 сервисов: `postgres`, `redis`, `seaweedfs`, `keycloak`, `ntp`, `sms-gateway-mock`, разовые `migrate` (миграции) и `seed` (три воронки: `b2b_university_v2` на 14 шагов задания — основная, по умолчанию; `b2b_university_v1` — дополнительная продажная воронка с ПЭП-согласованием КП, не по умолчанию; `b2c_individual_v1` на 6), затем `api`, `worker` и `caddy`. `migrate` и `seed` после завершения видны только в `docker compose ps -a` (`Exited (0)`); `api` и `worker` стартуют после успешного `seed`, `api` дополнительно ждёт готовности Keycloak. На чистой машине это около минуты, дольше всего поднимается Keycloak.
 
 ```bash
 curl http://localhost:8080/health/ready
@@ -441,7 +441,7 @@ alembic revision --autogenerate -m "описание"
 
 Новая модель добавляется в `app/modules/<module>/models.py` и обязательно импортируется в `app/db/models.py` — иначе Alembic не увидит её при автогенерации.
 
-**Сидинг.** Единая точка входа контейнера — `deploy/entrypoint.sh` (`api`\|`worker`\|`migrate`\|`seed`\|`sms-gateway-mock`\|`shell`). Режим `seed` запускает только `python -m app.modules.workflow.seed` (две демо-воронки); сиды отчётов, уведомлений и интеграций в контейнер не входят и запускаются вручную (все идемпотентны):
+**Сидинг.** Единая точка входа контейнера — `deploy/entrypoint.sh` (`api`\|`worker`\|`migrate`\|`seed`\|`sms-gateway-mock`\|`shell`). Режим `seed` запускает только `python -m app.modules.workflow.seed` (три воронки — см. выше); сиды отчётов, уведомлений и интеграций в контейнер не входят и запускаются вручную (все идемпотентны):
 
 ```bash
 docker compose exec api python -m app.modules.reporting.seed       # 10 шаблонов отчётов

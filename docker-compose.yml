@@ -307,7 +307,8 @@ services:
     networks: [crm]
 
   seed:
-    # Демо-воронки b2b_university_v1 и b2c_individual_v1 (раздел 7).
+    # Три воронки (B2-1/B2-2): b2b_university_v2 (основная, по умолчанию),
+    # b2b_university_v1 (дополнительная, не по умолчанию) и b2c_individual_v1 (раздел 7).
     # Идемпотентно, поэтому безопасно на каждом `docker compose up`.
     build:
       context: .

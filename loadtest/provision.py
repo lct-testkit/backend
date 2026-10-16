@@ -12,12 +12,16 @@ sprint10-admin-erasure-implementation.md уже описывает для Organi
 
 Создаёт:
 * один организацию-фикстуру (переиспользуется при повторном запуске);
-* `--count` сделок (по умолчанию 4000) в статусе `identification`
-  воронки `b2b_university_v1`, владелец — демо-КАМ `kam.ivanov`
-  (deploy/keycloak/realm-crm.json) — переход `identification→first_contact`
-  ничем не обусловлен (`app/modules/workflow/seed.py`: обычный шаг вперёд
-  без `conditions`/`requires_comment`), поэтому не нужно готовить
-  синтетические данные под guard-условия;
+* `--count` сделок (по умолчанию 4000) в статусе `--from-code` воронки
+  `--workflow-code` (по умолчанию `b2b_university_v2`, B2-4: пара сменилась
+  с `identification→first_contact` воронки v1 на `meeting→documents_exchange`
+  воронки v2 — после B2-1 это снова переход без условий, действий и
+  обязательного комментария), владелец — демо-КАМ `kam.ivanov`
+  (deploy/keycloak/realm-crm.json). Перед вставкой сделок скрипт сам
+  проверяет, что у пары `--from-code`→`--to-code` нет `conditions`,
+  `actions` и `requires_comment` (НФР 1: нагрузочный сценарий `transition`
+  не должен тратить лишние запросы на условия или действия) — иначе выходит
+  с понятным сообщением, а не роняет прогон локаста на первом же переходе;
 * отдельный пул `--comment-pool-size` сделок (по умолчанию 100) для сценария
   «добавление комментария» — комментарии не меняют версию сделки, но
   циклический пул из 100, а не одна сделка, не создаёт горячую строку.
@@ -41,11 +45,16 @@ import app.main  # noqa: F401 — регистрирует все модели �
 from app.modules.catalog.models import Organization
 from app.modules.crm.models import Deal
 from app.modules.identity.models import User
-from app.modules.workflow.models import Workflow, WorkflowStatus
+from app.modules.workflow.models import Workflow, WorkflowStatus, WorkflowTransition
 
 DEFAULT_DATABASE_URL = "postgresql+asyncpg://crm_app:crm_app@localhost:5433/crm"
 FIXTURE_ORG_NAME = "Нагрузочное тестирование — фикстура"
 KAM_EMAIL = "ivanov@rt-it-school.ru"
+#: B2-4: после B2-1 воронка по умолчанию — v2 (14 шагов задания); пара без условий, действий и
+#: обязательного комментария — meeting→documents_exchange (3→4).
+DEFAULT_WORKFLOW_CODE = "b2b_university_v2"
+DEFAULT_FROM_CODE = "meeting"
+DEFAULT_TO_CODE = "documents_exchange"
 
 
 async def _get_or_create_org(session) -> Organization:
@@ -67,6 +76,9 @@ async def main() -> None:
         "--database-url",
         default=os.environ.get("LOADTEST_DATABASE_URL", DEFAULT_DATABASE_URL),
     )
+    parser.add_argument("--workflow-code", default=DEFAULT_WORKFLOW_CODE)
+    parser.add_argument("--from-code", default=DEFAULT_FROM_CODE)
+    parser.add_argument("--to-code", default=DEFAULT_TO_CODE)
     args = parser.parse_args()
 
     engine = create_async_engine(args.database_url)
@@ -80,10 +92,10 @@ async def main() -> None:
                 "just-in-time provisioning отработал (первый вход kam.ivanov в систему)?"
             )
         workflow = await session.scalar(
-            select(Workflow).where(Workflow.code == "b2b_university_v1")
+            select(Workflow).where(Workflow.code == args.workflow_code)
         )
         if workflow is None:
-            raise SystemExit("Воронка b2b_university_v1 не найдена — сиды применены?")
+            raise SystemExit(f"Воронка {args.workflow_code!r} не найдена — сиды применены?")
         statuses = (
             (
                 await session.execute(
@@ -94,8 +106,35 @@ async def main() -> None:
             .all()
         )
         by_code = {s.code: s for s in statuses}
-        from_status = by_code["identification"]
-        to_status = by_code["first_contact"]
+        if args.from_code not in by_code or args.to_code not in by_code:
+            raise SystemExit(
+                f"Статус {args.from_code!r} или {args.to_code!r} не найден в воронке "
+                f"{args.workflow_code!r}"
+            )
+        from_status = by_code[args.from_code]
+        to_status = by_code[args.to_code]
+
+        # НФР 1: нагрузочный сценарий `transition` шлёт переход без комментария и файлов
+        # (`locustfile_transition.py`), поэтому пара обязана быть без условий, действий и
+        # обязательного комментария — иначе каждый переход в прогоне даёт 422, а не 200.
+        transition = await session.scalar(
+            select(WorkflowTransition).where(
+                WorkflowTransition.workflow_id == workflow.id,
+                WorkflowTransition.from_status_id == from_status.id,
+                WorkflowTransition.to_status_id == to_status.id,
+            )
+        )
+        if transition is None:
+            raise SystemExit(
+                f"Переход {args.from_code!r} → {args.to_code!r} не найден в воронке "
+                f"{args.workflow_code!r}"
+            )
+        if transition.conditions or transition.actions or transition.requires_comment:
+            raise SystemExit(
+                f"Переход {args.from_code!r} → {args.to_code!r} несёт условия, действия или "
+                "обязательный комментарий — нагрузочный сценарий transition шлёт переход без "
+                "файлов и комментария и получит 422 на каждом запросе; выберите другую пару"
+            )
 
         org = await _get_or_create_org(session)
         await session.commit()
