@@ -40,6 +40,7 @@ from app.core.db import session_scope
 from app.core.metrics import track_task
 from app.modules.admin.models import FeatureFlag
 from app.modules.integration import bitrix, lms
+from app.modules.integration.cms_pull import CmsPullService
 from app.modules.integration.models import IntegrationSource, OutboxEvent, OutboxStatus
 from app.modules.integration.security import (
     check_outbound_url_resolved,
@@ -311,3 +312,29 @@ async def sweep_lms_progress_pull(ctx: dict[str, Any]) -> dict[str, int]:
             )
 
     return {"pulled": batch.applied, "skipped": batch.skipped, "failed": batch.failed}
+
+
+@track_task
+async def sweep_cms_leads_pull(ctx: dict[str, Any]) -> dict[str, int]:
+    """B5-2 (Функц.5 ТЗ): забор лидов с сайта по расписанию. Тик раз в минуту
+    (`worker/main.py`), реальный интервал задаёт `integration_sources.
+    pull_interval_seconds` — тик, пришедшийся раньше срока, молча пропускается."""
+    async with session_scope() as session:
+        source = await session.scalar(
+            select(IntegrationSource).where(IntegrationSource.code == "cms")
+        )
+        if source is None or not source.is_active or not source.pull_enabled:
+            return {"status": "skipped"}
+        if source.last_sync_at is not None:
+            elapsed = (dt.datetime.now(dt.UTC) - source.last_sync_at).total_seconds()
+            if elapsed < source.pull_interval_seconds:
+                return {"status": "too_soon"}
+
+    result = await CmsPullService().run("cron")
+    return {
+        "status": result.status,
+        "fetched": result.fetched,
+        "created": result.created,
+        "duplicates": result.duplicates,
+        "failed": result.failed,
+    }

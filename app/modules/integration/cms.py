@@ -75,6 +75,10 @@ class LeadIngestResult:
     message: InboundMessage
     deal_id: uuid.UUID | None
     contact_id: uuid.UUID | None
+    #: B5-2: эта доставка — повтор уже обработанного ключа (идемпотентность), а не новая
+    #: обработка. `CmsPullService` использует это, чтобы не считать повтор «новой сделкой» в
+    #: счётчиках прогона; вебхук это поле не использует.
+    replayed: bool = False
 
 
 @dataclass(slots=True)
@@ -136,13 +140,31 @@ class CmsLeadService:
             await self._session.commit()
             raise
 
-        message, replay = await self._claim(idempotency_key, payload)
+        return await self._ingest_payload(payload, idempotency_key, channel="webhook")
+
+    async def ingest_pulled(self, record: dict[str, Any], key: str) -> LeadIngestResult:
+        """B5-2: лид, полученный забором по API (`CmsPullService`), минует проверку подписи —
+        доверие даёт сам факт успешного ответа источника по нашему токену (Bearer), как и у
+        вебхука с верной подписью. Ключ идемпотентности — голый `lead_id` с сайта: если сайт
+        ещё и шлёт тот же лид вебхуком, второй вход ловит дедупликация человека и продукта
+        (`_open_duplicate`), а не мёртвый `UNIQUE` — ключи вебхука и pull не обязаны совпадать
+        буквально, но на практике сайт ссылается на один и тот же `lead_id` в обоих путях."""
+        return await self._ingest_payload(record, key, channel="pull")
+
+    async def _ingest_payload(
+        self, payload: dict[str, Any], key: str, *, channel: str
+    ) -> LeadIngestResult:
+        """Хвост, общий для вебхука (после проверки подписи) и забора по API (B5-2): захват ключа
+        идемпотентности, разбор и запись сделки, итог во входящих."""
+        message, replay = await self._claim(key, payload, channel=channel)
         if replay:
-            return await self._stored_result(message)
+            result = await self._stored_result(message)
+            result.replayed = True
+            return result
 
         try:
             async with self._session.begin_nested():
-                outcome = await self._process(payload, idempotency_key)
+                outcome = await self._process(payload, key)
         except AppError as exc:
             # Ошибка каталога (422 «нет курса», 503 «служебной учётки нет» и т.п.) — текст написан
             # нами, без SQL и чужих данных: он и уходит отправителю, и остаётся во входящих.
@@ -225,15 +247,19 @@ class CmsLeadService:
             )
         ).scalar_one_or_none()
 
-    async def _claim(self, key: str, payload: dict[str, Any]) -> tuple[InboundMessage, bool]:
-        """Место под `Idempotency-Key`: `(сообщение, это_повтор_с_итогом)`."""
+    async def _claim(
+        self, key: str, payload: dict[str, Any], *, channel: str = "webhook"
+    ) -> tuple[InboundMessage, bool]:
+        """Место под `Idempotency-Key`: `(сообщение, это_повтор_с_итогом)`. `channel` — B5-2:
+        как заявка попала в журнал (`webhook`/`pull`/`manual`)."""
         for _attempt in range(_CLAIM_ATTEMPTS):
             existing = await self._find_message(key)
             if existing is not None:
                 if existing.status in _FINAL_STATUSES:
                     return existing, True
                 # `failed` (или недописанное `received`): доставка повторена после неудачи —
-                # обрабатываем заново на той же записи, ключ уникален.
+                # обрабатываем заново на той же записи, ключ уникален. Канал не трогаем: он
+                # описывает, как заявка попала в журнал первым разом.
                 existing.raw_payload = payload
                 existing.signature_valid = True
                 existing.status = InboundStatus.RECEIVED.value
@@ -248,6 +274,7 @@ class CmsLeadService:
                 source_code=_SOURCE,
                 external_id=key,
                 message_type="lead",
+                channel=channel,
                 raw_payload=payload,
                 signature_valid=True,
                 status=InboundStatus.RECEIVED.value,

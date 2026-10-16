@@ -25,6 +25,11 @@ class IntegrationSourceOut(BaseModel):
     config: dict[str, Any]
     last_sync_at: dt.datetime | None
     last_error: str | None
+    # B5-2/B5-5: забор по API.
+    pull_enabled: bool
+    pull_interval_seconds: int
+    pull_request: dict[str, Any] | None
+    last_run: dict[str, Any] | None
     created_at: dt.datetime
     updated_at: dt.datetime
 
@@ -41,6 +46,9 @@ class IntegrationSourceUpdateRequest(BaseModel):
     )
     is_active: bool | None = None
     config: dict[str, Any] | None = None
+    # B5-2: включатель и период забора по API (60..86400 с — как в CHECK колонки).
+    pull_enabled: bool | None = None
+    pull_interval_seconds: int | None = Field(default=None, ge=60, le=86400)
 
 
 class ExternalRefOut(BaseModel):
@@ -79,6 +87,8 @@ class InboundMessageOut(BaseModel):
     source_code: str
     external_id: str
     message_type: str | None
+    # B5-2: вебхук (как раньше), забор по расписанию или кнопка «Забрать сейчас» (B5-5).
+    channel: str
     status: str
     signature_valid: bool
     error: str | None
