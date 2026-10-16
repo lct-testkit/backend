@@ -93,6 +93,8 @@ class ErrorCode(StrEnum):
     # `POST /admin/integrations/outbox-events/{id}/retry` для события, которое
     # не в `failed`/`dead`: `pending` уже стоит в очереди, `sent` доставлено.
     INTEGRATION_EVENT_NOT_RETRYABLE = "CRM-1704"
+    # B5-5: «Забрать сейчас» — запрос уже стоит в очереди (ещё не разобран тиком cron).
+    INTEGRATION_PULL_BUSY = "CRM-1705"
 
     # --- Импорт ---
     IMPORT_BAD_FORMAT = "CRM-1801"
@@ -172,6 +174,9 @@ ERROR_CATALOG: dict[ErrorCode, ErrorSpec] = {
     ErrorCode.INTEGRATION_SOURCE_INACTIVE: ErrorSpec(409, "Источник интеграции неактивен"),
     ErrorCode.INTEGRATION_EVENT_NOT_RETRYABLE: ErrorSpec(
         409, "Повторить можно только событие в статусе failed или dead"
+    ),
+    ErrorCode.INTEGRATION_PULL_BUSY: ErrorSpec(
+        409, "Запрос на забор уже стоит в очереди, подождите завершения"
     ),
     ErrorCode.IMPORT_BAD_FORMAT: ErrorSpec(422, "Недопустимый или повреждённый формат импорта"),
     ErrorCode.IMPORT_MAPPING_INCOMPLETE: ErrorSpec(422, "Маппинг импорта не завершён"),

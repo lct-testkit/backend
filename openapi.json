@@ -6273,6 +6273,117 @@
         "title": "IntegrationSourceUpdateRequest",
         "type": "object"
       },
+      "IntegrationStatusOut": {
+        "description": "Сводка для экрана источника: `last_run` — снимок момента завершения последнего прогона\n(cron или ручного), `inbound_last_24h`/`outbox_last_24h` — живые счётчики по статусам за\nпоследние сутки (не из `last_run`).",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "cursors": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Cursors",
+            "type": "object"
+          },
+          "inbound_last_24h": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Inbound Last 24H",
+            "type": "object"
+          },
+          "is_active": {
+            "title": "Is Active",
+            "type": "boolean"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "last_run": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Run"
+          },
+          "last_sync_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Sync At"
+          },
+          "outbox_last_24h": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Outbox Last 24H",
+            "type": "object"
+          },
+          "pull_enabled": {
+            "title": "Pull Enabled",
+            "type": "boolean"
+          },
+          "pull_interval_seconds": {
+            "title": "Pull Interval Seconds",
+            "type": "integer"
+          },
+          "pull_request": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pull Request"
+          }
+        },
+        "required": [
+          "code",
+          "is_active",
+          "pull_enabled",
+          "pull_interval_seconds",
+          "cursors",
+          "last_sync_at",
+          "last_error",
+          "last_run",
+          "pull_request",
+          "inbound_last_24h",
+          "outbox_last_24h"
+        ],
+        "title": "IntegrationStatusOut",
+        "type": "object"
+      },
       "InviteCheckResponse": {
         "description": "Проверка одноразовой ссылки приглашения (new_spec §4.1 шаг 4).",
         "properties": {
@@ -10957,6 +11068,43 @@
           "graph_hash"
         ],
         "title": "PublishResponse",
+        "type": "object"
+      },
+      "PullRequestBody": {
+        "description": "`updated_since=null` — читать с сохранённого курсора (обычный ручной запуск); дата в\nпрошлом — подобрать заявки за период заново (например, упавшие), не откатывая курсор назад\n(`CmsPullService.run`/`sweep_lms_progress_pull`: итоговый курсор — максимум старого и\nвычисленного на этом прогоне).",
+        "properties": {
+          "updated_since": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated Since"
+          }
+        },
+        "title": "PullRequestBody",
+        "type": "object"
+      },
+      "PullRequestResponse": {
+        "properties": {
+          "requested_at": {
+            "format": "date-time",
+            "title": "Requested At",
+            "type": "string"
+          },
+          "status": {
+            "default": "queued",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "requested_at"
+        ],
+        "title": "PullRequestResponse",
         "type": "object"
       },
       "ReassignRequest": {
@@ -18257,6 +18405,98 @@
         ]
       }
     },
+    "/api/admin/integrations/sources/{code}/pull": {
+      "post": {
+        "description": "Ручной запуск забора по API вне расписания cron — следующий тик (не больше минуты, `worker/main.py`) выполнит его независимо от `pull_enabled` и интервала источника. Источник выключен или адрес не настроен — 409 (CRM-1703); запрос уже стоит в очереди — 409 (CRM-1705). Лимит 6 запросов в минуту на пользователя.",
+        "operationId": "request_source_pull_api_admin_integrations_sources__code__pull_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "required": true,
+            "schema": {
+              "title": "Code",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PullRequestBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PullRequestResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Забрать сейчас",
+        "tags": [
+          "integrations-admin"
+        ]
+      }
+    },
     "/api/admin/integrations/sources/{code}/routing": {
       "delete": {
         "operationId": "delete_source_routing_api_admin_integrations_sources__code__routing_delete",
@@ -18477,6 +18717,73 @@
           }
         ],
         "summary": "Сохранить маршрутизацию",
+        "tags": [
+          "integrations-admin"
+        ]
+      }
+    },
+    "/api/admin/integrations/sources/{code}/status": {
+      "get": {
+        "description": "Настройки забора, курсоры, итог последнего прогона (`last_run`) и живые счётчики за последние 24 часа по журналу входящих и очереди исходящих.",
+        "operationId": "get_source_status_api_admin_integrations_sources__code__status_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "required": true,
+            "schema": {
+              "title": "Code",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationStatusOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "summary": "Статус синхронизации источника",
         "tags": [
           "integrations-admin"
         ]

@@ -188,3 +188,38 @@ class MappingPreviewResponse(BaseModel):
     product: dict[str, Any] | None = None
     errors: list[MappingValidationErrorOut] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+# --- B5-5: ручной запуск «Забрать сейчас» и статус синхронизации ---------------------------
+
+
+class PullRequestBody(BaseModel):
+    """`updated_since=null` — читать с сохранённого курсора (обычный ручной запуск); дата в
+    прошлом — подобрать заявки за период заново (например, упавшие), не откатывая курсор назад
+    (`CmsPullService.run`/`sweep_lms_progress_pull`: итоговый курсор — максимум старого и
+    вычисленного на этом прогоне)."""
+
+    updated_since: str | None = None
+
+
+class PullRequestResponse(BaseModel):
+    status: str = "queued"
+    requested_at: dt.datetime
+
+
+class IntegrationStatusOut(BaseModel):
+    """Сводка для экрана источника: `last_run` — снимок момента завершения последнего прогона
+    (cron или ручного), `inbound_last_24h`/`outbox_last_24h` — живые счётчики по статусам за
+    последние сутки (не из `last_run`)."""
+
+    code: str
+    is_active: bool
+    pull_enabled: bool
+    pull_interval_seconds: int
+    cursors: dict[str, str | None]
+    last_sync_at: dt.datetime | None
+    last_error: str | None
+    last_run: dict[str, Any] | None
+    pull_request: dict[str, Any] | None
+    inbound_last_24h: dict[str, int]
+    outbox_last_24h: dict[str, int]

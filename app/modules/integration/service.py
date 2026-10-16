@@ -36,7 +36,13 @@ from app.modules.audit.service import AuditService, diff_changes
 from app.modules.crm.models import Deal
 from app.modules.identity.models import Role, User
 from app.modules.integration.field_mapping import FieldMapping, validate_mapping
-from app.modules.integration.models import IntegrationSource, OutboxEvent, OutboxStatus
+from app.modules.integration.models import (
+    InboundMessage,
+    IntegrationSource,
+    OutboxEvent,
+    OutboxStatus,
+    SyncCursor,
+)
 from app.modules.integration.routing import Routing, validate_routing
 from app.modules.integration.security import check_outbound_url_resolved
 
@@ -277,6 +283,92 @@ class IntegrationSourceService:
             entity_id=source.id,
             changes=diff_changes(before, {}),
         )
+
+    # --- B5-5: ручной запуск «Забрать сейчас» и статус синхронизации --------------------
+
+    _DEFAULT_BASE_URL_SETTING: dict[str, str] = {"cms": "cms_base_url", "lms": "lms_base_url"}
+
+    async def request_pull(
+        self, code: str, principal: Principal, *, updated_since: str | None
+    ) -> dict[str, Any]:
+        """Сама ничего не забирает: пишет запрос в `pull_request`, его первым делом читает
+        `sweep_cms_leads_pull`/`sweep_lms_progress_pull` на следующем тике (раз в минуту,
+        `worker/main.py`) и запускает забор сразу, независимо от `pull_enabled` и интервала —
+        в течение минуты, а не по расписанию."""
+        source = await self.get_by_code(code)
+        settings = get_settings()
+        default_attr = self._DEFAULT_BASE_URL_SETTING.get(code)
+        default_base_url = getattr(settings, default_attr, None) if default_attr else None
+        if not source.is_active or not (source.base_url or default_base_url):
+            raise AppError(
+                ErrorCode.INTEGRATION_SOURCE_INACTIVE, "Источник выключен или адрес не настроен"
+            )
+        if source.pull_request:
+            raise AppError(
+                ErrorCode.INTEGRATION_PULL_BUSY, "Запрос на забор уже стоит в очереди"
+            )
+        pull_request = {
+            "requested_at": dt.datetime.now(dt.UTC).isoformat(),
+            "requested_by": str(principal.user_id),
+            "updated_since": updated_since,
+        }
+        source.pull_request = pull_request
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.INTEGRATION_PULL_REQUESTED,
+            entity_type="integration_source",
+            entity_id=source.id,
+            changes={"pull_request": {"old": None, "new": pull_request}},
+        )
+        return pull_request
+
+    async def get_status(self, code: str) -> dict[str, Any]:
+        """Сводка для экрана источника: настройки забора, курсоры (по всем `resource`,
+        названия не захардкожены здесь — у CMS и LMS они разные), итог последнего прогона
+        (`last_run` — снимок момента завершения) и живые счётчики за последние 24 часа по
+        журналу входящих и очереди исходящих (у `cms` исходящих нет — источник только
+        принимает, `outbox_last_24h` будет пустым, и это ожидаемо)."""
+        source = await self.get_by_code(code)
+        cursor_rows = (
+            await self._session.execute(
+                select(SyncCursor.resource, SyncCursor.cursor_value).where(
+                    SyncCursor.source_code == code
+                )
+            )
+        ).all()
+        cursors: dict[str, str | None] = {row.resource: row.cursor_value for row in cursor_rows}
+
+        since = dt.datetime.now(dt.UTC) - dt.timedelta(hours=24)
+        inbound_rows = (
+            await self._session.execute(
+                select(InboundMessage.status, func.count())
+                .where(InboundMessage.source_code == code, InboundMessage.received_at >= since)
+                .group_by(InboundMessage.status)
+            )
+        ).all()
+        inbound_counts: dict[str, int] = {row[0]: row[1] for row in inbound_rows}
+
+        outbox_rows = (
+            await self._session.execute(
+                select(OutboxEvent.status, func.count())
+                .where(OutboxEvent.target == code, OutboxEvent.created_at >= since)
+                .group_by(OutboxEvent.status)
+            )
+        ).all()
+        outbox_counts: dict[str, int] = {row[0]: row[1] for row in outbox_rows}
+        return {
+            "code": source.code,
+            "is_active": source.is_active,
+            "pull_enabled": source.pull_enabled,
+            "pull_interval_seconds": source.pull_interval_seconds,
+            "cursors": cursors,
+            "last_sync_at": source.last_sync_at,
+            "last_error": source.last_error,
+            "last_run": source.last_run,
+            "pull_request": source.pull_request,
+            "inbound_last_24h": inbound_counts,
+            "outbox_last_24h": outbox_counts,
+        }
 
 
 class OutboxEventService:

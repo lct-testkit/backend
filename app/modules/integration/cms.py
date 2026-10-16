@@ -176,14 +176,19 @@ class CmsLeadService:
 
         return await self._ingest_payload(payload, idempotency_key, channel="webhook")
 
-    async def ingest_pulled(self, record: dict[str, Any], key: str) -> LeadIngestResult:
+    async def ingest_pulled(
+        self, record: dict[str, Any], key: str, *, channel: str = "pull"
+    ) -> LeadIngestResult:
         """B5-2: лид, полученный забором по API (`CmsPullService`), минует проверку подписи —
         доверие даёт сам факт успешного ответа источника по нашему токену (Bearer), как и у
         вебхука с верной подписью. Ключ идемпотентности — голый `lead_id` с сайта: если сайт
         ещё и шлёт тот же лид вебхуком, второй вход ловит дедупликация человека и продукта
         (`_open_duplicate`), а не мёртвый `UNIQUE` — ключи вебхука и pull не обязаны совпадать
-        буквально, но на практике сайт ссылается на один и тот же `lead_id` в обоих путях."""
-        return await self._ingest_payload(record, key, channel="pull")
+        буквально, но на практике сайт ссылается на один и тот же `lead_id` в обоих путях.
+
+        `channel` (B5-5) — `pull` для планового прогона cron, `manual` для «Забрать сейчас»:
+        администратору видно в журнале входящих, какие записи появились по кнопке."""
+        return await self._ingest_payload(record, key, channel=channel)
 
     async def _ingest_payload(
         self, payload: dict[str, Any], key: str, *, channel: str
