@@ -28,6 +28,7 @@ from app.modules.workflow.schemas import (
     StatusImpactResponse,
     StatusMappingJobOut,
     StatusOut,
+    StatusRenameRequest,
     TransitionOut,
     ValidateResponse,
     WorkflowCreateRequest,
@@ -48,6 +49,9 @@ router = APIRouter(prefix="/workflows", tags=["workflows"])
 WorkflowRead = Annotated[Principal, Depends(require_permission(Permission.WORKFLOW_READ))]
 WorkflowWrite = Annotated[Principal, Depends(require_permission(Permission.WORKFLOW_WRITE))]
 WorkflowPublish = Annotated[Principal, Depends(require_permission(Permission.WORKFLOW_PUBLISH))]
+WorkflowRenameStatus = Annotated[
+    Principal, Depends(require_permission(Permission.WORKFLOW_RENAME_STATUS))
+]
 
 
 def _workflow_out(workflow: Workflow, *, unpublished: bool) -> WorkflowOut:
@@ -280,6 +284,34 @@ async def status_impact(
         suggested_targets=[StatusOut.model_validate(s) for s in candidates],
         warnings=warnings,
     )
+
+
+@router.patch(
+    "/{workflow_id}/statuses/{status_id}",
+    summary="Переименовать статус",
+    description=(
+        "Меняет только подпись статуса — код, тип, переходы и SLA не затрагиваются. "
+        "Если статус есть в опубликованном снимке, снимок пересобирается с новым именем "
+        "(has_unpublished_changes не включается из-за самого переименования). "
+        "Обязателен If-Match. Роль: Руководитель или администратор."
+    ),
+    response_model=StatusOut,
+)
+async def rename_status(
+    payload: StatusRenameRequest,
+    session: DbSession,
+    if_match: IfMatch,
+    _: WorkflowRenameStatus,
+    workflow_id: Annotated[uuid.UUID, Path()],
+    status_id: Annotated[uuid.UUID, Path()],
+) -> StatusOut:
+    service = WorkflowService(session)
+    workflow = await service.get_or_404(workflow_id)
+    target_status = await service.get_status_or_404(workflow_id, status_id)
+    renamed = await service.rename_status(
+        workflow, target_status, name=payload.name, expected_version=if_match
+    )
+    return StatusOut.model_validate(renamed)
 
 
 @router.post(

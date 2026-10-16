@@ -421,6 +421,60 @@ class WorkflowService:
         if workflow.state == WorkflowState.ARCHIVED.value:
             raise AppError(ErrorCode.VALIDATION, "Архивная воронка недоступна для изменений")
 
+    async def rename_status(
+        self,
+        workflow: Workflow,
+        status: WorkflowStatus,
+        *,
+        name: str,
+        expected_version: int,
+    ) -> WorkflowStatus:
+        """B2-5: только подпись статуса — код, тип, переходы и SLA не меняются. Доступно
+        Руководителю и администратору (`Permission.WORKFLOW_RENAME_STATUS`), а не только
+        администратору через конструктор: Функц.2 называет это «корректировкой именования
+        статусов» отдельно от редактирования графа.
+
+        Снимок переписывается новым объектом (JSONB не отслеживает правку поля на месте) тем
+        же приёмом, что `republish_after_archive` — черновик и опубликованный снимок получают
+        одно имя статуса, поэтому `has_unpublished_changes` не включается только из-за этого
+        переименования."""
+        self._check_version(workflow, expected_version)
+        self._ensure_not_archived(workflow)
+        if status.is_archived:
+            raise AppError(ErrorCode.VALIDATION, "Архивный статус недоступен для изменений")
+
+        new_name = " ".join(name.split())
+        if not new_name:
+            raise ValidationError(
+                "Имя статуса не может быть пустым",
+                [FieldError(field="name", reason="обязательное поле")],
+            )
+        if new_name == status.name:
+            return status  # без изменений — не плодим версию впустую
+
+        await self._claim_version(workflow, expected_version)
+        old_name = status.name
+        status.name = new_name
+
+        if workflow.published_graph is not None:
+            renamed_snapshot = _with_renamed_status(
+                workflow.published_graph, str(status.id), new_name
+            )
+            if renamed_snapshot is not None:
+                workflow.published_graph = renamed_snapshot
+                workflow.graph_hash = snapshot_digest(renamed_snapshot)
+
+        await self._session.flush()
+        workflow_id = workflow.id
+        run_after_commit(self._session, lambda: invalidate_workflow_cache(workflow_id))
+        await self._audit.record(
+            AuditAction.WORKFLOW_STATUS_RENAMED,
+            entity_type="workflow_status",
+            entity_id=status.id,
+            changes={"name": {"old": old_name, "new": new_name}},
+        )
+        return status
+
     async def save_graph(
         self, workflow: Workflow, payload: GraphIn, *, expected_version: int
     ) -> Graph:
@@ -1037,6 +1091,20 @@ class WorkflowService:
             entity_id=job.id,
             changes={"processed": job.processed_count, "failed": job.failed_count},
         )
+
+
+def _with_renamed_status(
+    snapshot: dict[str, Any], status_id: str, new_name: str
+) -> dict[str, Any] | None:
+    """Снимок с переименованным статусом (B2-5), или `None`, если статуса в снимке нет (не
+    опубликован в этой версии графа — переименование живой строки всё равно применяется)."""
+    statuses = snapshot.get("statuses", [])
+    if not any(s["id"] == status_id for s in statuses):
+        return None
+    return {
+        **snapshot,
+        "statuses": [{**s, "name": new_name} if s["id"] == status_id else s for s in statuses],
+    }
 
 
 def _without_statuses(snapshot: dict[str, Any], status_ids: set[str]) -> dict[str, Any]:
