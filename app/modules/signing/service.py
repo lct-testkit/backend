@@ -49,6 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
 from app.core.config import get_settings
+from app.core.context import get_client
 from app.core.db import run_after_commit
 from app.core.errors import (
     AppError,
@@ -62,6 +63,7 @@ from app.core.ids import uuid7
 from app.core.masking import mask_email, mask_phone
 from app.core.permissions import Permission, has_permission
 from app.core.rate_limit import enforce as rate_limit_enforce
+from app.core.redis_client import get_redis
 from app.core.security import Principal
 from app.core.storage import (
     download_object_bytes,
@@ -84,7 +86,8 @@ from app.modules.crm.models import (
 )
 from app.modules.crm.models import SignatureStatus as DealSignatureStatus
 from app.modules.files.models import Attachment, AttachmentCategory, File, FileStatus
-from app.modules.identity.models import User
+from app.modules.identity.models import SecurityEventType, Severity, User
+from app.modules.identity.service import IdentityService
 from app.modules.integration.service import get_outbox_service
 from app.modules.notification.email_transport import (
     EmailSendError,
@@ -1359,10 +1362,47 @@ class SignatureRequestService:
         stmt = select(SignatureRequest).where(SignatureRequest.access_token_hash == token_hash)
         request = (await self._session.execute(stmt)).scalars().first()
         if request is None:
+            # B7-5: токен, не найденный ни у одного запроса, — угадывание, а не истёкшая
+            # настоящая ссылка (та ветка ниже событие не считает).
+            await self._record_invalid_token_probe()
             raise AppError(ErrorCode.SIGNATURE_TOKEN_INVALID, "Ссылка недействительна")
         if request.token_expires_at and request.token_expires_at < dt.datetime.now(dt.UTC):
             raise AppError(ErrorCode.SIGNATURE_TOKEN_INVALID, "Срок действия ссылки истёк")
         return request
+
+    #: Не менее этого числа неверных токенов с одного IP за окно — перебор ссылок (B7-5).
+    _TOKEN_PROBE_THRESHOLD = 5
+    _TOKEN_PROBE_WINDOW_SECONDS = 600
+    _TOKEN_PROBE_LOCK_SECONDS = 600
+
+    async def _record_invalid_token_probe(self) -> None:
+        """SIGNATURE_TOKEN_PROBE — один раз на окно, не на каждую неудачу (иначе шестая и
+        далее попытки раздували бы журнал). Пишется с немедленным коммитом (тот же приём, что
+        `audit.service.record_denied_and_commit`): запрос завершается исключением сразу после
+        вызова, и обычный коммит транзакции до записи не доходит."""
+        client = get_client()
+        if client is None or not client.ip:
+            return
+        try:
+            redis = get_redis()
+            counter_key = f"sig:token_probe:count:{client.ip}"
+            count = await redis.incr(counter_key)
+            if count == 1:
+                await redis.expire(counter_key, self._TOKEN_PROBE_WINDOW_SECONDS)
+            if count < self._TOKEN_PROBE_THRESHOLD:
+                return
+            lock_key = f"sig:token_probe:lock:{client.ip}"
+            if not await redis.set(lock_key, "1", nx=True, ex=self._TOKEN_PROBE_LOCK_SECONDS):
+                return  # уже зафиксировано в этом окне
+        except Exception:  # noqa: BLE001 — недоступность Redis не должна ронять проверку токена
+            logger.warning("signature_token_probe_counter_failed")
+            return
+        await IdentityService(self._session).record_security_event(
+            SecurityEventType.SIGNATURE_TOKEN_PROBE,
+            severity=Severity.WARNING,
+            details={"ip": client.ip},
+        )
+        await self._session.commit()
 
     async def my_requests(self, principal: Principal) -> list[SignatureRequest]:
         stmt = (
@@ -1686,6 +1726,18 @@ class SignatureRequestService:
             changes={
                 "attempts": {"old": None, "new": otp.attempts},
                 "status": {"old": None, "new": "locked"},
+            },
+        )
+        # B7-5: перебор кода подписи — главный вектор атаки на публичные ручки ПЭП; без этого
+        # события он виден только в аудите, не в журнале безопасности (B6-2). Тело кода, токен
+        # и адрес получателя сюда не попадают — только счётчик попыток и канал.
+        await IdentityService(self._session).record_security_event(
+            SecurityEventType.SIGNATURE_OTP_FAILED,
+            severity=Severity.WARNING,
+            details={
+                "request_id": str(request.id),
+                "attempts": otp.attempts,
+                "channel": otp.channel,
             },
         )
         document = await self._session.get(SignatureDocument, request.document_id)
