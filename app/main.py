@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.docs import attach_docs
 from app.api.health import router as health_router
+from app.api.meta import router as meta_router
 from app.core.config import get_settings
 from app.core.db import dispose_engine
 from app.core.logging import configure_logging
@@ -77,6 +78,7 @@ OPENAPI_DESCRIPTION = """
 **Соглашения (раздел 2 спецификации)**
 
 * Все ошибки — RFC 7807 Problem Details с внутренним кодом вида `CRM-XXYY`.
+  Полный справочник кодов — `GET /api/meta/error-codes` (без аутентификации, B9-4).
 * Идентификаторы — UUIDv7, в JSON строками.
 * Даты — ISO 8601 с часовым поясом, внутри хранятся и отдаются в UTC.
 * Деньги — строка `"150000.00"` плюс отдельное поле `currency`.
@@ -199,6 +201,7 @@ def create_app() -> FastAPI:
 
     # Технические ручки вне /api: их опрашивают Docker, Caddy и Prometheus.
     app.include_router(health_router)
+    app.include_router(meta_router, prefix=settings.api_prefix)
 
     app.include_router(auth_router, prefix=settings.api_prefix)
     app.include_router(me_router, prefix=settings.api_prefix)
