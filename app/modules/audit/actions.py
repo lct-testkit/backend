@@ -59,6 +59,10 @@ class AuditAction(StrEnum):
     COMMENT_CREATED = "COMMENT_CREATED"
     COMMENT_UPDATED = "COMMENT_UPDATED"
     COMMENT_DELETED = "COMMENT_DELETED"
+    # B4-7: AUDITOR читает комментарии сделки через comment:audit_read — доступ к свободному
+    # тексту с возможными ПДн, того же класса, что PII_ACCESS, но именованный под конкретную
+    # операцию, чтобы в журнале было видно, что именно смотрели, а не только что «обращались к ПДн».
+    DEAL_COMMENTS_VIEWED = "DEAL_COMMENTS_VIEWED"
     FILE_UPLOAD_INTENT = "FILE_UPLOAD_INTENT"
     FILE_COMMITTED = "FILE_COMMITTED"
     FILE_INFECTED = "FILE_INFECTED"

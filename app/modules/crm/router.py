@@ -18,6 +18,7 @@ from collections.abc import Sequence
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Query, Request, status
+from sqlalchemy import select
 
 from app.core.deps import (
     AuditDep,
@@ -37,6 +38,9 @@ from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import defer_denied_audit
 from app.modules.crm.models import Deal, Task
 from app.modules.crm.schemas import (
+    AuditCommentListResponse,
+    AuditCommentOut,
+    AuditDealRef,
     AvailableTransitionOut,
     AvailableTransitionsResponse,
     BulkReassignRequest,
@@ -83,11 +87,15 @@ from app.modules.crm.service import (
     set_cached_deal_card,
     touch_recent,
 )
+from app.modules.identity.models import User
 from app.modules.identity.schemas import OperationResult
 
 deals_router = APIRouter(prefix="/deals", tags=["deals"])
 comments_router = APIRouter(prefix="/comments", tags=["comments"])
 tasks_router = APIRouter(prefix="/tasks", tags=["tasks"])
+# B4-7: отдельный маршрут, не вложенный в `deals_router` — он НЕ проходит через
+# `DealService.get_or_404` (сделка для AUDITOR всегда вне скоупа, раздел 4, DealScope.NONE).
+deal_audit_router = APIRouter(prefix="/admin/audit/deals", tags=["audit"])
 
 DealRead = Annotated[Principal, Depends(require_permission(Permission.DEAL_READ))]
 DealCreatePerm = Annotated[Principal, Depends(require_permission(Permission.DEAL_CREATE))]
@@ -98,6 +106,9 @@ DealReassignBulkPerm = Annotated[
     Principal, Depends(require_permission(Permission.DEAL_REASSIGN_BULK))
 ]
 DealDeletePerm = Annotated[Principal, Depends(require_permission(Permission.DEAL_DELETE))]
+CommentAuditRead = Annotated[
+    Principal, Depends(require_permission(Permission.COMMENT_AUDIT_READ))
+]
 
 
 # =============================================================================
@@ -690,6 +701,63 @@ async def create_comment(
             key=idempotency_key, status=status.HTTP_201_CREATED, body=result.model_dump(mode="json")
         )
     return result
+
+
+# =============================================================================
+# B4-7: комментарии сделки для AUDITOR (comment:audit_read)
+# =============================================================================
+
+
+@deal_audit_router.get(
+    "/{deal_id}/comments",
+    summary="Комментарии сделки для аудитора",
+    description=(
+        "Право `comment:audit_read` (AUDITOR), не `deal:read` — сделка целиком вне скоупа этой "
+        "роли (раздел 4, `DealScope.NONE`); доступ только к переписке, найденной через запись "
+        "`COMMENT_CREATED` в журнале аудита. Видит и мягко удалённые сделки (B4-3). Отдаёт все "
+        "комментарии, включая внутренние и системные; текст живых замаскирован (email, "
+        "телефон, ФИО), у удалённых — `body: null`. Каждый вызов пишет `DEAL_COMMENTS_VIEWED`."
+    ),
+    response_model=AuditCommentListResponse,
+)
+async def list_deal_comments_for_audit(
+    session: DbSession,
+    audit: AuditDep,
+    _principal: CommentAuditRead,
+    deal_id: Annotated[uuid.UUID, Path()],
+    limit: Annotated[int | None, Query(ge=1, le=MAX_LIMIT)] = None,
+    cursor: Annotated[str | None, Query()] = None,
+) -> AuditCommentListResponse:
+    deal = await session.get(Deal, deal_id)
+    if deal is None:
+        raise NotFoundError("Сделка", deal_id)
+
+    rows, next_cursor = await CommentService(session).list_for_audit(
+        deal.id, limit=limit, cursor=Cursor.decode(cursor) if cursor else None
+    )
+    author_ids = {comment.author_id for comment in rows if comment.author_id is not None}
+    names: dict[uuid.UUID, str] = {}
+    if author_ids:
+        names = dict(
+            (
+                await session.execute(
+                    select(User.id, User.full_name).where(User.id.in_(author_ids))
+                )
+            ).all()
+        )
+    items = [
+        AuditCommentOut.from_model(comment, author_name=names.get(comment.author_id))
+        for comment in rows
+    ]
+    await audit.record(
+        AuditAction.DEAL_COMMENTS_VIEWED, entity_type="deal", entity_id=deal.id,
+        changes={"count": len(items)},
+    )
+    return AuditCommentListResponse(
+        deal=AuditDealRef(id=deal.id, number=deal.number, deleted=deal.deleted_at is not None),
+        items=items,
+        next_cursor=next_cursor,
+    )
 
 
 # =============================================================================

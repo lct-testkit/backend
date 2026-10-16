@@ -585,6 +585,173 @@
         "title": "AuditChainReport",
         "type": "object"
       },
+      "AuditCommentListResponse": {
+        "properties": {
+          "deal": {
+            "$ref": "#/components/schemas/AuditDealRef"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AuditCommentOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "deal",
+          "items"
+        ],
+        "title": "AuditCommentListResponse",
+        "type": "object"
+      },
+      "AuditCommentOut": {
+        "description": "Тот же набор, что `CommentOut`, плюс `author_name` (у AUDITOR нет `user:read`, своей\nручки для имён ему не хватило бы) и `is_deleted` явно. Текст живого комментария —\nзамаскированный (`mask_contacts_text`: email/телефон/ФИО внутри свободного текста);\nудалённого — не отдаётся вовсе (`body=None`), иначе эта ручка была бы обходом\n`CommentService.delete`, который помечает комментарий удалённым именно ради исключения\nтекста из интерфейса.",
+        "properties": {
+          "author_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author Id"
+          },
+          "author_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author Name"
+          },
+          "body": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Body"
+          },
+          "body_format": {
+            "title": "Body Format",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "deleted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted At"
+          },
+          "edited_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited At"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "is_deleted": {
+            "title": "Is Deleted",
+            "type": "boolean"
+          },
+          "is_internal": {
+            "title": "Is Internal",
+            "type": "boolean"
+          },
+          "is_system": {
+            "title": "Is System",
+            "type": "boolean"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Id"
+          }
+        },
+        "required": [
+          "id",
+          "body_format",
+          "is_system",
+          "is_internal",
+          "is_deleted",
+          "created_at"
+        ],
+        "title": "AuditCommentOut",
+        "type": "object"
+      },
+      "AuditDealRef": {
+        "description": "Минимум для контекста ответа без открытия самой сделки (она вне скоупа AUDITOR) —\n`deleted` вместо полной карточки: B4-3 мягко удаляет сделки, и история переписки по ним\nдолжна оставаться читаемой аудитору.",
+        "properties": {
+          "deleted": {
+            "title": "Deleted",
+            "type": "boolean"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "number": {
+            "title": "Number",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "number",
+          "deleted"
+        ],
+        "title": "AuditDealRef",
+        "type": "object"
+      },
       "AuditEntryOut": {
         "description": "Запись журнала. `changes` уже маскированы на записи (раздел 1).",
         "properties": {
@@ -15626,6 +15793,108 @@
         "summary": "Журнал аудита",
         "tags": [
           "admin"
+        ]
+      }
+    },
+    "/api/admin/audit/deals/{deal_id}/comments": {
+      "get": {
+        "description": "Право `comment:audit_read` (AUDITOR), не `deal:read` — сделка целиком вне скоупа этой роли (раздел 4, `DealScope.NONE`); доступ только к переписке, найденной через запись `COMMENT_CREATED` в журнале аудита. Видит и мягко удалённые сделки (B4-3). Отдаёт все комментарии, включая внутренние и системные; текст живых замаскирован (email, телефон, ФИО), у удалённых — `body: null`. Каждый вызов пишет `DEAL_COMMENTS_VIEWED`.",
+        "operationId": "list_deal_comments_for_audit_api_admin_audit_deals__deal_id__comments_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "deal_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Deal Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 100,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditCommentListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "summary": "Комментарии сделки для аудитора",
+        "tags": [
+          "audit"
         ]
       }
     },

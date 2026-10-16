@@ -39,7 +39,7 @@ from app.modules.catalog.router import (
     products_router,
     regions_router,
 )
-from app.modules.crm.router import comments_router, deals_router, tasks_router
+from app.modules.crm.router import comments_router, deal_audit_router, deals_router, tasks_router
 from app.modules.files.router import attachments_router, files_router
 from app.modules.identity.router_admin import router as admin_users_router
 from app.modules.identity.router_auth import router as auth_router
@@ -207,6 +207,7 @@ def create_app() -> FastAPI:
     app.include_router(directory_router, prefix=settings.api_prefix)
     app.include_router(admin_users_router, prefix=settings.api_prefix)
     app.include_router(admin_router, prefix=settings.api_prefix)
+    app.include_router(deal_audit_router, prefix=settings.api_prefix)
     app.include_router(workflow_router, prefix=settings.api_prefix)
     app.include_router(deals_router, prefix=settings.api_prefix)
     app.include_router(comments_router, prefix=settings.api_prefix)
