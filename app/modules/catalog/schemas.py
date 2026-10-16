@@ -230,6 +230,52 @@ class ApplyDriftRequest(BaseModel):
     )
 
 
+# --- B4-1/B4-2: ответственный за вуз ----------------------------------------
+
+
+class OrganizationOwnerSetRequest(BaseModel):
+    """`PUT /organizations/{id}/owner`. `owner_id=None` — снять ответственного."""
+
+    owner_id: uuid.UUID | None = None
+    reason: NonEmptyStr = Field(max_length=500)
+
+
+class OrganizationOwnerRemoveRequest(BaseModel):
+    """`DELETE /organizations/{id}/owner` — вуз становится «ничьим» (B4-2)."""
+
+    reason: NonEmptyStr = Field(max_length=500)
+
+
+class BulkOrganizationOwnerRequest(BaseModel):
+    """Ровно один из `from_owner_id`/`organization_ids`; `owner_id=None` снимает
+    ответственного у всех выбранных вузов."""
+
+    from_owner_id: uuid.UUID | None = None
+    organization_ids: list[uuid.UUID] | None = Field(default=None, min_length=1, max_length=100)
+    owner_id: uuid.UUID | None = None
+    reason: NonEmptyStr = Field(max_length=500)
+    carry_open_deals: bool = False
+
+    @model_validator(mode="after")
+    def _exactly_one_selector(self) -> BulkOrganizationOwnerRequest:
+        if (self.from_owner_id is None) == (self.organization_ids is None):
+            raise ValueError("Нужен ровно один из from_owner_id или organization_ids")
+        return self
+
+
+class BulkOwnerSkipOut(BaseModel):
+    organization_id: uuid.UUID
+    reason: str
+
+
+class BulkOrganizationOwnerResponse(BaseModel):
+    batch_id: uuid.UUID
+    changed: int
+    skipped: list[BulkOwnerSkipOut] = Field(default_factory=list)
+    deals_reassigned: int = 0
+    remaining: int = 0
+
+
 # =============================================================================
 # Контакты
 # =============================================================================

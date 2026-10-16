@@ -36,6 +36,15 @@ class Permission(StrEnum):
     # не входит в `ORG_WRITE` (которым владеет и KAM), тем же приёмом, что
     # `DEAL_REASSIGN` отделён от обычного `DEAL_UPDATE`.
     ORG_RESTORE = "organization:restore"
+    # B4-1: смена/назначение/снятие ответственного за вуз — ТЗ Функц.11
+    # отдаёт это Руководителю отдельно от обычного редактирования карточки.
+    # Не входит в `ORG_WRITE` (которым владеет и KAM) по той же причине, что
+    # `ORG_RESTORE`: KAM больше не может передать вуз себе или коллеге через
+    # обычный `PATCH`.
+    ORG_OWNER_ASSIGN = "organization:assign_owner"
+    # B4-3: мягкое удаление вуза и сделки — только ADMIN (матрица прав).
+    ORG_DELETE = "organization:delete"
+    DEAL_DELETE = "deal:delete"
     CONTACT_READ = "contact:read"
     CONTACT_WRITE = "contact:write"
     CONTACT_REVEAL = "contact:reveal"
@@ -135,11 +144,14 @@ _KAM: frozenset[Permission] = frozenset(
 
 # HEAD — руководитель: всё как у KAM, плюс команда, переназначение и импорт
 # каталогов (раздел 5: матрица прав отдаёт «Импорт каталогов» HEAD и ADMIN,
-# не KAM).
+# не KAM). B4-1: назначение/смена ответственного за вуз — тоже здесь (в
+# пределах своей команды проверяется отдельно, в `ensure_assignable_user`).
+# B4-3: удаление сделки/организации у HEAD нет — только восстановление.
 _HEAD: frozenset[Permission] = _KAM | {
     Permission.DEAL_REASSIGN,
     Permission.DEAL_REASSIGN_BULK,
     Permission.ORG_RESTORE,
+    Permission.ORG_OWNER_ASSIGN,
     Permission.AUDIT_READ,
     Permission.SIGNATURE_VOID,
     Permission.FILE_DELETE,
