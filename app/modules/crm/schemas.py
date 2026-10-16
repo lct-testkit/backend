@@ -315,6 +315,12 @@ class CommentDeleteRequest(BaseModel):
     reason: str | None = None
 
 
+class DealDeleteRequest(BaseModel):
+    """B4-3 (A-16): причина обязательна — в отличие от удаления комментария."""
+
+    reason: str = Field(min_length=1, max_length=500)
+
+
 class CommentOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

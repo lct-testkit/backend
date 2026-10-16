@@ -61,6 +61,7 @@ from app.modules.catalog.schemas import (
     LossReasonOut,
     LossReasonUpdateRequest,
     OrganizationCreateRequest,
+    OrganizationDeleteRequest,
     OrganizationLicenseListResponse,
     OrganizationLicenseOut,
     OrganizationListResponse,
@@ -97,6 +98,7 @@ from app.modules.catalog.service import (
     organization_in_scope,
     region_list_query,
 )
+from app.modules.identity.schemas import OperationResult
 
 organizations_router = APIRouter(prefix="/organizations", tags=["organizations"])
 contacts_router = APIRouter(prefix="/contacts", tags=["contacts"])
@@ -115,6 +117,7 @@ OrgWrite = Annotated[Principal, Depends(require_permission(Permission.ORG_WRITE)
 OrgReveal = Annotated[Principal, Depends(require_permission(Permission.ORG_REVEAL))]
 OrgRestore = Annotated[Principal, Depends(require_permission(Permission.ORG_RESTORE))]
 OrgOwnerAssign = Annotated[Principal, Depends(require_permission(Permission.ORG_OWNER_ASSIGN))]
+OrgDelete = Annotated[Principal, Depends(require_permission(Permission.ORG_DELETE))]
 ContactRead = Annotated[Principal, Depends(require_permission(Permission.CONTACT_READ))]
 ContactWrite = Annotated[Principal, Depends(require_permission(Permission.CONTACT_WRITE))]
 ContactReveal = Annotated[Principal, Depends(require_permission(Permission.CONTACT_REVEAL))]
@@ -142,7 +145,14 @@ async def list_organizations(
     is_accredited: Annotated[bool | None, Query()] = None,
     source: Annotated[str | None, Query()] = None,
     q: Annotated[str | None, Query()] = None,
+    deleted: Annotated[bool, Query()] = False,
 ) -> OrganizationListResponse:
+    # B4-3: список мягко удалённых вузов — иначе восстановить что-то нельзя, id
+    # удалённой организации больше нигде не виден. Отдельное право: `ORG_RESTORE`,
+    # не `ORG_DELETE` (само удаление организации — право, которого нет даже у HEAD).
+    if deleted and not has_permission(principal.role, Permission.ORG_RESTORE):
+        defer_denied_audit(session, entity_type="organization", reason="deleted_list_forbidden")
+        raise ForbiddenError("Список удалённых организаций доступен только с правом восстановления")
     filters = OrganizationFilters(
         name=name,
         inn=inn,
@@ -154,6 +164,7 @@ async def list_organizations(
         is_accredited=is_accredited,
         source=source,
         q=q,
+        deleted=deleted,
     )
     stmt = (await OrganizationService(session).list_query(principal, filters)).order_by(
         Organization.created_at.desc(), Organization.id.desc()
@@ -433,6 +444,28 @@ async def reveal_organization(
     organization = await service.get_or_404(organization_id, principal)
     await service.reveal(organization)
     return OrganizationRevealOut.model_validate(organization)
+
+
+@organizations_router.delete(
+    "/{organization_id}",
+    summary="Удалить организацию",
+    description=(
+        "B4-3 (A-16): мягкое удаление. 409 CRM-1303 со списком `blockers`, если есть "
+        "живые (не мягко удалённые) сделки, контакты или лицензии. Роль: ADMIN."
+    ),
+    response_model=OperationResult,
+)
+async def delete_organization(
+    payload: OrganizationDeleteRequest,
+    session: DbSession,
+    principal: OrgDelete,
+    if_match: IfMatch,
+    organization_id: Annotated[uuid.UUID, Path()],
+) -> OperationResult:
+    service = OrganizationService(session)
+    organization = await service.get_or_404(organization_id, principal)
+    await service.delete(organization, reason=payload.reason, expected_version=if_match)
+    return OperationResult(ok=True, detail="Организация удалена")
 
 
 @organizations_router.post(
