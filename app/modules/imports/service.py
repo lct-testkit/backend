@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import datetime as dt
 import hashlib
@@ -211,7 +212,11 @@ class ImportService:
             )
 
         content = await download_object_bytes(bucket=file.bucket, key=file.storage_key)
-        return parse_table(content, source_format=job.source_format)
+        # B8-11: разбор xlsx/csv — чистый Python (openpyxl/csv), секунды CPU на крупный файл.
+        # Внутри цикла событий это держало бы реплику api недоступной для всех остальных
+        # запросов на всё время разбора (гипотеза B8-5, не измерено этой задачей, но правка
+        # безвредна и дёшева: `to_thread` всегда корректен для CPU-синхронного кода).
+        return await asyncio.to_thread(parse_table, content, source_format=job.source_format)
 
     async def profile(self, job: ImportJob) -> ProfileResult:
         table = await self._load_table(job)

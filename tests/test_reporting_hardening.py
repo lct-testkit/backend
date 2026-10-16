@@ -61,11 +61,19 @@ async def _job(job_id: uuid.UUID):
 
 
 class TestQueue:
+    """B8-11: `sweep_report_jobs` больше не рендерит сама (это теперь делает задача arq
+    `render_report_job`, поставленная `ReportJobService.create` сразу после коммита) — тик
+    остаётся добором зависших `processing` и потерянных постановок. Эти тесты проверяют
+    безопасность и конкурентность на уровне `render_report_job` напрямую: атомарный захват
+    (`UPDATE ... WHERE status='queued' RETURNING`) даёт те же гарантии «взято ровно один раз»,
+    что раньше давал `FOR UPDATE SKIP LOCKED`, но без необходимости держать замок на всё время
+    рендера."""
+
     def test_the_error_shown_to_the_client_hides_the_exception_text(
         self, client, monkeypatch
     ) -> None:
         from app.modules.reporting.service import ReportJobService
-        from app.modules.reporting.tasks import sweep_report_jobs
+        from app.modules.reporting.tasks import render_report_job
 
         async def boom(self, job, principal):
             raise RuntimeError('relation "secret_table" does not exist: SELECT password FROM x')
@@ -75,21 +83,20 @@ class TestQueue:
         run(client, _clear_queue)
         job_id = run(client, _queued_job, owner.id)
 
-        result = run(client, sweep_report_jobs, {})
+        result = run(client, render_report_job, {}, str(job_id))
 
         job = run(client, _job, job_id)
-        assert result["failed"] == 1
+        assert result is False
         assert job.status == "failed"
         assert "secret_table" not in job.error and "SELECT" not in job.error
         assert "Код ошибки" in job.error
 
-    def test_a_job_held_by_another_tick_is_skipped(self, client, monkeypatch) -> None:
-        from sqlalchemy import select
-
-        from app.core.db import get_session_factory
-        from app.modules.reporting.models import ReportJob
+    def test_only_one_concurrent_claim_renders_the_same_job(self, client, monkeypatch) -> None:
+        """Два параллельных вызова `render_report_job` на одно и то же задание (повторная
+        постановка, перекрытие добора и прямой постановки) — атомарный `UPDATE ... RETURNING`
+        отдаёт строку только одному; второй получает `None` и ничего не рендерит."""
         from app.modules.reporting.service import ReportJobService
-        from app.modules.reporting.tasks import sweep_report_jobs
+        from app.modules.reporting.tasks import render_report_job
 
         generated: list[uuid.UUID] = []
 
@@ -103,26 +110,25 @@ class TestQueue:
         run(client, _clear_queue)
         job_id = run(client, _queued_job, owner.id)
 
-        async def _scenario() -> tuple[int, int]:
-            async with get_session_factory()() as holder:
-                # Другой тик уже взял задание: строка под замком, статус в БД всё ещё `queued`.
-                await holder.execute(
-                    select(ReportJob).where(ReportJob.id == job_id).with_for_update()
-                )
-                skipped = await sweep_report_jobs({})
-                await holder.rollback()
-            taken = await sweep_report_jobs({})
-            return skipped["processed"], taken["processed"]
+        async def _scenario() -> tuple[bool | None, bool | None]:
+            return await asyncio.gather(
+                render_report_job({}, str(job_id)), render_report_job({}, str(job_id))
+            )
 
-        assert run(client, _scenario) == (0, 1)
+        results = run(client, _scenario)
+        assert sorted(results, key=lambda r: r is None) == [True, None]
         assert generated == [job_id]
+        assert run(client, _job, job_id).status == "completed"
 
-    def test_jobs_in_one_tick_render_concurrently_not_one_by_one(self, client, monkeypatch) -> None:
-        """Раздел 4.13: «конкурентность воркеров ограничена семафором (10)» — если тик
-        рендерит взятые задания одно за другим (было так до фикса), два задания по 0.3с
-        займут ~0.6с суммарно; конкурентно — оба идут внахлёст и тик укладывается в ~0.3с."""
+    def test_two_different_jobs_render_concurrently_not_one_by_one(
+        self, client, monkeypatch
+    ) -> None:
+        """Раздел 4.13: «конкурентность воркеров ограничена семафором (10)» — семафор по
+        умолчанию (10) пропускает оба задания разом: если бы `render_report_job` сериализовал
+        их (ждал освобождения семафора одно за другим), два задания по 0.3с заняли бы ~0.6с
+        суммарно; конкурентно — внахлёст, и обе задачи укладываются в ~0.3с."""
         from app.modules.reporting.service import ReportJobService
-        from app.modules.reporting.tasks import sweep_report_jobs
+        from app.modules.reporting.tasks import render_report_job
 
         started: list[float] = []
 
@@ -137,41 +143,71 @@ class TestQueue:
         run(client, _clear_queue)
         job_ids = [run(client, _queued_job, owner.id) for _ in range(2)]
 
+        async def _scenario() -> list[bool | None]:
+            return await asyncio.gather(*(render_report_job({}, str(jid)) for jid in job_ids))
+
         t0 = time.monotonic()
-        result = run(client, sweep_report_jobs, {})
+        results = run(client, _scenario)
         elapsed = time.monotonic() - t0
 
-        assert result["processed"] == 2
+        assert results == [True, True]
         assert all(run(client, _job, jid).status == "completed" for jid in job_ids)
         # И оба рендера стартовали до того, как первый успел завершиться — не строго
         # последовательно (иначе второй начался бы не раньше t=0.3с).
         assert max(started) - min(started) < 0.3
-        assert elapsed < 0.55, f"тик занял {elapsed:.2f}с — похоже, задания шли одно за другим"
+        assert elapsed < 0.55, f"рендер занял {elapsed:.2f}с — похоже, задания шли одно за другим"
 
-    def test_overlapping_ticks_build_a_report_once(self, client, monkeypatch) -> None:
-        from app.modules.reporting.service import ReportJobService
+    def test_sweep_requeues_processing_stuck_longer_than_the_stale_threshold(
+        self, client, monkeypatch
+    ) -> None:
+        """B8-11: воркер «упал» посреди рендера — `processing` со старым `started_at` тик
+        возвращает в `queued`, чтобы его подхватил следующий добор/постановка."""
+        from app.core.db import session_scope
+        from app.modules.reporting.models import ReportJob
         from app.modules.reporting.tasks import sweep_report_jobs
 
-        generated: list[uuid.UUID] = []
-
-        async def slow_generate(self, job, principal):
-            generated.append(job.id)
-            await asyncio.sleep(0.3)  # отчёт считается дольше, чем до следующего тика
-            job.status = "completed"
-            await self._session.flush()
-
-        monkeypatch.setattr(ReportJobService, "generate", slow_generate)
         owner = run(client, _make_user, "KAM")
         run(client, _clear_queue)
         job_id = run(client, _queued_job, owner.id)
 
-        async def _two_ticks() -> None:
-            await asyncio.gather(sweep_report_jobs({}), sweep_report_jobs({}))
+        async def _mark_stale_processing() -> None:
+            async with session_scope() as session:
+                job = await session.get(ReportJob, job_id)
+                job.status = "processing"
+                job.started_at = dt.datetime.now(dt.UTC) - dt.timedelta(minutes=16)
 
-        run(client, _two_ticks)
+        run(client, _mark_stale_processing)
 
-        assert generated == [job_id]
-        assert run(client, _job, job_id).status == "completed"
+        result = run(client, sweep_report_jobs, {})
+
+        assert result["requeued"] == 1
+        job = run(client, _job, job_id)
+        assert job.status == "queued"
+        assert job.started_at is None
+
+    def test_sweep_does_not_requeue_processing_within_the_threshold(
+        self, client, monkeypatch
+    ) -> None:
+        from app.core.db import session_scope
+        from app.modules.reporting.models import ReportJob
+        from app.modules.reporting.tasks import sweep_report_jobs
+
+        owner = run(client, _make_user, "KAM")
+        run(client, _clear_queue)
+        job_id = run(client, _queued_job, owner.id)
+
+        async def _mark_fresh_processing() -> None:
+            async with session_scope() as session:
+                job = await session.get(ReportJob, job_id)
+                job.status = "processing"
+                job.started_at = dt.datetime.now(dt.UTC) - dt.timedelta(minutes=1)
+
+        run(client, _mark_fresh_processing)
+
+        result = run(client, sweep_report_jobs, {})
+
+        assert result["requeued"] == 0
+        assert run(client, _job, job_id).status == "processing"
 
 
 class TestRenderOffTheLoop:
