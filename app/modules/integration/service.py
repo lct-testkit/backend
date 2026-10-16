@@ -35,6 +35,7 @@ from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService, diff_changes
 from app.modules.crm.models import Deal
 from app.modules.identity.models import Role, User
+from app.modules.integration.field_mapping import FieldMapping, validate_mapping
 from app.modules.integration.models import IntegrationSource, OutboxEvent, OutboxStatus
 from app.modules.integration.security import check_outbound_url_resolved
 
@@ -178,6 +179,59 @@ class IntegrationSourceService:
                 changes=changes,
             )
         return source
+
+    # --- B5-3: настраиваемый маппинг «утверждённых полей» ------------------------------
+
+    async def get_mapping(self, code: str) -> FieldMapping | None:
+        source = await self.get_by_code(code)
+        if not source.field_mapping:
+            return None
+        return FieldMapping.model_validate(source.field_mapping)
+
+    async def set_mapping(
+        self, code: str, mapping: FieldMapping, *, approved_by: uuid.UUID
+    ) -> FieldMapping:
+        """Проверка (`validate_mapping`) бросает 422 с `errors[]` при любой проблеме — цель из
+        реестра, не более 50 правил, `value_map`/`template` в границах, обязательно хоть одна
+        цель `email`/`phone`, `custom_fields.<код>` — активное определение для сделки."""
+        source = await self.get_by_code(code)
+        errors = await validate_mapping(self._session, mapping, code)
+        if errors:
+            raise ValidationError(
+                "Маппинг не принят",
+                [FieldError(field=error.field, reason=error.reason) for error in errors],
+            )
+        stored = mapping.model_copy(
+            update={
+                "version": (source.field_mapping or {}).get("version", 0) + 1,
+                "approved_by": approved_by,
+                "approved_at": dt.datetime.now(dt.UTC),
+            }
+        )
+        before = source.field_mapping
+        source.field_mapping = stored.model_dump(mode="json")
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.INTEGRATION_MAPPING_UPDATED,
+            entity_type="integration_source",
+            entity_id=source.id,
+            changes=diff_changes(before or {}, source.field_mapping),
+        )
+        return stored
+
+    async def reset_mapping(self, code: str) -> None:
+        source = await self.get_by_code(code)
+        if source.field_mapping is None:
+            return
+        before = source.field_mapping
+        source.field_mapping = None
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.INTEGRATION_MAPPING_RESET,
+            entity_type="integration_source",
+            entity_id=source.id,
+            changes=diff_changes(before, {}),
+        )
 
 
 class OutboxEventService:

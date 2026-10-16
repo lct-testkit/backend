@@ -22,6 +22,7 @@ import re
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -111,6 +112,9 @@ class LeadPayload:
     amount: Decimal | None = None
     external_id: str | None = None
     created_at: dt.datetime | None = None
+    #: B5-3: значения, собранные настраиваемым маппингом для `custom_fields.<код>` —
+    #: содержимое проверяется `catalog.custom_fields.check_values` при создании сделки, не здесь.
+    custom_fields: dict[str, Any] = dataclass_field(default_factory=dict)
 
     @property
     def is_order(self) -> bool:
@@ -403,6 +407,9 @@ def parse_lead_payload(payload: Mapping[str, Any]) -> LeadPayload:
         reasons = {error.reason for error in errors}
         raise ValidationError(next(iter(reasons)) if len(reasons) == 1 else _GENERIC_DETAIL, errors)
 
+    raw_custom_fields = payload.get("custom_fields")
+    custom_fields = raw_custom_fields if isinstance(raw_custom_fields, dict) else {}
+
     return LeadPayload(
         first_name=first_name,
         last_name=last_name,
@@ -418,4 +425,7 @@ def parse_lead_payload(payload: Mapping[str, Any]) -> LeadPayload:
         amount=amount,
         external_id=external_id,
         created_at=_parse_created_at(pick("created_at")),
+        # B5-3: маппинг собирает их под ключом `custom_fields` (не через алиасы — одно значение
+        # на целевой код, не на всю заявку); чужой тип (не dict) тихо игнорируется.
+        custom_fields=custom_fields,
     )

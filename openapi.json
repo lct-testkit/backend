@@ -4865,6 +4865,58 @@
         "title": "FeatureFlagPatch",
         "type": "object"
       },
+      "FieldMapping": {
+        "properties": {
+          "approved_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approved At"
+          },
+          "approved_by": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approved By"
+          },
+          "mode": {
+            "default": "strict",
+            "enum": [
+              "strict",
+              "passthrough"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/MappingRule"
+            },
+            "maxItems": 50,
+            "title": "Rules",
+            "type": "array"
+          },
+          "version": {
+            "default": 1,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "title": "FieldMapping",
+        "type": "object"
+      },
       "FileCommitRequest": {
         "description": "Клиент может сообщить контрольную сумму заранее — сервер всё равно\nпересчитывает её из объекта в S3 (раздел 9), это поле только для\nранней диагностики несовпадения на клиенте.",
         "properties": {
@@ -7197,6 +7249,233 @@
           }
         },
         "title": "LossReasonUpdateRequest",
+        "type": "object"
+      },
+      "MappingGetResponse": {
+        "description": "Текущий маппинг (`null` — администратор ничего не настраивал) и каталог целей для\nэкрана настройки, чтобы форма не хардкодила список.",
+        "properties": {
+          "mapping": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FieldMapping"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/TargetOut"
+            },
+            "title": "Targets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "mapping",
+          "targets"
+        ],
+        "title": "MappingGetResponse",
+        "type": "object"
+      },
+      "MappingPreviewRequest": {
+        "description": "Либо `record` (образец тела), либо `from_remote: true` (первая запись с источника —\nтребует настроенный `CMS_BASE_URL`). `mapping` — черновик для предпросмотра ДО сохранения;\nбез него используется уже сохранённый маппинг источника.",
+        "properties": {
+          "from_remote": {
+            "default": false,
+            "title": "From Remote",
+            "type": "boolean"
+          },
+          "mapping": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FieldMapping"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "record": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Record"
+          }
+        },
+        "title": "MappingPreviewRequest",
+        "type": "object"
+      },
+      "MappingPreviewResponse": {
+        "properties": {
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/MappingValidationErrorOut"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "ignored_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Ignored Keys",
+            "type": "array"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "title": "Payload",
+            "type": "object"
+          },
+          "product": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product"
+          },
+          "record": {
+            "additionalProperties": true,
+            "title": "Record",
+            "type": "object"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "record",
+          "payload"
+        ],
+        "title": "MappingPreviewResponse",
+        "type": "object"
+      },
+      "MappingRule": {
+        "properties": {
+          "constant": {
+            "title": "Constant"
+          },
+          "default": {
+            "title": "Default"
+          },
+          "required": {
+            "default": false,
+            "title": "Required",
+            "type": "boolean"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "sources": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 10,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sources"
+          },
+          "target": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Target",
+            "type": "string"
+          },
+          "template": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Template"
+          },
+          "transform": {
+            "default": "none",
+            "enum": [
+              "none",
+              "trim",
+              "lower",
+              "upper",
+              "value_map",
+              "template",
+              "join",
+              "constant"
+            ],
+            "title": "Transform",
+            "type": "string"
+          },
+          "value_map": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value Map"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "title": "MappingRule",
+        "type": "object"
+      },
+      "MappingValidationErrorOut": {
+        "properties": {
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "reason"
+        ],
+        "title": "MappingValidationErrorOut",
         "type": "object"
       },
       "MePatchRequest": {
@@ -12746,6 +13025,24 @@
         "title": "SystemSettingPut",
         "type": "object"
       },
+      "TargetOut": {
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "label"
+        ],
+        "title": "TargetOut",
+        "type": "object"
+      },
       "TaskCreateRequest": {
         "properties": {
           "assignee_id": {
@@ -17221,6 +17518,322 @@
           }
         ],
         "summary": "Update Source",
+        "tags": [
+          "integrations-admin"
+        ]
+      }
+    },
+    "/api/admin/integrations/sources/{code}/mapping": {
+      "delete": {
+        "operationId": "delete_source_mapping_api_admin_integrations_sources__code__mapping_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "required": true,
+            "schema": {
+              "title": "Code",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Вернуть прежнее поведение (без маппинга)",
+        "tags": [
+          "integrations-admin"
+        ]
+      },
+      "get": {
+        "operationId": "get_source_mapping_api_admin_integrations_sources__code__mapping_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "required": true,
+            "schema": {
+              "title": "Code",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MappingGetResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "summary": "Текущий маппинг полей и каталог целей",
+        "tags": [
+          "integrations-admin"
+        ]
+      },
+      "put": {
+        "description": "B5-3: администратор задаёт, какие поля источника принимаются, куда они ложатся и как преобразуются, без релиза. 422 с errors[] — неизвестная цель, лишние правила, нет цели email/phone, custom_fields.<код> без активного определения.",
+        "operationId": "put_source_mapping_api_admin_integrations_sources__code__mapping_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "required": true,
+            "schema": {
+              "title": "Code",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FieldMapping"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FieldMapping"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Сохранить маппинг полей",
+        "tags": [
+          "integrations-admin"
+        ]
+      }
+    },
+    "/api/admin/integrations/sources/{code}/mapping/preview": {
+      "post": {
+        "operationId": "preview_source_mapping_api_admin_integrations_sources__code__mapping_preview_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "required": true,
+            "schema": {
+              "title": "Code",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MappingPreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MappingPreviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Предпросмотр маппинга без записи в БД",
         "tags": [
           "integrations-admin"
         ]

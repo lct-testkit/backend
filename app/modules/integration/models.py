@@ -129,6 +129,11 @@ class IntegrationSource(UuidPkMixin, TimestampMixin, Base):
     )
     pull_request: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     last_run: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # B5-3/B5-4: настраиваемый маппинг «утверждённых полей» и маршрутизация (воронка, тип
+    # сделки, правила по значению поля) — обычный PATCH их не трогает, только выделенные ручки
+    # (`IntegrationSourceUpdateRequest` этих полей не содержит). Миграция 0028.
+    field_mapping: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    routing: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
 
 class InboundMessage(UuidPkMixin, Base):

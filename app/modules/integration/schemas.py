@@ -6,7 +6,9 @@ import datetime as dt
 import uuid
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.modules.integration.field_mapping import FieldMapping
 
 
 class IntegrationSourceOut(BaseModel):
@@ -130,3 +132,51 @@ class BitrixWebhookRequest(BaseModel):
     bitrix_id: str
     version: int = Field(ge=1)
     fields: dict[str, Any] = Field(default_factory=dict)
+
+
+# =============================================================================
+# B5-3: настраиваемый маппинг «утверждённых полей»
+# =============================================================================
+
+
+class TargetOut(BaseModel):
+    code: str
+    label: str
+
+
+class MappingGetResponse(BaseModel):
+    """Текущий маппинг (`null` — администратор ничего не настраивал) и каталог целей для
+    экрана настройки, чтобы форма не хардкодила список."""
+
+    mapping: FieldMapping | None
+    targets: list[TargetOut]
+
+
+class MappingValidationErrorOut(BaseModel):
+    field: str
+    reason: str
+
+
+class MappingPreviewRequest(BaseModel):
+    """Либо `record` (образец тела), либо `from_remote: true` (первая запись с источника —
+    требует настроенный `CMS_BASE_URL`). `mapping` — черновик для предпросмотра ДО сохранения;
+    без него используется уже сохранённый маппинг источника."""
+
+    record: dict[str, Any] | None = None
+    from_remote: bool = False
+    mapping: FieldMapping | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_sample_source(self) -> MappingPreviewRequest:
+        if (self.record is None) == (not self.from_remote):
+            raise ValueError("нужен либо record, либо from_remote: true")
+        return self
+
+
+class MappingPreviewResponse(BaseModel):
+    record: dict[str, Any]
+    payload: dict[str, Any]
+    ignored_keys: list[str] = Field(default_factory=list)
+    product: dict[str, Any] | None = None
+    errors: list[MappingValidationErrorOut] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
