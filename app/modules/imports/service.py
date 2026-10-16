@@ -1064,6 +1064,7 @@ class ImportService:
                 direction_id=uuid.UUID(data["direction_id"]) if data.get("direction_id") else None,
                 duration_hours=data.get("duration_hours"),
                 format=data.get("format"),
+                kind=data.get("kind") or "course",
                 base_price=Decimal(str(raw_price)) if raw_price is not None else None,
                 currency=data.get("currency") or "RUB",
                 import_job_id=job.id,
@@ -1086,6 +1087,7 @@ class ImportService:
             "direction_id",
             "duration_hours",
             "format",
+            "kind",
             "base_price",
             "currency",
         ):

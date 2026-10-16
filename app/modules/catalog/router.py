@@ -66,6 +66,7 @@ from app.modules.catalog.schemas import (
     ProductContactListResponse,
     ProductContactOut,
     ProductCreateRequest,
+    ProductKindLiteral,
     ProductListResponse,
     ProductOut,
     ProductUpdateRequest,
@@ -533,7 +534,15 @@ async def update_learner_profile(
 # =============================================================================
 
 
-@products_router.get("", summary="Справочник продуктов", response_model=ProductListResponse)
+@products_router.get(
+    "",
+    summary="Справочник продуктов",
+    description=(
+        "Фильтр `kind` различает ИТ-программу/курс (`course`, по умолчанию у старых записей) "
+        "и ИТ-продукт — ПО вендора (`software`, B3-7). Роль: чтение каталога."
+    ),
+    response_model=ProductListResponse,
+)
 async def list_products(
     session: DbSession,
     page: Pagination,
@@ -543,6 +552,7 @@ async def list_products(
     code: Annotated[str | None, Query()] = None,
     is_active: Annotated[bool | None, Query()] = None,
     product_format: Annotated[str | None, Query(alias="format")] = None,
+    kind: Annotated[ProductKindLiteral | None, Query()] = None,
     q: Annotated[str | None, Query()] = None,
 ) -> ProductListResponse:
     filters = ProductFilters(
@@ -551,6 +561,7 @@ async def list_products(
         code=code,
         is_active=is_active,
         format=product_format,
+        kind=kind,
         q=q,
     )
     service = ProductService(session)

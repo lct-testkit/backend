@@ -66,6 +66,10 @@ _PRODUCT: dict[str, str] = {
     "длительность": "duration_hours",
     "часы": "duration_hours",
     "длительность, часы": "duration_hours",
+    # B3-7: курс/программа (ИТ-программа) или ПО (ИТ-продукт вендора).
+    "тип": "kind",
+    "вид": "kind",
+    "тип продукта": "kind",
 }
 _LICENSE: dict[str, str] = {
     "название вуза": "organization_name",

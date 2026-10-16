@@ -1447,6 +1447,7 @@ class ProductFilters:
     code: str | None = None
     is_active: bool | None = None
     format: str | None = None
+    kind: str | None = None
     q: str | None = None
 
 
@@ -1475,6 +1476,8 @@ class ProductService:
             stmt = stmt.where(Product.is_active == filters.is_active)
         if filters.format:
             stmt = stmt.where(Product.format == filters.format)
+        if filters.kind:
+            stmt = stmt.where(Product.kind == filters.kind)
         if filters.q:
             pattern = f"%{filters.q.strip()}%"
             stmt = stmt.where(Product.name.ilike(pattern) | Product.code.ilike(pattern))
@@ -1532,6 +1535,7 @@ class ProductService:
             name=payload.name,
             description=payload.description,
             direction_id=payload.direction_id,
+            kind=payload.kind,
             vendor_id=payload.vendor_id,
             duration_hours=payload.duration_hours,
             format=payload.format,
@@ -1564,6 +1568,12 @@ class ProductService:
         # обычно, пока вендора не трогают.
         if data.get("vendor_id") is not None and data["vendor_id"] != product.vendor_id:
             await self._require_vendor(data["vendor_id"])
+        # B3-7: смена типа (курс <-> ПО) у продукта, который уже указан в
+        # сделке или лицензии, — 409, а не тихая правка: отчёты и фильтры
+        # по типу (B1-9, "Реестр лицензий" B1-11) опираются на kind, и его
+        # смена задним числом переписала бы уже построенную статистику.
+        if "kind" in data and data["kind"] != product.kind:
+            await self._require_product_not_in_use(product.id)
         changes: dict[str, dict[str, Any]] = {}
 
         if "custom_fields" in data:
@@ -1594,6 +1604,30 @@ class ProductService:
             changes=changes,
         )
         return product
+
+    async def _require_product_not_in_use(self, product_id: uuid.UUID) -> None:
+        """B3-7: продукт, уже проданный (`deal_products`) или лицензированный
+        (`organization_licenses.product_id`), не меняет тип (курс <-> ПО)."""
+        from app.modules.crm.models import DealProduct
+
+        in_deal = await self._session.scalar(
+            select(DealProduct.id).where(DealProduct.product_id == product_id).limit(1)
+        )
+        if in_deal is not None:
+            raise AppError(
+                ErrorCode.ENTITY_IN_USE,
+                "Продукт указан в сделках — смена типа невозможна",
+            )
+        in_license = await self._session.scalar(
+            select(OrganizationLicense.id)
+            .where(OrganizationLicense.product_id == product_id)
+            .limit(1)
+        )
+        if in_license is not None:
+            raise AppError(
+                ErrorCode.ENTITY_IN_USE,
+                "Продукт указан в лицензии — смена типа невозможна",
+            )
 
     async def delete(self, product: Product) -> None:
         """B-9: мягкое удаление (таблица с `deleted_at`, тот же приём, что у направлений) —

@@ -9844,6 +9844,15 @@
             "title": "Is Active",
             "type": "boolean"
           },
+          "kind": {
+            "default": "course",
+            "enum": [
+              "course",
+              "software"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
           "name": {
             "maxLength": 255,
             "minLength": 1,
@@ -10006,6 +10015,15 @@
           "is_active": {
             "title": "Is Active",
             "type": "boolean"
+          },
+          "kind": {
+            "default": "course",
+            "enum": [
+              "course",
+              "software"
+            ],
+            "title": "Kind",
+            "type": "string"
           },
           "name": {
             "title": "Name",
@@ -10185,6 +10203,21 @@
               }
             ],
             "title": "Is Active"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "course",
+                  "software"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
           },
           "name": {
             "anyOf": [
@@ -28419,6 +28452,7 @@
     },
     "/api/products": {
       "get": {
+        "description": "Фильтр `kind` различает ИТ-программу/курс (`course`, по умолчанию у старых записей) и ИТ-продукт — ПО вендора (`software`, B3-7). Роль: чтение каталога.",
         "operationId": "list_products_api_products_get",
         "parameters": [
           {
@@ -28501,6 +28535,26 @@
                 }
               ],
               "title": "Format"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "course",
+                    "software"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
             }
           },
           {
