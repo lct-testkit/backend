@@ -124,9 +124,7 @@ async def _state(workflow_id: uuid.UUID) -> dict[str, Any]:
         }
 
 
-async def _add_exit_from_parked(
-    workflow_id: uuid.UUID, publish: bool, *, target_code: str
-) -> None:
+async def _add_exit_from_parked(workflow_id: uuid.UUID, publish: bool, target_code: str) -> None:
     """Выход `parked → target_code`, заведённый администратором: в черновик и, при `publish`,
     ещё и в снимок. B2-4: `target_code` приходит от вызывающего кода спеки (`spec.statuses[0]
     .code`), а не зашит в тексте теста — иначе тест был бы завязан на код старой воронки v1."""
@@ -210,7 +208,7 @@ class TestBackfillResumeTransitions:
         old, full, _ = _specs("_b2b_spec")
         first_step = full.statuses[0].code
         workflow_id = run(client, _seed, old)
-        run(client, _add_exit_from_parked, workflow_id, True, target_code=first_step)
+        run(client, _add_exit_from_parked, workflow_id, True, first_step)
         before = run(client, _state, workflow_id)
 
         added = run(client, _reseed, full, workflow_id)
@@ -224,7 +222,7 @@ class TestBackfillResumeTransitions:
     ) -> None:
         old, full, _ = _specs("_b2b_spec")
         workflow_id = run(client, _seed, old)
-        run(client, _add_exit_from_parked, workflow_id, False, target_code=full.statuses[0].code)
+        run(client, _add_exit_from_parked, workflow_id, False, full.statuses[0].code)
         before = run(client, _state, workflow_id)
 
         added = run(client, _reseed, full, workflow_id)
