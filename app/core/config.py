@@ -99,6 +99,13 @@ class Settings(BaseSettings):
     keycloak_admin_client_secret: SecretStr | None = None
     keycloak_jwks_ttl: int = 3600
     keycloak_verify_audience: bool = True
+    # B6-3: опрос Admin API событий (LOGIN_ERROR -> LOGIN_FAILED/BRUTE_FORCE_LOCK). Выключен по
+    # умолчанию: требует eventsEnabled в realm и роль view-events у сервисного клиента
+    # (спринт D1, не в этом репозитории) — без них задача просто не делает запросов.
+    keycloak_events_poll_enabled: bool = False
+    # Накладка на повторный опрос — события Keycloak могут прийти с задержкой относительно
+    # своего `time`, курсор без накладки бы их пропустил.
+    keycloak_events_overlap_seconds: int = 120
 
     # --- S3 / SeaweedFS --------------------------------------------------
     # MinIO использовать запрещено: раздел «Стек» спецификации.

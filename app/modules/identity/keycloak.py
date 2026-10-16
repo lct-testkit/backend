@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -404,6 +405,44 @@ class KeycloakClient:
         response = await self.admin_request("DELETE", f"/sessions/{kc_session_id}")
         if response.status_code not in (200, 204, 404):
             response.raise_for_status()
+
+    # --- События (B6-3) ----------------------------------------------------
+
+    async def list_events(
+        self,
+        *,
+        types: Sequence[str] = (),
+        date_from_ms: int | None = None,
+        first: int = 0,
+        max_results: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """`GET /admin/realms/{realm}/events` — требует `eventsEnabled: true` в realm и роль
+        `view-events` у сервисного клиента (спринт D1, не в этом репозитории). Keycloak 25.0
+        фильтрует `dateFrom` по дням (ограничение раздела B6-3), поэтому курсор между опросами
+        держит `KeycloakEventSync` сам, по `time` события (мс), не по этому параметру."""
+        params: dict[str, Any] = {"first": first, "max": max_results}
+        if types:
+            params["type"] = list(types)
+        if date_from_ms is not None:
+            params["dateFrom"] = dt.datetime.fromtimestamp(date_from_ms / 1000, dt.UTC).strftime(
+                "%Y-%m-%d"
+            )
+        response = await self.admin_request("GET", "/events", params=params)
+        response.raise_for_status()
+        found = response.json()
+        return found if isinstance(found, list) else []
+
+    async def brute_force_status(self, keycloak_id: str) -> dict[str, Any] | None:
+        """`GET /admin/realms/{realm}/attack-detection/brute-force/users/{id}` — `disabled:
+        true` значит пользователь заблокирован перебором (поле `failureFactor` в realm)."""
+        response = await self.admin_request(
+            "GET", f"/attack-detection/brute-force/users/{keycloak_id}"
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        found = response.json()
+        return found if isinstance(found, dict) else None
 
     # --- Health ----------------------------------------------------------
 
