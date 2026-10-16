@@ -11427,6 +11427,155 @@
         "title": "ReportTemplateOut",
         "type": "object"
       },
+      "Route": {
+        "properties": {
+          "deal_type": {
+            "default": "b2c",
+            "enum": [
+              "b2c",
+              "b2b"
+            ],
+            "title": "Deal Type",
+            "type": "string"
+          },
+          "fixed_owner_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fixed Owner Id"
+          },
+          "initial_status_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Initial Status Code"
+          },
+          "owner_policy": {
+            "default": "least_loaded",
+            "enum": [
+              "least_loaded",
+              "organization_owner",
+              "fixed"
+            ],
+            "title": "Owner Policy",
+            "type": "string"
+          },
+          "workflow_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Code"
+          }
+        },
+        "title": "Route",
+        "type": "object"
+      },
+      "RouteCondition": {
+        "properties": {
+          "equals": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Equals"
+          },
+          "in": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "In"
+          },
+          "target": {
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "title": "RouteCondition",
+        "type": "object"
+      },
+      "Routing": {
+        "properties": {
+          "default": {
+            "$ref": "#/components/schemas/Route"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/RoutingRule"
+            },
+            "maxItems": 10,
+            "title": "Rules",
+            "type": "array"
+          }
+        },
+        "title": "Routing",
+        "type": "object"
+      },
+      "RoutingGetResponse": {
+        "description": "B5-4: текущая маршрутизация (`null` — не настроена, заявки идут в B2C-воронку по\nумолчанию, как и раньше).",
+        "properties": {
+          "routing": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Routing"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "routing"
+        ],
+        "title": "RoutingGetResponse",
+        "type": "object"
+      },
+      "RoutingRule": {
+        "properties": {
+          "route": {
+            "$ref": "#/components/schemas/Route"
+          },
+          "when": {
+            "$ref": "#/components/schemas/RouteCondition"
+          }
+        },
+        "required": [
+          "when",
+          "route"
+        ],
+        "title": "RoutingRule",
+        "type": "object"
+      },
       "SessionInfo": {
         "properties": {
           "created_at": {
@@ -17834,6 +17983,231 @@
           }
         ],
         "summary": "Предпросмотр маппинга без записи в БД",
+        "tags": [
+          "integrations-admin"
+        ]
+      }
+    },
+    "/api/admin/integrations/sources/{code}/routing": {
+      "delete": {
+        "operationId": "delete_source_routing_api_admin_integrations_sources__code__routing_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "required": true,
+            "schema": {
+              "title": "Code",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Вернуть прежнее поведение (без маршрутизации)",
+        "tags": [
+          "integrations-admin"
+        ]
+      },
+      "get": {
+        "operationId": "get_source_routing_api_admin_integrations_sources__code__routing_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "required": true,
+            "schema": {
+              "title": "Code",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutingGetResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "summary": "Текущая маршрутизация (воронка/тип сделки на источник)",
+        "tags": [
+          "integrations-admin"
+        ]
+      },
+      "put": {
+        "description": "B5-4 (BUG-15): правила «если поле заявки равно/в списке — вот воронка, тип сделки и ответственный», плюс маршрут по умолчанию. 422 с errors[] — воронка не найдена/не опубликована/не того deal_type, статус не найден в опубликованном графе, fixed_owner_id не найден или неактивен, больше 10 правил.",
+        "operationId": "put_source_routing_api_admin_integrations_sources__code__routing_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "required": true,
+            "schema": {
+              "title": "Code",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Routing"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Routing"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Сохранить маршрутизацию",
         "tags": [
           "integrations-admin"
         ]

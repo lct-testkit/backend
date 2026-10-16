@@ -95,6 +95,7 @@ class AuditAction(StrEnum):
     INTEGRATION_MAPPING_RESET = "INTEGRATION_MAPPING_RESET"
     # B5-4: маршрутизация (воронка/тип сделки на источник, правила по значению поля).
     INTEGRATION_ROUTING_UPDATED = "INTEGRATION_ROUTING_UPDATED"
+    INTEGRATION_ROUTING_RESET = "INTEGRATION_ROUTING_RESET"
 
     # --- Отчётность и дашборды (спринт 8, §4.13/§7.9) ---
     DASHBOARD_CREATED = "DASHBOARD_CREATED"
