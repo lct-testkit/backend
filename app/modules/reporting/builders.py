@@ -58,7 +58,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import FieldError, ValidationError
@@ -195,6 +195,11 @@ class ReportFilters:
     direction_ids: list[uuid.UUID] | None = None
     product_ids: list[uuid.UUID] | None = None
     owner_ids: list[uuid.UUID] | None = None
+    # B1-1 (BUG-1): поддерево `direction_ids`, если оно было раскрыто `_load_filters` — выбор
+    # родительского направления тогда включает дочерние. `None` у builder'ов, которые продолжают
+    # звать `_parse_report_filters` напрямую (без БД) — `_apply_entity_filters` в этом случае
+    # падает назад на точное совпадение `direction_ids`, как было до этой задачи.
+    direction_tree_ids: list[uuid.UUID] | None = None
 
     def has_any(self) -> bool:
         return any(
@@ -225,6 +230,30 @@ def _day_start(value: dt.date) -> dt.datetime:
     return dt.datetime.combine(value, dt.time.min, tzinfo=dt.UTC)
 
 
+async def _expand_direction_tree(
+    session: AsyncSession, direction_ids: list[uuid.UUID]
+) -> list[uuid.UUID]:
+    """B1-1 (BUG-1): `direction_ids` -> само значение плюс все дочерние направления рекурсивно
+    (выбор родителя — «Программирование» — должен включать «Python», «Java» и т.п., раздел
+    5.3/demo-дерево `deploy/seed/catalogs.mjs`). `UNION`, не `UNION ALL`: испорченные данные с
+    циклом `parent_id` не должны зациклить запрос (повтор id схлопывается)."""
+    base = select(Direction.id).where(Direction.id.in_(direction_ids))
+    tree = base.cte("direction_tree", recursive=True)
+    tree = tree.union(select(Direction.id).join(tree, Direction.parent_id == tree.c.id))
+    rows = (await session.execute(select(tree.c.id))).scalars().all()
+    return list(rows)
+
+
+async def _load_filters(session: AsyncSession, params: dict[str, Any]) -> ReportFilters:
+    """B1-1: как `_parse_report_filters`, но раскрывает `direction_ids` в поддерево одним
+    дополнительным запросом (нужна сессия — поэтому async и отдельная функция, а не правка
+    `_parse_report_filters`, которую используют офлайновые тесты формата параметров)."""
+    filters = _parse_report_filters(params)
+    if filters.direction_ids:
+        filters.direction_tree_ids = await _expand_direction_tree(session, filters.direction_ids)
+    return filters
+
+
 def _apply_entity_filters(stmt: Any, filters: ReportFilters) -> Any:
     """Организации/направления/продукты/ответственные — без периода. Отдельно
     от `_apply_deal_filters`, потому что `build_monthly_dynamics` применяет
@@ -240,12 +269,13 @@ def _apply_entity_filters(stmt: Any, filters: ReportFilters) -> Any:
                 select(DealProduct.deal_id).where(DealProduct.product_id.in_(filters.product_ids))
             )
         )
-    if filters.direction_ids:
+    direction_ids = filters.direction_tree_ids or filters.direction_ids
+    if direction_ids:
         stmt = stmt.where(
             Deal.id.in_(
                 select(DealProduct.deal_id)
                 .join(Product, Product.id == DealProduct.product_id)
-                .where(Product.direction_id.in_(filters.direction_ids))
+                .where(Product.direction_id.in_(direction_ids))
             )
         )
     return stmt
@@ -745,8 +775,23 @@ async def build_stuck_deals(
 
 
 async def _deal_register_query(session: AsyncSession, principal: Principal, params: dict[str, Any]):
-    filters = _parse_report_filters(params)
+    filters = await _load_filters(session, params)
     clause = await deal_scope_clause(session, principal)
+    direction_ids = filters.direction_tree_ids or filters.direction_ids
+
+    # BUG-1 (часть 2): сумма сделки повторялась на каждой её строке-продукте, поэтому сумма по
+    # колонке в Excel была завышена ровно во столько раз, сколько у сделки продуктов. Окно
+    # считается уже после WHERE/JOIN (обычная семантика Postgres), поэтому при фильтре по
+    # продукту сумма достаётся первой ОТОБРАННОЙ строке, а не первой по каталогу.
+    amount_column = case(
+        (
+            func.row_number().over(partition_by=Deal.id, order_by=(Product.name, DealProduct.id))
+            == 1,
+            Deal.amount,
+        ),
+        else_=None,
+    ).label("amount")
+
     stmt = (
         select(
             Organization.name,
@@ -756,7 +801,7 @@ async def _deal_register_query(session: AsyncSession, principal: Principal, para
             func.coalesce(User.display_name, User.full_name),
             Deal.number,
             Deal.title,
-            Deal.amount,
+            amount_column,
             Deal.created_at,
             Deal.closed_at,
         )
@@ -772,7 +817,17 @@ async def _deal_register_query(session: AsyncSession, principal: Principal, para
     )
     if clause is not None:
         stmt = stmt.where(clause)
-    return _apply_deal_filters(stmt, filters)
+    stmt = _apply_deal_filters(stmt, filters)
+    # BUG-1 (часть 1): `_apply_deal_filters` выше уже ограничил, какие СДЕЛКИ попадают в отчёт
+    # (сделка остаётся, если хотя бы один её продукт подходит под фильтр) — но без этих двух
+    # условий в выдаче сделки с продуктами P и Q при фильтре "только P" всё равно была бы и
+    # строка с Q, потому что сама строка берётся из LEFT JOIN без ограничения на продукт/
+    # направление. Здесь ограничиваются уже СТРОКИ.
+    if filters.product_ids:
+        stmt = stmt.where(Product.id.in_(filters.product_ids))
+    if direction_ids:
+        stmt = stmt.where(Direction.id.in_(direction_ids))
+    return stmt
 
 
 async def estimate_deal_register(
@@ -830,6 +885,7 @@ async def build_deal_register(
             "Закрыта",
         ],
         rows=rows,
+        note="Сумма сделки указана на первой строке сделки",
     )
 
 
