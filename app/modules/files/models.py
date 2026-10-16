@@ -12,6 +12,15 @@ report, erasure_request), а проверка существования и пр
 Дедупликация по `sha256`: `refcount` считает активные ссылки из
 `attachments`, физическое удаление объекта в S3 — только при `refcount = 0`
 (раздел 3.7). Здесь это поле, инкремент/декремент — в `files.service`.
+
+B2-6: `Attachment.status_id`/`status_history_id` привязывают файл сделки к
+шагу воронки. `status_id` — статус сделки на момент прикладывания (для
+вложения перехода — статус, из которого уходят, см. `DealService.transition`
+в `crm.service`); `status_history_id` — запись истории перехода, с которой
+файл был передан (B2-7), выставляется один раз и больше не переписывается.
+Для вложений не-сделок (организация, контакт, импорт) обе колонки `NULL`.
+`ON DELETE RESTRICT` на оба FK: статус или запись истории с живыми
+вложениями нельзя убрать мимо `WorkflowService.save_graph` (CRM-1208).
 """
 
 from __future__ import annotations
@@ -80,6 +89,19 @@ class Attachment(UuidPkMixin, Base):
     __table_args__ = (
         Index("ix_attachments_entity", "entity_type", "entity_id"),
         Index("ix_attachments_file", "file_id"),
+        # B2-6: вкладка «Файлы в статусе» и условия `step_attachments.*` читают по
+        # (entity_id, status_id) только у живых вложений сделок.
+        Index(
+            "ix_attachments_deal_status",
+            "entity_id",
+            "status_id",
+            postgresql_where=text("entity_type = 'deal' AND deleted_at IS NULL"),
+        ),
+        Index(
+            "ix_attachments_status_history",
+            "status_history_id",
+            postgresql_where=text("status_history_id IS NOT NULL"),
+        ),
         CheckConstraint(
             "category IN ('contract','presentation','act','license','report',"
             "'signature_container','other')",
@@ -94,6 +116,15 @@ class Attachment(UuidPkMixin, Base):
     entity_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     category: Mapped[str] = mapped_column(String(24), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # B2-6/B2-7: см. докстринг модуля. `status_id` проставляет `AttachmentService.create`
+    # (из `Deal.status_id` текущей сделки); `status_history_id` — только `DealService.transition`
+    # при привязке файлов к переходу, один раз.
+    status_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workflow_statuses.id", ondelete="RESTRICT"), nullable=True
+    )
+    status_history_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("deal_status_history.id", ondelete="RESTRICT"), nullable=True
+    )
     uploaded_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
     )
