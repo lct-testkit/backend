@@ -48,6 +48,8 @@ class Permission(StrEnum):
     WORKFLOW_READ = "workflow:read"
     WORKFLOW_WRITE = "workflow:write"
     WORKFLOW_PUBLISH = "workflow:publish"
+    # B2-5: только подпись статуса, не весь конструктор — HEAD получает его, KAM нет.
+    WORKFLOW_RENAME_STATUS = "workflow:rename_status"
 
     # --- Файлы ---
     FILE_UPLOAD = "file:upload"
@@ -148,6 +150,9 @@ _HEAD: frozenset[Permission] = _KAM | {
     Permission.FILE_DELETE,
     Permission.IMPORT_RUN,
     Permission.IMPORT_ROLLBACK,
+    # B2-5: Функц.2 требует «корректировки именования статусов»; конструктор воронок
+    # (workflow:write/workflow:publish) остаётся только у ADMIN.
+    Permission.WORKFLOW_RENAME_STATUS,
 }
 
 # AUDITOR — только журнал, плюс явное «чтение» соглашений ЭДО из матрицы

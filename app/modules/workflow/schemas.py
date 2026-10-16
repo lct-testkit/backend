@@ -90,6 +90,13 @@ class StatusIn(BaseModel):
     is_archived: bool = False
 
 
+class StatusRenameRequest(BaseModel):
+    """B2-5: `PATCH /workflows/{id}/statuses/{status_id}` — только подпись статуса; код, тип,
+    переходы и SLA этой ручкой не меняются (конструктор графа остаётся у ADMIN)."""
+
+    name: NonEmptyStr = Field(max_length=255)
+
+
 class StatusOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -242,7 +249,12 @@ class StatusImpactResponse(BaseModel):
 
 
 class StatusArchiveRequest(BaseModel):
-    mapping_rules: dict[str, Any] = Field(default_factory=dict)
+    # B2-3/B2-M: соответствие статусов между воронками статичное, по коду к коду; условные
+    # правила (в зависимости от полей сделки) решает B-7 в спринте B9. Поле принимается ради
+    # стабильности контракта и сознательно не обрабатывается.
+    mapping_rules: dict[str, Any] = Field(
+        default_factory=dict, description="Зарезервировано, пока не используется"
+    )
     target_status_id: uuid.UUID
     fallback_status_id: uuid.UUID | None = None
     sla_mode: SlaModeLiteral = "recalculate"

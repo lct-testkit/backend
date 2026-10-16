@@ -514,6 +514,16 @@ class TestPermissionMatrix:
         assert has_permission("KAM", Permission.WORKFLOW_READ)
         assert has_permission("HEAD", Permission.WORKFLOW_READ)
 
+    def test_head_renames_statuses_but_not_the_whole_graph(self) -> None:
+        """B2-5: Функц.2 — «корректировка именования статусов» — доступна Руководителю
+        отдельно от конструктора (workflow:write/workflow:publish остаются только у ADMIN)."""
+        assert has_permission("HEAD", Permission.WORKFLOW_RENAME_STATUS)
+        assert not has_permission("HEAD", Permission.WORKFLOW_WRITE)
+        assert not has_permission("HEAD", Permission.WORKFLOW_PUBLISH)
+        for role in ("KAM", "AUDITOR", "INTEGRATION"):
+            assert not has_permission(role, Permission.WORKFLOW_RENAME_STATUS)
+        assert has_permission("ADMIN", Permission.WORKFLOW_RENAME_STATUS)
+
 
 class TestWorkflowState:
     def test_states_match_spec_enum(self) -> None:

@@ -12190,6 +12190,7 @@
           },
           "mapping_rules": {
             "additionalProperties": true,
+            "description": "Зарезервировано, пока не используется",
             "title": "Mapping Rules",
             "type": "object"
           },
@@ -12584,6 +12585,22 @@
           "is_archived"
         ],
         "title": "StatusOut",
+        "type": "object"
+      },
+      "StatusRenameRequest": {
+        "description": "B2-5: `PATCH /workflows/{id}/statuses/{status_id}` — только подпись статуса; код, тип,\nпереходы и SLA этой ручкой не меняются (конструктор графа остаётся у ADMIN).",
+        "properties": {
+          "name": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "StatusRenameRequest",
         "type": "object"
       },
       "SystemSettingListResponse": {
@@ -33063,6 +33080,125 @@
           }
         ],
         "summary": "Опубликовать воронку",
+        "tags": [
+          "workflows"
+        ]
+      }
+    },
+    "/api/workflows/{workflow_id}/statuses/{status_id}": {
+      "patch": {
+        "description": "Меняет только подпись статуса — код, тип, переходы и SLA не затрагиваются. Если статус есть в опубликованном снимке, снимок пересобирается с новым именем (has_unpublished_changes не включается из-за самого переименования). Обязателен If-Match. Роль: Руководитель или администратор.",
+        "operationId": "rename_status_api_workflows__workflow_id__statuses__status_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "status_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Status Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StatusRenameRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Переименовать статус",
         "tags": [
           "workflows"
         ]
