@@ -216,6 +216,8 @@ class OrganizationFilters:
     is_accredited: bool | None = None
     source: str | None = None
     q: str | None = None
+    # B4-3: список мягко удалённых вузов — только для права `ORG_RESTORE`.
+    deleted: bool = False
 
 
 @dataclass(slots=True)
@@ -241,7 +243,13 @@ class OrganizationService:
     async def list_query(
         self, principal: Principal, filters: OrganizationFilters
     ) -> Select[tuple[Organization]]:
-        stmt = select(Organization).where(Organization.deleted_at.is_(None))
+        # B4-3: без списка удалённых восстановить что-то нельзя — id удалённой
+        # организации нигде больше не виден.
+        stmt = select(Organization).where(
+            Organization.deleted_at.is_not(None)
+            if filters.deleted
+            else Organization.deleted_at.is_(None)
+        )
         clause = await organization_scope_clause(self._session, principal)
         if clause is not None:
             stmt = stmt.where(clause)
@@ -327,6 +335,69 @@ class OrganizationService:
             entity_id=organization.id,
         )
         await self._session.flush()
+        return organization
+
+    async def delete_blockers(self, organization: Organization) -> list[dict[str, Any]]:
+        """B4-3 (A-16): причины, по которым организацию нельзя удалить мягко — живые
+        (не мягко удалённые) сделки, контакты и лицензии. Сознательно не
+        `core.dependents.restrict_dependents`: он считает все строки, включая уже мягко
+        удалённые, и предназначен для жёсткого удаления по 152-ФЗ, а не для этой проверки."""
+        from app.modules.crm.models import Deal
+
+        deals = await self._session.scalar(
+            select(func.count()).where(
+                Deal.organization_id == organization.id, Deal.deleted_at.is_(None)
+            )
+        )
+        contacts = await self._session.scalar(
+            select(func.count()).where(
+                Contact.organization_id == organization.id, Contact.deleted_at.is_(None)
+            )
+        )
+        licenses = await self._session.scalar(
+            select(func.count()).where(
+                OrganizationLicense.organization_id == organization.id,
+                OrganizationLicense.deleted_at.is_(None),
+            )
+        )
+        blockers: list[dict[str, Any]] = []
+        if deals:
+            blockers.append(
+                {"code": "live_deals", "count": int(deals), "detail": "Сделки (включая закрытые)"}
+            )
+        if contacts:
+            blockers.append({"code": "live_contacts", "count": int(contacts), "detail": "Контакты"})
+        if licenses:
+            blockers.append({"code": "live_licenses", "count": int(licenses), "detail": "Лицензии"})
+        return blockers
+
+    async def delete(
+        self, organization: Organization, *, reason: str, expected_version: int
+    ) -> Organization:
+        """B4-3 (A-16): мягкое удаление вуза — только ADMIN (`Permission.ORG_DELETE`).
+        Уведомление владельцу не нужно (доку B4-3): организация пропадает из его же списка."""
+        blockers = await self.delete_blockers(organization)
+        if blockers:
+            raise AppError(
+                ErrorCode.ENTITY_IN_USE,
+                "У организации есть связанные записи — удаление невозможно",
+                extra={"blockers": blockers},
+            )
+        await claim_version(
+            self._session, organization, expected_version, conflicting={"name": organization.name}
+        )
+        organization.deleted_at = dt.datetime.now(dt.UTC)
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.ORGANIZATION_DELETED,
+            entity_type="organization",
+            entity_id=organization.id,
+            changes={
+                "name": {"old": None, "new": organization.name},
+                "inn": {"old": None, "new": organization.inn},
+                "reason": {"old": None, "new": reason},
+            },
+        )
         return organization
 
     async def set_owner(

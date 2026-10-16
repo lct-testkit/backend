@@ -1199,6 +1199,8 @@ class DealFilters:
     closed_from: dt.datetime | None = None
     closed_to: dt.datetime | None = None
     q: str | None = None
+    # B4-3: список мягко удалённых сделок — только для права `DEAL_DELETE`.
+    deleted: bool = False
 
 
 @dataclass(slots=True)
@@ -1399,7 +1401,9 @@ class DealService:
     # --- Скоуп и выборка ---------------------------------------------------
 
     async def list_query(self, principal: Principal, filters: DealFilters) -> Select[tuple[Deal]]:
-        stmt = select(Deal).where(Deal.deleted_at.is_(None))
+        stmt = select(Deal).where(
+            Deal.deleted_at.is_not(None) if filters.deleted else Deal.deleted_at.is_(None)
+        )
         clause = await deal_scope_clause(self._session, principal)
         if clause is not None:
             stmt = stmt.where(clause)
@@ -1518,6 +1522,100 @@ class DealService:
                 self._session, entity_type="deal", entity_id=deal.id, reason="watcher_read_only"
             )
             raise ForbiddenError("Наблюдатель видит сделку, но не может её менять")
+        return deal
+
+    async def get_deleted_or_404(self, deal_id: uuid.UUID, principal: Principal) -> Deal:
+        """Как `get_or_404`, но для восстановления (B4-3): мягко удалённая сделка — ровно
+        то, что ищет вызывающий, прятать её незачем. Скоуп проверяется как обычно —
+        `deal_in_scope` не смотрит на `deleted_at`."""
+        deal = await self._session.get(Deal, deal_id)
+        if deal is None:
+            raise NotFoundError("Сделка", deal_id)
+        if not await deal_in_scope(self._session, principal, deal):
+            defer_denied_audit(
+                self._session, entity_type="deal", entity_id=deal.id, reason="out_of_scope"
+            )
+            raise NotFoundError("Сделка", deal_id)
+        return deal
+
+    async def delete(
+        self, deal: Deal, principal: Principal, *, reason: str, expected_version: int
+    ) -> Deal:
+        """B4-3 (A-16): мягкое удаление сделки — только ADMIN (`Permission.DEAL_DELETE`).
+        Сделка с незавершённым запросом на подпись не удаляется: сначала `SIGNATURE_VOID`
+        (аннулировать запрос), иначе подписанный документ осиротел бы."""
+        if deal.signature_status in (
+            DealSignatureStatus.PENDING.value,
+            DealSignatureStatus.PARTIALLY_SIGNED.value,
+        ):
+            raise AppError(
+                ErrorCode.ENTITY_IN_USE,
+                "У сделки есть незавершённый запрос на подпись — сначала аннулируйте его",
+                extra={
+                    "blockers": [
+                        {
+                            "code": "pending_signature",
+                            "count": 1,
+                            "detail": "Незавершённый запрос на подпись",
+                        }
+                    ]
+                },
+            )
+        await claim_version(
+            self._session, deal, expected_version, conflicting={"number": deal.number}
+        )
+        deal.deleted_at = dt.datetime.now(dt.UTC)
+        await self._session.flush()
+        await drop_deal_card_after_commit(self._session, deal.id)
+        await self._audit.record(
+            AuditAction.DEAL_DELETED,
+            entity_type="deal",
+            entity_id=deal.id,
+            changes={
+                "number": {"old": None, "new": deal.number},
+                "reason": {"old": None, "new": reason},
+            },
+        )
+        await get_notification_service().notify_user(
+            self._session,
+            recipient_id=deal.owner_id,
+            template_code="DEAL_DELETED",
+            priority=NotificationPriority.NORMAL,
+            entity_type="deal",
+            entity_id=deal.id,
+        )
+        return deal
+
+    async def restore(self, deal: Deal, *, expected_version: int) -> Deal:
+        """B4-3: обратно из мягкого удаления. 409 CRM-1305, если сделка не была удалена
+        (тот же принцип, что `OrganizationService.restore` — не no-op, а конфликт
+        состояния). `order_number` — частичный уникальный индекс `WHERE deleted_at IS
+        NULL`: если его успела занять другая живая сделка, явный 409 вместо 500 на
+        IntegrityError."""
+        if deal.deleted_at is None:
+            raise AppError(
+                ErrorCode.DEAL_NOT_DELETED, "Сделка не удалена", extra={"deal_id": str(deal.id)}
+            )
+        if deal.order_number is not None:
+            taken = await self._session.scalar(
+                select(Deal.id).where(
+                    Deal.order_number == deal.order_number,
+                    Deal.deleted_at.is_(None),
+                    Deal.id != deal.id,
+                )
+            )
+            if taken is not None:
+                raise AppError(
+                    ErrorCode.DUPLICATE,
+                    "Номер заявки уже занят другой активной сделкой",
+                    extra={"reason": "order_number_taken", "order_number": deal.order_number},
+                )
+        await claim_version(
+            self._session, deal, expected_version, conflicting={"number": deal.number}
+        )
+        deal.deleted_at = None
+        await self._session.flush()
+        await self._audit.record(AuditAction.DEAL_RESTORED, entity_type="deal", entity_id=deal.id)
         return deal
 
     # --- Создание ------------------------------------------------------------
@@ -2862,9 +2960,17 @@ class TaskService:
     def list_query(
         self, filters: TaskFilters, scope_clause: ColumnElement[bool] | None
     ) -> Select[tuple[Task]]:
-        stmt = select(Task).where(Task.deleted_at.is_(None))
+        # B4-3: раньше JOIN со сделкой делался только когда у скоупа было условие (не ADMIN),
+        # поэтому ADMIN видел задачи удалённых сделок — JOIN и фильтр по Deal.deleted_at теперь
+        # всегда, скоуп роли накладывается поверх.
+        stmt = (
+            select(Task)
+            .where(Task.deleted_at.is_(None))
+            .join(Deal, Deal.id == Task.deal_id)
+            .where(Deal.deleted_at.is_(None))
+        )
         if scope_clause is not None:
-            stmt = stmt.join(Deal, Deal.id == Task.deal_id).where(scope_clause)
+            stmt = stmt.where(scope_clause)
         if filters.deal_id:
             stmt = stmt.where(Task.deal_id == filters.deal_id)
         if filters.assignee_id:

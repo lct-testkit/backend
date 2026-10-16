@@ -276,6 +276,13 @@ class BulkOrganizationOwnerResponse(BaseModel):
     remaining: int = 0
 
 
+# --- B4-3: мягкое удаление ---------------------------------------------------
+
+
+class OrganizationDeleteRequest(BaseModel):
+    reason: NonEmptyStr = Field(max_length=500)
+
+
 # =============================================================================
 # Контакты
 # =============================================================================

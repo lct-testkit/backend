@@ -27,13 +27,14 @@ from app.core.deps import (
     Pagination,
     require_permission,
 )
-from app.core.errors import AppError, ErrorCode, NotFoundError
+from app.core.errors import AppError, ErrorCode, ForbiddenError, NotFoundError
 from app.core.idempotency import IdempotencyGuard
 from app.core.pagination import MAX_LIMIT, Cursor, Page, keyset_before
-from app.core.permissions import Permission
+from app.core.permissions import Permission, has_permission
 from app.core.redis_client import distributed_lock
 from app.core.security import Principal
 from app.modules.audit.actions import AuditAction
+from app.modules.audit.service import defer_denied_audit
 from app.modules.crm.models import Deal, Task
 from app.modules.crm.schemas import (
     AvailableTransitionOut,
@@ -47,6 +48,7 @@ from app.modules.crm.schemas import (
     CommentUpdateRequest,
     DealCardOut,
     DealCreateRequest,
+    DealDeleteRequest,
     DealEventOut,
     DealHistoryResponse,
     DealListResponse,
@@ -95,6 +97,7 @@ DealReassignPerm = Annotated[Principal, Depends(require_permission(Permission.DE
 DealReassignBulkPerm = Annotated[
     Principal, Depends(require_permission(Permission.DEAL_REASSIGN_BULK))
 ]
+DealDeletePerm = Annotated[Principal, Depends(require_permission(Permission.DEAL_DELETE))]
 
 
 # =============================================================================
@@ -140,7 +143,13 @@ async def list_deals(
     closed_from: Annotated[dt.datetime | None, Query()] = None,
     closed_to: Annotated[dt.datetime | None, Query()] = None,
     q: Annotated[str | None, Query()] = None,
+    deleted: Annotated[bool, Query()] = False,
 ) -> DealListResponse:
+    # B4-3: без списка удалённых сделок восстановить что-то нельзя — id удалённой
+    # сделки нигде больше не виден. Право restore совмещено с delete (матрица: только ADMIN).
+    if deleted and not has_permission(principal.role, Permission.DEAL_DELETE):
+        defer_denied_audit(session, entity_type="deal", reason="deleted_list_forbidden")
+        raise ForbiddenError("Список удалённых сделок доступен только с правом удаления")
     filters = DealFilters(
         status_ids=status_id,
         is_closed=is_closed,
@@ -159,6 +168,7 @@ async def list_deals(
         closed_from=closed_from,
         closed_to=closed_to,
         q=q,
+        deleted=deleted,
     )
     service = DealService(session)
     sort_by = parse_deal_sort(sort)
@@ -240,6 +250,47 @@ async def bulk_reassign_deals(
         reason=payload.reason,
     )
     return BulkReassignResponse(reassigned_count=count)
+
+
+@deals_router.delete(
+    "/{deal_id}",
+    summary="Удалить сделку",
+    description=(
+        "B4-3 (A-16): мягкое удаление. 409 CRM-1303 с блокером `pending_signature`, если "
+        "у сделки есть незавершённый запрос на подпись — сначала аннулируйте его. "
+        "Роль: ADMIN."
+    ),
+    response_model=OperationResult,
+)
+async def delete_deal(
+    payload: DealDeleteRequest,
+    session: DbSession,
+    principal: DealDeletePerm,
+    if_match: IfMatch,
+    deal_id: Annotated[uuid.UUID, Path()],
+) -> OperationResult:
+    service = DealService(session)
+    deal = await service.get_or_404(deal_id, principal)
+    await service.delete(deal, principal, reason=payload.reason, expected_version=if_match)
+    return OperationResult(ok=True, detail="Сделка удалена")
+
+
+@deals_router.post(
+    "/{deal_id}/restore",
+    summary="Восстановить сделку",
+    description="B4-3: обратно из мягкого удаления. 409 CRM-1305 для не удалённой. Роль: ADMIN.",
+    response_model=DealOut,
+)
+async def restore_deal(
+    session: DbSession,
+    principal: DealDeletePerm,
+    if_match: IfMatch,
+    deal_id: Annotated[uuid.UUID, Path()],
+) -> DealOut:
+    service = DealService(session)
+    deal = await service.get_deleted_or_404(deal_id, principal)
+    deal = await service.restore(deal, expected_version=if_match)
+    return (await _deal_outs(service, principal, [deal]))[0]
 
 
 @deals_router.get(
