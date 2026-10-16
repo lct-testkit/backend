@@ -17,7 +17,13 @@ import uuid
 import pytest
 
 from tests.conftest import TEST_DATABASE_URL, run
-from tests.crm_helpers import by_code, create_deal, create_published_workflow, login, transition_deal
+from tests.crm_helpers import (
+    by_code,
+    create_deal,
+    create_published_workflow,
+    login,
+    transition_deal,
+)
 
 pytestmark = pytest.mark.skipif(
     not TEST_DATABASE_URL, reason="нужен TEST_DATABASE_URL с применёнными миграциями"
@@ -30,7 +36,12 @@ def _step_graph_body() -> dict:
     и тесту не нужен отдельный переход в него."""
     return {
         "statuses": [
-            {"code": "step4", "name": "Шаг 4: обмен документами", "type": "initial", "sort_order": 10},
+            {
+                "code": "step4",
+                "name": "Шаг 4: обмен документами",
+                "type": "initial",
+                "sort_order": 10,
+            },
             {"code": "step6", "name": "Шаг 6: подписание", "type": "won", "sort_order": 20},
         ],
         "transitions": [
@@ -206,8 +217,6 @@ class TestStepAttachmentsCondition:
 
         run(client, _move_attachment_to_other_status)
 
-        response = transition_deal(
-            client, deal, statuses["step6"]["id"], attachments=[]
-        )
+        response = transition_deal(client, deal, statuses["step6"]["id"], attachments=[])
         assert response.status_code == 422, response.text
         assert response.json()["code"] == "CRM-1201"

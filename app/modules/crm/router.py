@@ -36,9 +36,6 @@ from app.core.redis_client import distributed_lock
 from app.core.security import Principal
 from app.modules.audit.actions import AuditAction
 from app.modules.crm.models import Deal, DealStatusHistory, Task
-from app.modules.files.models import Attachment
-from app.modules.files.schemas import AttachmentListResponse
-from app.modules.files.service import AttachmentService
 from app.modules.crm.schemas import (
     AvailableTransitionOut,
     AvailableTransitionsResponse,
@@ -85,6 +82,9 @@ from app.modules.crm.service import (
     set_cached_deal_card,
     touch_recent,
 )
+from app.modules.files.models import Attachment
+from app.modules.files.schemas import AttachmentListResponse
+from app.modules.files.service import AttachmentService
 from app.modules.identity.schemas import OperationResult
 
 deals_router = APIRouter(prefix="/deals", tags=["deals"])

@@ -105,6 +105,9 @@ class Permission(StrEnum):
     AUDIT_EXPORT = "audit:export"
     SETTINGS_WRITE = "settings:write"
     ERASURE_MANAGE = "erasure:manage"
+    # B6-2: журнал security_events несёт IP и попытки входа — отдельное право, не `audit:read`.
+    # HEAD его не получает: руководитель увидел бы попытки входа и IP чужих команд.
+    SECURITY_EVENT_READ = "security_event:read"
 
 
 # KAM — менеджер по вузам: только свои сделки и связанные с ними сущности.
@@ -156,6 +159,7 @@ _AUDITOR: frozenset[Permission] = frozenset(
         Permission.AUDIT_EXPORT,
         Permission.EDM_READ,
         Permission.SIGNATURE_READ,
+        Permission.SECURITY_EVENT_READ,
     }
 )
 

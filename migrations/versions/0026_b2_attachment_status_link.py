@@ -78,9 +78,7 @@ def upgrade() -> None:
     )
     op.add_column(
         "attachments",
-        sa.Column(
-            "status_history_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=True
-        ),
+        sa.Column("status_history_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=True),
     )
     op.create_foreign_key(
         "fk_attachments_status_id_workflow_statuses",
@@ -154,6 +152,8 @@ def downgrade() -> None:
     op.drop_constraint(
         "fk_attachments_status_history_id_deal_status_history", "attachments", type_="foreignkey"
     )
-    op.drop_constraint("fk_attachments_status_id_workflow_statuses", "attachments", type_="foreignkey")
+    op.drop_constraint(
+        "fk_attachments_status_id_workflow_statuses", "attachments", type_="foreignkey"
+    )
     op.drop_column("attachments", "status_history_id")
     op.drop_column("attachments", "status_id")

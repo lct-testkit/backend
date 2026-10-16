@@ -165,9 +165,7 @@ async def list_attachments(
 ) -> AttachmentListResponse:
     # B2-8: вкладка «Файлы в статусе» — фильтр по шагу воронки имеет смысл только для сделок.
     if status_id is not None and entity_type != "deal":
-        raise AppError(
-            ErrorCode.VALIDATION, "Фильтр status_id применим только к вложениям сделки"
-        )
+        raise AppError(ErrorCode.VALIDATION, "Фильтр status_id применим только к вложениям сделки")
     await check_entity_access(session, principal, entity_type=entity_type, entity_id=entity_id)
     stmt = (
         AttachmentService(session)

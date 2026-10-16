@@ -316,6 +316,14 @@ class SecurityEvent(UuidPkMixin, Base):
     __table_args__ = (
         Index("ix_security_events_type_created", "event_type", "created_at"),
         Index("ix_security_events_user_created", "user_id", "created_at"),
+        # B6-2: `GET /admin/security-events?min_severity=warning` — основной путь просмотра,
+        # частичный индекс не раздувается записями `info`, которых большинство.
+        Index(
+            "ix_security_events_severity_created",
+            "severity",
+            "created_at",
+            postgresql_where=text("severity <> 'info'"),
+        ),
     )
 
     # Без FK: событие может касаться несуществующего или удалённого субъекта.

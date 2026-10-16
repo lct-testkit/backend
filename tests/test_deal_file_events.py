@@ -11,7 +11,13 @@ import uuid
 import pytest
 
 from tests.conftest import TEST_DATABASE_URL, run
-from tests.crm_helpers import by_code, create_deal, create_published_workflow, login, transition_deal
+from tests.crm_helpers import (
+    by_code,
+    create_deal,
+    create_published_workflow,
+    login,
+    transition_deal,
+)
 
 pytestmark = pytest.mark.skipif(
     not TEST_DATABASE_URL, reason="нужен TEST_DATABASE_URL с применёнными миграциями"
@@ -56,7 +62,9 @@ async def _ready_file() -> uuid.UUID:
         return file.id
 
 
-def _attach(client, deal_id: str, *, category: str = "contract", idempotency_key: str | None = None):
+def _attach(
+    client, deal_id: str, *, category: str = "contract", idempotency_key: str | None = None
+):
     file_id = run(client, _ready_file)
     headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
     response = client.post(
@@ -188,7 +196,8 @@ class TestAttachmentsCountAndHistoryEndpoint:
         assert moved.status_code == 200, moved.text
 
         history = _history_events(client, deal["id"])
-        (transition_row,) = [s for s in history["statuses"] if s["to_status_id"] == statuses["step6"]["id"]]
+        target_id = statuses["step6"]["id"]
+        (transition_row,) = [s for s in history["statuses"] if s["to_status_id"] == target_id]
         assert transition_row["attachments_count"] == 1
 
         files_response = client.get(
@@ -222,7 +231,5 @@ class TestAttachmentsCountAndHistoryEndpoint:
         auditor = run(client, _make_user, "AUDITOR")
         client.headers["X-CSRF-Token"] = authenticate(client, auditor)
 
-        response = client.get(
-            f"/api/deals/{deal['id']}/history/{uuid.uuid4()}/attachments"
-        )
+        response = client.get(f"/api/deals/{deal['id']}/history/{uuid.uuid4()}/attachments")
         assert response.status_code == 403, response.text

@@ -17,7 +17,7 @@ import unicodedata
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import NoReturn, Protocol, runtime_checkable
+from typing import Any, NoReturn, Protocol, runtime_checkable
 
 from sqlalchemy import Select, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession

@@ -91,9 +91,7 @@ async def main() -> None:
                 f"Демо-пользователь {KAM_EMAIL!r} не найден — realm-crm.json применён и "
                 "just-in-time provisioning отработал (первый вход kam.ivanov в систему)?"
             )
-        workflow = await session.scalar(
-            select(Workflow).where(Workflow.code == args.workflow_code)
-        )
+        workflow = await session.scalar(select(Workflow).where(Workflow.code == args.workflow_code))
         if workflow is None:
             raise SystemExit(f"Воронка {args.workflow_code!r} не найдена — сиды применены?")
         statuses = (
