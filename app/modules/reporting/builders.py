@@ -78,7 +78,7 @@ from app.modules.catalog.models import (
 from app.modules.crm.models import Deal, DealProduct, DealStatusHistory
 from app.modules.crm.service import deal_scope_clause
 from app.modules.identity.models import User
-from app.modules.workflow.models import TERMINAL_TYPES, StatusType, Workflow, WorkflowStatus
+from app.modules.workflow.models import StatusType, Workflow, WorkflowStatus
 
 
 @dataclass(slots=True)
@@ -409,9 +409,65 @@ async def _resolve_workflow_id(session: AsyncSession, params: dict[str, Any]) ->
 # =============================================================================
 
 
+#: Статусы, которые считаются «прогрессом» воронки — `lost`/`parked` не входят: сделка не
+#: «доходит» до отказа или заморозки, она туда ветвится. `reached_count` (B1-7, BUG-3/4)
+#: определён только для этих трёх типов — см. миграцию `0027_report_mv_without_deleted`.
+_MAIN_STATUS_TYPES = (
+    StatusType.INITIAL.value,
+    StatusType.INTERMEDIATE.value,
+    StatusType.WON.value,
+)
+
+
+async def _reached_counts(
+    session: AsyncSession,
+    principal: Principal,
+    filters: ReportFilters,
+    workflow_id: uuid.UUID,
+    main_statuses: list[tuple[uuid.UUID, int]],
+) -> dict[uuid.UUID, int]:
+    """B1-7 (BUG-3): для каждого основного статуса (initial/intermediate/won) — число РАЗЛИЧНЫХ
+    сделок, у которых наибольший `sort_order` среди посещённых основных статусов не меньше
+    `sort_order` этого статуса, то есть «дошли до шага N и дальше». В отличие от `entered_count`
+    (сколько раз сделка ВХОДИЛА в статус — возвраты назад и повторные переходы считаются
+    отдельно), это даёт конверсию, которая не может превысить 100% при пропуске необязательного
+    шага: `reached` монотонно не возрастает с номером шага по построению.
+
+    `main_statuses` — пары `(status_id, sort_order)` только основных статусов, уже отфильтрованных
+    вызывающим кодом (другие типы сюда не передаются — у них reached не определён)."""
+    if not main_statuses:
+        return {}
+    per_deal = (
+        select(
+            DealStatusHistory.deal_id,
+            func.max(WorkflowStatus.sort_order).label("max_order"),
+        )
+        .select_from(DealStatusHistory)
+        .join(WorkflowStatus, WorkflowStatus.id == DealStatusHistory.to_status_id)
+        .where(
+            WorkflowStatus.workflow_id == workflow_id,
+            WorkflowStatus.type.in_(_MAIN_STATUS_TYPES),
+            DealStatusHistory.deal_id.in_(await _scoped_deal_ids(session, principal, filters)),
+        )
+        .group_by(DealStatusHistory.deal_id)
+        .subquery()
+    )
+    counts_stmt = select(per_deal.c.max_order, func.count()).group_by(per_deal.c.max_order)
+    by_order: dict[int, int] = dict((await session.execute(counts_stmt)).all())  # type: ignore[arg-type]
+    return {
+        status_id: sum(count for order, count in by_order.items() if order >= sort_order)
+        for status_id, sort_order in main_statuses
+    }
+
+
 async def build_deal_funnel(
     session: AsyncSession, principal: Principal, params: dict[str, Any]
 ) -> ReportDataset:
+    """Воронка по статусам (B1-7, BUG-3/4): «Конверсия шага, %» считается от `reached` (дошли
+    до шага и дальше), не от `entered` (вошли хоть раз) — иначе необязательный шаг, который
+    пропускает часть сделок, давал конверсию следующего шага выше 100% (раздел 1: шаг 5
+    задания). Новые колонки «Дошли до шага» и «От старта, %» — в конец, первые пять заголовков
+    не меняются (контракт с дашбордом, `widgets.ts:18-24`)."""
     workflow_id = await _resolve_workflow_id(session, params)
     filters = await _load_filters(session, principal, params)
     statuses = (
@@ -431,11 +487,14 @@ async def build_deal_funnel(
         "Всего прошло",
         "Конверсия шага, %",
         "Среднее время, дн.",
+        "Дошли до шага",
+        "От старта, %",
     ]
     if not statuses:
         return ReportDataset(title="Воронка по статусам", columns=columns, rows=[])
 
     note: str | None = None
+    data_as_of: dt.datetime | None = None
     if deal_scope_for(principal.role) is DealScope.ALL and not filters.has_any():
         # Быстрый путь: материализованное представление (раздел 3.4/4.13),
         # обновляется `reporting.tasks.refresh_report_materialized_views`
@@ -450,7 +509,7 @@ async def build_deal_funnel(
                 text(
                     "SELECT ws.id, ws.name, ws.sort_order, "
                     "COALESCE(mv.currently_in_count, 0), COALESCE(mv.entered_count, 0), "
-                    "mv.avg_duration_in_prev "
+                    "mv.avg_duration_in_prev, mv.reached_count, mv.refreshed_at "
                     "FROM workflow_statuses ws "
                     "LEFT JOIN mv_deal_status_summary mv ON mv.status_id = ws.id "
                     "WHERE ws.workflow_id = :workflow_id "
@@ -459,7 +518,9 @@ async def build_deal_funnel(
                 {"workflow_id": workflow_id},
             )
         ).all()
-        stats = {row[0]: (row[3], row[4], row[5]) for row in mv_rows}
+        stats = {row[0]: (row[3], row[4], row[5], row[6]) for row in mv_rows}
+        as_of_values = [row[7] for row in mv_rows if row[7] is not None]
+        data_as_of = max(as_of_values) if as_of_values else None
         note = "Источник: материализованное представление (обновляется раз в 5 минут)"
     else:
         clause = await deal_scope_clause(session, principal)
@@ -492,24 +553,67 @@ async def build_deal_funnel(
             )
         ).all()
         hist_map = {row[0]: (row[1], row[2]) for row in hist_rows}
-        stats = {s.id: (current_map.get(s.id, 0), *hist_map.get(s.id, (0, None))) for s in statuses}
+        reached_map = await _reached_counts(
+            session,
+            principal,
+            filters,
+            workflow_id,
+            [(s.id, s.sort_order) for s in statuses if s.type in _MAIN_STATUS_TYPES],
+        )
+        stats = {
+            s.id: (
+                current_map.get(s.id, 0),
+                *hist_map.get(s.id, (0, None)),
+                reached_map.get(s.id),
+            )
+            for s in statuses
+        }
+        data_as_of = dt.datetime.now(dt.UTC)
 
     rows: list[list[Any]] = []
-    prev_entered: int | None = None
+    prev_reached: int | None = None
+    reached_first: int | None = None
     for status in statuses:
-        currently_in, entered, avg_dur = stats.get(status.id, (0, 0, None))
+        currently_in, entered, avg_dur, reached = stats.get(status.id, (0, 0, None, None))
         entered = entered or 0
-        if prev_entered is None:
-            conversion = 100.0 if entered else None
-        elif prev_entered == 0:
-            conversion = None
-        else:
-            conversion = round(entered / prev_entered * 100, 1)
+        # B1-7: архивный статус без единого перехода и без сделок сейчас — шум, не строка
+        # воронки (статус мог архивироваться до того, как через него прошла хоть одна сделка).
+        if status.is_archived and currently_in == 0 and entered == 0:
+            continue
         avg_days = round(avg_dur.total_seconds() / 86400, 1) if avg_dur is not None else None
-        rows.append([status.name, currently_in, entered, conversion, avg_days])
-        prev_entered = entered
 
-    return ReportDataset(title="Воронка по статусам", columns=columns, rows=rows, note=note)
+        if status.type in _MAIN_STATUS_TYPES:
+            if reached_first is None:
+                reached_first = reached or 0
+            if prev_reached is None:
+                conversion = 100.0 if reached else None
+            elif prev_reached == 0:
+                conversion = None
+            else:
+                conversion = round((reached or 0) / prev_reached * 100, 1)
+            prev_reached = reached or 0
+            reached_out: int | None = prev_reached
+            from_start = round(prev_reached / reached_first * 100, 1) if reached_first else None
+        else:
+            # lost/parked: не часть цепочки конверсии (ветвление, не прогресс), поэтому
+            # «Конверсия шага» и «Дошли до шага» для них не определены (`None`); «От старта, %»
+            # всё же считается — по числу сделок, попавших именно в этот статус (`entered`), от
+            # того же знаменателя, что и у основных шагов.
+            conversion = None
+            reached_out = None
+            from_start = round(entered / reached_first * 100, 1) if reached_first else None
+
+        rows.append(
+            [status.name, currently_in, entered, conversion, avg_days, reached_out, from_start]
+        )
+
+    return ReportDataset(
+        title="Воронка по статусам",
+        columns=columns,
+        rows=rows,
+        note=note,
+        data_as_of=data_as_of,
+    )
 
 
 # =============================================================================
@@ -520,20 +624,25 @@ async def build_deal_funnel(
 async def build_kam_summary(
     session: AsyncSession, principal: Principal, params: dict[str, Any]
 ) -> ReportDataset:
+    """B1-7 (BUG-5): «В работе» раньше считала всё, что не `won`/`lost` (`TERMINAL_TYPES` — по
+    замыслу «закрыта», `parked` туда намеренно не входит, см. докстринг `workflow.models`), то
+    есть включала и замороженные сделки. Теперь «В работе» — только `initial`/`intermediate`,
+    замороженные — отдельная колонка в конце (контракт первых пяти заголовков не меняется)."""
     filters = await _load_filters(session, principal, params)
     clause = await deal_scope_clause(session, principal)
     name_expr = func.coalesce(User.display_name, User.full_name)
-    terminal = [t.value for t in TERMINAL_TYPES]
+    in_progress_types = [StatusType.INITIAL.value, StatusType.INTERMEDIATE.value]
     stmt = (
         select(
             name_expr,
-            func.count(Deal.id).filter(WorkflowStatus.type.notin_(terminal)),
+            func.count(Deal.id).filter(WorkflowStatus.type.in_(in_progress_types)),
             func.count(Deal.id).filter(WorkflowStatus.type == StatusType.WON.value),
             func.count(Deal.id).filter(WorkflowStatus.type == StatusType.LOST.value),
             func.coalesce(
                 func.sum(Deal.amount).filter(WorkflowStatus.type == StatusType.WON.value), 0
             ),
             func.avg(Deal.closed_at - Deal.created_at).filter(Deal.closed_at.is_not(None)),
+            func.count(Deal.id).filter(WorkflowStatus.type == StatusType.PARKED.value),
         )
         .select_from(Deal)
         .join(User, User.id == Deal.owner_id)
@@ -555,12 +664,29 @@ async def build_kam_summary(
             lost_count,
             float(won_amount) if won_amount else 0.0,
             round(avg_cycle.total_seconds() / 86400, 1) if avg_cycle is not None else None,
+            frozen_count,
         ]
-        for name, open_count, won_count, lost_count, won_amount, avg_cycle in result
+        for (
+            name,
+            open_count,
+            won_count,
+            lost_count,
+            won_amount,
+            avg_cycle,
+            frozen_count,
+        ) in result
     ]
     return ReportDataset(
         title="Сводка по КАМам",
-        columns=["КАМ", "В работе", "Выиграно", "Проиграно", "Сумма выигранных", "Ср. цикл, дн."],
+        columns=[
+            "КАМ",
+            "В работе",
+            "Выиграно",
+            "Проиграно",
+            "Сумма выигранных",
+            "Ср. цикл, дн.",
+            "Заморожено",
+        ],
         rows=rows,
     )
 
@@ -659,17 +785,28 @@ async def build_loss_reasons(
 async def build_sla_compliance(
     session: AsyncSession, principal: Principal, params: dict[str, Any]
 ) -> ReportDataset:
+    """B1-7 (BUG-4): `apply_sla` (`crm.service`) обнуляет `sla_state` до `ok` при закрытии
+    сделки — раньше это завышало долю «В норме» на число закрытых сделок, у которых SLA
+    фактически уже не действует. Открытые и закрытые считаются раздельно: доли — только по
+    открытым (`closed_at IS NULL`), число закрытых в выборке — в `note`, без них самих в
+    знаменателе."""
     filters = await _load_filters(session, principal, params)
     clause = await deal_scope_clause(session, principal)
-    stmt = (
+    open_stmt = (
         select(Deal.sla_state, func.count(Deal.id))
-        .where(Deal.deleted_at.is_(None))
+        .where(Deal.deleted_at.is_(None), Deal.closed_at.is_(None))
         .group_by(Deal.sla_state)
     )
+    closed_stmt = select(func.count(Deal.id)).where(
+        Deal.deleted_at.is_(None), Deal.closed_at.is_not(None)
+    )
     if clause is not None:
-        stmt = stmt.where(clause)
-    stmt = _apply_deal_filters(stmt, filters)
-    result: dict[str, int] = {row[0]: row[1] for row in (await session.execute(stmt)).all()}
+        open_stmt = open_stmt.where(clause)
+        closed_stmt = closed_stmt.where(clause)
+    open_stmt = _apply_deal_filters(open_stmt, filters)
+    closed_stmt = _apply_deal_filters(closed_stmt, filters)
+    result: dict[str, int] = {row[0]: row[1] for row in (await session.execute(open_stmt)).all()}
+    closed_count = (await session.execute(closed_stmt)).scalar_one() or 0
     total = sum(result.values())
     labels = {
         "ok": "В норме",
@@ -683,7 +820,10 @@ async def build_sla_compliance(
         pct = round(count / total * 100, 1) if total else 0.0
         rows.append([labels.get(state, state), count, pct])
     return ReportDataset(
-        title="Соблюдение SLA", columns=["Состояние", "Сделок", "Доля, %"], rows=rows
+        title="Соблюдение SLA",
+        columns=["Состояние", "Сделок", "Доля, %"],
+        rows=rows,
+        note=f"Закрытых сделок в выборке: {closed_count}, SLA к ним не применяется",
     )
 
 
@@ -848,7 +988,10 @@ async def _stuck_deals_query(session: AsyncSession, principal: Principal, params
         .join(User, User.id == Deal.owner_id)
         .join(WorkflowStatus, WorkflowStatus.id == Deal.status_id)
         .outerjoin(Organization, Organization.id == Deal.organization_id)
-        .where(Deal.deleted_at.is_(None), Deal.sla_state == "breached")
+        # B1-7 (BUG-4), на всякий случай: `apply_sla` обнуляет `sla_state` при закрытии, так что
+        # закрытая сделка в норме не должна остаться "breached" — но явное условие защищает от
+        # любого исторического/краевого случая, когда это почему-то не так.
+        .where(Deal.deleted_at.is_(None), Deal.sla_state == "breached", Deal.closed_at.is_(None))
         .order_by(Deal.sla_due_at.asc())
     )
     if clause is not None:
