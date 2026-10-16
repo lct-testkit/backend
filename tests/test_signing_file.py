@@ -25,12 +25,28 @@ pytestmark = pytest.mark.skipif(
 PDF = b"%PDF-1.4 the contract to be signed"
 
 
+#: Ключи S3, запрошенные через `download_object_bytes` за время теста (B7-2: проверяет, какой
+#: именно файл запросил `load_document_pdf`, а не "что-то вернулось 200").
+_REQUESTED_KEYS: list[str] = []
+
+
 @pytest.fixture(autouse=True)
 def s3_returns_the_document(monkeypatch):
+    _REQUESTED_KEYS.clear()
+
     async def fake_download(*, bucket: str, key: str) -> bytes:
+        _REQUESTED_KEYS.append(key)
         return PDF
 
     monkeypatch.setattr("app.modules.signing.service.download_object_bytes", fake_download)
+
+
+async def _storage_key(file_id: uuid.UUID) -> str:
+    from app.core.db import session_scope
+    from app.modules.files.models import File
+
+    async with session_scope() as session:
+        return (await session.get(File, file_id)).storage_key
 
 
 def _external(client, **spec):
@@ -141,6 +157,106 @@ class TestInternalFile:
         assert parse_qs(urlparse(document["preview_url"]).query)[
             "response-content-disposition"
         ] == ["inline"]
+
+
+async def _document_file_id(document_id: uuid.UUID) -> uuid.UUID:
+    from app.core.db import session_scope
+    from app.modules.signing.models import SignatureDocument
+
+    async with session_scope() as session:
+        return (await session.get(SignatureDocument, document_id)).file_id
+
+
+class TestSignedVariant:
+    """B7-2 (BUG-24): после подписи `/file` отдаёт файл со штампом, а не исходник."""
+
+    def _scene(self, client, *, signed: bool):
+        signer = run(client, _make_user, "KAM")
+        built = _build(
+            client,
+            requests=[{"user": signer, "status": "signed" if signed else "sent"}],
+            status="signed" if signed else "pending",
+            with_results=signed,
+        )
+        _login(client, signer)
+        return signer, built
+
+    def test_before_signing_auto_variant_serves_the_original(self, client) -> None:
+        _, built = self._scene(client, signed=False)
+
+        response = client.get(f"/api/signature-requests/{built.request_ids[0]}/file")
+
+        assert response.status_code == 200, response.text
+        original_key = run(client, _storage_key, run(client, _document_file_id, built.document_id))
+        assert _REQUESTED_KEYS[-1] == original_key
+
+    def test_after_signing_auto_variant_serves_the_signed_file(self, client) -> None:
+        _, built = self._scene(client, signed=True)
+
+        response = client.get(f"/api/signature-requests/{built.request_ids[0]}/file")
+
+        assert response.status_code == 200, response.text
+        signed_key = run(client, _storage_key, built.signed_file_id)
+        assert _REQUESTED_KEYS[-1] == signed_key
+        assert "signed-" in response.headers["content-disposition"]
+
+    def test_explicit_original_variant_bypasses_the_signed_file(self, client) -> None:
+        _, built = self._scene(client, signed=True)
+
+        response = client.get(
+            f"/api/signature-requests/{built.request_ids[0]}/file?variant=original"
+        )
+
+        assert response.status_code == 200, response.text
+        original_key = run(client, _storage_key, run(client, _document_file_id, built.document_id))
+        assert _REQUESTED_KEYS[-1] == original_key
+
+    def test_protocol_variant_before_signing_is_not_signable(self, client) -> None:
+        _, built = self._scene(client, signed=False)
+
+        response = client.get(
+            f"/api/signature-requests/{built.request_ids[0]}/file?variant=protocol"
+        )
+
+        # DOCUMENT_NOT_SIGNABLE (как у protocol_download) — CRM-1505, 409, не 422.
+        assert response.status_code == 409, response.text
+        assert response.json()["code"] == "CRM-1505"
+
+    def test_protocol_variant_after_signing_serves_the_protocol(self, client) -> None:
+        _, built = self._scene(client, signed=True)
+
+        response = client.get(
+            f"/api/signature-requests/{built.request_ids[0]}/file?variant=protocol"
+        )
+
+        assert response.status_code == 200, response.text
+        protocol_key = run(client, _storage_key, built.protocol_file_id)
+        assert _REQUESTED_KEYS[-1] == protocol_key
+
+    def test_public_file_endpoint_also_prefers_the_signed_variant(self, client) -> None:
+        token = f"tok-{uuid.uuid4().hex}"
+        built = _build(
+            client,
+            requests=[{"user": None, "status": "signed", "token": token}],
+            status="signed",
+            with_results=True,
+        )
+
+        response = client.get(f"/public/sign/{token}/file")
+
+        assert response.status_code == 200, response.text
+        signed_key = run(client, _storage_key, built.signed_file_id)
+        assert _REQUESTED_KEYS[-1] == signed_key
+
+    def test_signing_page_preview_flags_and_url_point_at_the_signed_file(self, client) -> None:
+        signer, built = self._scene(client, signed=True)
+
+        response = client.post(f"/api/signature-requests/{built.request_ids[0]}/view")
+
+        assert response.status_code == 200, response.text
+        document = response.json()["document"]
+        assert document["is_signed"] is True
+        assert document["has_protocol"] is True
 
 
 def test_filename_with_cyrillic_is_encoded_for_the_header() -> None:

@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, Path, Query, Response, UploadFile, status
 from sqlalchemy import select
@@ -375,7 +375,10 @@ async def view_request(
     summary="PDF документа для просмотра (внутренний подписант)",
     description=(
         "PDF документа запроса с origin приложения: `inline`, без CORS и без ссылки на "
-        "хранилище. Только свой запрос. Роль: подписант."
+        "хранилище. По умолчанию (`variant=auto`) после подписи отдаёт файл со штампом, а "
+        "не исходник (B7-2); `variant=original` — всегда исходник; `variant=protocol` — "
+        "протокол подписания (только у подписанного документа, иначе `DOCUMENT_NOT_SIGNABLE`). "
+        "Только свой запрос. Роль: подписант."
     ),
     response_class=Response,
     responses={200: {"content": {"application/pdf": {}}}},
@@ -384,10 +387,11 @@ async def get_request_file(
     session: DbSession,
     principal: Annotated[Principal, Depends(require_permission(Permission.SIGNATURE_SIGN))],
     request_id: Annotated[uuid.UUID, Path()],
+    variant: Annotated[Literal["auto", "original", "protocol"], Query()] = "auto",
 ) -> Response:
     service = SignatureRequestService(session)
     request = await service.get_for_internal_signer(request_id, principal)
-    data, filename = await service.load_document_pdf(request)
+    data, filename = await service.load_document_pdf(request, variant=variant)
     return Response(
         content=data, media_type="application/pdf", headers=pdf_inline_headers(filename)
     )
