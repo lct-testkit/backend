@@ -30,6 +30,7 @@ IDEMPOTENT_OPERATIONS = {
     ("post", "/api/deals/{deal_id}/comments"),
     ("post", "/api/tasks"),
     ("post", "/api/attachments"),
+    ("post", "/api/organization-licenses"),
     ("post", "/api/v1/integrations/cms/leads"),
 }
 

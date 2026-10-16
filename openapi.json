@@ -6800,6 +6800,354 @@
         "title": "LearnerProfileUpdateRequest",
         "type": "object"
       },
+      "LicenseCreateRequest": {
+        "description": "B3-6: вендор и ПО принимаются либо ссылкой (`vendor_id`/`product_id`\n— существующая запись каталога), либо текстом (`vendor`/`product_name`\n— как раньше у импорта; сервис пытается найти единственное совпадение\nв каталоге тем же `catalog.license_matching.LicenseMatcher`, что и\nимпорт, но не создаёт недостающее автоматически, см. отчёт по эпику).\nНужно указать хотя бы одно из каждой пары — проверяется в сервисе\n(`ValidationError`, а не здесь: единый формат ошибки Problem Details).\n\n`transfer_status` — обычная строка, не `Literal`: сервис пропускает её\nчерез `catalog.license_values.parse_transfer_status`, который принимает\nи английские коды, и русские синонимы (B3-3) — тем же путём, что и\nимпорт, а не отдельной, более строгой проверкой на API.",
+        "properties": {
+          "comment": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Comment"
+          },
+          "contract_number": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contract Number"
+          },
+          "is_perpetual": {
+            "default": false,
+            "title": "Is Perpetual",
+            "type": "boolean"
+          },
+          "is_signed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Signed"
+          },
+          "license_signed_at": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "License Signed At"
+          },
+          "license_term_years": {
+            "anyOf": [
+              {
+                "maximum": 50.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "License Term Years"
+          },
+          "license_valid_until": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "License Valid Until"
+          },
+          "manager_full_name": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manager Full Name"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "product_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Id"
+          },
+          "product_name": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Name"
+          },
+          "responsible_contacts": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Responsible Contacts"
+          },
+          "transfer_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transfer Status"
+          },
+          "vendor": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vendor"
+          },
+          "vendor_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vendor Id"
+          }
+        },
+        "required": [
+          "organization_id"
+        ],
+        "title": "LicenseCreateRequest",
+        "type": "object"
+      },
+      "LicenseUpdateRequest": {
+        "description": "Все поля необязательны (PATCH); `organization_id` не редактируется —\nудалить и создать заново (см. задачу B3-6).",
+        "properties": {
+          "comment": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Comment"
+          },
+          "contract_number": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contract Number"
+          },
+          "is_perpetual": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Perpetual"
+          },
+          "is_signed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Signed"
+          },
+          "license_signed_at": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "License Signed At"
+          },
+          "license_term_years": {
+            "anyOf": [
+              {
+                "maximum": 50.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "License Term Years"
+          },
+          "license_valid_until": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "License Valid Until"
+          },
+          "manager_full_name": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manager Full Name"
+          },
+          "product_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Id"
+          },
+          "product_name": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Name"
+          },
+          "responsible_contacts": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Responsible Contacts"
+          },
+          "transfer_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transfer Status"
+          },
+          "vendor": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vendor"
+          },
+          "vendor_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vendor Id"
+          }
+        },
+        "title": "LicenseUpdateRequest",
+        "type": "object"
+      },
       "LogoutRequest": {
         "properties": {
           "local_only": {
@@ -8383,6 +8731,17 @@
               }
             ],
             "title": "Next Cursor"
+          },
+          "total": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total"
           }
         },
         "required": [
@@ -8405,8 +8764,15 @@
             "title": "Comment"
           },
           "contract_number": {
-            "title": "Contract Number",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contract Number"
           },
           "created_at": {
             "format": "date-time",
@@ -8417,6 +8783,22 @@
             "format": "uuid",
             "title": "Id",
             "type": "string"
+          },
+          "is_perpetual": {
+            "default": false,
+            "title": "Is Perpetual",
+            "type": "boolean"
+          },
+          "is_signed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Signed"
           },
           "license_signed_at": {
             "anyOf": [
@@ -8429,6 +8811,29 @@
               }
             ],
             "title": "License Signed At"
+          },
+          "license_term_years": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "License Term Years"
+          },
+          "license_valid_until": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "License Valid Until"
           },
           "license_valid_year": {
             "anyOf": [
@@ -8456,6 +8861,40 @@
             "format": "uuid",
             "title": "Organization Id",
             "type": "string"
+          },
+          "organization_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Organization Name"
+          },
+          "organization_short_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Organization Short Name"
+          },
+          "product_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Id"
           },
           "product_name": {
             "title": "Product Name",
@@ -8498,6 +8937,18 @@
             "title": "Vendor",
             "type": "string"
           },
+          "vendor_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vendor Id"
+          },
           "version": {
             "title": "Version",
             "type": "integer"
@@ -8508,7 +8959,6 @@
           "organization_id",
           "vendor",
           "product_name",
-          "contract_number",
           "version",
           "created_at",
           "updated_at"
@@ -14451,7 +14901,7 @@
     }
   },
   "info": {
-    "description": "\nБэкенд CRM ИТ Школы Ростелекома.\n\n**Соглашения (раздел 2 спецификации)**\n\n* Все ошибки — RFC 7807 Problem Details с внутренним кодом вида `CRM-XXYY`.\n* Идентификаторы — UUIDv7, в JSON строками.\n* Даты — ISO 8601 с часовым поясом, внутри хранятся и отдаются в UTC.\n* Деньги — строка `\"150000.00\"` плюс отдельное поле `currency`.\n* Списки — курсорная пагинация: `limit` (максимум 100) и непрозрачный `cursor`,\n  ответ содержит `items` и `next_cursor`.\n* Обновления — оптимистичная блокировка через `If-Match` и поле `version`.\n* `Idempotency-Key` (8–255 символов, действует внутри пользователя, хранится 24 часа)\n  принимают ручки создания сделки, организации, контакта, комментария, задачи и\n  вложения (`POST /api/deals`, `/api/organizations`, `/api/contacts`,\n  `/api/deals/{deal_id}/comments`, `/api/tasks`, `/api/attachments`) и вебхук\n  `POST /api/v1/integrations/cms/leads` (у вебхука обязателен). Повтор с тем же\n  ключом и телом возвращает сохранённый ответ, с другим телом — 409 CRM-1003.\n  Остальные ручки заголовок не читают: переход сделки защищён коротким\n  блокирующим локом, а не ключом.\n* `request_id` проходит через логи, аудит и тело ошибки, отдаётся в `X-Request-Id`.\n\n**Аутентификация**\n\n* Браузер — серверная сессия: httpOnly-cookie `crm_sid`; на POST/PUT/PATCH/DELETE\n  нужен ещё заголовок `X-CSRF-Token` со значением cookie `crm_csrf` (иначе 403 CRM-1107).\n* Сервисные вызовы — `Authorization: Bearer`; в prod так ходит только роль INTEGRATION.\n* Без аутентификации (`security: []`): `/health/*`, `/api/auth/*`, `/public/*`; вебхуки\n  `/api/v1/integrations/*` подписываются HMAC тела запроса (заголовок `X-Signature`).\n\n**Ошибки.** Каждая операция описывает 400/401/403/404/409/422/429/500 как\n`application/problem+json` со схемой `Problem`; 4xx/5xx вне этого списка (413, 503)\nтоже приходят в этом формате.\n",
+    "description": "\nБэкенд CRM ИТ Школы Ростелекома.\n\n**Соглашения (раздел 2 спецификации)**\n\n* Все ошибки — RFC 7807 Problem Details с внутренним кодом вида `CRM-XXYY`.\n* Идентификаторы — UUIDv7, в JSON строками.\n* Даты — ISO 8601 с часовым поясом, внутри хранятся и отдаются в UTC.\n* Деньги — строка `\"150000.00\"` плюс отдельное поле `currency`.\n* Списки — курсорная пагинация: `limit` (максимум 100) и непрозрачный `cursor`,\n  ответ содержит `items` и `next_cursor`.\n* Обновления — оптимистичная блокировка через `If-Match` и поле `version`.\n* `Idempotency-Key` (8–255 символов, действует внутри пользователя, хранится 24 часа)\n  принимают ручки создания сделки, организации, контакта, комментария, задачи,\n  вложения и лицензии (`POST /api/deals`, `/api/organizations`, `/api/contacts`,\n  `/api/deals/{deal_id}/comments`, `/api/tasks`, `/api/attachments`,\n  `/api/organization-licenses`) и вебхук `POST /api/v1/integrations/cms/leads`\n  (у вебхука обязателен). Повтор с тем же ключом и телом возвращает сохранённый\n  ответ, с другим телом — 409 CRM-1003. Остальные ручки заголовок не читают:\n  переход сделки защищён коротким блокирующим локом, а не ключом.\n* `request_id` проходит через логи, аудит и тело ошибки, отдаётся в `X-Request-Id`.\n\n**Аутентификация**\n\n* Браузер — серверная сессия: httpOnly-cookie `crm_sid`; на POST/PUT/PATCH/DELETE\n  нужен ещё заголовок `X-CSRF-Token` со значением cookie `crm_csrf` (иначе 403 CRM-1107).\n* Сервисные вызовы — `Authorization: Bearer`; в prod так ходит только роль INTEGRATION.\n* Без аутентификации (`security: []`): `/health/*`, `/api/auth/*`, `/public/*`; вебхуки\n  `/api/v1/integrations/*` подписываются HMAC тела запроса (заголовок `X-Signature`).\n\n**Ошибки.** Каждая операция описывает 400/401/403/404/409/422/429/500 как\n`application/problem+json` со схемой `Problem`; 4xx/5xx вне этого списка (413, 503)\nтоже приходят в этом формате.\n",
     "title": "CRM ИТ Школы Ростелекома — API",
     "version": "0.1.0"
   },
@@ -27399,7 +27849,7 @@
     },
     "/api/organization-licenses": {
       "get": {
-        "description": "Фильтр: organization_id. Только организации из скоупа вызывающего (KAM/HEAD — свои и по своим сделкам, ADMIN — все). Роль: чтение каталога.",
+        "description": "Фильтры: organization_id, vendor_id, product_id, transfer_status (можно несколько раз), is_signed, year (лицензия действует в этом году), signed_year, q (поиск по вузу, вендору, ПО, номеру договора). `with_total=true` добавляет точное число строк (отдельный COUNT-запрос). Только организации из скоупа вызывающего (KAM/HEAD — свои и по своим сделкам, ADMIN — все). Роль: чтение каталога.",
         "operationId": "list_organization_licenses_api_organization_licenses_get",
         "parameters": [
           {
@@ -27417,6 +27867,133 @@
                 }
               ],
               "title": "Organization Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "vendor_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Vendor Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "product_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Product Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "transfer_status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Transfer Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "is_signed",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Is Signed"
+            }
+          },
+          {
+            "in": "query",
+            "name": "year",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Year"
+            }
+          },
+          {
+            "in": "query",
+            "name": "signed_year",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Signed Year"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          },
+          {
+            "in": "query",
+            "name": "with_total",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "With Total",
+              "type": "boolean"
             }
           },
           {
@@ -27495,9 +28072,178 @@
         "tags": [
           "organization-licenses"
         ]
+      },
+      "post": {
+        "description": "Вендор и ПО — либо ссылкой (vendor_id/product_id из каталога), либо текстом (vendor/product_name: сервис пытается найти однозначное совпадение, не находит — сохраняет как текст без ссылки). Дубль составного ключа (вуз, вендор, ПО, номер договора) — 409 CRM-1301 с license_id существующей записи. transfer_status принимает английские коды и русские синонимы (BUG-10). Поддерживает Idempotency-Key. Роль: license:write (KAM — по своим вузам).",
+        "operationId": "create_organization_license_api_organization_licenses_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "description": "Ключ идемпотентности, 8–255 символов. Повтор с тем же ключом и телом возвращает сохранённый ответ, с другим телом — 409 CRM-1003. Действует в пределах пользователя, хранится 24 часа.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LicenseCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationLicenseOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Создать лицензию/договор",
+        "tags": [
+          "organization-licenses"
+        ]
       }
     },
     "/api/organization-licenses/{license_id}": {
+      "delete": {
+        "description": "Мягкое удаление. Роль: license:delete (HEAD, ADMIN).",
+        "operationId": "delete_organization_license_api_organization_licenses__license_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "license_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "License Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Удалить лицензию/договор",
+        "tags": [
+          "organization-licenses"
+        ]
+      },
       "get": {
         "operationId": "get_organization_license_api_organization_licenses__license_id__get",
         "parameters": [
@@ -27559,6 +28305,113 @@
           }
         },
         "summary": "Карточка лицензии/договора",
+        "tags": [
+          "organization-licenses"
+        ]
+      },
+      "patch": {
+        "description": "`organization_id` не редактируется — удалить и создать заново. Смена вендора/ПО/номера договора, приводящая к дублю ключа у другой записи, — 409 CRM-1301. Роль: license:write (KAM — по своим вузам).",
+        "operationId": "update_organization_license_api_organization_licenses__license_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "license_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "License Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LicenseUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationLicenseOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Изменить лицензию/договор",
         "tags": [
           "organization-licenses"
         ]
