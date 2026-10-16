@@ -124,9 +124,12 @@ async def _state(workflow_id: uuid.UUID) -> dict[str, Any]:
         }
 
 
-async def _add_exit_from_parked(workflow_id: uuid.UUID, publish: bool) -> None:
-    """Выход `parked → identification`, заведённый администратором: в черновик и, при `publish`,
-    ещё и в снимок."""
+async def _add_exit_from_parked(
+    workflow_id: uuid.UUID, publish: bool, *, target_code: str
+) -> None:
+    """Выход `parked → target_code`, заведённый администратором: в черновик и, при `publish`,
+    ещё и в снимок. B2-4: `target_code` приходит от вызывающего кода спеки (`spec.statuses[0]
+    .code`), а не зашит в тексте теста — иначе тест был бы завязан на код старой воронки v1."""
     from sqlalchemy import select
 
     from app.core.db import session_scope
@@ -145,7 +148,7 @@ async def _add_exit_from_parked(workflow_id: uuid.UUID, publish: bool) -> None:
         row = WorkflowTransition(
             workflow_id=workflow_id,
             from_status_id=statuses["parked"].id,
-            to_status_id=statuses["identification"].id,
+            to_status_id=statuses[target_code].id,
             name="Свой выход",
             sort_order=1,
         )
@@ -205,22 +208,23 @@ class TestBackfillResumeTransitions:
 
     def test_an_exit_configured_by_an_administrator_is_respected(self, client) -> None:
         old, full, _ = _specs("_b2b_spec")
+        first_step = full.statuses[0].code
         workflow_id = run(client, _seed, old)
-        run(client, _add_exit_from_parked, workflow_id, True)
+        run(client, _add_exit_from_parked, workflow_id, True, target_code=first_step)
         before = run(client, _state, workflow_id)
 
         added = run(client, _reseed, full, workflow_id)
 
         assert added == 0
         assert run(client, _state, workflow_id) == before
-        assert before["snapshot_exits"] == ["identification"]
+        assert before["snapshot_exits"] == [first_step]
 
     def test_an_exit_only_in_the_draft_is_not_published_behind_the_admins_back(
         self, client
     ) -> None:
         old, full, _ = _specs("_b2b_spec")
         workflow_id = run(client, _seed, old)
-        run(client, _add_exit_from_parked, workflow_id, False)
+        run(client, _add_exit_from_parked, workflow_id, False, target_code=full.statuses[0].code)
         before = run(client, _state, workflow_id)
 
         added = run(client, _reseed, full, workflow_id)
@@ -278,6 +282,7 @@ class TestFrozenDealsCanResume:
         from app.modules.workflow.models import WorkflowStatus
 
         old, full, _ = _specs("_b2b_spec")
+        first_step = full.statuses[0].code
         workflow_id = run(client, _seed, old)
         login(client, "ADMIN")
         deal = create_deal(client, str(workflow_id))
@@ -300,7 +305,7 @@ class TestFrozenDealsCanResume:
                 )
 
         run(client, freeze)
-        first_step = run(client, status_id, "identification")
+        first_step = run(client, status_id, first_step)
 
         def available() -> list[str]:
             response = client.get(f"/api/deals/{deal['id']}/available-transitions")
