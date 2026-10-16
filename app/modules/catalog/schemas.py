@@ -635,26 +635,46 @@ class OrganizationLicenseOut(BaseModel):
 
     id: uuid.UUID
     organization_id: uuid.UUID
+    # B3-6 (BUG-12): название вуза — раньше выдача лицензии требовала
+    # отдельного запроса на организацию, чтобы узнать, чей это договор.
+    organization_name: str | None = None
+    organization_short_name: str | None = None
     vendor: str
+    vendor_id: uuid.UUID | None = None
     product_name: str
-    contract_number: str
+    product_id: uuid.UUID | None = None
+    contract_number: str | None = None
     license_signed_at: dt.date | None = None
     license_valid_year: int | None = None
     transfer_status: TransferStatusLiteral | None = None
     manager_full_name: str | None = None
     responsible_contacts: str | None = None
     comment: str | None = None
+    # B3-3: разобранные значения «Подписание лицензии» / «Срок действия».
+    is_signed: bool | None = None
+    license_term_years: int | None = None
+    license_valid_until: dt.date | None = None
+    is_perpetual: bool = False
     version: int
     created_at: dt.datetime
     updated_at: dt.datetime
 
     @classmethod
-    def from_model(cls, license_: Any, *, reveal: bool) -> OrganizationLicenseOut:
+    def from_model(
+        cls,
+        license_: Any,
+        *,
+        reveal: bool,
+        organization_name: str | None = None,
+        organization_short_name: str | None = None,
+    ) -> OrganizationLicenseOut:
         """ФИО менеджера и «ответственные от вуза» — персональные данные из исходного xls. Без
         права `contact:reveal` они отдаются маскированными: инициалами вместо ФИО, email и
         телефоны по своим форматам (`mask_contacts_text`). Раскрытие остальным — через обычный
         `reveal` контактов, где оно попадает в аудит."""
         out = cls.model_validate(license_)
+        out.organization_name = organization_name
+        out.organization_short_name = organization_short_name
         if not reveal:
             out.manager_full_name = mask_name(license_.manager_full_name)
             out.responsible_contacts = mask_contacts_text(license_.responsible_contacts)
@@ -664,6 +684,59 @@ class OrganizationLicenseOut(BaseModel):
 class OrganizationLicenseListResponse(BaseModel):
     items: list[OrganizationLicenseOut]
     next_cursor: str | None = None
+    # B3-6: только когда запрошен `with_total=true` (доп. COUNT-запрос).
+    total: int | None = None
+
+
+class LicenseCreateRequest(BaseModel):
+    """B3-6: вендор и ПО принимаются либо ссылкой (`vendor_id`/`product_id`
+    — существующая запись каталога), либо текстом (`vendor`/`product_name`
+    — как раньше у импорта; сервис пытается найти единственное совпадение
+    в каталоге тем же `catalog.license_matching.LicenseMatcher`, что и
+    импорт, но не создаёт недостающее автоматически, см. отчёт по эпику).
+    Нужно указать хотя бы одно из каждой пары — проверяется в сервисе
+    (`ValidationError`, а не здесь: единый формат ошибки Problem Details).
+
+    `transfer_status` — обычная строка, не `Literal`: сервис пропускает её
+    через `catalog.license_values.parse_transfer_status`, который принимает
+    и английские коды, и русские синонимы (B3-3) — тем же путём, что и
+    импорт, а не отдельной, более строгой проверкой на API."""
+
+    organization_id: uuid.UUID
+    vendor_id: uuid.UUID | None = None
+    vendor: NonEmptyStr | None = Field(default=None, max_length=255)
+    product_id: uuid.UUID | None = None
+    product_name: NonEmptyStr | None = Field(default=None, max_length=255)
+    contract_number: str | None = Field(default=None, max_length=128)
+    is_signed: bool | None = None
+    license_signed_at: dt.date | None = None
+    license_term_years: int | None = Field(default=None, ge=1, le=50)
+    license_valid_until: dt.date | None = None
+    is_perpetual: bool = False
+    transfer_status: str | None = None
+    manager_full_name: str | None = Field(default=None, max_length=255)
+    responsible_contacts: str | None = None
+    comment: str | None = None
+
+
+class LicenseUpdateRequest(BaseModel):
+    """Все поля необязательны (PATCH); `organization_id` не редактируется —
+    удалить и создать заново (см. задачу B3-6)."""
+
+    vendor_id: uuid.UUID | None = None
+    vendor: NonEmptyStr | None = Field(default=None, max_length=255)
+    product_id: uuid.UUID | None = None
+    product_name: NonEmptyStr | None = Field(default=None, max_length=255)
+    contract_number: str | None = Field(default=None, max_length=128)
+    is_signed: bool | None = None
+    license_signed_at: dt.date | None = None
+    license_term_years: int | None = Field(default=None, ge=1, le=50)
+    license_valid_until: dt.date | None = None
+    is_perpetual: bool | None = None
+    transfer_status: str | None = None
+    manager_full_name: str | None = Field(default=None, max_length=255)
+    responsible_contacts: str | None = None
+    comment: str | None = None
 
 
 # =============================================================================

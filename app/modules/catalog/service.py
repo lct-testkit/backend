@@ -19,6 +19,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import ColumnElement, Select, delete, exists, false, func, or_, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependents import restrict_dependents
@@ -30,6 +31,7 @@ from app.core.errors import (
     ValidationError,
     VersionConflictError,
 )
+from app.core.masking import mask_contacts_text, mask_name
 from app.core.normalize import clean_text, company_key, name_key, normalize_email, normalize_phone
 from app.core.optimistic import claim_version
 from app.core.security import Principal
@@ -38,6 +40,9 @@ from app.modules.audit.service import AuditService, defer_denied_audit
 from app.modules.catalog import learner
 from app.modules.catalog.custom_fields import validate_custom_fields
 from app.modules.catalog.drift import drift_new_value
+from app.modules.catalog.license_keys import LicenseKey
+from app.modules.catalog.license_matching import LicenseMatcher
+from app.modules.catalog.license_values import parse_transfer_status
 from app.modules.catalog.models import (
     Contact,
     ContactChannel,
@@ -49,6 +54,7 @@ from app.modules.catalog.models import (
     LossReason,
     Organization,
     OrganizationLicense,
+    OrgType,
     Product,
     Region,
 )
@@ -2148,21 +2154,38 @@ def region_list_query() -> Select[tuple[Region]]:
 
 
 # =============================================================================
-# Лицензии/договоры вуз↔вендор↔ПО (П3, rtk_requiriments.md разд. 4, Треб.1)
+# Лицензии/договоры вуз↔вендор↔ПО (rtk_requiriments.md разд. 4, Треб.1; B3-6)
 #
-# Только чтение здесь: единственный путь записи — импорт (`imports.service`,
-# entity_type='license'), у ручки нет отдельных create/update/delete —
-# карточка организации показывает уже загруженное, полноценный экран
-# управления не входит в этот минимум (см. отчёт по П3).
+# До B3-6 была только читалка (единственный путь записи — импорт,
+# `imports.service`, `entity_type='license'`). Эта задача добавляет
+# create/update/delete: KAM — по своим вузам (`license:write`), удаление —
+# HEAD/ADMIN (`license:delete`); аудит и составной ключ (B3-1) общие с
+# импортом.
 # =============================================================================
+
+
+@dataclass(slots=True)
+class LicenseFilters:
+    organization_id: uuid.UUID | None = None
+    vendor_id: uuid.UUID | None = None
+    product_id: uuid.UUID | None = None
+    transfer_statuses: tuple[str, ...] = ()
+    is_signed: bool | None = None
+    # Лицензия действует в этом календарном году: подписана не позже
+    # 31.12.year (или дата подписания не указана) и либо бессрочна, либо
+    # действует до не раньше 01.01.year (или срок окончания не указан).
+    year: int | None = None
+    signed_year: int | None = None
+    q: str | None = None
 
 
 class OrganizationLicenseService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+        self._audit = AuditService(session)
 
     async def list_query(
-        self, principal: Principal, *, organization_id: uuid.UUID | None = None
+        self, principal: Principal, filters: LicenseFilters
     ) -> Select[tuple[OrganizationLicense]]:
         """Лицензии только организаций из скоупа вызывающего. Раньше хватало права на чтение
         каталога, и любой KAM/HEAD читал договоры (с именами менеджеров) всех вузов."""
@@ -2172,9 +2195,68 @@ class OrganizationLicenseService:
             stmt = stmt.where(
                 OrganizationLicense.organization_id.in_(select(Organization.id).where(clause))
             )
-        if organization_id is not None:
-            stmt = stmt.where(OrganizationLicense.organization_id == organization_id)
+        if filters.organization_id is not None:
+            stmt = stmt.where(OrganizationLicense.organization_id == filters.organization_id)
+        if filters.vendor_id is not None:
+            stmt = stmt.where(OrganizationLicense.vendor_id == filters.vendor_id)
+        if filters.product_id is not None:
+            stmt = stmt.where(OrganizationLicense.product_id == filters.product_id)
+        if filters.transfer_statuses:
+            stmt = stmt.where(OrganizationLicense.transfer_status.in_(filters.transfer_statuses))
+        if filters.is_signed is not None:
+            stmt = stmt.where(OrganizationLicense.is_signed == filters.is_signed)
+        if filters.year is not None:
+            year_start = dt.date(filters.year, 1, 1)
+            year_end = dt.date(filters.year, 12, 31)
+            stmt = stmt.where(
+                OrganizationLicense.license_signed_at.is_(None)
+                | (OrganizationLicense.license_signed_at <= year_end)
+            ).where(
+                OrganizationLicense.is_perpetual.is_(True)
+                | OrganizationLicense.license_valid_until.is_(None)
+                | (OrganizationLicense.license_valid_until >= year_start)
+            )
+        if filters.signed_year is not None:
+            stmt = stmt.where(
+                OrganizationLicense.license_signed_at.between(
+                    dt.date(filters.signed_year, 1, 1), dt.date(filters.signed_year, 12, 31)
+                )
+            )
+        if filters.q:
+            pattern = f"%{filters.q.strip()}%"
+            org_ids = select(Organization.id).where(
+                Organization.name.ilike(pattern) | Organization.short_name.ilike(pattern)
+            )
+            stmt = stmt.where(
+                OrganizationLicense.vendor.ilike(pattern)
+                | OrganizationLicense.product_name.ilike(pattern)
+                | OrganizationLicense.contract_number.ilike(pattern)
+                | OrganizationLicense.organization_id.in_(org_ids)
+            )
         return stmt
+
+    async def count(self, principal: Principal, filters: LicenseFilters) -> int:
+        stmt = (await self.list_query(principal, filters)).with_only_columns(
+            func.count(OrganizationLicense.id)
+        )
+        return int(await self._session.scalar(stmt) or 0)
+
+    async def organization_names(
+        self, licenses: Iterable[OrganizationLicense]
+    ) -> dict[uuid.UUID, tuple[str, str | None]]:
+        """Название (и краткое название) вуза для выдачи (BUG-12): один
+        запрос на всю страницу, как `ProductService.vendor_names`."""
+        org_ids = {lic.organization_id for lic in licenses}
+        if not org_ids:
+            return {}
+        rows = (
+            await self._session.execute(
+                select(Organization.id, Organization.name, Organization.short_name).where(
+                    Organization.id.in_(org_ids)
+                )
+            )
+        ).all()
+        return {row.id: (row.name, row.short_name) for row in rows}
 
     async def get_or_404(self, license_id: uuid.UUID, principal: Principal) -> OrganizationLicense:
         license_ = await self._session.get(OrganizationLicense, license_id)
@@ -2193,3 +2275,275 @@ class OrganizationLicenseService:
             )
             raise NotFoundError("Лицензия", license_id)
         return license_
+
+    async def _require_organization_in_scope(
+        self, organization_id: uuid.UUID, principal: Principal
+    ) -> Organization:
+        organization = await self._session.get(Organization, organization_id)
+        if organization is None or organization.deleted_at is not None:
+            raise NotFoundError("Организация", organization_id)
+        if not await organization_in_scope(self._session, principal, organization):
+            defer_denied_audit(
+                self._session,
+                entity_type="organization",
+                entity_id=organization_id,
+                reason="out_of_scope",
+            )
+            raise NotFoundError("Организация", organization_id)
+        return organization
+
+    async def _resolve_vendor(
+        self, vendor_id: uuid.UUID | None, vendor_text: str | None
+    ) -> tuple[str, uuid.UUID | None]:
+        """B3-4: ссылка — проверяется (`org_type='company'`, не удалена);
+        текст — ищется тем же `LicenseMatcher`, что импорт (без
+        автосоздания, см. докстринг `LicenseCreateRequest`)."""
+        if vendor_id is not None:
+            organization = await self._session.get(Organization, vendor_id)
+            if (
+                organization is None
+                or organization.deleted_at is not None
+                or organization.org_type != OrgType.COMPANY.value
+            ):
+                raise NotFoundError("Вендор", vendor_id)
+            return (clean_text(vendor_text) or organization.name), vendor_id
+        text = clean_text(vendor_text)
+        if text is None:
+            raise ValidationError(
+                "Укажите вендора",
+                [FieldError(field="vendor", reason="укажите vendor_id или vendor")],
+            )
+        match = await LicenseMatcher(self._session).match_vendor(text)
+        return text, (match.entity.id if match.is_unique and match.entity else None)
+
+    async def _resolve_product(
+        self, product_id: uuid.UUID | None, product_text: str | None, vendor_id: uuid.UUID | None
+    ) -> tuple[str, uuid.UUID | None]:
+        if product_id is not None:
+            product = await self._session.get(Product, product_id)
+            if product is None or product.deleted_at is not None or product.kind != "software":
+                raise NotFoundError("ПО", product_id)
+            return (clean_text(product_text) or product.name), product_id
+        text = clean_text(product_text)
+        if text is None:
+            raise ValidationError(
+                "Укажите ПО",
+                [FieldError(field="product_name", reason="укажите product_id или product_name")],
+            )
+        match = await LicenseMatcher(self._session).match_software(text, vendor_id=vendor_id)
+        return text, (match.entity.id if match.is_unique and match.entity else None)
+
+    def _resolve_transfer_status(self, raw: str | None) -> str | None:
+        if not raw:
+            return None
+        status, error = parse_transfer_status(raw)
+        if error:
+            raise ValidationError(error, [FieldError(field="transfer_status", reason=error)])
+        return status
+
+    async def _find_by_key(self, key: LicenseKey) -> OrganizationLicense | None:
+        return await self._session.scalar(
+            select(OrganizationLicense).where(
+                OrganizationLicense.organization_id == key.organization_id,
+                OrganizationLicense.vendor_key == key.vendor_key,
+                OrganizationLicense.product_key == key.product_key,
+                OrganizationLicense.contract_key == key.contract_key,
+                OrganizationLicense.deleted_at.is_(None),
+            )
+        )
+
+    def _masked_changes(
+        self, before: dict[str, Any], after: dict[str, Any]
+    ) -> dict[str, dict[str, Any]]:
+        """ФИО менеджера и «ответственные от вуза» — ПДн из формы/файла
+        (см. `OrganizationLicenseOut.from_model`): журнал аудита хранит их
+        маскированными, а не как есть."""
+        changes: dict[str, dict[str, Any]] = {}
+        for field_name, new_value in after.items():
+            old_value = before.get(field_name)
+            old_cmp, new_cmp = _json_safe(old_value), _json_safe(new_value)
+            if old_cmp == new_cmp:
+                continue
+            if field_name == "manager_full_name":
+                old_cmp, new_cmp = mask_name(old_cmp), mask_name(new_cmp)
+            elif field_name == "responsible_contacts":
+                old_cmp, new_cmp = mask_contacts_text(old_cmp), mask_contacts_text(new_cmp)
+            changes[field_name] = {"old": old_cmp, "new": new_cmp}
+        return changes
+
+    async def create(self, principal: Principal, payload: Any) -> OrganizationLicense:
+        organization = await self._require_organization_in_scope(payload.organization_id, principal)
+        vendor_text, vendor_id = await self._resolve_vendor(payload.vendor_id, payload.vendor)
+        product_text, product_id = await self._resolve_product(
+            payload.product_id, payload.product_name, vendor_id
+        )
+        transfer_status = self._resolve_transfer_status(payload.transfer_status)
+        contract_number = clean_text(payload.contract_number)
+
+        key = LicenseKey.build(
+            organization.id,
+            vendor=vendor_text,
+            product_name=product_text,
+            contract_number=contract_number,
+        )
+        existing = await self._find_by_key(key)
+        if existing is not None:
+            raise AppError(
+                ErrorCode.DUPLICATE,
+                "Лицензия с таким вузом, вендором, ПО и номером договора уже существует",
+                extra={"license_id": str(existing.id)},
+            )
+
+        license_ = OrganizationLicense(
+            organization_id=organization.id,
+            vendor=vendor_text,
+            vendor_id=vendor_id,
+            product_name=product_text,
+            product_id=product_id,
+            contract_number=contract_number,
+            vendor_key=key.vendor_key,
+            product_key=key.product_key,
+            contract_key=key.contract_key,
+            is_signed=payload.is_signed,
+            license_signed_at=payload.license_signed_at,
+            license_term_years=payload.license_term_years,
+            license_valid_until=payload.license_valid_until,
+            is_perpetual=payload.is_perpetual,
+            transfer_status=transfer_status,
+            manager_full_name=payload.manager_full_name,
+            responsible_contacts=payload.responsible_contacts,
+            comment=payload.comment,
+        )
+        try:
+            async with self._session.begin_nested():
+                self._session.add(license_)
+                await self._session.flush()
+        except IntegrityError:
+            # Гонка: другой запрос создал ту же запись между проверкой выше и этим flush
+            # (тот же приём, что `catalog.lookup.ProductIndex.create`).
+            raced = await self._find_by_key(key)
+            raise AppError(
+                ErrorCode.DUPLICATE,
+                "Лицензия с таким вузом, вендором, ПО и номером договора уже существует",
+                extra={"license_id": str(raced.id) if raced is not None else None},
+            ) from None
+
+        created_fields = {
+            field_name: getattr(license_, field_name) for field_name in self._TRACKED_FIELDS
+        }
+        created_fields["organization_id"] = license_.organization_id
+        await self._audit.record(
+            AuditAction.LICENSE_CREATED,
+            entity_type="organization_license",
+            entity_id=license_.id,
+            changes=self._masked_changes({}, created_fields),
+        )
+        return license_
+
+    # Полный список простых полей, которые отслеживаются для версии/аудита (кроме
+    # vendor/product_name/contract_number — у них особая обработка ниже, тоже входят в diff).
+    _TRACKED_FIELDS: tuple[str, ...] = (
+        "vendor",
+        "product_name",
+        "contract_number",
+        "transfer_status",
+        "manager_full_name",
+        "responsible_contacts",
+        "is_signed",
+        "license_signed_at",
+        "license_term_years",
+        "license_valid_until",
+        "is_perpetual",
+        "comment",
+    )
+
+    async def update(
+        self, license_: OrganizationLicense, payload: Any, *, expected_version: int
+    ) -> OrganizationLicense:
+        if license_.version != expected_version:
+            raise VersionConflictError(license_.version, {"vendor": license_.vendor})
+
+        data = payload.model_dump(exclude_unset=True)
+        # ВСЕ отслеживаемые поля, а не только часть: иначе правка, скажем, одного `comment`
+        # не попадала бы в `changes` — версия не росла бы и запись не шла бы в аудит, хотя
+        # значение в БД уже поменялось (баг, найденный тестом `test_update_comment_bumps_version`).
+        before = {field_name: getattr(license_, field_name) for field_name in self._TRACKED_FIELDS}
+
+        vendor_id = license_.vendor_id
+        if "vendor_id" in data or "vendor" in data:
+            new_vendor_id = data.get("vendor_id", license_.vendor_id)
+            new_vendor_text = data.get("vendor", license_.vendor)
+            vendor_text, vendor_id = await self._resolve_vendor(new_vendor_id, new_vendor_text)
+            license_.vendor = vendor_text
+            license_.vendor_id = vendor_id
+        if "product_id" in data or "product_name" in data:
+            new_product_id = data.get("product_id", license_.product_id)
+            new_product_text = data.get("product_name", license_.product_name)
+            product_text, product_id = await self._resolve_product(
+                new_product_id, new_product_text, vendor_id
+            )
+            license_.product_name = product_text
+            license_.product_id = product_id
+        if "contract_number" in data:
+            license_.contract_number = clean_text(data["contract_number"])
+        if "transfer_status" in data:
+            license_.transfer_status = self._resolve_transfer_status(data["transfer_status"])
+        for field_name in (
+            "is_signed",
+            "license_signed_at",
+            "license_term_years",
+            "license_valid_until",
+            "is_perpetual",
+            "manager_full_name",
+            "responsible_contacts",
+            "comment",
+        ):
+            if field_name in data:
+                setattr(license_, field_name, data[field_name])
+
+        key = LicenseKey.build(
+            license_.organization_id,
+            vendor=license_.vendor,
+            product_name=license_.product_name,
+            contract_number=license_.contract_number,
+        )
+        if (
+            key.vendor_key != license_.vendor_key
+            or key.product_key != license_.product_key
+            or key.contract_key != license_.contract_key
+        ):
+            conflict = await self._find_by_key(key)
+            if conflict is not None and conflict.id != license_.id:
+                raise AppError(
+                    ErrorCode.DUPLICATE,
+                    "Лицензия с таким вузом, вендором, ПО и номером договора уже существует",
+                    extra={"license_id": str(conflict.id)},
+                )
+            license_.vendor_key = key.vendor_key
+            license_.product_key = key.product_key
+            license_.contract_key = key.contract_key
+
+        after = {field_name: getattr(license_, field_name) for field_name in self._TRACKED_FIELDS}
+        changes = self._masked_changes(before, after)
+        if not changes:
+            return license_
+        license_.version += 1
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.LICENSE_UPDATED,
+            entity_type="organization_license",
+            entity_id=license_.id,
+            changes=changes,
+        )
+        return license_
+
+    async def delete(self, license_: OrganizationLicense) -> None:
+        license_.deleted_at = dt.datetime.now(dt.UTC)
+        license_.version += 1
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.LICENSE_DELETED,
+            entity_type="organization_license",
+            entity_id=license_.id,
+            changes={"deleted": {"old": False, "new": True}},
+        )

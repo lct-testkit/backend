@@ -43,6 +43,12 @@ class Permission(StrEnum):
     # --- Каталоги ---
     CATALOG_READ = "catalog:read"
     CATALOG_WRITE = "catalog:write"
+    # B3-6: лицензии вуз-вендор-ПО были read-only через catalog:read; запись
+    # и удаление — отдельные права (KAM пишет лицензии своих вузов, но не
+    # должен уметь их удалять без HEAD/ADMIN — тот же приём, что
+    # ORG_RESTORE отделён от ORG_WRITE).
+    LICENSE_WRITE = "license:write"
+    LICENSE_DELETE = "license:delete"
 
     # --- Воронки ---
     WORKFLOW_READ = "workflow:read"
@@ -122,6 +128,7 @@ _KAM: frozenset[Permission] = frozenset(
         Permission.CONTACT_WRITE,
         Permission.CONTACT_REVEAL,
         Permission.CATALOG_READ,
+        Permission.LICENSE_WRITE,
         Permission.WORKFLOW_READ,
         Permission.FILE_UPLOAD,
         Permission.FILE_DOWNLOAD,
@@ -140,6 +147,7 @@ _HEAD: frozenset[Permission] = _KAM | {
     Permission.DEAL_REASSIGN,
     Permission.DEAL_REASSIGN_BULK,
     Permission.ORG_RESTORE,
+    Permission.LICENSE_DELETE,
     Permission.AUDIT_READ,
     Permission.SIGNATURE_VOID,
     Permission.FILE_DELETE,

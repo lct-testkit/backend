@@ -51,6 +51,8 @@ from app.modules.catalog.schemas import (
     LearnerProfileOut,
     LearnerProfileRevealOut,
     LearnerProfileUpdateRequest,
+    LicenseCreateRequest,
+    LicenseUpdateRequest,
     LossReasonCreateRequest,
     LossReasonListResponse,
     LossReasonOut,
@@ -81,6 +83,7 @@ from app.modules.catalog.service import (
     DirectionService,
     HolidayService,
     LearnerProfileService,
+    LicenseFilters,
     LossReasonService,
     OrganizationFilters,
     OrganizationLicenseService,
@@ -113,6 +116,8 @@ ContactWrite = Annotated[Principal, Depends(require_permission(Permission.CONTAC
 ContactReveal = Annotated[Principal, Depends(require_permission(Permission.CONTACT_REVEAL))]
 CatalogRead = Annotated[Principal, Depends(require_permission(Permission.CATALOG_READ))]
 CatalogWrite = Annotated[Principal, Depends(require_permission(Permission.CATALOG_WRITE))]
+LicenseWrite = Annotated[Principal, Depends(require_permission(Permission.LICENSE_WRITE))]
+LicenseDelete = Annotated[Principal, Depends(require_permission(Permission.LICENSE_DELETE))]
 
 
 # =============================================================================
@@ -1036,19 +1041,34 @@ async def list_regions(session: DbSession, principal: CatalogRead) -> RegionList
 
 
 # =============================================================================
-# Лицензии/договоры вуз↔вендор↔ПО (П3, rtk_requiriments.md разд. 4, Треб.1)
+# Лицензии/договоры вуз↔вендор↔ПО (rtk_requiriments.md разд. 4, Треб.1; B3-6)
 #
-# Только чтение: загружаются через POST /api/imports (entity_type='license'),
-# см. `imports.router`. Достаточно для показа на карточке организации —
-# отдельного экрана управления в этом минимуме нет (см. отчёт по П3).
+# До B3-6 была только читалка (загрузка — POST /api/imports,
+# entity_type='license', см. `imports.router`). CRUD здесь использует тот
+# же составной ключ (B3-1) и разбор значений (B3-3), что и импорт.
 # =============================================================================
+
+
+def _license_out(
+    license_: OrganizationLicense,
+    *,
+    reveal: bool,
+    names: dict[uuid.UUID, tuple[str, str | None]],
+) -> OrganizationLicenseOut:
+    name, short_name = names.get(license_.organization_id, (None, None))
+    return OrganizationLicenseOut.from_model(
+        license_, reveal=reveal, organization_name=name, organization_short_name=short_name
+    )
 
 
 @organization_licenses_router.get(
     "",
     summary="Список лицензий/договоров вуз-вендор-ПО",
     description=(
-        "Фильтр: organization_id. Только организации из скоупа вызывающего (KAM/HEAD — свои "
+        "Фильтры: organization_id, vendor_id, product_id, transfer_status (можно несколько раз), "
+        "is_signed, year (лицензия действует в этом году), signed_year, q (поиск по вузу, "
+        "вендору, ПО, номеру договора). `with_total=true` добавляет точное число строк "
+        "(отдельный COUNT-запрос). Только организации из скоупа вызывающего (KAM/HEAD — свои "
         "и по своим сделкам, ADMIN — все). Роль: чтение каталога."
     ),
     response_model=OrganizationLicenseListResponse,
@@ -1058,12 +1078,29 @@ async def list_organization_licenses(
     page: Pagination,
     principal: CatalogRead,
     organization_id: Annotated[uuid.UUID | None, Query()] = None,
+    vendor_id: Annotated[uuid.UUID | None, Query()] = None,
+    product_id: Annotated[uuid.UUID | None, Query()] = None,
+    transfer_status: Annotated[list[str] | None, Query()] = None,
+    is_signed: Annotated[bool | None, Query()] = None,
+    year: Annotated[int | None, Query()] = None,
+    signed_year: Annotated[int | None, Query()] = None,
+    q: Annotated[str | None, Query()] = None,
+    with_total: Annotated[bool, Query()] = False,
 ) -> OrganizationLicenseListResponse:
-    stmt = (
-        await OrganizationLicenseService(session).list_query(
-            principal, organization_id=organization_id
-        )
-    ).order_by(OrganizationLicense.created_at.desc(), OrganizationLicense.id.desc())
+    filters = LicenseFilters(
+        organization_id=organization_id,
+        vendor_id=vendor_id,
+        product_id=product_id,
+        transfer_statuses=tuple(transfer_status or ()),
+        is_signed=is_signed,
+        year=year,
+        signed_year=signed_year,
+        q=q,
+    )
+    service = OrganizationLicenseService(session)
+    stmt = (await service.list_query(principal, filters)).order_by(
+        OrganizationLicense.created_at.desc(), OrganizationLicense.id.desc()
+    )
     cursor = page.decoded_cursor
     if cursor:
         stmt = stmt.where(
@@ -1071,12 +1108,16 @@ async def list_organization_licenses(
         )
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
     reveal = has_permission(principal.role, Permission.CONTACT_REVEAL)
+    names = await service.organization_names(rows)
     built = Page.build(
         rows,
         limit=page.limit,
-        serializer=lambda row: OrganizationLicenseOut.from_model(row, reveal=reveal),
+        serializer=lambda row: _license_out(row, reveal=reveal, names=names),
     )
-    return OrganizationLicenseListResponse(items=built.items, next_cursor=built.next_cursor)
+    total = await service.count(principal, filters) if with_total else None
+    return OrganizationLicenseListResponse(
+        items=built.items, next_cursor=built.next_cursor, total=total
+    )
 
 
 @organization_licenses_router.get(
@@ -1087,7 +1128,94 @@ async def list_organization_licenses(
 async def get_organization_license(
     session: DbSession, principal: CatalogRead, license_id: Annotated[uuid.UUID, Path()]
 ) -> OrganizationLicenseOut:
-    license_ = await OrganizationLicenseService(session).get_or_404(license_id, principal)
-    return OrganizationLicenseOut.from_model(
-        license_, reveal=has_permission(principal.role, Permission.CONTACT_REVEAL)
+    service = OrganizationLicenseService(session)
+    license_ = await service.get_or_404(license_id, principal)
+    names = await service.organization_names([license_])
+    return _license_out(
+        license_, reveal=has_permission(principal.role, Permission.CONTACT_REVEAL), names=names
     )
+
+
+@organization_licenses_router.post(
+    "",
+    summary="Создать лицензию/договор",
+    description=(
+        "Вендор и ПО — либо ссылкой (vendor_id/product_id из каталога), либо текстом "
+        "(vendor/product_name: сервис пытается найти однозначное совпадение, не находит — "
+        "сохраняет как текст без ссылки). Дубль составного ключа (вуз, вендор, ПО, номер "
+        "договора) — 409 CRM-1301 с license_id существующей записи. transfer_status принимает "
+        "английские коды и русские синонимы (BUG-10). Поддерживает Idempotency-Key. "
+        "Роль: license:write (KAM — по своим вузам)."
+    ),
+    response_model=OrganizationLicenseOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_organization_license(
+    payload: LicenseCreateRequest,
+    request: Request,
+    session: DbSession,
+    principal: LicenseWrite,
+    idempotency_key: IdempotencyKeyHeader,
+) -> OrganizationLicenseOut:
+    guard = IdempotencyGuard(session, actor_id=principal.user_id)
+    body = await request.body()
+    if idempotency_key:
+        cached = await guard.lookup(
+            key=idempotency_key, method=request.method, path=request.url.path, body=body
+        )
+        if cached is not None:
+            return OrganizationLicenseOut.model_validate(cached.body)
+        await guard.reserve(
+            key=idempotency_key, method=request.method, path=request.url.path, body=body
+        )
+
+    service = OrganizationLicenseService(session)
+    license_ = await service.create(principal, payload)
+    names = await service.organization_names([license_])
+    result = _license_out(license_, reveal=True, names=names)
+
+    if idempotency_key:
+        await guard.store(
+            key=idempotency_key,
+            status=status.HTTP_201_CREATED,
+            body=result.model_dump(mode="json"),
+        )
+    return result
+
+
+@organization_licenses_router.patch(
+    "/{license_id}",
+    summary="Изменить лицензию/договор",
+    description=(
+        "`organization_id` не редактируется — удалить и создать заново. Смена вендора/ПО/номера "
+        "договора, приводящая к дублю ключа у другой записи, — 409 CRM-1301. Роль: license:write "
+        "(KAM — по своим вузам)."
+    ),
+    response_model=OrganizationLicenseOut,
+)
+async def update_organization_license(
+    payload: LicenseUpdateRequest,
+    session: DbSession,
+    principal: LicenseWrite,
+    if_match: IfMatch,
+    license_id: Annotated[uuid.UUID, Path()],
+) -> OrganizationLicenseOut:
+    service = OrganizationLicenseService(session)
+    license_ = await service.get_or_404(license_id, principal)
+    license_ = await service.update(license_, payload, expected_version=if_match)
+    names = await service.organization_names([license_])
+    return _license_out(license_, reveal=True, names=names)
+
+
+@organization_licenses_router.delete(
+    "/{license_id}",
+    summary="Удалить лицензию/договор",
+    description="Мягкое удаление. Роль: license:delete (HEAD, ADMIN).",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_organization_license(
+    session: DbSession, principal: LicenseDelete, license_id: Annotated[uuid.UUID, Path()]
+) -> None:
+    service = OrganizationLicenseService(session)
+    license_ = await service.get_or_404(license_id, principal)
+    await service.delete(license_)

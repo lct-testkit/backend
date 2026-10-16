@@ -153,6 +153,14 @@ class AuditAction(StrEnum):
     # направлений и ничего на него не ссылается (продукты/сделки), иначе
     # 409 `ENTITY_IN_USE`. См. `catalog.service.DirectionService.delete`.
     DIRECTION_DELETED = "DIRECTION_DELETED"
+    # B3-6: CRUD лицензий вуз-вендор-ПО (до этой задачи — только импорт).
+    # `manager_full_name`/`responsible_contacts` в `changes` идут через
+    # `mask_name`/`mask_contacts_text` — журнал аудита не должен стать
+    # хранилищем ПДн, которые на выдаче и так маскируются без
+    # `contact:reveal` (см. `OrganizationLicenseService`).
+    LICENSE_CREATED = "LICENSE_CREATED"
+    LICENSE_UPDATED = "LICENSE_UPDATED"
+    LICENSE_DELETED = "LICENSE_DELETED"
     LOSS_REASON_CREATED = "LOSS_REASON_CREATED"
     LOSS_REASON_UPDATED = "LOSS_REASON_UPDATED"
     # П4: жёсткое удаление (таблица без `deleted_at` — «деактивируется, не

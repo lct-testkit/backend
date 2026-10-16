@@ -69,7 +69,9 @@ class TestMatchUniversity:
         from app.core.db import session_scope
 
         shared_name = f"Университет {uuid.uuid4().hex[:8]}"
-        inn = "".join(str((i * 7) % 10) for i in range(10))
+        # Случайный ИНН на каждый прогон: тестовая БД не очищается между запусками,
+        # фиксированное значение рано или поздно столкнётся с уникальным индексом.
+        inn = f"{uuid.uuid4().int % 10**10:010d}"
 
         async def scenario():
             async with session_scope() as session:
