@@ -20,6 +20,7 @@ build/
 pip-wheel-metadata/
 .Python
 .venv/
+.venv312/
 venv/
 ENV/
 env/
