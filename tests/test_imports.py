@@ -7,7 +7,8 @@ backend-агента про rtk_requiriments.md разд. 4, Треб.1).
 требует сессии Postgres — раньше не было покрыто вообще (та же граница, что
 у остального DB-слоя репозитория), `TestLicenseImportEndToEnd` теперь
 покрывает генерик-пайплайн (dry-run → apply → повторный импорт = upsert по
-`contract_number`) тем же приёмом, что `tests/test_api_smoke.py`/`tests/
+составному ключу вуз-вендор-ПО-договор, B3-1) тем же приёмом, что `tests/
+test_api_smoke.py`/`tests/
 conftest.py`: настоящая Postgres за `TEST_DATABASE_URL`, S3 — заглушка в
 памяти (`imports.service.inspect_object`/`download_object_bytes`/
 `ensure_bucket`/`upload_object_bytes` подменены `monkeypatch`, реальный
@@ -17,6 +18,7 @@ SeaweedFS не нужен). Без `TEST_DATABASE_URL` класс пропуск
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import io
 import uuid
@@ -293,6 +295,40 @@ class TestLicenseFields:
         assert value is None
         assert err is None
 
+    def test_transfer_status_accepts_russian_synonyms(self) -> None:
+        # B3-3 (BUG-10): прежде только английские коды — русское слово из
+        # файла заказчика давало ошибку строки на каждой лицензии.
+        spec = next(f for f in LICENSE_FIELDS if f.target == "transfer_status")
+        value, err = validate_field(spec, "Передано")
+        assert err is None
+        assert value == "transferred"
+
+    def test_license_signed_kind_returns_dict_with_is_signed(self) -> None:
+        spec = next(f for f in LICENSE_FIELDS if f.target == "license_signed_at")
+        assert spec.kind == "license_signed"
+        value, err = validate_field(spec, "да")
+        assert err is None
+        assert value == {"is_signed": True}
+
+    def test_license_signed_kind_accepts_date_and_sets_both_fields(self) -> None:
+        spec = next(f for f in LICENSE_FIELDS if f.target == "license_signed_at")
+        value, err = validate_field(spec, "15.03.2024")
+        assert err is None
+        assert value == {"is_signed": True, "license_signed_at": dt.date(2024, 3, 15)}
+
+    def test_license_term_kind_accepts_years_and_calendar_year(self) -> None:
+        spec = next(f for f in LICENSE_FIELDS if f.target == "license_valid_year")
+        assert spec.kind == "license_term"
+        value, err = validate_field(spec, "3")
+        assert err is None
+        assert value == {"license_term_years": 3, "license_valid_year": 3}
+
+    def test_license_term_kind_rejects_out_of_range_value(self) -> None:
+        spec = next(f for f in LICENSE_FIELDS if f.target == "license_valid_year")
+        value, err = validate_field(spec, "1999")
+        assert value is None
+        assert err is not None
+
     def test_organization_name_column_maps_by_exact_label(self) -> None:
         mapping = suggest_mapping(["Название ВУЗа", "Вендор"], list(LICENSE_FIELDS))
         assert mapping["Название ВУЗа"] == "organization_name"
@@ -487,9 +523,14 @@ class TestLicenseImportEndToEnd:
                 pass
             await service.finalize_apply_if_done(job)
 
-    def test_apply_creates_rows_then_second_import_upserts_by_contract_number(
+    def test_apply_creates_rows_then_second_import_upserts_by_composite_key(
         self, client, monkeypatch
     ) -> None:
+        """B3-1 (BUG-9): естественный ключ строки — (вуз, вендор, ПО, номер
+        договора), не только номер договора. Повтор с тем же вендором/ПО и
+        другим статусом/комментарием обновляет ту же запись; это НЕ прежнее
+        поведение, где ключом был только `contract_number` — тест обновлён
+        под новую, намеренно иную семантику (см. отчёт по эпику)."""
         from sqlalchemy import select
 
         from app.core.db import session_scope
@@ -558,12 +599,12 @@ class TestLicenseImportEndToEnd:
         assert comment == "исходная запись"
         assert version == 1
 
-        # Второй импорт того же номера договора с другим вендором/комментарием
-        # — должен ОБНОВИТЬ существующую запись (не создать вторую).
+        # Второй импорт — тот же вуз/вендор/ПО/договор (ключ не меняется),
+        # другой статус и комментарий -> ОБНОВЛЯЕТ существующую запись.
         rows_v2 = [
             [
                 org_name,
-                "ВендорБ-обновлённый",
+                "ВендорА",
                 "ПродуктА",
                 contract_number,
                 "2026-01-10",
@@ -600,12 +641,94 @@ class TestLicenseImportEndToEnd:
         run(client, self._apply_synchronously, uuid.UUID(job_id_v2))
 
         second_pass = run(client, _count_and_fetch)
-        assert len(second_pass) == 1, "upsert должен обновить строку, а не размножить её"
+        assert (
+            len(second_pass) == 1
+        ), "upsert с тем же ключом должен обновить строку, а не размножить её"
         second_id, vendor2, comment2, version2 = second_pass[0]
         assert second_id == first_id
-        assert vendor2 == "ВендорБ-обновлённый"
+        assert vendor2 == "ВендорА"
         assert comment2 == "обновлённая запись"
         assert version2 == 2
+
+    def test_same_contract_number_different_product_creates_two_rows(
+        self, client, monkeypatch
+    ) -> None:
+        """BUG-9: один номер договора на несколько ПО — раньше вторая строка
+        молча перезаписывала первую (ключ был только `contract_number`).
+        После B3-1 ключ составной (вуз, вендор, ПО, договор): обе строки
+        одного договора с разным ПО дают ДВЕ отдельные записи."""
+        from sqlalchemy import select
+
+        from app.core.db import session_scope
+        from app.modules.catalog.models import OrganizationLicense
+
+        org_name = f"Тестовый университет П3 {uuid.uuid4().hex[:8]}"
+        contract_number = f"TU-{uuid.uuid4().hex[:10]}"
+
+        rows = [
+            [
+                org_name,
+                "ВендорА",
+                "ПО Один",
+                contract_number,
+                "2026-01-10",
+                "3",
+                "not_started",
+                "Иванов И.И.",
+                "Петров П.П.",
+                "первое ПО по тому же договору",
+            ],
+            [
+                org_name,
+                "ВендорА",
+                "ПО Два",
+                contract_number,
+                "2026-01-10",
+                "3",
+                "not_started",
+                "Иванов И.И.",
+                "Петров П.П.",
+                "второе ПО по тому же договору",
+            ],
+        ]
+        content = self._xlsx_bytes(rows)
+        self._stub_storage(monkeypatch, content)
+        head = run(client, _make_user, "HEAD")
+        _org_id, file_id = run(client, self._seed_organization_and_file, org_name, content, head.id)
+        csrf = authenticate(client, head)
+        client.headers["X-CSRF-Token"] = csrf
+
+        job_id = client.post(
+            "/api/imports",
+            json={
+                "file_id": str(file_id),
+                "entity_type": "license",
+                "mode": "upsert",
+                "source_format": "xlsx",
+            },
+        ).json()["id"]
+        client.put(f"/api/imports/{job_id}/mapping", json={"mapping": self._MAPPING})
+        dry = client.post(f"/api/imports/{job_id}/dry-run").json()
+        assert dry["ok_rows"] == 2, dry
+        run(client, self._apply_synchronously, uuid.UUID(job_id))
+
+        async def _fetch() -> list[str]:
+            async with session_scope() as session:
+                rows = (
+                    (
+                        await session.execute(
+                            select(OrganizationLicense).where(
+                                OrganizationLicense.contract_number == contract_number
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                return sorted(r.product_name for r in rows)
+
+        products = run(client, _fetch)
+        assert products == ["ПО Два", "ПО Один"], "один договор на два ПО должен дать две записи"
 
     def test_only_head_and_admin_rollback(self) -> None:
         assert not has_permission("KAM", Permission.IMPORT_ROLLBACK)
