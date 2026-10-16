@@ -59,6 +59,9 @@ class ErrorCode(StrEnum):
     # (нет смысла восстанавливать активную запись — не no-op, а конфликт
     # состояния: если вызывающий перепутал id, тихий успех это бы скрыл).
     ORGANIZATION_NOT_DELETED = "CRM-1304"
+    # B4-3: `POST /deals/{id}/restore` на сделке, которая не удалена — тот же
+    # принцип, что у `ORGANIZATION_NOT_DELETED`.
+    DEAL_NOT_DELETED = "CRM-1305"
 
     # --- Файлы ---
     FILE_TYPE_NOT_ALLOWED = "CRM-1401"
@@ -148,6 +151,7 @@ ERROR_CATALOG: dict[ErrorCode, ErrorSpec] = {
     ErrorCode.ORGANIZATION_INN_EXISTS: ErrorSpec(409, "Организация с таким ИНН уже существует"),
     ErrorCode.ENTITY_IN_USE: ErrorSpec(409, "Сущность используется и не может быть удалена"),
     ErrorCode.ORGANIZATION_NOT_DELETED: ErrorSpec(409, "Организация не удалена"),
+    ErrorCode.DEAL_NOT_DELETED: ErrorSpec(409, "Сделка не удалена"),
     ErrorCode.FILE_TYPE_NOT_ALLOWED: ErrorSpec(415, "Недопустимый тип файла"),
     ErrorCode.FILE_TOO_LARGE: ErrorSpec(413, "Превышен размер файла"),
     ErrorCode.FILE_INFECTED: ErrorSpec(422, "Файл не прошёл антивирусную проверку"),

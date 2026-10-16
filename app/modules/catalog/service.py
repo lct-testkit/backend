@@ -53,7 +53,7 @@ from app.modules.catalog.models import (
     Region,
 )
 from app.modules.catalog.validators import validate_inn
-from app.modules.identity.models import Role
+from app.modules.identity.models import Role, User
 from app.modules.notification.service import NotificationPriority, get_notification_service
 
 _SIMILARITY_THRESHOLD = 0.3
@@ -62,6 +62,9 @@ _SIMILARITY_LIMIT = 5
 _SAME_NAME_LIMIT = 5
 # Ответственных за один продукт на практике единицы; предел нужен только как страховка выдачи.
 _PRODUCT_CONTACTS_LIMIT = 500
+# B4-2: каждая вуз-запись аудита берёт глобальный advisory-лок цепочки
+# (`audit/service.py`), поэтому массовая передача ограничена сотней за вызов.
+_BULK_OWNER_LIMIT = 100
 
 
 def _json_safe(value: Any) -> Any:
@@ -86,20 +89,33 @@ async def organization_scope_clause(
     они её ответственный `owner_id`, либо к ней привязана хотя бы одна
     сделка в их скоупе сделок. Организации не являются ПДн (dop.md §11.8),
     поэтому `INTEGRATION` читает без ограничения — иначе входящий лид не
-    сможет найти существующую организацию для дедупликации."""
+    сможет найти существующую организацию для дедупликации.
+
+    B4-2: ветка «ответственный» для HEAD раньше сравнивала `owner_id` только
+    с самим Руководителем (`== principal.user_id`), а не с его командой — в
+    отличие от `deal_scope_clause`, где TEAM даёт `Deal.owner_id.in_(...)`.
+    Из-за этого вуз, которым владеет КАМ его команды и у которого ещё нет
+    сделки, Руководителю не был виден вообще (ни прочитать, ни передать).
+    Теперь HEAD видит вузы всех участников своей команды по владельцу, KAM —
+    только свои."""
     from app.modules.crm.models import Deal
-    from app.modules.crm.service import deal_scope_clause
+    from app.modules.crm.service import deal_scope_clause, head_scope_member_ids
 
     if principal.role in (Role.ADMIN.value, Role.INTEGRATION.value):
         return None
     if principal.role not in (Role.KAM.value, Role.HEAD.value):
         return false()
 
+    if principal.role == Role.HEAD.value:
+        owner_clause = Organization.owner_id.in_(await head_scope_member_ids(session, principal))
+    else:
+        owner_clause = Organization.owner_id == principal.user_id
+
     deal_clause = await deal_scope_clause(session, principal)
     linked_orgs = select(Deal.organization_id).where(Deal.organization_id.is_not(None))
     if deal_clause is not None:
         linked_orgs = linked_orgs.where(deal_clause)
-    return or_(Organization.owner_id == principal.user_id, Organization.id.in_(linked_orgs))
+    return or_(owner_clause, Organization.id.in_(linked_orgs))
 
 
 async def organization_in_scope(
@@ -175,6 +191,17 @@ class ContactUpsertResult:
     created: bool
     changed: dict[str, Any] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class BulkOwnerResult:
+    """Итог `OrganizationService.bulk_set_owner` (B4-2)."""
+
+    batch_id: uuid.UUID
+    changed: list[uuid.UUID] = field(default_factory=list)
+    skipped: list[dict[str, Any]] = field(default_factory=list)
+    deals_reassigned: int = 0
+    remaining: int = 0
 
 
 @dataclass(slots=True)
@@ -301,6 +328,205 @@ class OrganizationService:
         )
         await self._session.flush()
         return organization
+
+    async def set_owner(
+        self,
+        organization: Organization,
+        principal: Principal,
+        *,
+        owner_id: uuid.UUID | None,
+        reason: str,
+        expected_version: int,
+    ) -> Organization:
+        """B4-1: назначить, сменить или снять ответственного за вуз (ТЗ Функц.11).
+
+        Отдельно от `update()` — обычный `PATCH` больше не может менять `owner_id`
+        (убран из `_PATCHABLE_FIELDS`), только эта ветка и ручки `PUT`/`DELETE
+        .../owner`, которые требуют `Permission.ORG_OWNER_ASSIGN`. `owner_id=None`
+        снимает ответственного (B4-2: вуз становится «ничьим»)."""
+        conflicting = {"owner_id": str(organization.owner_id) if organization.owner_id else None}
+        if organization.owner_id == owner_id:
+            raise ValidationError(
+                "Новый ответственный совпадает с текущим",
+                [FieldError(field="owner_id", reason="совпадает с текущим ответственным")],
+            )
+
+        new_owner: User | None = None
+        if owner_id is not None:
+            # Ленивый импорт — как у `deal_scope_clause` выше: `crm.service` ссылается
+            # только на `catalog.models`, цикл модулей не создаётся.
+            from app.modules.crm.service import ensure_assignable_user
+
+            new_owner = await ensure_assignable_user(
+                self._session, principal, owner_id, roles=(Role.KAM.value, Role.HEAD.value)
+            )
+
+        old_owner_id = organization.owner_id
+        await claim_version(self._session, organization, expected_version, conflicting=conflicting)
+        organization.owner_id = new_owner.id if new_owner is not None else None
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.ORGANIZATION_OWNER_CHANGED,
+            entity_type="organization",
+            entity_id=organization.id,
+            changes={
+                "owner_id": {
+                    "old": str(old_owner_id) if old_owner_id else None,
+                    "new": str(owner_id) if owner_id else None,
+                },
+                "reason": {"old": None, "new": reason},
+            },
+        )
+        if new_owner is not None:
+            await get_notification_service().notify_user(
+                self._session,
+                recipient_id=new_owner.id,
+                template_code="ORG_OWNER_ASSIGNED",
+                priority=NotificationPriority.NORMAL,
+                entity_type="organization",
+                entity_id=organization.id,
+            )
+        if old_owner_id is not None:
+            await get_notification_service().notify_user(
+                self._session,
+                recipient_id=old_owner_id,
+                template_code="ORG_OWNER_REMOVED",
+                priority=NotificationPriority.NORMAL,
+                entity_type="organization",
+                entity_id=organization.id,
+            )
+        return organization
+
+    async def bulk_set_owner(
+        self,
+        principal: Principal,
+        *,
+        organization_ids: list[uuid.UUID] | None,
+        from_owner_id: uuid.UUID | None,
+        owner_id: uuid.UUID | None,
+        reason: str,
+        carry_open_deals: bool,
+    ) -> BulkOwnerResult:
+        """B4-2: передать все вузы одного менеджера другому (или снять ответственного)
+        одним действием. Ровно один из `organization_ids`/`from_owner_id` — схема запроса
+        (`BulkOrganizationOwnerRequest`) это проверяет до вызова. Выборка ограничена скоупом
+        вызывающего (HEAD видит и передаёт только вузы своей команды) и `_BULK_OWNER_LIMIT`
+        организациями за вызов — остаток в `remaining`."""
+        from app.modules.crm.service import DealService, ensure_assignable_user
+
+        new_owner: User | None = None
+        if owner_id is not None:
+            new_owner = await ensure_assignable_user(
+                self._session, principal, owner_id, roles=(Role.KAM.value, Role.HEAD.value)
+            )
+
+        stmt = select(Organization).where(Organization.deleted_at.is_(None))
+        clause = await organization_scope_clause(self._session, principal)
+        if clause is not None:
+            stmt = stmt.where(clause)
+        if from_owner_id is not None:
+            stmt = stmt.where(Organization.owner_id == from_owner_id)
+        else:
+            stmt = stmt.where(Organization.id.in_(organization_ids or []))
+        stmt = (
+            stmt.order_by(Organization.created_at, Organization.id)
+            .limit(_BULK_OWNER_LIMIT + 1)
+            .with_for_update()
+        )
+        rows = list((await self._session.execute(stmt)).scalars().all())
+        remaining = max(0, len(rows) - _BULK_OWNER_LIMIT)
+        rows = rows[:_BULK_OWNER_LIMIT]
+
+        batch_id = uuid.uuid4()
+        changed_ids: list[uuid.UUID] = []
+        skipped: list[dict[str, Any]] = []
+        old_owner_counts: dict[uuid.UUID, int] = {}
+        changed_org_ids: list[uuid.UUID] = []
+        for organization in rows:
+            if organization.owner_id == owner_id:
+                skipped.append({"organization_id": str(organization.id), "reason": "already_owner"})
+                continue
+            old_owner_id = organization.owner_id
+            # Массовая операция — без `expected_version` клиента, версия просто растёт
+            # (тот же приём, что `DealService.bulk_reassign`).
+            await claim_version(self._session, organization)
+            organization.owner_id = new_owner.id if new_owner is not None else None
+            changed_ids.append(organization.id)
+            changed_org_ids.append(organization.id)
+            if old_owner_id is not None:
+                old_owner_counts[old_owner_id] = old_owner_counts.get(old_owner_id, 0) + 1
+            await self._audit.record(
+                AuditAction.ORGANIZATION_OWNER_CHANGED,
+                entity_type="organization",
+                entity_id=organization.id,
+                changes={
+                    "owner_id": {
+                        "old": str(old_owner_id) if old_owner_id else None,
+                        "new": str(owner_id) if owner_id else None,
+                    },
+                    "reason": {"old": None, "new": reason},
+                    "batch_id": {"old": None, "new": str(batch_id)},
+                },
+            )
+
+        if not changed_ids:
+            return BulkOwnerResult(
+                batch_id=batch_id,
+                changed=[],
+                skipped=skipped,
+                deals_reassigned=0,
+                remaining=remaining,
+            )
+
+        await self._session.flush()
+
+        deals_reassigned = 0
+        if carry_open_deals and new_owner is not None and old_owner_counts:
+            from app.modules.crm.models import Deal
+
+            deal_ids = list(
+                (
+                    await self._session.execute(
+                        select(Deal.id).where(
+                            Deal.organization_id.in_(changed_org_ids),
+                            Deal.owner_id.in_(old_owner_counts.keys()),
+                            Deal.deleted_at.is_(None),
+                            Deal.closed_at.is_(None),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if deal_ids:
+                deals_reassigned = await DealService(self._session).bulk_reassign(
+                    principal, deal_ids=deal_ids, successor_id=new_owner.id, reason=reason
+                )
+
+        if new_owner is not None:
+            await get_notification_service().notify_user(
+                self._session,
+                recipient_id=new_owner.id,
+                template_code="ORG_OWNER_ASSIGNED",
+                priority=NotificationPriority.NORMAL,
+                payload={"count": len(changed_ids)},
+            )
+        for old_owner_id, count in old_owner_counts.items():
+            await get_notification_service().notify_user(
+                self._session,
+                recipient_id=old_owner_id,
+                template_code="ORG_OWNER_REMOVED",
+                priority=NotificationPriority.NORMAL,
+                payload={"count": count},
+            )
+
+        return BulkOwnerResult(
+            batch_id=batch_id,
+            changed=changed_ids,
+            skipped=skipped,
+            deals_reassigned=deals_reassigned,
+            remaining=remaining,
+        )
 
     async def _find_by_inn(self, inn: str) -> Organization | None:
         return await self._session.scalar(select(Organization).where(Organization.inn == inn))
@@ -497,6 +723,8 @@ class OrganizationService:
         )
         return organization
 
+    # B4-1: `owner_id` убран отсюда — смена ответственного за вуз идёт только
+    # через `set_owner()` (отдельное право `ORG_OWNER_ASSIGN`), не обычным PATCH.
     _PATCHABLE_FIELDS = frozenset(
         {
             "name",
@@ -511,7 +739,6 @@ class OrganizationService:
             "main_phone",
             "main_email",
             "students_count",
-            "owner_id",
         }
     )
 

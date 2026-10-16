@@ -1008,6 +1008,49 @@ async def head_scope_member_ids(session: AsyncSession, principal: Principal) -> 
     return member_ids
 
 
+async def ensure_assignable_user(
+    session: AsyncSession,
+    principal: Principal,
+    user_id: uuid.UUID,
+    *,
+    roles: tuple[str, ...] | None = None,
+) -> User:
+    """Общая проверка «можно ли назначить этого пользователя ответственным».
+
+    Вынесена из `DealService._resolve_owner` (B4-1), чтобы тем же правилом
+    пользовался `catalog.service.OrganizationService.set_owner` (ответственный
+    за вуз): пользователь существует, активен, и, если задан `roles` —
+    имеет одну из перечисленных ролей (для вуза — KAM или HEAD; для сделки
+    `roles=None`, как было раньше). Для HEAD целевой пользователь обязан
+    входить в его команду (`head_scope_member_ids`); остальным ролям, кроме
+    ADMIN и INTEGRATION, назначать кого-то другого запрещено.
+
+    Тому, кому чужого назначать нельзя, отказ (403) одинаков для любого id —
+    так по ответу не узнать, есть ли такой сотрудник."""
+    if principal.role == Role.HEAD.value:
+        if user_id not in await head_scope_member_ids(session, principal):
+            defer_denied_audit(session, entity_type="user", reason="owner_outside_team")
+            raise ForbiddenError("Назначить ответственным можно только сотрудника своей команды")
+    elif not (principal.is_admin or principal.role == Role.INTEGRATION.value):
+        defer_denied_audit(session, entity_type="user", reason="assign_owner_forbidden")
+        raise ForbiddenError("Назначать ответственным другого сотрудника может только руководитель")
+
+    user = await session.get(User, user_id)
+    if user is None:
+        raise NotFoundError("Пользователь", user_id)
+    if not user.is_active:
+        raise ValidationError(
+            "Ответственным можно назначить только активного сотрудника",
+            [FieldError(field="owner_id", reason="сотрудник неактивен")],
+        )
+    if roles is not None and user.role not in roles:
+        raise ValidationError(
+            "Ответственным за вуз можно назначить только КАМа или руководителя",
+            [FieldError(field="owner_id", reason="недопустимая роль")],
+        )
+    return user
+
+
 async def deal_scope_clause(
     session: AsyncSession, principal: Principal
 ) -> ColumnElement[bool] | None:
@@ -1578,28 +1621,11 @@ class DealService:
         команды, KAM не назначает никого. Раньше `owner_id` принимался как есть: КАМ заводил
         сделки «на коллегу», а несуществующий id доходил до FK и давал 500.
 
-        Тому, кому чужого назначать нельзя, отказ (403) одинаков для любого id — так по
-        ответу не узнать, есть ли такой сотрудник."""
+        Проверка самого назначения (B4-1) — в модульной `ensure_assignable_user`, которой
+        пользуется и `catalog.service.OrganizationService.set_owner` (ответственный за вуз)."""
         if owner_id is None or owner_id == principal.user_id:
             return principal.user_id
-        if principal.role == Role.HEAD.value:
-            if owner_id not in await head_scope_member_ids(self._session, principal):
-                defer_denied_audit(self._session, entity_type="user", reason="owner_outside_team")
-                raise ForbiddenError(
-                    "Назначить ответственным можно только сотрудника своей команды"
-                )
-        elif not (principal.is_admin or principal.role == Role.INTEGRATION.value):
-            defer_denied_audit(self._session, entity_type="user", reason="assign_owner_forbidden")
-            raise ForbiddenError("Заводить сделку на другого сотрудника может только руководитель")
-
-        owner = await self._session.get(User, owner_id)
-        if owner is None:
-            raise NotFoundError("Пользователь", owner_id)
-        if not owner.is_active:
-            raise ValidationError(
-                "Ответственным можно назначить только активного сотрудника",
-                [FieldError(field="owner_id", reason="сотрудник неактивен")],
-            )
+        owner = await ensure_assignable_user(self._session, principal, owner_id)
         return owner.id
 
     async def create(
