@@ -4466,6 +4466,66 @@
         "title": "ErasureRequestOut",
         "type": "object"
       },
+      "ErrorCodeListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ErrorCodeOut"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "ErrorCodeListResponse",
+        "type": "object"
+      },
+      "ErrorCodeOut": {
+        "properties": {
+          "code": {
+            "description": "Код из каталога, `CRM-XXYY`.",
+            "title": "Code",
+            "type": "string"
+          },
+          "description": {
+            "description": "Что означает код и когда он возникает.",
+            "title": "Description",
+            "type": "string"
+          },
+          "hint": {
+            "description": "Что сделать клиенту, чтобы продолжить.",
+            "title": "Hint",
+            "type": "string"
+          },
+          "http_status": {
+            "description": "HTTP-статус, с которым код обычно отдаётся.",
+            "title": "Http Status",
+            "type": "integer"
+          },
+          "name": {
+            "description": "Имя значения `ErrorCode`, например `VERSION_CONFLICT`.",
+            "title": "Name",
+            "type": "string"
+          },
+          "title": {
+            "description": "Короткое название ошибки.",
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "name",
+          "http_status",
+          "title",
+          "description",
+          "hint"
+        ],
+        "title": "ErrorCodeOut",
+        "type": "object"
+      },
       "EventCodeListResponse": {
         "properties": {
           "items": {
@@ -10041,7 +10101,60 @@
         "description": "RFC 7807 Problem Details — единственный формат ошибок этого API.\n\nContent-Type ответа — `application/problem+json`. Помимо перечисленных, тело\nможет нести поля, специфичные для ошибки (например `limit` у 429).",
         "properties": {
           "code": {
-            "description": "Внутренний код из каталога ошибок, `CRM-XXYY`: по нему, а не по тексту, клиент выбирает поведение.",
+            "description": "Внутренний код из каталога ошибок, `CRM-XXYY`: по нему, а не по тексту, клиент выбирает поведение. Полный справочник — `GET /api/meta/error-codes` (B9-4).",
+            "enum": [
+              "CRM-1001",
+              "CRM-1002",
+              "CRM-1003",
+              "CRM-1101",
+              "CRM-1102",
+              "CRM-1103",
+              "CRM-1104",
+              "CRM-1105",
+              "CRM-1106",
+              "CRM-1107",
+              "CRM-1201",
+              "CRM-1202",
+              "CRM-1203",
+              "CRM-1204",
+              "CRM-1205",
+              "CRM-1206",
+              "CRM-1207",
+              "CRM-1208",
+              "CRM-1209",
+              "CRM-1301",
+              "CRM-1302",
+              "CRM-1303",
+              "CRM-1304",
+              "CRM-1401",
+              "CRM-1402",
+              "CRM-1403",
+              "CRM-1404",
+              "CRM-1501",
+              "CRM-1502",
+              "CRM-1503",
+              "CRM-1504",
+              "CRM-1505",
+              "CRM-1506",
+              "CRM-1601",
+              "CRM-1602",
+              "CRM-1603",
+              "CRM-1701",
+              "CRM-1702",
+              "CRM-1703",
+              "CRM-1704",
+              "CRM-1801",
+              "CRM-1802",
+              "CRM-1803",
+              "CRM-1804",
+              "CRM-1901",
+              "CRM-1902",
+              "CRM-1903",
+              "CRM-8429",
+              "CRM-9000",
+              "CRM-9004",
+              "CRM-9503"
+            ],
             "pattern": "^CRM-[0-9]{4}$",
             "title": "Code",
             "type": "string"
@@ -14901,7 +15014,7 @@
     }
   },
   "info": {
-    "description": "\nБэкенд CRM ИТ Школы Ростелекома.\n\n**Соглашения (раздел 2 спецификации)**\n\n* Все ошибки — RFC 7807 Problem Details с внутренним кодом вида `CRM-XXYY`.\n* Идентификаторы — UUIDv7, в JSON строками.\n* Даты — ISO 8601 с часовым поясом, внутри хранятся и отдаются в UTC.\n* Деньги — строка `\"150000.00\"` плюс отдельное поле `currency`.\n* Списки — курсорная пагинация: `limit` (максимум 100) и непрозрачный `cursor`,\n  ответ содержит `items` и `next_cursor`.\n* Обновления — оптимистичная блокировка через `If-Match` и поле `version`.\n* `Idempotency-Key` (8–255 символов, действует внутри пользователя, хранится 24 часа)\n  принимают ручки создания сделки, организации, контакта, комментария, задачи,\n  вложения и лицензии (`POST /api/deals`, `/api/organizations`, `/api/contacts`,\n  `/api/deals/{deal_id}/comments`, `/api/tasks`, `/api/attachments`,\n  `/api/organization-licenses`) и вебхук `POST /api/v1/integrations/cms/leads`\n  (у вебхука обязателен). Повтор с тем же ключом и телом возвращает сохранённый\n  ответ, с другим телом — 409 CRM-1003. Остальные ручки заголовок не читают:\n  переход сделки защищён коротким блокирующим локом, а не ключом.\n* `request_id` проходит через логи, аудит и тело ошибки, отдаётся в `X-Request-Id`.\n\n**Аутентификация**\n\n* Браузер — серверная сессия: httpOnly-cookie `crm_sid`; на POST/PUT/PATCH/DELETE\n  нужен ещё заголовок `X-CSRF-Token` со значением cookie `crm_csrf` (иначе 403 CRM-1107).\n* Сервисные вызовы — `Authorization: Bearer`; в prod так ходит только роль INTEGRATION.\n* Без аутентификации (`security: []`): `/health/*`, `/api/auth/*`, `/public/*`; вебхуки\n  `/api/v1/integrations/*` подписываются HMAC тела запроса (заголовок `X-Signature`).\n\n**Ошибки.** Каждая операция описывает 400/401/403/404/409/422/429/500 как\n`application/problem+json` со схемой `Problem`; 4xx/5xx вне этого списка (413, 503)\nтоже приходят в этом формате.\n",
+    "description": "\nБэкенд CRM ИТ Школы Ростелекома.\n\n**Соглашения (раздел 2 спецификации)**\n\n* Все ошибки — RFC 7807 Problem Details с внутренним кодом вида `CRM-XXYY`.\n  Полный справочник кодов — `GET /api/meta/error-codes` (без аутентификации, B9-4).\n* Идентификаторы — UUIDv7, в JSON строками.\n* Даты — ISO 8601 с часовым поясом, внутри хранятся и отдаются в UTC.\n* Деньги — строка `\"150000.00\"` плюс отдельное поле `currency`.\n* Списки — курсорная пагинация: `limit` (максимум 100) и непрозрачный `cursor`,\n  ответ содержит `items` и `next_cursor`.\n* Обновления — оптимистичная блокировка через `If-Match` и поле `version`.\n* `Idempotency-Key` (8–255 символов, действует внутри пользователя, хранится 24 часа)\n  принимают ручки создания сделки, организации, контакта, комментария, задачи,\n  вложения и лицензии (`POST /api/deals`, `/api/organizations`, `/api/contacts`,\n  `/api/deals/{deal_id}/comments`, `/api/tasks`, `/api/attachments`,\n  `/api/organization-licenses`) и вебхук `POST /api/v1/integrations/cms/leads`\n  (у вебхука обязателен). Повтор с тем же ключом и телом возвращает сохранённый\n  ответ, с другим телом — 409 CRM-1003. Остальные ручки заголовок не читают:\n  переход сделки защищён коротким блокирующим локом, а не ключом.\n* `request_id` проходит через логи, аудит и тело ошибки, отдаётся в `X-Request-Id`.\n\n**Аутентификация**\n\n* Браузер — серверная сессия: httpOnly-cookie `crm_sid`; на POST/PUT/PATCH/DELETE\n  нужен ещё заголовок `X-CSRF-Token` со значением cookie `crm_csrf` (иначе 403 CRM-1107).\n* Сервисные вызовы — `Authorization: Bearer`; в prod так ходит только роль INTEGRATION.\n* Без аутентификации (`security: []`): `/health/*`, `/api/auth/*`, `/public/*`; вебхуки\n  `/api/v1/integrations/*` подписываются HMAC тела запроса (заголовок `X-Signature`).\n\n**Ошибки.** Каждая операция описывает 400/401/403/404/409/422/429/500 как\n`application/problem+json` со схемой `Problem`; 4xx/5xx вне этого списка (413, 503)\nтоже приходят в этом формате.\n",
     "title": "CRM ИТ Школы Ростелекома — API",
     "version": "0.1.0"
   },
@@ -27276,6 +27389,35 @@
         "summary": "Мои задачи на подпись",
         "tags": [
           "signing"
+        ]
+      }
+    },
+    "/api/meta/error-codes": {
+      "get": {
+        "description": "Все коды `CRM-XXYY` из каталога ошибок API: статус, заголовок, описание и подсказка «что сделать». Строится из `core.errors.ERROR_CATALOG` на каждый запрос — отставание от кода исключено. Роль: доступно без аутентификации (справочник не несёт данных пользователей).",
+        "operationId": "list_error_codes_api_meta_error_codes_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorCodeListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [],
+        "summary": "Справочник кодов ошибок",
+        "tags": [
+          "meta"
         ]
       }
     },

@@ -119,6 +119,7 @@ class TestPublicOperations:
             ("post", "/api/v1/integrations/cms/leads"),
             ("post", "/api/v1/integrations/bitrix/webhook"),
             ("post", "/api/v1/integrations/lms/progress"),
+            ("get", "/api/meta/error-codes"),
         ],
     )
     def test_public_routes_need_no_credentials(
@@ -231,6 +232,22 @@ class TestProblemDetails:
         assert response["content"]["application/json"]["schema"] == {
             "$ref": "#/components/schemas/TransitionResponse"
         }
+
+
+class TestErrorCodeCatalogInSchema:
+    """B9-4 (НФР3): все 51 кода из `ErrorCode` упомянуты в схеме — через `enum` поля
+    `Problem.code`, а не вручную написанную таблицу, которая отстаёт от кода."""
+
+    def test_problem_code_enum_lists_every_error_code(self, schema: dict[str, Any]) -> None:
+        problem = schema["components"]["schemas"]["Problem"]
+        assert set(problem["properties"]["code"]["enum"]) == {code.value for code in ErrorCode}
+
+    def test_every_code_appears_literally_in_the_exported_schema(
+        self, schema: dict[str, Any]
+    ) -> None:
+        serialized = json.dumps(schema, ensure_ascii=False)
+        missing = [code.value for code in ErrorCode if code.value not in serialized]
+        assert missing == []
 
 
 class TestIdempotencyKey:
