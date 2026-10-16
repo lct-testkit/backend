@@ -9,6 +9,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.modules.integration.field_mapping import FieldMapping
+from app.modules.integration.routing import Routing
 
 
 class IntegrationSourceOut(BaseModel):
@@ -150,6 +151,13 @@ class MappingGetResponse(BaseModel):
 
     mapping: FieldMapping | None
     targets: list[TargetOut]
+
+
+class RoutingGetResponse(BaseModel):
+    """B5-4: текущая маршрутизация (`null` — не настроена, заявки идут в B2C-воронку по
+    умолчанию, как и раньше)."""
+
+    routing: Routing | None
 
 
 class MappingValidationErrorOut(BaseModel):

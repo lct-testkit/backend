@@ -37,6 +37,7 @@ from app.modules.crm.models import Deal
 from app.modules.identity.models import Role, User
 from app.modules.integration.field_mapping import FieldMapping, validate_mapping
 from app.modules.integration.models import IntegrationSource, OutboxEvent, OutboxStatus
+from app.modules.integration.routing import Routing, validate_routing
 from app.modules.integration.security import check_outbound_url_resolved
 
 logger = structlog.get_logger(__name__)
@@ -228,6 +229,50 @@ class IntegrationSourceService:
         await self._session.flush()
         await self._audit.record(
             AuditAction.INTEGRATION_MAPPING_RESET,
+            entity_type="integration_source",
+            entity_id=source.id,
+            changes=diff_changes(before, {}),
+        )
+
+    # --- B5-4: маршрутизация (воронка/тип сделки на источник) --------------------------
+
+    async def get_routing(self, code: str) -> Routing | None:
+        source = await self.get_by_code(code)
+        if not source.routing:
+            return None
+        return Routing.model_validate(source.routing)
+
+    async def set_routing(self, code: str, routing: Routing) -> Routing:
+        """Проверка (`validate_routing`) бросает 422 с `errors[]`: воронка не найдена/не
+        опубликована/не того `deal_type`, статус не найден в графе, `fixed_owner_id`
+        неактивен или не найден, больше `_MAX_RULES` правил."""
+        source = await self.get_by_code(code)
+        errors = await validate_routing(self._session, routing)
+        if errors:
+            raise ValidationError(
+                "Маршрутизация не принята",
+                [FieldError(field=error.field, reason=error.reason) for error in errors],
+            )
+        before = source.routing
+        source.routing = routing.model_dump(mode="json")
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.INTEGRATION_ROUTING_UPDATED,
+            entity_type="integration_source",
+            entity_id=source.id,
+            changes=diff_changes(before or {}, source.routing),
+        )
+        return routing
+
+    async def reset_routing(self, code: str) -> None:
+        source = await self.get_by_code(code)
+        if source.routing is None:
+            return
+        before = source.routing
+        source.routing = None
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.INTEGRATION_ROUTING_RESET,
             entity_type="integration_source",
             entity_id=source.id,
             changes=diff_changes(before, {}),
