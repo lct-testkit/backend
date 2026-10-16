@@ -220,6 +220,42 @@ async def upload_object_bytes(*, bucket: str, key: str, body: bytes, content_typ
     await asyncio.to_thread(_upload)
 
 
+async def iter_object_chunks(*, bucket: str, key: str, chunk_size: int = 262144):
+    """Потоковое чтение объекта чанками (B6-4): антивирусный сканер (`files.antivirus`)
+    передаёт их в clamd по протоколу INSTREAM без накопления всего файла в памяти процесса —
+    до `deal_files_max_size_bytes` (500 МБ по умолчанию) это важно при нескольких
+    одновременных `commit`. `asyncio.to_thread` на каждый чанк — тот же приём, что у
+    `inspect_object`/`download_object_to_file`, только без накопления в один буфер."""
+
+    def _open():
+        response = _client().get_object(Bucket=bucket, Key=key)
+        return response["Body"]
+
+    body = await asyncio.to_thread(_open)
+    try:
+        while True:
+            chunk = await asyncio.to_thread(body.read, chunk_size)
+            if not chunk:
+                break
+            yield chunk
+    finally:
+        await asyncio.to_thread(body.close)
+
+
+async def copy_object(*, src_bucket: str, src_key: str, dst_bucket: str, dst_key: str) -> None:
+    """Серверная копия объекта между бакетами (B6-5: карантин заражённого файла) — без
+    скачивания на клиент, `CopySource` остаётся на стороне S3-совместимого хранилища."""
+
+    def _copy() -> None:
+        _client().copy_object(
+            Bucket=dst_bucket,
+            Key=dst_key,
+            CopySource={"Bucket": src_bucket, "Key": src_key},
+        )
+
+    await asyncio.to_thread(_copy)
+
+
 async def delete_object(*, bucket: str, key: str) -> None:
     def _delete() -> None:
         try:

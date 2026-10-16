@@ -19,6 +19,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, NoReturn, Protocol, runtime_checkable
 
+import structlog
 from sqlalchemy import Select, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +29,7 @@ from app.core.ids import uuid7
 from app.core.permissions import Permission, has_permission
 from app.core.security import Principal
 from app.core.storage import (
+    copy_object,
     delete_object,
     ensure_bucket,
     generate_presigned_get,
@@ -38,6 +40,10 @@ from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
 from app.modules.files.models import Attachment, File, FileStatus
 from app.modules.files.schemas import AttachmentFileInfo, AttachmentOut, UploadIntentRequest
+from app.modules.identity.models import SecurityEventType, Severity
+from app.modules.identity.service import IdentityService
+
+logger = structlog.get_logger(__name__)
 
 # Сигнатуры разрешённых форматов (раздел 9: «расширение врёт», нужна
 # проверка по факту). docx/xlsx неотличимы от zip по первым байтам — это
@@ -205,6 +211,13 @@ def _check_magic_bytes(extension: str, magic: bytes) -> bool:
 class ScanResult:
     clean: bool
     detail: str | None = None
+    # B6-4: скан не состоялся (clamd недоступен/таймаут/ошибка) — это НЕ «заражено»,
+    # commit решает по `clamav_fail_mode` (open/closed), а не всегда отклоняет файл.
+    error: bool = False
+    # Имя сигнатуры антивируса при `clean=False, error=False` — то, что попадает в
+    # `security_events.details.signature` (B6-5) и в `scan_result` (после `_VERIFIED_MIME`
+    # расширения колонки до 128 символов, миграция 0028).
+    signature: str | None = None
 
 
 @runtime_checkable
@@ -467,6 +480,20 @@ class FileService:
                 entity_id=file.id,
                 changes={"reason": {"old": None, "new": "magic_bytes_or_hash_mismatch"}},
             )
+            # B6-5: расхождение сигнатуры/расширения — не обязательно вредонос
+            # (переименованный файл), отдельный (менее тревожный) тип события, чем
+            # MALWARE_DETECTED ниже. Событие переживает откат транзакции запроса так же, как
+            # и аудит выше: оба пишутся до исключения, `_reject_commit` коммитит их явно.
+            await IdentityService(self._session).record_security_event(
+                SecurityEventType.FILE_REJECTED,
+                user_id=file.uploaded_by,
+                severity=Severity.WARNING,
+                details={
+                    "file_id": str(file.id),
+                    "filename": file.original_filename,
+                    "reason": "signature_mismatch",
+                },
+            )
             await self._reject_commit(
                 AppError(
                     ErrorCode.FILE_INFECTED,
@@ -474,22 +501,75 @@ class FileService:
                 )
             )
 
+        # B6-4: файлы крупнее синхронного лимита не держат HTTP-запрос на скане — остаются
+        # `quarantined` до проверки воркером. Воркер `sweep_quarantined_files` НЕ реализован в
+        # этом эпике (см. отчёт): такой файл останется quarantined до ручной проверки/перевода
+        # в `ready` — это безопасная сторона ошибки (недоступность лучше ложного «чисто»).
+        if settings.clamav_enabled and inspection.size_bytes > settings.clamav_sync_max_bytes:
+            file.status = FileStatus.QUARANTINED.value
+            file.scan_result = "pending_scan"
+            file.scanned_at = dt.datetime.now(dt.UTC)
+            await self._session.flush()
+            return file
+
         scan = await get_antivirus_scanner().scan(bucket=file.bucket, key=file.storage_key)
         file.scanned_at = dt.datetime.now(dt.UTC)
-        file.scan_result = "clean" if scan.clean else (scan.detail or "infected")
 
-        if not scan.clean:
+        if scan.error:
+            # Скан не состоялся (clamd недоступен/таймаут) — это НЕ «заражено»: `closed`
+            # (prod) отказывает доступности в пользу безопасности, `open` (dev/demo)
+            # принимает файл со сканом, пропущенным по недоступности, с явным следом в
+            # `scan_result` и в логе (B6-4, вопрос владельцу: что важнее при недоступном
+            # антивирусе — доступность или безопасность; дефолт здесь — open).
+            if settings.clamav_fail_mode == "closed":
+                file.status = FileStatus.QUARANTINED.value
+                file.scan_result = "scan_unavailable"
+                await self._session.flush()
+                return file
+            file.scan_result = f"skipped:{(scan.detail or 'clamd_unavailable')[:110]}"
+            logger.warning("file_deep_scan_skipped", file_id=str(file.id), reason=scan.detail)
+        elif not scan.clean:
             file.status = FileStatus.INFECTED.value
+            file.scan_result = (scan.signature or scan.detail or "infected")[:128]
             await self._session.flush()
             await self._audit.record(
                 AuditAction.FILE_INFECTED,
                 entity_type="file",
                 entity_id=file.id,
-                changes={"reason": {"old": None, "new": scan.detail}},
+                changes={"reason": {"old": None, "new": scan.signature or scan.detail}},
             )
+            # B6-5: обнаружение вредоноса — инцидент безопасности, не просто отказ коммита.
+            # Событие пишется и коммитится ДО `_reject_commit` поднимает исключение — тем же
+            # приёмом, что аудит выше: откат транзакции запроса не должен стереть след атаки.
+            await IdentityService(self._session).record_security_event(
+                SecurityEventType.MALWARE_DETECTED,
+                user_id=file.uploaded_by,
+                severity=Severity.CRITICAL,
+                details={
+                    "file_id": str(file.id),
+                    "sha256": file.sha256,
+                    "signature": scan.signature,
+                    "size_bytes": file.size_bytes,
+                    "scanner": "clamav",
+                    "filename": file.original_filename,
+                },
+            )
+            # Карантин: заражённый объект не должен остаться доступным ни по какой ссылке
+            # (`download_url` уже требует `ready`, но объект в бакете `files` оставался бы
+            # физически). Копия на сервере, затем удаление исходного ключа.
+            await ensure_bucket(settings.s3_bucket_quarantine)
+            await copy_object(
+                src_bucket=file.bucket,
+                src_key=file.storage_key,
+                dst_bucket=settings.s3_bucket_quarantine,
+                dst_key=f"{file.id}/{file.sha256 or 'unknown'}",
+            )
+            await delete_object(bucket=file.bucket, key=file.storage_key)
             await self._reject_commit(
                 AppError(ErrorCode.FILE_INFECTED, "Файл не прошёл антивирусную проверку")
             )
+        else:
+            file.scan_result = "clean"
 
         await self._dedup_storage(file)
 

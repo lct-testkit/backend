@@ -23,6 +23,8 @@ from app.core.metrics import start_worker_metrics_server, stop_worker_metrics_se
 from app.core.redis_client import close_redis
 from app.modules.admin.models import IdempotencyKey
 from app.modules.crm.tasks import sweep_sla_breaches
+from app.modules.files.antivirus import build_scanner as build_antivirus_scanner
+from app.modules.files.service import register_antivirus_scanner
 from app.modules.identity.tasks import sweep_erasure_requests, sweep_user_lifecycle
 from app.modules.imports.tasks import sweep_import_jobs
 from app.modules.integration.service import RealOutboxService, register_outbox_service
@@ -86,6 +88,13 @@ async def startup(ctx: dict[str, Any]) -> None:
     # процессе, публикация (crm/signing) — в `api`. Оба обязаны
     # зарегистрировать реализацию независимо.
     register_outbox_service(RealOutboxService())
+    # B6-4: тот же приём — регистрация реального сканера per-процесс. Воркер пока не
+    # сканирует сам (sweep_quarantined_files не реализован в этом эпике), но будущий код
+    # воркера, который позовёт `get_antivirus_scanner()`, не должен попасть на заглушку
+    # молча только потому, что забыли продублировать регистрацию.
+    clamav_scanner = build_antivirus_scanner(settings)
+    if clamav_scanner is not None:
+        register_antivirus_scanner(clamav_scanner)
     # Метрики фоновых задач считаются в этом процессе, api их не видит: отдаём сами.
     ctx["metrics_server"] = start_worker_metrics_server(settings.worker_metrics_port)
 

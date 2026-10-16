@@ -72,7 +72,10 @@ class File(UuidPkMixin, Base):
     sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     refcount: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="pending")
-    scan_result: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # B6-4: 128, не 32 — имя сигнатуры настоящего антивируса (`ClamAvScanner`, в отличие от
+    # заглушки) бывает длиннее 32 символов; без расширения колонки `commit` упал бы с 500
+    # именно на заражённых файлах (миграция 0028).
+    scan_result: Mapped[str | None] = mapped_column(String(128), nullable=True)
     scanned_at: Mapped[dt.datetime | None] = mapped_column(nullable=True)
     contains_pd: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
     uploaded_by: Mapped[uuid.UUID | None] = mapped_column(

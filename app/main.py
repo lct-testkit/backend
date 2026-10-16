@@ -39,7 +39,9 @@ from app.modules.catalog.router import (
     regions_router,
 )
 from app.modules.crm.router import comments_router, deals_router, tasks_router
+from app.modules.files.antivirus import build_scanner as build_antivirus_scanner
 from app.modules.files.router import attachments_router, files_router
+from app.modules.files.service import register_antivirus_scanner
 from app.modules.identity.router_admin import router as admin_users_router
 from app.modules.identity.router_auth import router as auth_router
 from app.modules.identity.router_directory import router as directory_router
@@ -125,6 +127,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # `LoggingOutboxService` — событие терялось в структурном логе, таблицы
     # `outbox_events` не было вовсе (см. `integration/service.py`).
     register_outbox_service(RealOutboxService())
+    # B6-4: `NullAntivirusScanner` (регистрируется по умолчанию в `files.service`) всегда
+    # отвечал «чисто» — без явного `CLAMAV_ENABLED=true` остаётся так и здесь (dev/demo без
+    # поднятого clamd рядом). `build_scanner` возвращает `None`, когда выключен.
+    clamav_scanner = build_antivirus_scanner(settings)
+    if clamav_scanner is not None:
+        register_antivirus_scanner(clamav_scanner)
 
     # Прогреваем JWKS, чтобы первый запрос не платил за поход в Keycloak.
     # Жёсткий общий таймаут обязателен: httpx ограничивает соединение, но
