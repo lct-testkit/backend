@@ -61,36 +61,21 @@ from app.modules.reporting.models import (
     ReportTemplate,
 )
 from app.modules.reporting.rendering import CONTENT_TYPES, render_report
+from app.modules.reporting.schemas import ReportColumnOut, ReportTemplateOut
+from app.modules.reporting.spec import REPORT_SPECS, derived_data_categories, validate_params
 
 #: Раздел 4.13: «< 1 000 строк, < 2 с» — граница между sync- и async-путём.
 SYNC_ROW_THRESHOLD = 1000
 
-# new_spec §4.13: «каждая генерация — событие REPORT_EXPORTED в аудите с
-# указанием количества строк и категорий данных» — `row_count` уже писался,
-# категории — нет. `report_templates` не хранит состав колонок структурно
-# (`query_def` — просто `{"kind": ...}`, см. `reporting.seed`), поэтому
-# источник здесь — то же прочтение восьми шаблонов, что и их описания в
-# `reporting.seed`: пять агрегатных отчётов (воронка/регионы/причины/SLA/
-# динамика) не содержат ФИО ни в одной строке, `kam_summary` — сводка по
-# именованным сотрудникам, `stuck_deals` — «листинг, не агрегат» с
-# ответственным по каждой сделке, `learning_progress` — прогресс именованных
-# учащихся. Код отчёта, которого нет в словаре, трактуется как содержащий
-# ПДн (безопасный отказ, а не молчаливое «пусто»).
-REPORT_DATA_CATEGORIES: dict[str, list[str]] = {
-    "deal_funnel": [],
-    "region_summary": [],
-    "loss_reasons": [],
-    "sla_compliance": [],
-    "monthly_dynamics": [],
-    "kam_summary": ["ФИО сотрудников (КАМ)"],
-    "stuck_deals": ["ФИО сотрудников (владелец сделки)"],
-    "learning_progress": ["ФИО контактов/учащихся", "прогресс обучения"],
-    # Выгрузка для LMS: контакты учащихся и их профиль целиком, без маскирования.
-    "lms_users_upload": [
-        "ФИО, телефон и email учащихся",
-        "ПДн учащихся (СНИЛС, паспорт, дата рождения, адрес регистрации, диплом)",
-    ],
-}
+# new_spec §4.13: «каждая генерация — событие REPORT_EXPORTED в аудите с указанием количества
+# строк и категорий данных». Код отчёта, которого нет в словаре, трактуется как содержащий ПДн
+# (безопасный отказ, а не молчаливое «пусто») — см. `assert` в `reporting.spec`, который не даёт
+# такому случаю произойти молча для зарегистрированных builder'ов.
+#
+# B1-2/B1-12: производный от `ReportSpec.data_categories` (`reporting.spec`) — раньше это был
+# самостоятельный словарь без `deal_register` (он уходил в «не классифицировано»); теперь
+# источник один, расхождения между каталогом вида отчёта и аудитом структурно невозможны.
+REPORT_DATA_CATEGORIES: dict[str, list[str]] = derived_data_categories()
 
 
 def _reject_null_fields(data: dict[str, Any]) -> None:
@@ -120,6 +105,48 @@ _RENDER_LOCK = threading.Lock()
 def _render_serialized(dataset: ReportDataset, *, format: str, template_code: str) -> bytes:
     with _RENDER_LOCK:
         return render_report(dataset, format=format, template_code=template_code)
+
+
+def report_template_out(template: ReportTemplate) -> ReportTemplateOut:
+    """B1-2/B1-3: `columns`/`params`/`date_fields`/`default_date_field` не хранятся в БД — они
+    вычисляются из `REPORT_SPECS` по `query_def.kind` при каждом ответе, тем же приёмом, что уже
+    используют производные `CHART_KINDS`/`REPORT_DATA_CATEGORIES` этого модуля. Код без описания
+    в `REPORT_SPECS` (не бывает для активного шаблона — см. `assert` в `reporting.spec`, но
+    запись в БД теоретически может опередить код при откате миграции/деплоя) отдаёт пустые
+    списки, а не падает 500."""
+    kind = template.query_def.get("kind", template.code)
+    spec = REPORT_SPECS.get(kind)
+    if spec is None:
+        columns: list[ReportColumnOut] = []
+        params: list[str] = []
+        date_fields: list[str] = []
+        default_date_field = None
+    else:
+        columns = [
+            ReportColumnOut(key=c.key, title=c.title, default=c.default) for c in spec.columns
+        ]
+        allowed = set(spec.common_filters) | set(spec.params) | {"limit"}
+        if spec.columns:
+            allowed.add("columns")
+        if spec.date_fields:
+            allowed.add("date_field")
+        params = sorted(allowed)
+        date_fields = list(spec.date_fields)
+        default_date_field = spec.default_date_field
+    return ReportTemplateOut(
+        id=template.id,
+        code=template.code,
+        name=template.name,
+        description=template.description,
+        allowed_roles=template.allowed_roles,
+        default_params=template.default_params,
+        output_formats=template.output_formats,  # type: ignore[arg-type]
+        is_active=template.is_active,
+        columns=columns,
+        params=params,
+        date_fields=date_fields,
+        default_date_field=default_date_field,
+    )
 
 
 class ReportTemplateService:
@@ -226,6 +253,15 @@ class ReportJobService:
             )
 
         params = {**template.default_params, **(payload.params or {})}
+        # B1-2: строгая проверка ДО создания записи `report_jobs` — так некорректный запрос
+        # (неизвестный параметр, недопустимая колонка, `date_field` вне каталога) не оставляет
+        # осиротевшее задание: вся транзакция откатывается обычным обработчиком ошибок FastAPI.
+        # Код без описания (гипотетический рассинхрон сида и `REPORT_SPECS`) не проверяем — это
+        # уже отловлено выше через `kind not in REPORT_BUILDERS`, а `REPORT_SPECS` описывает
+        # ровно то же множество кодов (`assert` в `reporting.spec`).
+        spec = REPORT_SPECS.get(kind)
+        if spec is not None:
+            validate_params(spec, params)
 
         job = ReportJob(
             template_code=template.code,

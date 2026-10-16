@@ -331,7 +331,9 @@ class TestDealRegisterReport:
             def limit(self, _n: int) -> _Stmt:
                 return self
 
-        async def fake_query(session: object, principal: object, params: dict) -> _Stmt:
+        async def fake_query(
+            session: object, principal: object, params: dict, *, columns: list[str]
+        ) -> _Stmt:
             return _Stmt()
 
         class _Result:
