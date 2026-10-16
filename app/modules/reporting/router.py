@@ -28,13 +28,13 @@ from app.modules.reporting.schemas import (
     ReportJobListResponse,
     ReportJobOut,
     ReportTemplateListResponse,
-    ReportTemplateOut,
 )
 from app.modules.reporting.service import (
     DashboardService,
     DashboardWidgetService,
     ReportJobService,
     ReportTemplateService,
+    report_template_out,
 )
 
 reports_router = APIRouter(prefix="/reports", tags=["reporting"])
@@ -61,7 +61,7 @@ async def list_report_templates(
 ) -> ReportTemplateListResponse:
     stmt = ReportTemplateService(session).list_query(principal)
     rows = (await session.execute(stmt)).scalars().all()
-    return ReportTemplateListResponse(items=[ReportTemplateOut.model_validate(r) for r in rows])
+    return ReportTemplateListResponse(items=[report_template_out(r) for r in rows])
 
 
 # =============================================================================

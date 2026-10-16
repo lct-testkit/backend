@@ -54,9 +54,10 @@ from __future__ import annotations
 import datetime as dt
 import re
 import uuid
+import zoneinfo
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -87,10 +88,32 @@ class ReportDataset:
     rows: list[list[Any]]
     note: str | None = None
     generated_at: dt.datetime = field(default_factory=lambda: dt.datetime.now(dt.UTC))
+    # B1-2: параллельные `columns` списки для рендера (B1-6) — ключ колонки каталога (`None`, если
+    # у вида отчёта нет каталога колонок) и её тип значения. `None` целиком (а не список `None`) —
+    # признак «у этого builder'а колонки не из каталога», используется только рендером B1-6.
+    keys: list[str | None] | None = None
+    kinds: list[str] | None = None
+    # B1-6/B1-7: необязательные поля качества файлов — усечение по `limit` и момент среза данных
+    # (материализованное представление). Отсутствие `total_rows`/`truncated` означает «усечения не
+    # было, оценивать незачем» (агрегаты заведомо малы).
+    total_rows: int | None = None
+    truncated: bool = False
+    data_as_of: dt.datetime | None = None
 
 
 ReportBuilder = Callable[[AsyncSession, Principal, dict[str, Any]], Awaitable[ReportDataset]]
 ReportEstimator = Callable[[AsyncSession, Principal, dict[str, Any]], Awaitable[int]]
+
+
+@dataclass(frozen=True, slots=True)
+class ColumnDef:
+    """Описание одной колонки каталога вида отчёта (B1-2). `kind` — подсказка рендеру (B1-6), как
+    форматировать значение (деньги/процент/дни/дата/дата-время), а не влияет на сам запрос."""
+
+    key: str
+    title: str
+    kind: Literal["text", "int", "money", "pct", "days", "date", "datetime"] = "text"
+    default: bool = True
 
 
 def _parse_uuid(params: dict[str, Any], key: str) -> uuid.UUID | None:
@@ -181,6 +204,21 @@ def _parse_uuid_list(params: dict[str, Any], key: str) -> list[uuid.UUID] | None
     return parsed
 
 
+#: B1-3: `date_field` — по какой дате считать «период» (раздел 4/ФТ.1/ФТ.4). Колонка `Deal`,
+#: которую выбирает `filters.date_field`; `updated_at` — последнее изменение карточки сделки
+#: (`TimestampMixin`, комментарии в карточке не считаются).
+_DATE_FIELD_COLUMNS: dict[str, Any] = {
+    "created_at": Deal.created_at,
+    "closed_at": Deal.closed_at,
+    "updated_at": Deal.updated_at,
+}
+DEFAULT_TIMEZONE_NAME = "Europe/Moscow"
+
+
+def _default_timezone() -> dt.tzinfo:
+    return zoneinfo.ZoneInfo(DEFAULT_TIMEZONE_NAME)
+
+
 @dataclass(slots=True)
 class ReportFilters:
     """П1 (rtk_requiriments.md разд. 4, ФТ.1/ФТ.4): период + фильтры по
@@ -200,6 +238,12 @@ class ReportFilters:
     # звать `_parse_report_filters` напрямую (без БД) — `_apply_entity_filters` в этом случае
     # падает назад на точное совпадение `direction_ids`, как было до этой задачи.
     direction_tree_ids: list[uuid.UUID] | None = None
+    # B1-3: колонка периода (`created_at`/`closed_at`/`updated_at`) — проверяется против
+    # `ReportSpec.date_fields` в `reporting.service.validate_params`, здесь просто хранится.
+    date_field: str = "created_at"
+    # B1-3: пояс пользователя для границ суток периода и `date_trunc` месяца (B1-7). По умолчанию
+    # Europe/Moscow — тот же запасной пояс, что `crm.service._business_calendar`.
+    tz: dt.tzinfo = field(default_factory=_default_timezone)
 
     def has_any(self) -> bool:
         return any(
@@ -216,6 +260,7 @@ class ReportFilters:
 
 def _parse_report_filters(params: dict[str, Any]) -> ReportFilters:
     date_from, date_to = _parse_date_range(params)
+    date_field = params.get("date_field")
     return ReportFilters(
         date_from=date_from,
         date_to=date_to,
@@ -223,11 +268,12 @@ def _parse_report_filters(params: dict[str, Any]) -> ReportFilters:
         direction_ids=_parse_uuid_list(params, "direction_ids"),
         product_ids=_parse_uuid_list(params, "product_ids"),
         owner_ids=_parse_uuid_list(params, "owner_ids"),
+        date_field=str(date_field) if date_field else "created_at",
     )
 
 
-def _day_start(value: dt.date) -> dt.datetime:
-    return dt.datetime.combine(value, dt.time.min, tzinfo=dt.UTC)
+def _day_start(value: dt.date, tz: dt.tzinfo) -> dt.datetime:
+    return dt.datetime.combine(value, dt.time.min, tzinfo=tz)
 
 
 async def _expand_direction_tree(
@@ -244,13 +290,30 @@ async def _expand_direction_tree(
     return list(rows)
 
 
-async def _load_filters(session: AsyncSession, params: dict[str, Any]) -> ReportFilters:
-    """B1-1: как `_parse_report_filters`, но раскрывает `direction_ids` в поддерево одним
-    дополнительным запросом (нужна сессия — поэтому async и отдельная функция, а не правка
-    `_parse_report_filters`, которую используют офлайновые тесты формата параметров)."""
+async def _resolve_user_timezone(session: AsyncSession, principal: Principal) -> dt.tzinfo:
+    """B1-3: пояс пользователя, одним запросом (`User.timezone`, по умолчанию Europe/Moscow —
+    `identity.models.User`). Пустое или неизвестное (`zoneinfo` не знает такой пояс) значение —
+    тот же запасной пояс, тем же приёмом, что `crm.service._business_calendar`."""
+    raw = await session.scalar(select(User.timezone).where(User.id == principal.user_id))
+    if not raw:
+        return _default_timezone()
+    try:
+        return zoneinfo.ZoneInfo(raw)
+    except (zoneinfo.ZoneInfoNotFoundError, ValueError):
+        return _default_timezone()
+
+
+async def _load_filters(
+    session: AsyncSession, principal: Principal, params: dict[str, Any]
+) -> ReportFilters:
+    """B1-1/B1-3: как `_parse_report_filters`, но раскрывает `direction_ids` в поддерево и
+    подставляет настоящий пояс пользователя — обоим нужна сессия, поэтому async и отдельная
+    функция, а не правка `_parse_report_filters`, которую используют офлайновые тесты формата
+    параметров."""
     filters = _parse_report_filters(params)
     if filters.direction_ids:
         filters.direction_tree_ids = await _expand_direction_tree(session, filters.direction_ids)
+    filters.tz = await _resolve_user_timezone(session, principal)
     return filters
 
 
@@ -285,16 +348,22 @@ def _apply_deal_filters(stmt: Any, filters: ReportFilters, *, date_column: Any =
     """Период + фильтры по сущностям для запросов, у которых `Deal` — базовая
     таблица (`select(...).select_from(Deal)` либо просто `select(Deal...)`).
 
-    `date_column` — по какой дате считать «период»; по умолчанию
-    `Deal.created_at` (когда заведена сделка). Отдельные builder'ы передают
-    более уместную колонку своим принципалам (например `build_loss_reasons`
-    — `Deal.closed_at`, момент, когда причина отказа стала известна) —
-    выбор для каждого builder'а описан в его собственном комментарии."""
-    column = date_column if date_column is not None else Deal.created_at
+    `date_column`, когда передан явно, перекрывает `filters.date_field` — так
+    `build_loss_reasons` закрепляет `Deal.closed_at` (момент, когда причина
+    отказа стала известна) независимо от выбора пользователя, потому что его
+    `ReportSpec.date_fields` не даёт этот параметр выбрать (B1-2/B1-3). Без
+    явной колонки период считается по `_DATE_FIELD_COLUMNS[filters.date_field]`
+    (по умолчанию `created_at`), а границы суток — в поясе `filters.tz`
+    (B1-3: `Europe/Moscow`, если у пользователя не задан свой)."""
+    column = (
+        date_column
+        if date_column is not None
+        else _DATE_FIELD_COLUMNS.get(filters.date_field, Deal.created_at)
+    )
     if filters.date_from is not None:
-        stmt = stmt.where(column >= _day_start(filters.date_from))
+        stmt = stmt.where(column >= _day_start(filters.date_from, filters.tz))
     if filters.date_to is not None:
-        stmt = stmt.where(column < _day_start(filters.date_to) + dt.timedelta(days=1))
+        stmt = stmt.where(column < _day_start(filters.date_to, filters.tz) + dt.timedelta(days=1))
     return _apply_entity_filters(stmt, filters)
 
 
@@ -344,7 +413,7 @@ async def build_deal_funnel(
     session: AsyncSession, principal: Principal, params: dict[str, Any]
 ) -> ReportDataset:
     workflow_id = await _resolve_workflow_id(session, params)
-    filters = _parse_report_filters(params)
+    filters = await _load_filters(session, principal, params)
     statuses = (
         (
             await session.execute(
@@ -451,7 +520,7 @@ async def build_deal_funnel(
 async def build_kam_summary(
     session: AsyncSession, principal: Principal, params: dict[str, Any]
 ) -> ReportDataset:
-    filters = _parse_report_filters(params)
+    filters = await _load_filters(session, principal, params)
     clause = await deal_scope_clause(session, principal)
     name_expr = func.coalesce(User.display_name, User.full_name)
     terminal = [t.value for t in TERMINAL_TYPES]
@@ -504,7 +573,7 @@ async def build_kam_summary(
 async def build_region_summary(
     session: AsyncSession, principal: Principal, params: dict[str, Any]
 ) -> ReportDataset:
-    filters = _parse_report_filters(params)
+    filters = await _load_filters(session, principal, params)
     clause = await deal_scope_clause(session, principal)
     region_name = func.coalesce(Region.name, "Без региона")
     stmt = (
@@ -547,7 +616,9 @@ async def build_loss_reasons(
     # а не `created_at`: «причины отказов за период» естественнее читать как
     # «сколько отказов случилось в этом периоде», а не «сколько отказов дали
     # сделки, заведённые в этом периоде» (могли быть заведены сильно раньше).
-    filters = _parse_report_filters(params)
+    # `date_column=Deal.closed_at` ниже закрепляет это жёстко: `ReportSpec.date_fields` этого вида
+    # отчёта — только `("closed_at",)` (B1-3), `date_field` параметром не выбирается.
+    filters = await _load_filters(session, principal, params)
     clause = await deal_scope_clause(session, principal)
     total_stmt = select(func.count(Deal.id)).where(
         Deal.deleted_at.is_(None), Deal.loss_reason_id.is_not(None)
@@ -588,7 +659,7 @@ async def build_loss_reasons(
 async def build_sla_compliance(
     session: AsyncSession, principal: Principal, params: dict[str, Any]
 ) -> ReportDataset:
-    filters = _parse_report_filters(params)
+    filters = await _load_filters(session, principal, params)
     clause = await deal_scope_clause(session, principal)
     stmt = (
         select(Deal.sla_state, func.count(Deal.id))
@@ -621,35 +692,84 @@ async def build_sla_compliance(
 # =============================================================================
 
 
+def _now() -> dt.datetime:
+    """Текущий момент (UTC, aware) — отдельная функция, а не прямой `dt.datetime.now(dt.UTC)` в
+    теле builder'а, чтобы тесты (B1-7) могли зафиксировать «сегодня» через
+    `monkeypatch.setattr(builders, "_now", ...)` и не зависеть от даты прогона."""
+    return dt.datetime.now(dt.UTC)
+
+
+def _month_floor(value: dt.date) -> dt.date:
+    return value.replace(day=1)
+
+
+def _add_months(value: dt.date, delta: int) -> dt.date:
+    total = value.month - 1 + delta
+    year = value.year + total // 12
+    month = total % 12 + 1
+    return dt.date(year, month, 1)
+
+
+def _month_range(start: dt.date, end: dt.date) -> list[dt.date]:
+    """Все месяцы окна `[start, end]` включительно, по первому числу — так месяц без единой
+    сделки всё равно попадает в ряд с нулём (B1-7, BUG-3), а не просто выпадает из строк."""
+    months: list[dt.date] = []
+    cur = _month_floor(start)
+    last = _month_floor(end)
+    while cur <= last:
+        months.append(cur)
+        cur = _add_months(cur, 1)
+    return months
+
+
+def _month_trunc_local(column: Any, tz_name: str) -> Any:
+    """`date_trunc('month', колонка)` в поясе пользователя, не сессии БД (B1-3/B1-7):
+    `timezone(zone, timestamptz)` в Postgres сначала переводит момент в стенные часы указанного
+    пояса (и превращает его в `timestamp` без пояса), а `date_trunc` уже режет по месяцу этих
+    стенных часов. Без этого перевода «1 февраля 00:30 по Москве» (это 31 января 21:30 UTC)
+    попадало бы в январскую строку."""
+    return func.date_trunc("month", func.timezone(tz_name, column))
+
+
 async def build_monthly_dynamics(
     session: AsyncSession, principal: Principal, params: dict[str, Any]
 ) -> ReportDataset:
+    """Динамика по месяцам (B1-7, BUG-3): ряд строится в Python от первого до последнего месяца
+    окна и заполняется нулями за пропущенные месяцы — раньше месяц без единой сделки просто не
+    попадал в строки, а график (`charts.py`, B1-8) рисовал точки на равных расстояниях по
+    индексу, из-за чего пропуск не был виден на глаз. `date_field` у этого вида отчёта не
+    выбирается (`ReportSpec.date_fields == ()`, B1-2/B1-3): у динамики уже две самостоятельные
+    серии по двум датам (создано/закрыто одновременно), выбор одной даты не имеет смысла."""
     months = _parse_int(params, "months", default=12, minimum=1, maximum=36)
-    filters = _parse_report_filters(params)
+    filters = await _load_filters(session, principal, params)
     clause = await deal_scope_clause(session, principal)
-    # `date_from`/`date_to` (П1), когда заданы, замещают «месяцев назад»
-    # целиком — явный период точнее эвристики по количеству месяцев.
-    # Список организаций сюда тоже добавлен (в отличие от примера в задаче
-    # «может не подходить структурно») — механически это тот же `.where()`,
-    # что у остальных builder'ов, план заведомо не запрещал добавлять его
-    # там, где не ломает структуру запроса.
-    since = (
-        _day_start(filters.date_from)
+    tz = filters.tz
+    tz_name = getattr(tz, "key", DEFAULT_TIMEZONE_NAME)
+    now_local = _now().astimezone(tz).date()
+
+    # `date_from`/`date_to` (П1), когда заданы, замещают «месяцев назад» целиком — явный период
+    # точнее эвристики по количеству месяцев. Список организаций и остальные сущностные фильтры
+    # применяются тем же `_apply_entity_filters`, что и у остальных builder'ов.
+    window_start = (
+        filters.date_from
         if filters.date_from is not None
-        else dt.datetime.now(dt.UTC) - dt.timedelta(days=31 * months)
+        else _add_months(_month_floor(now_local), -(months - 1))
     )
+    window_end = filters.date_to if filters.date_to is not None else now_local
+    since = _day_start(window_start, tz)
     until = (
-        _day_start(filters.date_to) + dt.timedelta(days=1) if filters.date_to is not None else None
+        _day_start(filters.date_to, tz) + dt.timedelta(days=1)
+        if filters.date_to is not None
+        else None
     )
 
-    # `func.date_trunc("month", ...)` строится один раз в переменную и
-    # переиспользуется в SELECT и GROUP BY: два отдельных вызова с одним и
-    # тем же строковым литералом дают ДВА разных bind-параметра ($1 и $3) —
-    # Postgres не может на этапе планирования доказать, что они совпадут в
-    # рантайме, и падает `GroupingError`. Живая проверка против настоящего
-    # Postgres поймала это сразу (offline/юнит-тесты этого не видят —
-    # SQLite-подобной заглушки тут нет, см. docstring `tests/test_reporting.py`).
-    created_month = func.date_trunc("month", Deal.created_at)
+    # Выражение месяца строится один раз в переменную и переиспользуется в SELECT и GROUP BY: два
+    # отдельных вызова с одним и тем же строковым литералом дают ДВА разных bind-параметра —
+    # Postgres не может на этапе планирования доказать, что они совпадут в рантайме, и падает
+    # `GroupingError`. Живая проверка против настоящего Postgres поймала это сразу (офлайновые
+    # тесты этого не видят — SQLite-подобной заглушки тут нет, см. docstring
+    # `tests/test_reporting.py`).
+    created_month = _month_trunc_local(Deal.created_at, tz_name)
     created_stmt = (
         select(created_month, func.count(Deal.id))
         .where(Deal.deleted_at.is_(None), Deal.created_at >= since)
@@ -657,7 +777,7 @@ async def build_monthly_dynamics(
     )
     if until is not None:
         created_stmt = created_stmt.where(Deal.created_at < until)
-    closed_month = func.date_trunc("month", Deal.closed_at)
+    closed_month = _month_trunc_local(Deal.closed_at, tz_name)
     closed_stmt = (
         select(
             closed_month,
@@ -686,7 +806,7 @@ async def build_monthly_dynamics(
         for row in (await session.execute(closed_stmt)).all()
     }
 
-    all_months = sorted(set(created_map) | set(closed_map))
+    all_months = _month_range(window_start, window_end)
     rows = [
         [
             month.isoformat()[:7],
@@ -699,6 +819,11 @@ async def build_monthly_dynamics(
         title="Динамика по месяцам",
         columns=["Месяц", "Создано", "Выиграно", "Проиграно", "Сумма выигранных"],
         rows=rows,
+        note=(
+            f"Создано считается по дате создания, выиграно и проиграно — по дате закрытия; "
+            f"месяц — в поясе {tz_name}. Пропущенные месяцы показаны с нулём, а не выпадают из "
+            "строк."
+        ),
     )
 
 
@@ -708,7 +833,7 @@ async def build_monthly_dynamics(
 
 
 async def _stuck_deals_query(session: AsyncSession, principal: Principal, params: dict[str, Any]):
-    filters = _parse_report_filters(params)
+    filters = await _load_filters(session, principal, params)
     clause = await deal_scope_clause(session, principal)
     stmt = (
         select(
@@ -773,67 +898,272 @@ async def build_stuck_deals(
 # 8а. Реестр сделок: вуз + направление + продукт + статус + ответственный
 # =============================================================================
 
+#: Каталог колонок `deal_register` (B1-2). Порядок в файле равен порядку в параметре `columns`;
+#: без него действует набор по умолчанию — первые десять (`default=True`), в этом же порядке:
+#: ровно нынешние заголовки, которые ищет фронтенд (`widgets.ts:18-24`) — не переименовываются и
+#: не переставляются, новые шесть добавлены только в конец каталога.
+REGISTER_COLUMNS: tuple[ColumnDef, ...] = (
+    ColumnDef("organization", "Вуз"),
+    ColumnDef("direction", "Направление"),
+    ColumnDef("product", "Продукт"),
+    ColumnDef("status", "Статус"),
+    ColumnDef("owner", "Ответственный"),
+    ColumnDef("number", "Номер"),
+    ColumnDef("title", "Название"),
+    ColumnDef("amount", "Сумма, ₽", kind="money"),
+    ColumnDef("created_at", "Создана", kind="datetime"),
+    ColumnDef("closed_at", "Закрыта", kind="datetime"),
+    ColumnDef("region", "Регион", default=False),
+    ColumnDef("quantity", "Кол-во", kind="int", default=False),
+    ColumnDef("stream_number", "Поток", kind="int", default=False),
+    ColumnDef("product_total", "Сумма по продукту, ₽", kind="money", default=False),
+    ColumnDef("students_planned", "Студентов (план)", kind="int", default=False),
+    ColumnDef("priority", "Приоритет", default=False),
+)
+_REGISTER_COLUMNS_BY_KEY: dict[str, ColumnDef] = {c.key: c for c in REGISTER_COLUMNS}
+#: Колонки продукта (B1-1): их выбор требует зерна «product» — строка на пару сделка-продукт.
+_REGISTER_PRODUCT_KEYS = frozenset({"product", "quantity", "stream_number", "product_total"})
+#: Колонки-названия, у которых отсутствующее значение показывается как «—», не пустой ячейкой —
+#: тот же приём, что уже был у `organization`/`direction`/`product` до каталога колонок.
+_REGISTER_DASH_KEYS = frozenset({"organization", "direction", "product", "region"})
+_REGISTER_MONEY_KEYS = frozenset({"amount", "product_total"})
 
-async def _deal_register_query(session: AsyncSession, principal: Principal, params: dict[str, Any]):
-    filters = await _load_filters(session, params)
+
+def register_default_columns() -> list[str]:
+    return [c.key for c in REGISTER_COLUMNS if c.default]
+
+
+def _register_grain(columns: list[str]) -> Literal["deal", "direction", "product"]:
+    """B1-1/B1-2: зерно строки реестра зависит от выбранных колонок. Есть колонка продукта —
+    строка на пару сделка-продукт (как было до каталога колонок). Нет колонки продукта, но есть
+    «направление» — строка на пару сделка-направление (`SELECT DISTINCT`: несколько продуктов
+    одного направления у одной сделки дают одну строку). Иначе — строка на сделку, без join'ов к
+    продуктам вовсе."""
+    if any(key in _REGISTER_PRODUCT_KEYS for key in columns):
+        return "product"
+    if "direction" in columns:
+        return "direction"
+    return "deal"
+
+
+def _parse_register_columns(params: dict[str, Any]) -> list[str]:
+    """Разбор `columns` реестра сделок. Строже, чем остальные `_parse_*` этого модуля: ошибка
+    содержит список допустимых ключей (B1-2, «422 со списком допустимых»), а не просто жалуется
+    на тип — колонок 16, угадывать их пользователю не из чего."""
+    raw = params.get("columns")
+    if raw is None or raw == []:
+        return register_default_columns()
+    if not isinstance(raw, list):
+        raise ValidationError(
+            "Параметр 'columns' должен быть списком ключей колонок",
+            [FieldError(field="columns", reason="ожидается массив строк")],
+        )
+    valid_keys = sorted(_REGISTER_COLUMNS_BY_KEY)
+    seen: set[str] = set()
+    result: list[str] = []
+    for key in raw:
+        if key not in _REGISTER_COLUMNS_BY_KEY:
+            raise ValidationError(
+                f"Параметр 'columns' содержит неизвестный ключ: {key!r}",
+                [
+                    FieldError(
+                        field="columns",
+                        reason=f"неизвестный ключ: {key}; допустимо: {', '.join(valid_keys)}",
+                    )
+                ],
+            )
+        if key in seen:
+            raise ValidationError(
+                f"Параметр 'columns' содержит повтор ключа: {key!r}",
+                [FieldError(field="columns", reason=f"повтор ключа: {key}")],
+            )
+        seen.add(key)
+        result.append(key)
+    return result
+
+
+async def _deal_register_query(
+    session: AsyncSession, principal: Principal, params: dict[str, Any], *, columns: list[str]
+):
+    filters = await _load_filters(session, principal, params)
     clause = await deal_scope_clause(session, principal)
     direction_ids = filters.direction_tree_ids or filters.direction_ids
+    grain = _register_grain(columns)
+    needs_region = "region" in columns
+    owner_name = func.coalesce(User.display_name, User.full_name)
 
-    # BUG-1 (часть 2): сумма сделки повторялась на каждой её строке-продукте, поэтому сумма по
-    # колонке в Excel была завышена ровно во столько раз, сколько у сделки продуктов. Окно
-    # считается уже после WHERE/JOIN (обычная семантика Postgres), поэтому при фильтре по
-    # продукту сумма достаётся первой ОТОБРАННОЙ строке, а не первой по каталогу.
-    amount_column = case(
-        (
-            func.row_number().over(partition_by=Deal.id, order_by=(Product.name, DealProduct.id))
-            == 1,
-            Deal.amount,
-        ),
-        else_=None,
-    ).label("amount")
-
-    stmt = (
-        select(
-            Organization.name,
-            Direction.name,
-            Product.name,
-            WorkflowStatus.name,
-            func.coalesce(User.display_name, User.full_name),
-            Deal.number,
-            Deal.title,
-            amount_column,
-            Deal.created_at,
-            Deal.closed_at,
+    if grain == "product":
+        # BUG-1 (часть 2): сумма сделки повторялась на каждой её строке-продукте, поэтому сумма по
+        # колонке в Excel была завышена ровно во столько раз, сколько у сделки продуктов. Окно
+        # считается уже после WHERE/JOIN (обычная семантика Postgres), поэтому при фильтре по
+        # продукту сумма достаётся первой ОТОБРАННОЙ строке, а не первой по каталогу.
+        amount_expr = case(
+            (
+                func.row_number().over(
+                    partition_by=Deal.id, order_by=(Product.name, DealProduct.id)
+                )
+                == 1,
+                Deal.amount,
+            ),
+            else_=None,
         )
+        product_total_expr = func.coalesce(
+            DealProduct.total,
+            DealProduct.price * DealProduct.quantity * (1 - DealProduct.discount_pct / 100),
+        )
+        exprs: dict[str, Any] = {
+            "organization": Organization.name,
+            "direction": Direction.name,
+            "product": Product.name,
+            "status": WorkflowStatus.name,
+            "owner": owner_name,
+            "number": Deal.number,
+            "title": Deal.title,
+            "amount": amount_expr,
+            "created_at": Deal.created_at,
+            "closed_at": Deal.closed_at,
+            "quantity": DealProduct.quantity,
+            "stream_number": DealProduct.stream_number,
+            "product_total": product_total_expr,
+            "students_planned": Deal.students_planned,
+            "priority": Deal.priority,
+        }
+        if needs_region:
+            exprs["region"] = Region.name
+        stmt = (
+            select(*[exprs[key] for key in columns])
+            .select_from(Deal)
+            .join(User, User.id == Deal.owner_id)
+            .join(WorkflowStatus, WorkflowStatus.id == Deal.status_id)
+            .outerjoin(Organization, Organization.id == Deal.organization_id)
+            .outerjoin(DealProduct, DealProduct.deal_id == Deal.id)
+            .outerjoin(Product, Product.id == DealProduct.product_id)
+            .outerjoin(Direction, Direction.id == Product.direction_id)
+            .where(Deal.deleted_at.is_(None))
+            .order_by(Deal.created_at.desc(), Deal.number)
+        )
+        if needs_region:
+            stmt = stmt.outerjoin(Region, Region.id == Organization.region_id)
+        if clause is not None:
+            stmt = stmt.where(clause)
+        stmt = _apply_deal_filters(stmt, filters)
+        # BUG-1 (часть 1): `_apply_deal_filters` выше уже ограничил, какие СДЕЛКИ попадают в отчёт
+        # (сделка остаётся, если хотя бы один её продукт подходит под фильтр) — но без этих двух
+        # условий в выдаче сделки с продуктами P и Q при фильтре "только P" всё равно была бы и
+        # строка с Q, потому что сама строка берётся из LEFT JOIN без ограничения на продукт/
+        # направление. Здесь ограничиваются уже СТРОКИ.
+        if filters.product_ids:
+            stmt = stmt.where(Product.id.in_(filters.product_ids))
+        if direction_ids:
+            stmt = stmt.where(Direction.id.in_(direction_ids))
+        return stmt
+
+    if grain == "direction":
+        # B1-2: строка на пару сделка-направление — несколько продуктов одного направления у
+        # одной сделки должны дать одну строку, не одну на каждый продукт. `DealProduct`/
+        # `Product` здесь только путь до `Direction`, в итоговой проекции их нет.
+        pairs = (
+            select(Deal.id.label("deal_id"), Direction.id.label("direction_id"))
+            .select_from(Deal)
+            .outerjoin(DealProduct, DealProduct.deal_id == Deal.id)
+            .outerjoin(Product, Product.id == DealProduct.product_id)
+            .outerjoin(Direction, Direction.id == Product.direction_id)
+            .where(Deal.deleted_at.is_(None))
+        )
+        if clause is not None:
+            pairs = pairs.where(clause)
+        pairs = _apply_deal_filters(pairs, filters)
+        # Тот же приём BUG-1 (часть 1), что и в зерне «product»: ограничивает уже строки
+        # сделка-направление, не только то, какие сделки прошли сущностный фильтр.
+        if filters.product_ids:
+            pairs = pairs.where(Product.id.in_(filters.product_ids))
+        if direction_ids:
+            pairs = pairs.where(Direction.id.in_(direction_ids))
+        pairs_cte = pairs.distinct().cte("register_direction_pairs")
+
+        # Сумма сделки — один раз (BUG-1, часть 2), но порядок окна считается по уже СХЛОПНУТЫМ
+        # парам `pairs_cte`, а не по исходным строкам-продуктам: иначе `SELECT DISTINCT` после
+        # оконной функции развалил бы одну пару на две строки там, где сумма стоит на одной из
+        # двух исходных строк-продуктов одного направления, а на другой пустует.
+        amount_expr = case(
+            (
+                func.row_number().over(
+                    partition_by=pairs_cte.c.deal_id, order_by=pairs_cte.c.direction_id
+                )
+                == 1,
+                Deal.amount,
+            ),
+            else_=None,
+        )
+        exprs = {
+            "organization": Organization.name,
+            "direction": Direction.name,
+            "status": WorkflowStatus.name,
+            "owner": owner_name,
+            "number": Deal.number,
+            "title": Deal.title,
+            "amount": amount_expr,
+            "created_at": Deal.created_at,
+            "closed_at": Deal.closed_at,
+            "students_planned": Deal.students_planned,
+            "priority": Deal.priority,
+        }
+        if needs_region:
+            exprs["region"] = Region.name
+        stmt = (
+            select(*[exprs[key] for key in columns])
+            .select_from(pairs_cte)
+            .join(Deal, Deal.id == pairs_cte.c.deal_id)
+            .join(User, User.id == Deal.owner_id)
+            .join(WorkflowStatus, WorkflowStatus.id == Deal.status_id)
+            .outerjoin(Organization, Organization.id == Deal.organization_id)
+            .outerjoin(Direction, Direction.id == pairs_cte.c.direction_id)
+            .order_by(Deal.created_at.desc(), Deal.number)
+        )
+        if needs_region:
+            stmt = stmt.outerjoin(Region, Region.id == Organization.region_id)
+        return stmt
+
+    # grain == "deal": строка на сделку, без join'ов к продуктам/направлениям вовсе. Фильтры по
+    # продукту/направлению всё равно ограничивают, какие СДЕЛКИ попадают (через
+    # `_apply_deal_filters` -> `_apply_entity_filters`, подзапросы по `deal_products`) — просто
+    # показывать сам продукт/направление нечем, колонка не выбрана.
+    exprs = {
+        "organization": Organization.name,
+        "status": WorkflowStatus.name,
+        "owner": owner_name,
+        "number": Deal.number,
+        "title": Deal.title,
+        "amount": Deal.amount,
+        "created_at": Deal.created_at,
+        "closed_at": Deal.closed_at,
+        "students_planned": Deal.students_planned,
+        "priority": Deal.priority,
+    }
+    if needs_region:
+        exprs["region"] = Region.name
+    stmt = (
+        select(*[exprs[key] for key in columns])
         .select_from(Deal)
         .join(User, User.id == Deal.owner_id)
         .join(WorkflowStatus, WorkflowStatus.id == Deal.status_id)
         .outerjoin(Organization, Organization.id == Deal.organization_id)
-        .outerjoin(DealProduct, DealProduct.deal_id == Deal.id)
-        .outerjoin(Product, Product.id == DealProduct.product_id)
-        .outerjoin(Direction, Direction.id == Product.direction_id)
         .where(Deal.deleted_at.is_(None))
         .order_by(Deal.created_at.desc(), Deal.number)
     )
+    if needs_region:
+        stmt = stmt.outerjoin(Region, Region.id == Organization.region_id)
     if clause is not None:
         stmt = stmt.where(clause)
     stmt = _apply_deal_filters(stmt, filters)
-    # BUG-1 (часть 1): `_apply_deal_filters` выше уже ограничил, какие СДЕЛКИ попадают в отчёт
-    # (сделка остаётся, если хотя бы один её продукт подходит под фильтр) — но без этих двух
-    # условий в выдаче сделки с продуктами P и Q при фильтре "только P" всё равно была бы и
-    # строка с Q, потому что сама строка берётся из LEFT JOIN без ограничения на продукт/
-    # направление. Здесь ограничиваются уже СТРОКИ.
-    if filters.product_ids:
-        stmt = stmt.where(Product.id.in_(filters.product_ids))
-    if direction_ids:
-        stmt = stmt.where(Direction.id.in_(direction_ids))
     return stmt
 
 
 async def estimate_deal_register(
     session: AsyncSession, principal: Principal, params: dict[str, Any]
 ) -> int:
-    inner = await _deal_register_query(session, principal, params)
+    columns = _parse_register_columns(params)
+    inner = await _deal_register_query(session, principal, params, columns=columns)
     count_stmt = select(func.count()).select_from(inner.subquery())
     return (await session.execute(count_stmt)).scalar_one() or 0
 
@@ -841,51 +1171,30 @@ async def estimate_deal_register(
 async def build_deal_register(
     session: AsyncSession, principal: Principal, params: dict[str, Any]
 ) -> ReportDataset:
+    columns = _parse_register_columns(params)
     limit = _parse_int(params, "limit", default=1000, minimum=1, maximum=5000)
-    stmt = (await _deal_register_query(session, principal, params)).limit(limit)
+    stmt = (await _deal_register_query(session, principal, params, columns=columns)).limit(limit)
     result = (await session.execute(stmt)).all()
-    rows = [
-        [
-            org_name or "—",
-            direction_name or "—",
-            product_name or "—",
-            status_name,
-            owner_name,
-            number,
-            title,
-            float(amount) if amount is not None else None,
-            created_at,
-            closed_at,
-        ]
-        for (
-            org_name,
-            direction_name,
-            product_name,
-            status_name,
-            owner_name,
-            number,
-            title,
-            amount,
-            created_at,
-            closed_at,
-        ) in result
-    ]
+
+    rows: list[list[Any]] = []
+    for raw_row in result:
+        mapped_row: list[Any] = []
+        for key, value in zip(columns, raw_row, strict=True):
+            if key in _REGISTER_DASH_KEYS:
+                mapped_row.append(value or "—")
+            elif key in _REGISTER_MONEY_KEYS:
+                mapped_row.append(float(value) if value is not None else None)
+            else:
+                mapped_row.append(value)
+        rows.append(mapped_row)
+
     return ReportDataset(
         title="Сделки по вузам и направлениям",
-        columns=[
-            "Вуз",
-            "Направление",
-            "Продукт",
-            "Статус",
-            "Ответственный",
-            "Номер",
-            "Название",
-            "Сумма, ₽",
-            "Создана",
-            "Закрыта",
-        ],
+        columns=[_REGISTER_COLUMNS_BY_KEY[key].title for key in columns],
         rows=rows,
-        note="Сумма сделки указана на первой строке сделки",
+        note="Сумма сделки указана на первой строке сделки" if "amount" in columns else None,
+        keys=list(columns),
+        kinds=[_REGISTER_COLUMNS_BY_KEY[key].kind for key in columns],
     )
 
 
@@ -1028,9 +1337,9 @@ def _lms_users_query(clause: Any, params: dict[str, Any]) -> Any:
     if clause is not None:
         deals = deals.where(clause)
     if date_from is not None:
-        deals = deals.where(Deal.created_at >= _day_start(date_from))
+        deals = deals.where(Deal.created_at >= _day_start(date_from, dt.UTC))
     if date_to is not None:
-        deals = deals.where(Deal.created_at < _day_start(date_to) + dt.timedelta(days=1))
+        deals = deals.where(Deal.created_at < _day_start(date_to, dt.UTC) + dt.timedelta(days=1))
     if product_id is not None or stream_number is not None:
         # Продукт и поток — об одной и той же строке сделки: «курс А, поток 2», а не «курс А» у
         # одной позиции и «поток 2» у другой.

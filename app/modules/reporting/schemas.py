@@ -20,6 +20,14 @@ WidgetTypeLiteral = Literal["report_table", "report_chart", "stat_tile"]
 # =============================================================================
 
 
+class ReportColumnOut(BaseModel):
+    """Элемент каталога колонок вида отчёта (B1-2, `reporting.spec.ReportSpec.columns`)."""
+
+    key: str
+    title: str
+    default: bool
+
+
 class ReportTemplateOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -31,6 +39,17 @@ class ReportTemplateOut(BaseModel):
     default_params: dict[str, Any]
     output_formats: list[FormatLiteral]
     is_active: bool
+    # B1-2/B1-3: вычисляются из `reporting.spec.REPORT_SPECS` по `query_def.kind`
+    # (`reporting.service.report_template_out`), не хранятся в БД отдельной миграцией.
+    # `columns` — пусто, если вид отчёта не поддерживает выбор колонок (агрегаты).
+    columns: list[ReportColumnOut] = Field(default_factory=list)
+    #: Все ключи `params`, которые принимает `POST /api/reports` для этого вида отчёта —
+    #: общие фильтры (сужены `common_filters`), `limit`, `columns`/`date_field` (если
+    #: поддержаны), и специфичные для вида (например `months`/`workflow_id`).
+    params: list[str] = Field(default_factory=list)
+    #: Допустимые значения `params.date_field`; пусто — параметр недопустим вовсе.
+    date_fields: list[str] = Field(default_factory=list)
+    default_date_field: str | None = None
 
 
 class ReportTemplateListResponse(BaseModel):

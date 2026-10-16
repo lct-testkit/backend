@@ -11154,6 +11154,30 @@
         "title": "RejectRequest",
         "type": "object"
       },
+      "ReportColumnOut": {
+        "description": "Элемент каталога колонок вида отчёта (B1-2, `reporting.spec.ReportSpec.columns`).",
+        "properties": {
+          "default": {
+            "title": "Default",
+            "type": "boolean"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "title",
+          "default"
+        ],
+        "title": "ReportColumnOut",
+        "type": "object"
+      },
       "ReportDataOut": {
         "description": "rtk_requiriments.md разд. 6.4 («возможность формирования результирующего\njson-файла»; см. также backend-issues.md #19): тот же `ReportDataset`,\nчто рендерится в xlsx/pdf/png, отданный как JSON — для дашбордов и\nклиентских диаграмм. Строится заново по параметрам задания при каждом\nзапросе (свежие данные), не создаёт файл в S3 и не пишет `REPORT_EXPORTED`\n— это чтение, не выгрузка (`reporting.service.ReportJobService.get_data`).",
         "properties": {
@@ -11420,6 +11444,31 @@
             "title": "Code",
             "type": "string"
           },
+          "columns": {
+            "items": {
+              "$ref": "#/components/schemas/ReportColumnOut"
+            },
+            "title": "Columns",
+            "type": "array"
+          },
+          "date_fields": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Date Fields",
+            "type": "array"
+          },
+          "default_date_field": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Date Field"
+          },
           "default_params": {
             "additionalProperties": true,
             "title": "Default Params",
@@ -11459,6 +11508,13 @@
               "type": "string"
             },
             "title": "Output Formats",
+            "type": "array"
+          },
+          "params": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Params",
             "type": "array"
           }
         },

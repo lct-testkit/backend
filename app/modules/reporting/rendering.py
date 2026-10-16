@@ -42,6 +42,7 @@ from app.modules.catalog import learner
 from app.modules.imports.parsing import sanitize_formula
 from app.modules.reporting.builders import LMS_USERS_UPLOAD, ReportDataset
 from app.modules.reporting.models import ReportFormat
+from app.modules.reporting.spec import derived_chart_kinds
 from app.modules.signing.rendering import html_to_pdf, render_template_html
 
 CONTENT_TYPES: dict[str, str] = {
@@ -50,8 +51,10 @@ CONTENT_TYPES: dict[str, str] = {
     ReportFormat.PNG.value: "image/png",
 }
 
-#: Виды отчёта, для которых определён график. Ключ — `report_templates.code`.
-CHART_KINDS = frozenset({"deal_funnel", "monthly_dynamics"})
+#: Виды отчёта, для которых определён график. Ключ — `report_templates.code`. B1-2/B1-8:
+#: производный от `ReportSpec.chart` (`reporting.spec`), а не самостоятельный литерал — иначе
+#: новый график в `ReportSpec` и регистрация в `rendering.render_png` могли бы расползтись.
+CHART_KINDS = derived_chart_kinds()
 
 
 class RenderNotSupportedError(Exception):
