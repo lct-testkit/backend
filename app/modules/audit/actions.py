@@ -83,6 +83,9 @@ class AuditAction(StrEnum):
     IMPORT_APPLIED = "IMPORT_APPLIED"
     IMPORT_ROLLBACK = "IMPORT_ROLLBACK"
     IMPORT_PRESET_CREATED = "IMPORT_PRESET_CREATED"
+    # B9-8 (OPEN-ISSUES B-15): `DELETE /api/import-presets/{id}` не было вовсе — созданный
+    # пресет маппинга нельзя было убрать из списка иначе, чем прямым SQL.
+    IMPORT_PRESET_DELETED = "IMPORT_PRESET_DELETED"
     REPORT_EXPORTED = "REPORT_EXPORTED"
     REPORT_FAILED = "REPORT_FAILED"
 

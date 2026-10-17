@@ -55,6 +55,11 @@ class ImportJobOut(BaseModel):
     source_format: str
     started_at: dt.datetime | None = None
     finished_at: dt.datetime | None = None
+    # B9-8 (OPEN-ISSUES B-14): миграция 0025_import_job_last_error и `imports.tasks` (запись
+    # причины ухода в `failed`, фоновая партия вне построчного цикла) существуют с прошлого
+    # спринта, но поле не отдавалось в ответе — пользователь видел только статус `failed` без
+    # причины, пока не открывал БД напрямую.
+    last_error: str | None = None
     rollback_available: bool
     rolled_back_at: dt.datetime | None = None
     created_at: dt.datetime

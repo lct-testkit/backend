@@ -6,7 +6,7 @@ import datetime as dt
 import uuid
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
@@ -91,11 +91,21 @@ class ReportJobOut(BaseModel):
 
     id: uuid.UUID
     template_code: str
+    # B9-8 (OPEN-ISSUES B-18): параметры, с которыми запущено задание (`ReportJob.params` —
+    # слияние `payload.params` с `default_params` шаблона, `ReportJobService.create`) были на
+    # модели, но не в ответе: клиент не мог показать «этот отчёт запущен с такими фильтрами»
+    # без похода в БД.
+    params: dict[str, Any]
     format: FormatLiteral
     status: JobStatusLiteral
     progress_pct: int
     row_count: int | None
     error: str | None
+    # B9-8: готовый файл — `None`, пока задание не завершено (`queued`/`processing`/`failed`)
+    # или если данных для скачивания не осталось (`SET NULL` при ретеншене файла, см. докстринг
+    # `reporting.models.ReportJob`). Ссылка на скачивание — всё равно через
+    # `GET /api/reports/{id}/download` (подписанный URL, не голый `file_id`).
+    file_id: uuid.UUID | None = None
     requested_by: uuid.UUID
     created_at: dt.datetime
     finished_at: dt.datetime | None
@@ -104,6 +114,14 @@ class ReportJobOut(BaseModel):
     # генерации — снимок, который не восстановить заново по одному `params`, если данные успели
     # измениться. `None` до завершения задания (`queued`/`processing`/`failed`).
     result_meta: dict[str, Any] | None = None
+
+    @field_validator("params")
+    @classmethod
+    def _hide_service_keys(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """Служебные ключи с `_` (например `_seed` — демо-история отчётов, B1-14,
+        `reporting.seed.seed_demo_report_history`) не предназначены для интегратора — тот же
+        фильтр, что `reporting.rendering.render_json` уже применяет к конверту json-файла."""
+        return {k: v for k, v in value.items() if not str(k).startswith("_")}
 
 
 class ReportJobListResponse(BaseModel):

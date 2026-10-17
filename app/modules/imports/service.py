@@ -249,6 +249,27 @@ class ImportService:
             .limit(1)
         )
 
+    async def get_preset_or_404(self, preset_id: uuid.UUID) -> ImportPreset:
+        preset = await self._session.get(ImportPreset, preset_id)
+        if preset is None:
+            raise NotFoundError("Пресет маппинга", preset_id)
+        return preset
+
+    async def delete_preset(self, preset: ImportPreset) -> None:
+        """B9-8 (OPEN-ISSUES B-15): раньше пресет можно было только создать (`save_mapping`,
+        `save_as_preset`), убрать — только прямым SQL. Жёсткое удаление, не мягкое: пресет —
+        сохранённый маппинг колонок, а не бизнес-сущность с историей переходов (как шаблон
+        уведомления, `notification.service.NotificationTemplateService.delete`)."""
+        preset_id = preset.id
+        await self._session.delete(preset)
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.IMPORT_PRESET_DELETED,
+            entity_type="import_preset",
+            entity_id=preset_id,
+            changes={"name": {"old": preset.name, "new": None}},
+        )
+
     # -- фаза 3: маппинг --------------------------------------------------
 
     async def save_mapping(
