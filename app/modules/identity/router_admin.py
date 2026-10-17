@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Path, Query, status
 from sqlalchemy import select
@@ -69,6 +69,7 @@ from app.modules.identity.schemas import (
     UserUnblockRequest,
 )
 from app.modules.identity.service import IdentityService
+from app.modules.signing.models import SignatureDocument
 from app.modules.signing.schemas import DownloadUrlOut
 
 router = APIRouter(prefix="/admin", tags=["admin-users"])
@@ -81,10 +82,30 @@ ErasureManager = Annotated[Principal, Depends(require_permission(Permission.ERAS
 async def _erasure_details(
     session: DbSession, requests: list[DataErasureRequest]
 ) -> list[ErasureRequestDetail]:
-    """Карточки запросов с именами субъектов (по одному запросу на тип субъекта)."""
+    """Карточки запросов с именами субъектов (по одному запросу на тип субъекта) и статусом
+    подписи акта (B6-9, один запрос на всю страницу — НФР 1, не на строку)."""
     names = await ErasureExecutionService(session).subject_displays(requests)
+    document_ids = [r.act_document_id for r in requests if r.act_document_id is not None]
+    statuses: dict[uuid.UUID, str] = {}
+    if document_ids:
+        rows = await session.execute(
+            select(SignatureDocument.id, SignatureDocument.status).where(
+                SignatureDocument.id.in_(document_ids)
+            )
+        )
+        statuses = {row[0]: row[1] for row in rows.all()}
     return [
-        ErasureRequestDetail.from_model(request, subject_display=names.get(request.subject_id))
+        ErasureRequestDetail.from_model(
+            request,
+            subject_display=names.get(request.subject_id),
+            act_signed=(
+                request.act_document_id is not None
+                and statuses.get(request.act_document_id) == "signed"
+            ),
+            act_signature_status=(
+                statuses.get(request.act_document_id) if request.act_document_id else None
+            ),
+        )
         for request in requests
     ]
 
@@ -599,18 +620,40 @@ async def restore_erasure_request(
 @router.get(
     "/erasure-requests/{request_id}/act",
     summary="Ссылка на акт об уничтожении ПДн",
-    description="Доступна только после исполнения запроса. Роль: ADMIN.",
+    description=(
+        "Доступна только после исполнения запроса. По умолчанию (`variant=signed`) отдаёт "
+        "подписанную копию, если акт уже подписан, иначе исходник; `variant=original` — всегда "
+        "исходник; `variant=protocol` — протокол подписания (B6-9). Роль: ADMIN."
+    ),
     response_model=DownloadUrlOut,
 )
 async def get_erasure_act(
     session: DbSession,
     _: ErasureManager,
     request_id: Annotated[uuid.UUID, Path()],
+    variant: Annotated[Literal["signed", "original", "protocol"], Query()] = "signed",
 ) -> DownloadUrlOut:
     request = await ErasureExecutionService(session).get_or_404(request_id)
     if request.act_file_id is None:
         raise NotFoundError("Акт об уничтожении ПДн", request_id)
-    file = await session.get(File, request.act_file_id)
+
+    file_id = request.act_file_id
+    document = (
+        await session.get(SignatureDocument, request.act_document_id)
+        if request.act_document_id
+        else None
+    )
+    if variant == "protocol":
+        if document is None or document.protocol_file_id is None:
+            raise AppError(
+                ErrorCode.DOCUMENT_NOT_SIGNABLE,
+                "Протокол подписания доступен только у подписанного акта",
+            )
+        file_id = document.protocol_file_id
+    elif variant == "signed" and document is not None and document.signed_file_id is not None:
+        file_id = document.signed_file_id
+
+    file = await session.get(File, file_id)
     if file is None:
         raise NotFoundError("Акт об уничтожении ПДн", request_id)
     url, expires_at = await FileService(session).download_url(file)

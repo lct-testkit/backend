@@ -89,7 +89,7 @@ from app.modules.crm.models import (
 )
 from app.modules.crm.models import SignatureStatus as DealSignatureStatus
 from app.modules.files.models import Attachment, AttachmentCategory, File, FileStatus
-from app.modules.identity.models import SecurityEventType, Severity, User
+from app.modules.identity.models import DataErasureRequest, SecurityEventType, Severity, User
 from app.modules.identity.service import IdentityService
 from app.modules.integration.service import get_outbox_service
 from app.modules.notification.email_transport import (
@@ -2487,6 +2487,14 @@ class SignatureRequestService:
                 .execution_options(synchronize_session=False)
             )
             await self._session.flush()
+        elif document.entity_type == "erasure_request":
+            # B6-9: подпись ответственного лица на акте об уничтожении ПДн — записывается в той
+            # же транзакции, что завершение документа, последней подписью (signatures[-1]).
+            erasure_request = await self._session.get(DataErasureRequest, document.entity_id)
+            if erasure_request is not None:
+                erasure_request.act_document_id = document.id
+                erasure_request.act_signature_id = signatures[-1].id
+                await self._session.flush()
 
         await get_outbox_service().publish(
             self._session,
@@ -2934,6 +2942,22 @@ class SigningService(Protocol):
         """Действие `request_signature` DSL-перехода (`app/modules/crm/
         service.py._run_actions`)."""
 
+    async def create_erasure_act_document(
+        self,
+        session: AsyncSession,
+        *,
+        erasure_request_id: uuid.UUID,
+        file_id: uuid.UUID,
+        signer_user_ids: list[uuid.UUID],
+        deadline_days: int = 14,
+    ) -> uuid.UUID | None:
+        """B6-9: подпись ответственного лица на акте об уничтожении ПДн — системный вызов (без
+        проверки прав, как `create_from_workflow_action`), документ `doc_type='erasure_act'`,
+        `signing_order='parallel'`, сразу `send()`. Без подписантов (`signer_user_ids` пуст) —
+        документ не создаётся, вызывающий сам решает, как уведомить ADMIN. Возвращает id
+        документа или `None`."""
+        ...
+
 
 class RealSigningService:
     async def void_pending_for_user(
@@ -3109,6 +3133,72 @@ class RealSigningService:
         await SignatureDocumentService(session).create_from_workflow_action(
             deal=deal, action=action, principal_id=principal.user_id
         )
+
+    async def create_erasure_act_document(
+        self,
+        session: AsyncSession,
+        *,
+        erasure_request_id: uuid.UUID,
+        file_id: uuid.UUID,
+        signer_user_ids: list[uuid.UUID],
+        deadline_days: int = 14,
+    ) -> uuid.UUID | None:
+        if not signer_user_ids:
+            return None
+        file = await session.get(File, file_id)
+        if file is None:
+            raise NotFoundError("Файл акта", file_id)
+        now = dt.datetime.now(dt.UTC)
+        document = SignatureDocument(
+            doc_type="erasure_act",
+            title="Акт об уничтожении персональных данных",
+            entity_type="erasure_request",
+            entity_id=erasure_request_id,
+            file_id=file_id,
+            content_hash=file.sha256 or hashlib.sha256(b"").hexdigest(),
+            signing_order="parallel",
+            status=SignatureDocumentStatus.DRAFT.value,
+            deadline_at=now + dt.timedelta(days=deadline_days),
+            created_by=None,
+        )
+        session.add(document)
+        await session.flush()
+
+        doc_service = SignatureDocumentService(session)
+        users = {
+            u.id: u
+            for u in (
+                await session.execute(select(User).where(User.id.in_(signer_user_ids)))
+            ).scalars()
+        }
+        resolved = [
+            ResolvedSigner(
+                signer_type=SignerType.INTERNAL.value,
+                user_id=user_id,
+                contact_id=None,
+                role_code=None,
+                name_snapshot=users[user_id].effective_name if user_id in users else "Неизвестно",
+                identifier_masked=mask_email(users[user_id].email) if user_id in users else None,
+                phone=users[user_id].phone if user_id in users else None,
+                email=users[user_id].email if user_id in users else None,
+            )
+            for user_id in signer_user_ids
+            if user_id in users
+        ]
+        if not resolved:
+            return None
+        await doc_service._create_requests(document, resolved)  # noqa: SLF001
+        await AuditService(session).record(
+            AuditAction.SIGNATURE_DOCUMENT_CREATED,
+            entity_type="signature_document",
+            entity_id=document.id,
+            changes={
+                "doc_type": {"old": None, "new": "erasure_act"},
+                "erasure_request_id": {"old": None, "new": str(erasure_request_id)},
+            },
+        )
+        await doc_service.send(document)
+        return document.id
 
 
 _service: SigningService = RealSigningService()

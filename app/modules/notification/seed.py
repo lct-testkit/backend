@@ -123,6 +123,15 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str | None, str]] = [
         "Акт об уничтожении ПДн доступен в карточке запроса.",
     ),
     (
+        # B6-9: ни настроенный ответственный (pdn.responsible_user_id), ни активный ADMIN не
+        # найдены — акт исполнен, но не подписан.
+        "ERASURE_ACT_NO_SIGNER",
+        "in_app",
+        None,
+        "Заявка на удаление/обезличивание исполнена, но акт об уничтожении ПДн не подписан: "
+        "назначьте ответственного (pdn.responsible_user_id) и переподпишите акт.",
+    ),
+    (
         "SIGNATURE_REQUESTED",
         "in_app",
         None,
