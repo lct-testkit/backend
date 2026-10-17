@@ -14,6 +14,7 @@ presigned URL — чистая криптография без сетевого 
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import hashlib
 import time
 from dataclasses import dataclass
@@ -264,6 +265,39 @@ async def delete_object(*, bucket: str, key: str) -> None:
             pass
 
     await asyncio.to_thread(_delete)
+
+
+@dataclass
+class ObjectSummary:
+    """Один элемент листинга бакета (B7-6: уборщик объектов-сирот)."""
+
+    key: str
+    last_modified: dt.datetime
+    size: int
+
+
+async def list_objects(*, bucket: str, prefix: str = "") -> list[ObjectSummary]:
+    """Все объекты бакета под `prefix` (постранично, `list_objects_v2`). Нужен только
+    эксплуатационным задачам (уборка сирот) — обычные пути приложения объекты не перечисляют."""
+
+    def _list() -> list[ObjectSummary]:
+        client = _client()
+        items: list[ObjectSummary] = []
+        continuation: dict[str, str] = {}
+        while True:
+            response = client.list_objects_v2(Bucket=bucket, Prefix=prefix, **continuation)
+            for obj in response.get("Contents", []):
+                items.append(
+                    ObjectSummary(
+                        key=obj["Key"], last_modified=obj["LastModified"], size=obj["Size"]
+                    )
+                )
+            if not response.get("IsTruncated"):
+                break
+            continuation = {"ContinuationToken": response["NextContinuationToken"]}
+        return items
+
+    return await asyncio.to_thread(_list)
 
 
 async def check_storage() -> DependencyStatus:

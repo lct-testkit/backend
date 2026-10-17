@@ -17,12 +17,15 @@ import structlog
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.db import session_scope
 from app.core.metrics import track_task
+from app.core.storage import delete_object, list_objects
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
 from app.modules.crm.models import Deal
 from app.modules.crm.models import SignatureStatus as DealSignatureStatus
+from app.modules.files.models import File
 from app.modules.notification.service import NotificationPriority, get_notification_service
 from app.modules.signing.models import (
     OPEN_REQUEST_STATUSES,
@@ -161,3 +164,56 @@ async def sweep_signature_otp_cleanup(ctx: dict[str, Any]) -> dict[str, int]:
     removed = result.rowcount or 0
     logger.info("signature_otp_codes_purged", removed=removed)
     return {"removed": removed}
+
+
+#: Префикс детерминированных ключей штампованного PDF/протокола (B7-6,
+#: `SignatureDocumentService._store_generated_pdf`) — только их проверяет уборщик. Исходные
+#: документы на подпись лежат под случайным ключом `{file_id}/{filename}` и чистятся общей
+#: ретеншен-задачей (B6-6), не здесь.
+SIGNED_OBJECT_PREFIX = "signed/"
+#: Объект младше этого порога не трогаем: запрос может быть между `upload_object_bytes` и
+#: коммитом — не должен попасть под уборку как сирота раньше, чем успеет либо зафиксироваться
+#: (появится строка `files`), либо откатиться (`run_after_rollback` уже его удалит).
+ORPHAN_MIN_AGE_HOURS = 24
+
+
+@track_task
+async def sweep_signature_orphans(ctx: dict[str, Any]) -> dict[str, int]:
+    """B7-6: объекты бакета `signatures` под `signed/` без строки `files`.
+
+    Обычный путь (успешная загрузка, но провалившийся дальше запрос) уже чистит
+    `run_after_rollback` сразу внутри транзакции запроса — эта задача - вторая линия обороны
+    на случай, если процесс умер между `upload_object_bytes` и откатом/коммитом (хук тогда не
+    выполнился бы)."""
+    settings = get_settings()
+    bucket = settings.s3_bucket_signatures
+    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(hours=ORPHAN_MIN_AGE_HOURS)
+
+    objects = await list_objects(bucket=bucket, prefix=SIGNED_OBJECT_PREFIX)
+    stale_keys = [obj.key for obj in objects if obj.last_modified < cutoff]
+    if not stale_keys:
+        logger.info("signature_orphans_swept", checked=len(objects), removed=0)
+        return {"checked": len(objects), "removed": 0}
+
+    async with session_scope() as session:
+        known = set(
+            (
+                await session.execute(
+                    select(File.storage_key).where(
+                        File.bucket == bucket, File.storage_key.in_(stale_keys)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    removed = 0
+    for key in stale_keys:
+        if key in known:
+            continue
+        await delete_object(bucket=bucket, key=key)
+        removed += 1
+
+    logger.info("signature_orphans_swept", checked=len(objects), removed=removed)
+    return {"checked": len(objects), "removed": removed}

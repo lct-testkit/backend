@@ -36,6 +36,7 @@ import hashlib
 import hmac
 import secrets
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -50,7 +51,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 
 from app.core.config import get_settings
 from app.core.context import get_client
-from app.core.db import run_after_commit
+from app.core.db import run_after_commit, run_after_rollback
 from app.core.errors import (
     AppError,
     ErrorCode,
@@ -61,11 +62,13 @@ from app.core.errors import (
 )
 from app.core.ids import uuid7
 from app.core.masking import mask_email, mask_phone
+from app.core.metrics import signature_complete_seconds
 from app.core.permissions import Permission, has_permission
 from app.core.rate_limit import enforce as rate_limit_enforce
 from app.core.redis_client import get_redis
 from app.core.security import Principal
 from app.core.storage import (
+    delete_object,
     download_object_bytes,
     ensure_bucket,
     generate_presigned_get,
@@ -965,17 +968,35 @@ class SignatureDocumentService:
         return requests
 
     async def _store_generated_pdf(
-        self, pdf_bytes: bytes, *, filename: str, uploaded_by: uuid.UUID | None
+        self,
+        pdf_bytes: bytes,
+        *,
+        filename: str,
+        uploaded_by: uuid.UUID | None,
+        key: str | None = None,
     ) -> uuid.UUID:
+        """Загружает сгенерированный PDF в бакет подписей и заводит запись `files`.
+
+        `key`, если задан, — детерминированный ключ объекта (B7-6: `_complete_document`
+        передаёт `signed/{document_id}/signed.pdf` и `.../protocol.pdf` — повторная подпись
+        после сбоя перезаписывает тот же объект, а не плодит сироту). Без `key` — прежний
+        случайный `{file_id}/{filename}` (создание документа из шаблона: `document_id` на
+        этом шаге ещё не существует). В обоих случаях при откате транзакции запроса объект
+        удаляется (`run_after_rollback`) — на успешную загрузку, но провалившийся дальше
+        запрос (аудит, отправка) не оставляет объект без записи `files`.
+        """
         await ensure_bucket(self._settings.s3_bucket_signatures)
         file_id = uuid7()
-        storage_key = f"{file_id}/{filename}"
+        storage_key = key or f"{file_id}/{filename}"
+        bucket = self._settings.s3_bucket_signatures
         await upload_object_bytes(
-            bucket=self._settings.s3_bucket_signatures,
-            key=storage_key,
-            body=pdf_bytes,
-            content_type="application/pdf",
+            bucket=bucket, key=storage_key, body=pdf_bytes, content_type="application/pdf"
         )
+
+        async def _cleanup_orphan() -> None:
+            await delete_object(bucket=bucket, key=storage_key)
+
+        run_after_rollback(self._session, _cleanup_orphan)
         file = File(
             id=file_id,
             storage_key=storage_key,
@@ -2059,6 +2080,18 @@ class SignatureRequestService:
     ) -> None:
         """Штамп, протокол и вложение — на последней подписи. Сама подпись `last` ещё не
         записана (см. `_seal`): её данные приходят отдельно и входят в штамп и протокол."""
+        started = time.perf_counter()
+        try:
+            await self._complete_document_inner(document, requests, last)
+        finally:
+            signature_complete_seconds.observe(time.perf_counter() - started)
+
+    async def _complete_document_inner(
+        self,
+        document: SignatureDocument,
+        requests: list[SignatureRequest],
+        last: _SignatureEntry,
+    ) -> None:
         now = dt.datetime.now(dt.UTC)
         document.status = SignatureDocumentStatus.SIGNED.value
         document.completed_at = now
@@ -2121,7 +2154,10 @@ class SignatureRequestService:
             ) from exc
         doc_service = SignatureDocumentService(self._session)
         signed_file_id = await doc_service._store_generated_pdf(  # noqa: SLF001
-            stamped_bytes, filename=f"signed-{document.id}.pdf", uploaded_by=document.created_by
+            stamped_bytes,
+            filename=f"signed-{document.id}.pdf",
+            uploaded_by=document.created_by,
+            key=f"signed/{document.id}/signed.pdf",
         )
         document.signed_file_id = signed_file_id
 
@@ -2143,7 +2179,10 @@ class SignatureRequestService:
             verify_url=verify_url.format(sig_id=final_sig_id),
         )
         protocol_file_id = await doc_service._store_generated_pdf(  # noqa: SLF001
-            protocol_bytes, filename=f"protocol-{document.id}.pdf", uploaded_by=document.created_by
+            protocol_bytes,
+            filename=f"protocol-{document.id}.pdf",
+            uploaded_by=document.created_by,
+            key=f"signed/{document.id}/protocol.pdf",
         )
         document.protocol_file_id = protocol_file_id
         document.manifest = {

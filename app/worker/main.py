@@ -41,7 +41,11 @@ from app.modules.reporting.tasks import (
     refresh_report_materialized_views,
     sweep_report_jobs,
 )
-from app.modules.signing.tasks import sweep_signature_deadlines, sweep_signature_otp_cleanup
+from app.modules.signing.tasks import (
+    sweep_signature_deadlines,
+    sweep_signature_orphans,
+    sweep_signature_otp_cleanup,
+)
 from app.modules.workflow.tasks import sweep_status_mapping_jobs
 
 logger = structlog.get_logger(__name__)
@@ -127,6 +131,7 @@ class WorkerSettings:
         sweep_import_jobs,
         sweep_signature_deadlines,
         sweep_signature_otp_cleanup,
+        sweep_signature_orphans,
         dispatch_pending_notifications,
         sweep_report_jobs,
         expire_report_files,
@@ -162,6 +167,8 @@ class WorkerSettings:
         cron(sweep_signature_deadlines, minute={0, 15, 30, 45}),
         # Раз в сутки: чистка OTP-кодов старше 30 дней (`signature.clean_otp`).
         cron(sweep_signature_otp_cleanup, hour=4, minute=45),
+        # Раз в сутки: объекты бакета signatures под signed/ без строки files (B7-6).
+        cron(sweep_signature_orphans, hour=4, minute=50),
         # Раз в минуту: доставка уведомлений во внешние каналы
         # (`notifications.dispatch`, spec.txt §6.11/строка 890).
         cron(dispatch_pending_notifications, minute=set(range(60))),
