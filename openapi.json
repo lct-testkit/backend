@@ -535,6 +535,30 @@
             "title": "Id",
             "type": "string"
           },
+          "status_history_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status History Id"
+          },
+          "status_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Id"
+          },
           "uploaded_by": {
             "anyOf": [
               {
@@ -921,6 +945,20 @@
           "logout_token"
         ],
         "title": "BackchannelLogoutRequest",
+        "type": "object"
+      },
+      "Body_public_verify_by_file_public_verify_by_file_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_public_verify_by_file_public_verify_by_file_post",
         "type": "object"
       },
       "Body_verify_signature_file_api_signatures_verify_post": {
@@ -3270,6 +3308,11 @@
       },
       "DealStatusHistoryOut": {
         "properties": {
+          "attachments_count": {
+            "default": 0,
+            "title": "Attachments Count",
+            "type": "integer"
+          },
           "changed_at": {
             "format": "date-time",
             "title": "Changed At",
@@ -10879,6 +10922,358 @@
         "title": "ReportTemplateOut",
         "type": "object"
       },
+      "RetentionCategoryResult": {
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "deleted": {
+            "title": "Deleted",
+            "type": "integer"
+          },
+          "dry_run": {
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "category",
+          "dry_run",
+          "deleted",
+          "status"
+        ],
+        "title": "RetentionCategoryResult",
+        "type": "object"
+      },
+      "RetentionRunListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RetentionRunOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "RetentionRunListResponse",
+        "type": "object"
+      },
+      "RetentionRunOut": {
+        "description": "Запись `retention_runs` (B6-6) — эксплуатационный журнал, без значений удалённых полей.",
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "deleted_count": {
+            "title": "Deleted Count",
+            "type": "integer"
+          },
+          "dry_run": {
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "format": "date-time",
+            "title": "Finished At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "triggered_by": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Triggered By"
+          }
+        },
+        "required": [
+          "id",
+          "category",
+          "started_at",
+          "finished_at",
+          "dry_run",
+          "deleted_count",
+          "status",
+          "created_at"
+        ],
+        "title": "RetentionRunOut",
+        "type": "object"
+      },
+      "RetentionRunRequest": {
+        "description": "`POST /api/admin/retention/run`: `dry_run` по умолчанию `true` — числа без удаления.",
+        "properties": {
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "dry_run": {
+            "default": true,
+            "title": "Dry Run",
+            "type": "boolean"
+          }
+        },
+        "title": "RetentionRunRequest",
+        "type": "object"
+      },
+      "RetentionRunResponse": {
+        "properties": {
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/RetentionCategoryResult"
+            },
+            "title": "Results",
+            "type": "array"
+          }
+        },
+        "required": [
+          "results"
+        ],
+        "title": "RetentionRunResponse",
+        "type": "object"
+      },
+      "SecurityEventListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SecurityEventOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "SecurityEventListResponse",
+        "type": "object"
+      },
+      "SecurityEventOut": {
+        "description": "Запись `security_events`. `details` уже маскированы на записи (B6-2).",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "details": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Details"
+          },
+          "event_type": {
+            "title": "Event Type",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "ip": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ip"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "user_agent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Agent"
+          },
+          "user_display": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Display"
+          },
+          "user_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id"
+          }
+        },
+        "required": [
+          "id",
+          "created_at",
+          "event_type",
+          "severity"
+        ],
+        "title": "SecurityEventOut",
+        "type": "object"
+      },
+      "SecurityEventSummaryOut": {
+        "properties": {
+          "by_type": {
+            "items": {
+              "$ref": "#/components/schemas/SecurityEventTypeCount"
+            },
+            "title": "By Type",
+            "type": "array"
+          },
+          "critical_count": {
+            "title": "Critical Count",
+            "type": "integer"
+          },
+          "since": {
+            "format": "date-time",
+            "title": "Since",
+            "type": "string"
+          }
+        },
+        "required": [
+          "since",
+          "by_type",
+          "critical_count"
+        ],
+        "title": "SecurityEventSummaryOut",
+        "type": "object"
+      },
+      "SecurityEventTypeCount": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "event_type": {
+            "title": "Event Type",
+            "type": "string"
+          },
+          "last_at": {
+            "format": "date-time",
+            "title": "Last At",
+            "type": "string"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_type",
+          "severity",
+          "count",
+          "last_at"
+        ],
+        "title": "SecurityEventTypeCount",
+        "type": "object"
+      },
       "SessionInfo": {
         "properties": {
           "created_at": {
@@ -11436,6 +11831,18 @@
             "title": "Id",
             "type": "string"
           },
+          "last_reminded_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Reminded At"
+          },
           "reject_reason": {
             "anyOf": [
               {
@@ -11446,6 +11853,11 @@
               }
             ],
             "title": "Reject Reason"
+          },
+          "reminders_sent": {
+            "default": 0,
+            "title": "Reminders Sent",
+            "type": "integer"
           },
           "sent_at": {
             "anyOf": [
@@ -11719,10 +12131,20 @@
             ],
             "title": "File Url"
           },
+          "has_protocol": {
+            "default": false,
+            "title": "Has Protocol",
+            "type": "boolean"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
             "type": "string"
+          },
+          "is_signed": {
+            "default": false,
+            "title": "Is Signed",
+            "type": "boolean"
           },
           "preview_url": {
             "title": "Preview Url",
@@ -11980,6 +12402,7 @@
           },
           "mapping_rules": {
             "additionalProperties": true,
+            "description": "Зарезервировано, пока не используется",
             "title": "Mapping Rules",
             "type": "object"
           },
@@ -12374,6 +12797,22 @@
           "is_archived"
         ],
         "title": "StatusOut",
+        "type": "object"
+      },
+      "StatusRenameRequest": {
+        "description": "B2-5: `PATCH /workflows/{id}/statuses/{status_id}` — только подпись статуса; код, тип,\nпереходы и SLA этой ручкой не меняются (конструктор графа остаётся у ADMIN).",
+        "properties": {
+          "name": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "StatusRenameRequest",
         "type": "object"
       },
       "SystemSettingListResponse": {
@@ -13286,10 +13725,12 @@
       "TransitionRequest": {
         "properties": {
           "attachments": {
+            "description": "id вложений этой сделки (POST /api/attachments), которые прикладываются к этому переходу",
             "items": {
               "format": "uuid",
               "type": "string"
             },
+            "maxItems": 20,
             "title": "Attachments",
             "type": "array"
           },
@@ -17751,6 +18192,607 @@
         ]
       }
     },
+    "/api/admin/retention/run": {
+      "post": {
+        "description": "`dry_run=true` (по умолчанию) считает, что было бы удалено, без удаления. Без `category` — все категории по очереди. Роль: ADMIN.",
+        "operationId": "run_retention_api_admin_retention_run_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetentionRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetentionRunResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Запустить очистку по сроку хранения вручную",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/retention/runs": {
+      "get": {
+        "description": "Курсорная пагинация, до 100 записей на страницу. Роль: ADMIN, AUDITOR.",
+        "operationId": "list_retention_runs_api_admin_retention_runs_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "category",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Category"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetentionRunListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "summary": "Журнал запусков очистки по сроку хранения",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/security-events": {
+      "get": {
+        "description": "Неудачные входы, блокировки перебора, обнаруженный вредонос и другие события безопасности. Фильтры: event_type (повторяемый параметр), min_severity, user_id, ip (точный адрес или сеть вида 203.0.113.0/24), период. Курсорная пагинация, до 100 записей на страницу. Роль: ADMIN, AUDITOR.",
+        "operationId": "list_security_events_api_admin_security_events_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "event_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Event Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "min_severity",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Min Severity"
+            }
+          },
+          {
+            "in": "query",
+            "name": "user_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "User Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ip",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Ip"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityEventListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "summary": "Журнал безопасности",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/security-events/export": {
+      "get": {
+        "description": "Построчный JSON (NDJSON) по тем же фильтрам, что у списка. Экспорт — массовая выгрузка: пишется событие MASS_EXPORT и запись аудита AUDIT_EXPORTED. Роль: ADMIN, AUDITOR.",
+        "operationId": "export_security_events_api_admin_security_events_export_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "event_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Event Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "min_severity",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Min Severity"
+            }
+          },
+          {
+            "in": "query",
+            "name": "user_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "User Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ip",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Ip"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 10000,
+              "maximum": 100000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "summary": "Экспорт журнала безопасности",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/security-events/summary": {
+      "get": {
+        "description": "Число событий по типу за последние `hours` часов (до 720) — данные для плитки дашборда администратора. Роль: ADMIN, AUDITOR.",
+        "operationId": "security_events_summary_api_admin_security_events_summary_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "hours",
+            "required": false,
+            "schema": {
+              "default": 24,
+              "maximum": 720,
+              "minimum": 1,
+              "title": "Hours",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityEventSummaryOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "summary": "Сводка журнала безопасности",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/admin/system-settings": {
       "get": {
         "description": "Возвращает системные настройки. Значения секретных настроек заменяются маркером. Роль: ADMIN.",
@@ -19354,6 +20396,23 @@
               "format": "uuid",
               "title": "Entity Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status Id"
             }
           },
           {
@@ -23107,6 +24166,84 @@
           }
         },
         "summary": "История статусов и событий",
+        "tags": [
+          "deals"
+        ]
+      }
+    },
+    "/api/deals/{deal_id}/history/{history_id}/attachments": {
+      "get": {
+        "description": "Вложения, привязанные к конкретному переходу (B2-7/B2-8): не более 20 на переход, без пагинации, в порядке created_at. `history_id` обязан принадлежать этой сделке, иначе 404. Роль: file:download.",
+        "operationId": "get_deal_history_attachments_api_deals__deal_id__history__history_id__attachments_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "deal_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Deal Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "history_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "History Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "summary": "Файлы, приложенные к записи истории",
         "tags": [
           "deals"
         ]
@@ -30225,7 +31362,7 @@
     },
     "/api/signature-requests/{request_id}/file": {
       "get": {
-        "description": "PDF документа запроса с origin приложения: `inline`, без CORS и без ссылки на хранилище. Только свой запрос. Роль: подписант.",
+        "description": "PDF документа запроса с origin приложения: `inline`, без CORS и без ссылки на хранилище. По умолчанию (`variant=auto`) после подписи отдаёт файл со штампом, а не исходник (B7-2); `variant=original` — всегда исходник; `variant=protocol` — протокол подписания (только у подписанного документа, иначе `DOCUMENT_NOT_SIGNABLE`). Только свой запрос. Роль: подписант.",
         "operationId": "get_request_file_api_signature_requests__request_id__file_get",
         "parameters": [
           {
@@ -30235,6 +31372,21 @@
             "schema": {
               "format": "uuid",
               "title": "Request Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "variant",
+            "required": false,
+            "schema": {
+              "default": "auto",
+              "enum": [
+                "auto",
+                "original",
+                "protocol"
+              ],
+              "title": "Variant",
               "type": "string"
             }
           },
@@ -32327,6 +33479,125 @@
         ]
       }
     },
+    "/api/workflows/{workflow_id}/statuses/{status_id}": {
+      "patch": {
+        "description": "Меняет только подпись статуса — код, тип, переходы и SLA не затрагиваются. Если статус есть в опубликованном снимке, снимок пересобирается с новым именем (has_unpublished_changes не включается из-за самого переименования). Обязателен If-Match. Роль: Руководитель или администратор.",
+        "operationId": "rename_status_api_workflows__workflow_id__statuses__status_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "status_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Status Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StatusRenameRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Переименовать статус",
+        "tags": [
+          "workflows"
+        ]
+      }
+    },
     "/api/workflows/{workflow_id}/statuses/{status_id}/archive": {
       "post": {
         "description": "Запускает мастер сопоставления: сделки переносятся батчами на target_status_id (или fallback_status_id), статус помечается archived только после завершения переноса. Если у сделок нет обязательных полей целевого статуса, нужен fallback_status_id (иначе 422). Если часть сделок всё же перенести нельзя, задача завершается со статусом failed, а статус остаётся в воронке (в warnings — причина). Из опубликованного снимка убирается только архивируемый статус, черновик воронки не публикуется. Обязателен If-Match. Роль: публикация воронок.",
@@ -32623,7 +33894,7 @@
     },
     "/health/live": {
       "get": {
-        "description": "Проверяет, что процесс жив. Роль: доступно без аутентификации.",
+        "description": "Проверяет, что процесс жив. Не раскрывает версию, профиль и состав инфраструктуры (B6-8) — за этим на `/health/details` с заголовком `X-Health-Token`. Роль: доступно без аутентификации.",
         "operationId": "live_health_live_get",
         "responses": {
           "200": {
@@ -32656,7 +33927,7 @@
     },
     "/health/ready": {
       "get": {
-        "description": "Проверяет PostgreSQL, Redis, Keycloak JWKS, SeaweedFS и очередь arq. Возвращает 503, если недоступна критичная зависимость. Роль: доступно без аутентификации.",
+        "description": "Возвращает 503, если недоступна критичная зависимость (PostgreSQL, Redis), иначе только сводный статус без списка зависимостей (B6-8) — список доступен на `/health/details` с заголовком `X-Health-Token`. Роль: доступно без аутентификации.",
         "operationId": "ready_health_ready_get",
         "responses": {
           "200": {
@@ -32781,7 +34052,7 @@
     },
     "/public/sign/{token}/file": {
       "get": {
-        "description": "Тот же PDF, что по `preview_url`, но с origin приложения: `inline`, без CORS и без ссылки на хранилище. Доступ — по той же ссылке подписи, лимит — общий с ней.",
+        "description": "Тот же PDF, что по `preview_url`, но с origin приложения: `inline`, без CORS и без ссылки на хранилище. По умолчанию (`variant=auto`) после подписи отдаёт файл со штампом, а не исходник (B7-2); `variant=original` — всегда исходник; `variant=protocol` — протокол подписания (только у подписанного документа). Доступ — по той же ссылке подписи, лимит — общий с ней.",
         "operationId": "get_sign_file_public_sign__token__file_get",
         "parameters": [
           {
@@ -32790,6 +34061,21 @@
             "required": true,
             "schema": {
               "title": "Token",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "variant",
+            "required": false,
+            "schema": {
+              "default": "auto",
+              "enum": [
+                "auto",
+                "original",
+                "protocol"
+              ],
+              "title": "Variant",
               "type": "string"
             }
           }
@@ -32938,6 +34224,140 @@
         },
         "security": [],
         "summary": "Подписать кодом подтверждения (внешний подписант)",
+        "tags": [
+          "signing-public"
+        ]
+      }
+    },
+    "/public/signed/{token}": {
+      "get": {
+        "description": "Ссылка отдельная от токена подписания: не даёт права подписывать, свой TTL (SIGNATURE_DOWNLOAD_TTL_DAYS, 30 дней по умолчанию) и лимит скачиваний. Неизвестный, просроченный и отозванный токен отвечают одинаково. Откат — SIGNATURE_PUBLIC_DOWNLOAD_ENABLED=false.",
+        "operationId": "get_signed_file_public_signed__token__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "title": "Token",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/pdf": {}
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [],
+        "summary": "Скачать подписанный файл по ссылке",
+        "tags": [
+          "signing-public"
+        ]
+      }
+    },
+    "/public/signed/{token}/protocol": {
+      "get": {
+        "operationId": "get_signed_protocol_public_signed__token__protocol_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "title": "Token",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/pdf": {}
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [],
+        "summary": "Скачать протокол подписания по ссылке",
+        "tags": [
+          "signing-public"
+        ]
+      }
+    },
+    "/public/verify/by-file": {
+      "post": {
+        "description": "multipart-файл сверяется по sha256 с сохранёнными подписями — без учётной записи (B7-3), тот же результат, что `POST /api/signatures/verify` для сотрудника.",
+        "operationId": "public_verify_by_file_public_verify_by_file_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_public_verify_by_file_public_verify_by_file_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerifyResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [],
+        "summary": "Сверить файл по хэшу публично",
         "tags": [
           "signing-public"
         ]

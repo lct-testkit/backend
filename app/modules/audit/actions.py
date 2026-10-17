@@ -109,6 +109,9 @@ class AuditAction(StrEnum):
     WORKFLOW_UPDATED = "WORKFLOW_UPDATED"
     WORKFLOW_PUBLISHED = "WORKFLOW_PUBLISHED"
     WORKFLOW_VALIDATED = "WORKFLOW_VALIDATED"
+    # B2-5: переименование статуса Руководителем или администратором — только подпись, код,
+    # переходы и SLA не меняются.
+    WORKFLOW_STATUS_RENAMED = "WORKFLOW_STATUS_RENAMED"
     STATUS_ARCHIVED = "STATUS_ARCHIVED"
     STATUS_MAPPING_STARTED = "STATUS_MAPPING_STARTED"
     STATUS_MAPPING_COMPLETED = "STATUS_MAPPING_COMPLETED"
@@ -197,6 +200,12 @@ class AuditAction(StrEnum):
     EDM_AGREEMENT_EXPIRED = "EDM_AGREEMENT_EXPIRED"
     # Инициатор получил новую ссылку внешнему подписанту; прежняя перестала работать.
     SIGNATURE_LINK_REISSUED = "SIGNATURE_LINK_REISSUED"
+    # B7-3: скачивание подписанного файла/протокола по публичной ссылке (не токену подписания).
+    SIGNATURE_DOWNLOADED = "SIGNATURE_DOWNLOADED"
+    # B7-1: напоминание подписанту о приближающемся дедлайне.
+    SIGNATURE_REMINDED = "SIGNATURE_REMINDED"
+    # B7-4: автопереход воронки после подписания всех сторон.
+    SIGNATURE_AUTO_ADVANCED = "SIGNATURE_AUTO_ADVANCED"
 
     # --- 152-ФЗ ---
     ERASURE_REQUEST_CREATED = "ERASURE_REQUEST_CREATED"
@@ -213,6 +222,8 @@ class AuditAction(StrEnum):
     PII_ACCESS = "PII_ACCESS"
     PII_REVEALED = "PII_REVEALED"
     MASS_EXPORT = "MASS_EXPORT"
+    # B6-6: срок хранения — категория, порог, число удалённых (без значений удалённых полей).
+    RETENTION_APPLIED = "RETENTION_APPLIED"
 
     # --- Система ---
     LOGIN_SUCCEEDED = "LOGIN_SUCCEEDED"

@@ -142,6 +142,9 @@ class SignatureRequestOut(BaseModel):
     viewed_at: dt.datetime | None
     decided_at: dt.datetime | None
     reject_reason: str | None
+    # B7-1: число отправленных напоминаний о дедлайне и время последнего.
+    reminders_sent: int = 0
+    last_reminded_at: dt.datetime | None = None
     created_at: dt.datetime
     # Контекст документа для списка «Мне на подпись» (заполняется в `/me/signature-requests`):
     # без него интерфейсу пришлось бы делать по запросу на каждый документ.
@@ -220,6 +223,11 @@ class SigningDocumentPreview(BaseModel):
     preview_url: str
     # Тот же PDF с origin приложения (без CORS и без ссылки на S3): проставляют роутеры.
     file_url: str | None = None
+    # B7-2: `preview_url`/`file_url` ведут на подписанный файл, когда документ подписан —
+    # эти два поля говорят фронтенду, что показать («подписан», «есть протокол»), не заставляя
+    # его угадывать по `status`.
+    is_signed: bool = False
+    has_protocol: bool = False
 
 
 class SigningSignerPreview(BaseModel):

@@ -31,7 +31,7 @@ from app.modules.workflow.models import (
     WorkflowStatus,
     WorkflowTransition,
 )
-from app.modules.workflow.seed import _b2b_spec, _b2c_spec
+from app.modules.workflow.seed import _b2b_sales_spec, _b2b_spec, _b2c_spec
 from app.modules.workflow.service import _validate_graph_data
 from tests.conftest import TEST_DATABASE_URL, _make_user, authenticate, run
 from tests.crm_helpers import (
@@ -46,6 +46,28 @@ from tests.crm_helpers import (
     put_graph,
     transition_deal,
 )
+
+#: B2-1: дословные названия 14 шагов задания (первоисточник — "6. ИТ Школа Ростелекома.md",
+#: строки 59-91 — `rtk_requiriments.md` из документа спринта в этом репозитории отсутствует).
+#: Шаг 5 несёт пометку «(опционально)» и шаг 2 сохраняет «с ним» — решение документа спринта.
+TZ_STEPS: list[str] = [
+    "Поиск контактов ответственного в вузе",
+    "Коммуникация с ним и уточнение актуальности программ по ИТ-направлениям",
+    "Организация встречи с представителями вуза",
+    "Обмен необходимым пакетом документов для подписания",
+    "Корректировка документов перед подписанием (опционально)",
+    "Подписание документов",
+    "Передача обучающих материалов по ИТ-направлению, лицензии ИТ-продукта и его "
+    "документации в вуз",
+    "Сопровождение внедрения ИТ-продуктов в вузе",
+    "Обучение преподавателей",
+    "Актуализация учебной программы по ИТ-направлению с учётом обучения преподавателя и "
+    "добавления ИТ-продукта",
+    "Ведение занятий",
+    "Актуализация документации по продукту и обучающим материалам",
+    "Повышение квалификации преподавателей",
+    "Контроль за исполнением каждого этапа",
+]
 
 
 def _status(code: str, type_: str, *, archived: bool = False) -> WorkflowStatus:
@@ -363,6 +385,122 @@ class TestSeedGraphs:
                     status.code,
                 )
 
+    def test_b2b_v2_names_match_assignment(self) -> None:
+        """B2-1: воронка по умолчанию (`_b2b_spec`, v2) несёт ровно 14 названий задания, в
+        точном порядке — жюри сверяет названия и порядок шагов с разделом 2 задания."""
+        spec = _b2b_spec()
+        pipeline = [
+            s
+            for s in spec.statuses
+            if s.type in {StatusType.INITIAL.value, StatusType.INTERMEDIATE.value}
+        ]
+        pipeline.sort(key=lambda s: s.sort_order)
+        assert [s.name for s in pipeline] == TZ_STEPS
+
+    def test_b2b_v2_has_fourteen_pipeline_steps_and_17_statuses(self) -> None:
+        spec = _b2b_spec()
+        assert len(spec.statuses) == 17
+        pipeline = [
+            s
+            for s in spec.statuses
+            if s.type in {StatusType.INITIAL.value, StatusType.INTERMEDIATE.value}
+        ]
+        assert len(pipeline) == 14
+        assert {s.type for s in spec.statuses} >= {
+            StatusType.WON.value,
+            StatusType.LOST.value,
+            StatusType.PARKED.value,
+        }
+
+    def test_b2b_v2_has_71_transitions_and_14_sla_rules(self) -> None:
+        spec = _b2b_spec()
+        pairs = [(t.from_code, t.to_code) for t in spec.transitions]
+        assert len(pairs) == len(set(pairs)) == 71
+        assert sum(1 for s in spec.statuses if s.sla_hours is not None) == 14
+
+    def test_optional_step_can_be_bypassed(self) -> None:
+        """Раздел 2, шаг 5: «опционально: корректировка документов перед подписанием» — путь
+        4→6 (минуя документы_correction) и путь 4→5→6 оба должны существовать в графе, а
+        кратчайший путь от начального статуса до `won` без шага 5 — 13 переходов (14 шагов
+        минус один, раз шаг 5 пропущен)."""
+        spec = _b2b_spec()
+        forward = {}
+        for t in spec.transitions:
+            forward.setdefault(t.from_code, []).append(t.to_code)
+        assert "signing" in forward["documents_exchange"]  # 4 -> 6, в обход
+        assert "documents_correction" in forward["documents_exchange"]  # 4 -> 5
+        assert "signing" in forward["documents_correction"]  # 5 -> 6
+
+        initial = next(s.code for s in spec.statuses if s.type == StatusType.INITIAL.value)
+        # BFS по чисто форвардным рёбрам (к won), игнорируя lost/parked/назад/цикл.
+        linear_order = [
+            "contact_search",
+            "communication",
+            "meeting",
+            "documents_exchange",
+            "signing",
+            "materials_transfer",
+            "implementation_support",
+            "teacher_training",
+            "curriculum_update",
+            "classes",
+            "docs_update",
+            "teacher_qualification",
+            "execution_control",
+            "won",
+        ]
+        assert linear_order[0] == initial
+        assert len(linear_order) - 1 == 13  # 13 переходов, шаг 5 пропущен
+
+    def test_only_head_closes_deal(self) -> None:
+        """Шаг 14 («контроль за исполнением каждого этапа») закрывает сделку успешно только
+        HEAD; ADMIN проходит всегда через `principal.is_admin` в `crm.service.transition`, а не
+        через `allowed_roles`."""
+        spec = _b2b_spec()
+        closing = next(
+            t for t in spec.transitions if t.from_code == "execution_control" and t.to_code == "won"
+        )
+        assert closing.allowed_roles == ["HEAD"]
+        assert closing.requires_comment is True
+
+    def test_legacy_sales_spec_unchanged(self) -> None:
+        """B2-1 (вариант B): старая продажная воронка (`_b2b_sales_spec`, v1) не трогается —
+        код статусов и структура графа остаются как были до появления v2. 69 переходов = 68 от
+        генератора `_linear_funnel` минус 4 заменённых действием/условием плюс 5 своих (решение
+        документа, числа сняты с кода ДО правки B2-1)."""
+        spec = _b2b_sales_spec()
+        assert spec.code == "b2b_university_v1"
+        assert len(spec.statuses) == 17
+        assert len(spec.transitions) == 69
+        codes = {s.code for s in spec.statuses}
+        assert codes == {
+            "identification",
+            "first_contact",
+            "qualification",
+            "meeting_scheduled",
+            "meeting_held",
+            "requirements",
+            "kp_preparation",
+            "kp_approval",
+            "legal_approval",
+            "contract_signing",
+            "lms_transfer",
+            "training_launch",
+            "monitoring",
+            "closing_prolongation",
+            "won",
+            "lost",
+            "parked",
+        }
+        # ПЭП-согласование КП — исключительно в v1, действие на переходе
+        # kp_preparation -> kp_approval.
+        kp_transition = next(
+            t
+            for t in spec.transitions
+            if t.from_code == "kp_preparation" and t.to_code == "kp_approval"
+        )
+        assert any(a.get("type") == "request_signature" for a in kp_transition.actions)
+
 
 class TestPermissionMatrix:
     def test_only_admin_writes_or_publishes_workflows(self) -> None:
@@ -375,6 +513,16 @@ class TestPermissionMatrix:
     def test_kam_and_head_can_read_workflows(self) -> None:
         assert has_permission("KAM", Permission.WORKFLOW_READ)
         assert has_permission("HEAD", Permission.WORKFLOW_READ)
+
+    def test_head_renames_statuses_but_not_the_whole_graph(self) -> None:
+        """B2-5: Функц.2 — «корректировка именования статусов» — доступна Руководителю
+        отдельно от конструктора (workflow:write/workflow:publish остаются только у ADMIN)."""
+        assert has_permission("HEAD", Permission.WORKFLOW_RENAME_STATUS)
+        assert not has_permission("HEAD", Permission.WORKFLOW_WRITE)
+        assert not has_permission("HEAD", Permission.WORKFLOW_PUBLISH)
+        for role in ("KAM", "AUDITOR", "INTEGRATION"):
+            assert not has_permission(role, Permission.WORKFLOW_RENAME_STATUS)
+        assert has_permission("ADMIN", Permission.WORKFLOW_RENAME_STATUS)
 
 
 class TestWorkflowState:
@@ -682,22 +830,20 @@ class TestSeedPublishesSlaRules:
         import dataclasses
         import datetime as dt
 
-        from sqlalchemy import select, update
+        from sqlalchemy import select
 
         from app.core.db import session_scope
         from app.modules.crm.models import Deal
         from app.modules.crm.service import _apply_sla_for_status
-        from app.modules.workflow.models import SlaRule, Workflow
+        from app.modules.workflow.models import SlaRule
         from app.modules.workflow.seed import seed_workflow
 
         async def _seed_and_inspect():
             async with session_scope() as session:
-                # Воронка по умолчанию на тип — одна; общая БД тестов может её уже держать.
-                await session.execute(
-                    update(Workflow)
-                    .where(Workflow.is_default.is_(True), Workflow.state == "published")
-                    .values(is_default=False)
-                )
+                # B2-2: воронка по умолчанию на тип — одна (уникальный индекс); `seed_workflow`
+                # сам решает, снимать ли default с текущей (см. `_demote_seed_default`) — тест
+                # больше не снимает его руками. Эта спека не обязана стать default: тесту важен
+                # только снимок и правила SLA, а не фактический выбор воронки для новых сделок.
                 spec = dataclasses.replace(_b2b_spec(), code=f"b2b_sla_{uuid.uuid4().hex[:8]}")
                 workflow = await seed_workflow(session, spec)
                 rules = (

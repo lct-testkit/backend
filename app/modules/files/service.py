@@ -17,8 +17,9 @@ import unicodedata
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import NoReturn, Protocol, runtime_checkable
+from typing import Any, NoReturn, Protocol, runtime_checkable
 
+import structlog
 from sqlalchemy import Select, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +29,7 @@ from app.core.ids import uuid7
 from app.core.permissions import Permission, has_permission
 from app.core.security import Principal
 from app.core.storage import (
+    copy_object,
     delete_object,
     ensure_bucket,
     generate_presigned_get,
@@ -38,6 +40,10 @@ from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
 from app.modules.files.models import Attachment, File, FileStatus
 from app.modules.files.schemas import AttachmentFileInfo, AttachmentOut, UploadIntentRequest
+from app.modules.identity.models import SecurityEventType, Severity
+from app.modules.identity.service import IdentityService
+
+logger = structlog.get_logger(__name__)
 
 # Сигнатуры разрешённых форматов (раздел 9: «расширение врёт», нужна
 # проверка по факту). docx/xlsx неотличимы от zip по первым байтам — это
@@ -205,6 +211,13 @@ def _check_magic_bytes(extension: str, magic: bytes) -> bool:
 class ScanResult:
     clean: bool
     detail: str | None = None
+    # B6-4: скан не состоялся (clamd недоступен/таймаут/ошибка) — это НЕ «заражено»,
+    # commit решает по `clamav_fail_mode` (open/closed), а не всегда отклоняет файл.
+    error: bool = False
+    # Имя сигнатуры антивируса при `clean=False, error=False` — то, что попадает в
+    # `security_events.details.signature` (B6-5) и в `scan_result` (после `_VERIFIED_MIME`
+    # расширения колонки до 128 символов, миграция 0028).
+    signature: str | None = None
 
 
 @runtime_checkable
@@ -235,7 +248,12 @@ def get_antivirus_scanner() -> AntivirusScanner:
 
 
 async def check_entity_access(
-    session: AsyncSession, principal: Principal, *, entity_type: str, entity_id: uuid.UUID
+    session: AsyncSession,
+    principal: Principal,
+    *,
+    entity_type: str,
+    entity_id: uuid.UUID,
+    write: bool = False,
 ) -> None:
     """Раздел 9: право на скачивание/привязку проверяется по родительской
     сущности, не только по праву на файлы вообще. Импорты сервисов других
@@ -243,6 +261,11 @@ async def check_entity_access(
     `workflow.service`/`crm.service` уже используют друг для друга): иначе
     `files → crm`/`files → catalog` на уровне модуля рискует зациклиться,
     если эти модули когда-нибудь начнут ссылаться на файлы при импорте.
+
+    `write=True` (B2-M): привязка и отвязка вложения сделки — это изменение
+    сделки, а не только её чтение. Без этого параметра участник-наблюдатель
+    (роль `watcher`, видит сделку, но не может её менять) мог бы прикрепить
+    или убрать файл, обходя `deal_writable`.
 
     Для типов сущностей без собственного, реально построенного конвейера
     (`erasure_request` — исполнение запросов на удаление ещё не реализовано)
@@ -253,7 +276,7 @@ async def check_entity_access(
     if entity_type == "deal":
         from app.modules.crm.service import DealService
 
-        await DealService(session).get_or_404(entity_id, principal)
+        await DealService(session).get_or_404(entity_id, principal, write=write)
         return
     if entity_type == "organization":
         from app.modules.catalog.service import OrganizationService
@@ -457,6 +480,20 @@ class FileService:
                 entity_id=file.id,
                 changes={"reason": {"old": None, "new": "magic_bytes_or_hash_mismatch"}},
             )
+            # B6-5: расхождение сигнатуры/расширения — не обязательно вредонос
+            # (переименованный файл), отдельный (менее тревожный) тип события, чем
+            # MALWARE_DETECTED ниже. Событие переживает откат транзакции запроса так же, как
+            # и аудит выше: оба пишутся до исключения, `_reject_commit` коммитит их явно.
+            await IdentityService(self._session).record_security_event(
+                SecurityEventType.FILE_REJECTED,
+                user_id=file.uploaded_by,
+                severity=Severity.WARNING,
+                details={
+                    "file_id": str(file.id),
+                    "filename": file.original_filename,
+                    "reason": "signature_mismatch",
+                },
+            )
             await self._reject_commit(
                 AppError(
                     ErrorCode.FILE_INFECTED,
@@ -464,22 +501,75 @@ class FileService:
                 )
             )
 
+        # B6-4: файлы крупнее синхронного лимита не держат HTTP-запрос на скане — остаются
+        # `quarantined` до проверки воркером. Воркер `sweep_quarantined_files` НЕ реализован в
+        # этом эпике (см. отчёт): такой файл останется quarantined до ручной проверки/перевода
+        # в `ready` — это безопасная сторона ошибки (недоступность лучше ложного «чисто»).
+        if settings.clamav_enabled and inspection.size_bytes > settings.clamav_sync_max_bytes:
+            file.status = FileStatus.QUARANTINED.value
+            file.scan_result = "pending_scan"
+            file.scanned_at = dt.datetime.now(dt.UTC)
+            await self._session.flush()
+            return file
+
         scan = await get_antivirus_scanner().scan(bucket=file.bucket, key=file.storage_key)
         file.scanned_at = dt.datetime.now(dt.UTC)
-        file.scan_result = "clean" if scan.clean else (scan.detail or "infected")
 
-        if not scan.clean:
+        if scan.error:
+            # Скан не состоялся (clamd недоступен/таймаут) — это НЕ «заражено»: `closed`
+            # (prod) отказывает доступности в пользу безопасности, `open` (dev/demo)
+            # принимает файл со сканом, пропущенным по недоступности, с явным следом в
+            # `scan_result` и в логе (B6-4, вопрос владельцу: что важнее при недоступном
+            # антивирусе — доступность или безопасность; дефолт здесь — open).
+            if settings.clamav_fail_mode == "closed":
+                file.status = FileStatus.QUARANTINED.value
+                file.scan_result = "scan_unavailable"
+                await self._session.flush()
+                return file
+            file.scan_result = f"skipped:{(scan.detail or 'clamd_unavailable')[:110]}"
+            logger.warning("file_deep_scan_skipped", file_id=str(file.id), reason=scan.detail)
+        elif not scan.clean:
             file.status = FileStatus.INFECTED.value
+            file.scan_result = (scan.signature or scan.detail or "infected")[:128]
             await self._session.flush()
             await self._audit.record(
                 AuditAction.FILE_INFECTED,
                 entity_type="file",
                 entity_id=file.id,
-                changes={"reason": {"old": None, "new": scan.detail}},
+                changes={"reason": {"old": None, "new": scan.signature or scan.detail}},
             )
+            # B6-5: обнаружение вредоноса — инцидент безопасности, не просто отказ коммита.
+            # Событие пишется и коммитится ДО `_reject_commit` поднимает исключение — тем же
+            # приёмом, что аудит выше: откат транзакции запроса не должен стереть след атаки.
+            await IdentityService(self._session).record_security_event(
+                SecurityEventType.MALWARE_DETECTED,
+                user_id=file.uploaded_by,
+                severity=Severity.CRITICAL,
+                details={
+                    "file_id": str(file.id),
+                    "sha256": file.sha256,
+                    "signature": scan.signature,
+                    "size_bytes": file.size_bytes,
+                    "scanner": "clamav",
+                    "filename": file.original_filename,
+                },
+            )
+            # Карантин: заражённый объект не должен остаться доступным ни по какой ссылке
+            # (`download_url` уже требует `ready`, но объект в бакете `files` оставался бы
+            # физически). Копия на сервере, затем удаление исходного ключа.
+            await ensure_bucket(settings.s3_bucket_quarantine)
+            await copy_object(
+                src_bucket=file.bucket,
+                src_key=file.storage_key,
+                dst_bucket=settings.s3_bucket_quarantine,
+                dst_key=f"{file.id}/{file.sha256 or 'unknown'}",
+            )
+            await delete_object(bucket=file.bucket, key=file.storage_key)
             await self._reject_commit(
                 AppError(ErrorCode.FILE_INFECTED, "Файл не прошёл антивирусную проверку")
             )
+        else:
+            file.scan_result = "clean"
 
         await self._dedup_storage(file)
 
@@ -641,12 +731,19 @@ class AttachmentService:
         self._session = session
         self._audit = AuditService(session)
 
-    def list_query(self, *, entity_type: str, entity_id: uuid.UUID) -> Select[tuple[Attachment]]:
-        return select(Attachment).where(
+    def list_query(
+        self, *, entity_type: str, entity_id: uuid.UUID, status_id: uuid.UUID | None = None
+    ) -> Select[tuple[Attachment]]:
+        # B2-8: вкладка «Файлы в статусе» — `status_id` фильтрует вложения этого шага. Параметр
+        # имеет смысл только для сделок: роутер отклоняет его при другом `entity_type` (422).
+        stmt = select(Attachment).where(
             Attachment.entity_type == entity_type,
             Attachment.entity_id == entity_id,
             Attachment.deleted_at.is_(None),
         )
+        if status_id is not None:
+            stmt = stmt.where(Attachment.status_id == status_id)
+        return stmt
 
     async def to_out(self, attachments: Sequence[Attachment]) -> list[AttachmentOut]:
         """Вложения со сведениями о файлах: один запрос `files IN (...)` на весь список,
@@ -722,12 +819,25 @@ class AttachmentService:
                 "Привязать можно только файл, загруженный вами, или как администратор"
             )
 
+        status_id: uuid.UUID | None = None
+        deal: Any = None
+        if entity_type == "deal":
+            # B2-6: вложение сделки несёт статус, в котором оно приложено — клиент этот статус
+            # не передаёт (подделать нельзя), он берётся из текущей сделки. Импорт `Deal` внутри
+            # функции — тот же приём, что `check_entity_access` выше (модуль `files` не
+            # импортирует `crm` на уровне модуля).
+            from app.modules.crm.models import Deal
+
+            deal = await self._session.get(Deal, entity_id)
+            status_id = deal.status_id if deal is not None else None
+
         attachment = Attachment(
             file_id=file.id,
             entity_type=entity_type,
             entity_id=entity_id,
             category=category,
             description=description,
+            status_id=status_id,
             uploaded_by=principal.user_id,
         )
         self._session.add(attachment)
@@ -750,6 +860,27 @@ class AttachmentService:
                 "category": {"old": None, "new": category},
             },
         )
+        if deal is not None:
+            # B2-8: карточка сделки должна показать «кто, когда и какой файл добавил» в ленте —
+            # до этого вложение падало «в общую кучу» без следа в `deal_events`.
+            from app.modules.crm.models import DealEvent, DealEventType
+
+            self._session.add(
+                DealEvent(
+                    deal_id=deal.id,
+                    event_type=DealEventType.FILE_ADDED.value,
+                    actor_id=principal.user_id,
+                    payload={
+                        "attachment_id": str(attachment.id),
+                        "file_id": str(file.id),
+                        "filename": file.original_filename,
+                        "category": category,
+                        "status_id": str(status_id) if status_id else None,
+                        "size_bytes": file.size_bytes,
+                    },
+                )
+            )
+            await self._session.flush()
         return attachment
 
     def ensure_can_delete(self, principal: Principal, attachment: Attachment) -> None:
@@ -763,7 +894,7 @@ class AttachmentService:
             return
         raise ForbiddenError("Отвязать вложение может его автор или руководитель")
 
-    async def delete(self, attachment: Attachment) -> None:
+    async def delete(self, attachment: Attachment, *, actor_id: uuid.UUID | None = None) -> None:
         file = await self._session.get(File, attachment.file_id)
         attachment.deleted_at = dt.datetime.now(dt.UTC)
         if file is not None:
@@ -782,3 +913,20 @@ class AttachmentService:
             entity_id=attachment.entity_id,
             changes={"file_id": {"old": str(attachment.file_id), "new": None}},
         )
+        if attachment.entity_type == "deal":
+            # B2-8: симметрично FILE_ADDED — отвязка тоже оставляет след в ленте сделки.
+            from app.modules.crm.models import DealEvent, DealEventType
+
+            self._session.add(
+                DealEvent(
+                    deal_id=attachment.entity_id,
+                    event_type=DealEventType.FILE_REMOVED.value,
+                    actor_id=actor_id,
+                    payload={
+                        "attachment_id": str(attachment.id),
+                        "filename": file.original_filename if file is not None else None,
+                        "category": attachment.category,
+                    },
+                )
+            )
+            await self._session.flush()

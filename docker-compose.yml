@@ -67,6 +67,11 @@ x-api-env: &api-env
   # Ключ HMAC записей аудита и Fernet-ключ секретных настроек: пусто — работают без них (см. .env.example).
   AUDIT_HMAC_KEY: ${AUDIT_HMAC_KEY:-}
   SETTINGS_ENCRYPTION_KEY: ${SETTINGS_ENCRYPTION_KEY:-}
+  # B6-7/B6-8: Fernet-ключ полей ПДн учащегося и токен полного /health/details — пусто
+  # работают без них (поля открытым текстом, ручка недостижима).
+  FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY:-}
+  FIELD_ENCRYPTION_KEY_PREV: ${FIELD_ENCRYPTION_KEY_PREV:-}
+  HEALTH_DETAILS_TOKEN: ${HEALTH_DETAILS_TOKEN:-}
   # Почта: пустой SMTP_HOST — письма (ссылки подписантам, email-уведомления) не уходят.
   SMTP_HOST: ${SMTP_HOST:-}
   SMTP_PORT: ${SMTP_PORT:-587}
@@ -307,7 +312,8 @@ services:
     networks: [crm]
 
   seed:
-    # Демо-воронки b2b_university_v1 и b2c_individual_v1 (раздел 7).
+    # Три воронки (B2-1/B2-2): b2b_university_v2 (основная, по умолчанию),
+    # b2b_university_v1 (дополнительная, не по умолчанию) и b2c_individual_v1 (раздел 7).
     # Идемпотентно, поэтому безопасно на каждом `docker compose up`.
     build:
       context: .

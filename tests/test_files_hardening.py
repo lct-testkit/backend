@@ -68,6 +68,9 @@ class TestUploadOverHttp:
 
         self.stored: dict[str, bytes] = {}
         self.deleted: list[tuple[str, str]] = []
+        # B6-5: заражённый файл копируется в карантинный бакет перед удалением исходного —
+        # `(src_bucket, src_key, dst_bucket, dst_key)` на каждый вызов.
+        self.copied: list[tuple[str, str, str, str]] = []
         self.monkeypatch = monkeypatch
 
         async def fake_ensure_bucket(bucket: str) -> None:
@@ -78,6 +81,11 @@ class TestUploadOverHttp:
 
         async def fake_delete_object(*, bucket: str, key: str) -> None:
             self.deleted.append((bucket, key))
+
+        async def fake_copy_object(
+            *, src_bucket: str, src_key: str, dst_bucket: str, dst_key: str
+        ) -> None:
+            self.copied.append((src_bucket, src_key, dst_bucket, dst_key))
 
         async def fake_inspect(*, bucket: str, key: str) -> ObjectInspection:
             content = self.stored[key]
@@ -91,6 +99,7 @@ class TestUploadOverHttp:
         monkeypatch.setattr(files_service, "ensure_bucket", fake_ensure_bucket)
         monkeypatch.setattr(files_service, "generate_presigned_put", fake_presigned_put)
         monkeypatch.setattr(files_service, "delete_object", fake_delete_object)
+        monkeypatch.setattr(files_service, "copy_object", fake_copy_object)
         monkeypatch.setattr(files_service, "inspect_object", fake_inspect)
         self.client = client
         self.user = run(client, _make_user, "KAM")
@@ -122,6 +131,21 @@ class TestUploadOverHttp:
                 select(AuditLog.action).where(AuditLog.entity_id == uuid.UUID(file_id))
             )
             return list(rows.scalars())
+
+    async def _security_events(self, user_id: uuid.UUID) -> list[dict]:
+        from sqlalchemy import select
+
+        from app.core.db import session_scope
+        from app.modules.identity.models import SecurityEvent
+
+        async with session_scope() as session:
+            rows = await session.execute(
+                select(SecurityEvent).where(SecurityEvent.user_id == user_id)
+            )
+            return [
+                {"event_type": r.event_type, "severity": r.severity, "details": r.details}
+                for r in rows.scalars()
+            ]
 
     def _upload(self, filename: str, content: bytes, *, declared: int | None = None, **kwargs):
         response = self._intent(filename, size=declared or len(content), **kwargs)
@@ -168,6 +192,13 @@ class TestUploadOverHttp:
         row = run(self.client, self._row, file_id)
         assert (row.status, row.scan_result) == ("infected", "signature_mismatch")
         assert "FILE_INFECTED" in run(self.client, self._audit_actions, file_id)
+        # B6-5: расхождение сигнатуры — FILE_REJECTED (warning), не MALWARE_DETECTED: это не
+        # обязательно вредонос, переименованный файл тоже даёт такой же след.
+        events = run(self.client, self._security_events, self.user.id)
+        (event,) = [e for e in events if e["event_type"] == "FILE_REJECTED"]
+        assert event["severity"] == "warning"
+        assert event["details"]["reason"] == "signature_mismatch"
+        assert not self.copied  # карантин — только для настоящего вредоноса (ниже)
 
     def test_a_second_commit_of_an_infected_file_is_refused_too(self) -> None:
         file_id = self._upload("scan.pdf", b"\x89PNG\r\n\x1a\n not a pdf")
@@ -213,6 +244,17 @@ class TestUploadOverHttp:
         row = run(self.client, self._row, file_id)
         assert (row.status, row.scan_result) == ("infected", "Eicar-Test")
         assert "FILE_INFECTED" in run(self.client, self._audit_actions, file_id)
+        # B6-5: обнаружение вредоноса — MALWARE_DETECTED (critical) и перенос объекта в
+        # карантинный бакет перед удалением исходного.
+        events = run(self.client, self._security_events, self.user.id)
+        (event,) = [e for e in events if e["event_type"] == "MALWARE_DETECTED"]
+        assert event["severity"] == "critical"
+        assert event["details"]["signature"] is None  # ScanResult выше без .signature
+        assert event["details"]["scanner"] == "clamav"
+        assert len(self.copied) == 1
+        src_bucket, src_key, dst_bucket, dst_key = self.copied[0]
+        assert dst_bucket == "quarantine"
+        assert (src_bucket, src_key) in self.deleted
 
     # --- MIME по содержимому ------------------------------------------------------------
 

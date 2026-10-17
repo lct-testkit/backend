@@ -48,6 +48,8 @@ class Permission(StrEnum):
     WORKFLOW_READ = "workflow:read"
     WORKFLOW_WRITE = "workflow:write"
     WORKFLOW_PUBLISH = "workflow:publish"
+    # B2-5: только подпись статуса, не весь конструктор — HEAD получает его, KAM нет.
+    WORKFLOW_RENAME_STATUS = "workflow:rename_status"
 
     # --- Файлы ---
     FILE_UPLOAD = "file:upload"
@@ -105,6 +107,9 @@ class Permission(StrEnum):
     AUDIT_EXPORT = "audit:export"
     SETTINGS_WRITE = "settings:write"
     ERASURE_MANAGE = "erasure:manage"
+    # B6-2: журнал security_events несёт IP и попытки входа — отдельное право, не `audit:read`.
+    # HEAD его не получает: руководитель увидел бы попытки входа и IP чужих команд.
+    SECURITY_EVENT_READ = "security_event:read"
 
 
 # KAM — менеджер по вузам: только свои сделки и связанные с ними сущности.
@@ -145,6 +150,9 @@ _HEAD: frozenset[Permission] = _KAM | {
     Permission.FILE_DELETE,
     Permission.IMPORT_RUN,
     Permission.IMPORT_ROLLBACK,
+    # B2-5: Функц.2 требует «корректировки именования статусов»; конструктор воронок
+    # (workflow:write/workflow:publish) остаётся только у ADMIN.
+    Permission.WORKFLOW_RENAME_STATUS,
 }
 
 # AUDITOR — только журнал, плюс явное «чтение» соглашений ЭДО из матрицы
@@ -156,6 +164,7 @@ _AUDITOR: frozenset[Permission] = frozenset(
         Permission.AUDIT_EXPORT,
         Permission.EDM_READ,
         Permission.SIGNATURE_READ,
+        Permission.SECURITY_EVENT_READ,
     }
 )
 

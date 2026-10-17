@@ -218,7 +218,12 @@ def worker_main(monkeypatch: pytest.MonkeyPatch):
 
 def _worker_settings(port: int) -> SimpleNamespace:
     return SimpleNamespace(
-        log_level="INFO", log_json=False, app_profile="dev", worker_metrics_port=port
+        log_level="INFO",
+        log_json=False,
+        app_profile="dev",
+        worker_metrics_port=port,
+        # B6-4: `startup()` зовёт `build_antivirus_scanner(settings)` безусловно.
+        clamav_enabled=False,
     )
 
 

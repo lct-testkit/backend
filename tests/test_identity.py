@@ -231,6 +231,14 @@ class TestPermissionMatrix:
             assert not has_permission(role, Permission.ERASURE_MANAGE)
         assert has_permission("ADMIN", Permission.ERASURE_MANAGE)
 
+    def test_security_event_read_is_admin_and_auditor_only(self) -> None:
+        """B6-2: HEAD читает audit:read по своей команде, но не security_event:read — иначе
+        руководитель увидел бы IP и попытки входа чужих команд."""
+        assert has_permission("AUDITOR", Permission.SECURITY_EVENT_READ)
+        assert has_permission("ADMIN", Permission.SECURITY_EVENT_READ)
+        for role in ("KAM", "HEAD", "INTEGRATION"):
+            assert not has_permission(role, Permission.SECURITY_EVENT_READ)
+
     def test_integration_has_no_ui_rights(self) -> None:
         assert not has_permission("INTEGRATION", Permission.DEAL_READ)
         assert not has_permission("INTEGRATION", Permission.REPORT_CREATE)
