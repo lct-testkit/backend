@@ -11219,6 +11219,22 @@
           "title": {
             "title": "Title",
             "type": "string"
+          },
+          "total_rows": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Rows"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
           }
         },
         "required": [

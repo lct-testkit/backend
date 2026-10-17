@@ -117,10 +117,13 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str, str, list[str], dict[str, Any], li
     (
         "learning_progress",
         "Прогресс обучения",
-        "Данные из LMS. Интеграция с LMS не собирает эти данные — отчёт пока пуст.",
+        "Прогресс учащихся по данным LMS: процент прохождения курса, оценка, даты зачисления и "
+        "завершения, последняя активность, поток. Пусто и без пометки «не реализована», если "
+        "источник lms не присылал данных. Параметры: date_from/date_to, organization_ids, "
+        "direction_ids, product_ids, owner_ids, columns, date_field, limit.",
         "learning_progress",
         [],
-        {},
+        {"limit": 1000},
         ["xlsx", "xls", "pdf", "json"],
     ),
     (
@@ -133,6 +136,34 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str, str, list[str], dict[str, Any], li
         ["HEAD", "ADMIN"],
         {"status_codes": ["payment_contract", "lms_enrollment"]},
         ["xlsx"],
+    ),
+    (
+        "product_demand",
+        "Рейтинг востребованности ИТ-продуктов и направлений",
+        "Ранжирование продуктов (или направлений) по заявкам на обучение, числу обучающихся и "
+        "параллельных потоков — индекс как среднее доле каждого показателя в выборке. "
+        "Параметры: level (product/direction), top (1-100), sort_by (index/applications/"
+        "learners/streams), date_from/date_to, organization_ids, direction_ids, product_ids, "
+        "owner_ids.",
+        "product_demand",
+        [],
+        {"level": "product", "top": 20, "sort_by": "index"},
+        # B1-8 (график "demand") не сделан — без png, пока график не зарегистрирован.
+        ["xlsx", "xls", "pdf", "json"],
+    ),
+    (
+        "license_register",
+        "Реестр лицензий",
+        "Лицензии/договоры вуз-вендор-ПО: вуз, вендор, ПО, номер договора, подписание и срок "
+        "действия лицензии, статус по передаче, ФИО менеджера, ответственные от вуза, "
+        "комментарий. ФИО маскируются без права contact:reveal. Параметры: date_from/date_to "
+        "(по дате подписания), organization_ids, vendors, transfer_statuses, valid_year, "
+        "expired, columns, date_field, limit.",
+        "license_register",
+        [],
+        {"limit": 1000},
+        # B1-8 (график "license_status") не сделан — без png, пока график не зарегистрирован.
+        ["xlsx", "xls", "pdf", "json"],
     ),
 ]
 

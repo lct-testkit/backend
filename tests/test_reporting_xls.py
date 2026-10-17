@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from decimal import Decimal
 
 import pytest
 import xlrd
@@ -55,11 +56,45 @@ class TestXlsSignatureAndRoundTrip:
 
     def test_aware_datetime_is_converted_to_naive_utc_not_rejected(self) -> None:
         aware = dt.datetime(2026, 1, 5, 10, 30, tzinfo=dt.UTC)
-        content = render_xls(_dataset(columns=["Когда"], rows=[[aware]], kinds=["datetime"]))
+        content = render_xls(
+            _dataset(columns=["Когда"], rows=[[aware]], kinds=["datetime"]), tz_name="UTC"
+        )
         book = xlrd.open_workbook(file_contents=content)
         sheet = book.sheet_by_index(0)
         parsed = xlrd.xldate_as_datetime(sheet.cell_value(1, 0), book.datemode)
         assert parsed == dt.datetime(2026, 1, 5, 10, 30)
+
+    def test_aware_datetime_without_tz_name_falls_back_to_the_default_timezone(self) -> None:
+        """B1-6: без `tz_name` (вызов без контекста запроса) — тот же пояс по умолчанию, что у
+        остальной отчётности (`DEFAULT_TIMEZONE_NAME` = Europe/Moscow, не UTC)."""
+        aware = dt.datetime(2026, 1, 5, 10, 30, tzinfo=dt.UTC)
+        content = render_xls(_dataset(columns=["Когда"], rows=[[aware]], kinds=["datetime"]))
+        book = xlrd.open_workbook(file_contents=content)
+        sheet = book.sheet_by_index(0)
+        parsed = xlrd.xldate_as_datetime(sheet.cell_value(1, 0), book.datemode)
+        assert parsed == dt.datetime(2026, 1, 5, 13, 30)
+
+    def test_aware_datetime_is_converted_to_the_named_user_timezone(self) -> None:
+        aware = dt.datetime(2026, 1, 5, 21, 30, tzinfo=dt.UTC)
+        content = render_xls(
+            _dataset(columns=["Когда"], rows=[[aware]], kinds=["datetime"]),
+            tz_name="Europe/Moscow",
+        )
+        book = xlrd.open_workbook(file_contents=content)
+        sheet = book.sheet_by_index(0)
+        parsed = xlrd.xldate_as_datetime(sheet.cell_value(1, 0), book.datemode)
+        # 21:30 UTC = 00:30 следующего дня в Москве (UTC+3) — перевод пояса меняет не только
+        # время, но и календарную дату ячейки.
+        assert parsed == dt.datetime(2026, 1, 6, 0, 30)
+
+    def test_decimal_value_is_written_as_a_real_number_not_text(self) -> None:
+        content = render_xls(
+            _dataset(columns=["Сумма"], rows=[[Decimal("150000.50")]], kinds=["money"])
+        )
+        book = xlrd.open_workbook(file_contents=content)
+        value = book.sheet_by_index(0).cell_value(1, 0)
+        assert value == 150000.50
+        assert isinstance(value, float)
 
 
 class TestXlsSafetyLimits:

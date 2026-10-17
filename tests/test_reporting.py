@@ -8,11 +8,11 @@ matplotlib и проверяет магические байты результ�
 парсинг параметров, содержимое сида (кросс-проверка с
 `reporting.builders.REPORT_BUILDERS`/`rendering.CHART_KINDS` — чтобы шаблон,
 обещающий `png`, не оказался без зарегистрированного графика) и права.
-`build_learning_progress` — единственный builder, не трогающий БД вообще
-(честная заглушка, см. его докстринг), поэтому вызван по-настоящему.
-Остальные builders (реальные SQL-запросы с RBAC-скоупом) и материализованное
-представление проверены вживую против настоящего Postgres в этой же сессии,
-не как pytest-тест — кроме `TestReportDataEndpoint` (П2) и `TestReportJobs`
+`build_learning_progress` (B1-10) читает настоящую БД — тесты его содержимого в
+`tests/test_reporting_progress.py`, не здесь. Остальные builders (реальные
+SQL-запросы с RBAC-скоупом) и материализованное представление проверены
+вживую против настоящего Postgres в этой же сессии, не как pytest-тест —
+кроме `TestReportDataEndpoint` (П2) и `TestReportJobs`
 (коды CRM-1601/1602/1603, `progress_pct`, фильтр `template_code`): настоящая
 Postgres обязательна, тот же приём, что `tests/test_imports.py::
 TestLicenseImportEndToEnd` — см. `tests/conftest.py`.
@@ -21,6 +21,7 @@ TestLicenseImportEndToEnd` — см. `tests/conftest.py`.
 from __future__ import annotations
 
 import datetime as dt
+import io
 import uuid
 from decimal import Decimal
 
@@ -45,7 +46,6 @@ from app.modules.reporting.builders import (
     _parse_uuid,
     _parse_uuid_list,
     build_deal_register,
-    build_learning_progress,
 )
 from app.modules.reporting.rendering import (
     CHART_KINDS,
@@ -56,6 +56,7 @@ from app.modules.reporting.rendering import (
     render_png,
     render_report,
     render_xlsx,
+    report_file_name,
 )
 from app.modules.reporting.seed import _DEFAULT_TEMPLATES
 from app.modules.reporting.service import SYNC_ROW_THRESHOLD
@@ -98,6 +99,104 @@ class TestCsvInjectionProtection:
         assert _xlsx_cell("Организация «Ростелеком»") == "Организация «Ростелеком»"
 
 
+class TestXlsxDatesAndLayout:
+    """B1-6: раньше `datetime` в xlsx попадал в файл текстом (`_xlsx_cell` приводило всё
+    не-число/не-строку к `str(value)`) — здесь проверяется, что ячейка с `kind="datetime"`
+    становится настоящей датой Excel с форматом, а не строкой, плюс сопутствующие требования
+    качества файла (ширины колонок, закреплённая шапка, автофильтр, альбомная печать)."""
+
+    def _dataset_with_datetime(self) -> ReportDataset:
+        aware = dt.datetime(2026, 1, 31, 21, 30, tzinfo=dt.UTC)
+        return ReportDataset(
+            title="Реестр",
+            columns=["Вуз", "Создана"],
+            rows=[["МГТУ им. Баумана", aware]],
+            keys=["organization", "created_at"],
+            kinds=["text", "datetime"],
+        )
+
+    def _load(self, content: bytes):
+        from openpyxl import load_workbook
+
+        return load_workbook(io.BytesIO(content))
+
+    def test_datetime_cell_is_a_real_date_not_a_string(self) -> None:
+        content = render_xlsx(self._dataset_with_datetime(), tz_name="Europe/Moscow")
+        sheet = self._load(content).active
+        cell = sheet.cell(row=2, column=2)
+        assert cell.is_date
+        assert cell.number_format == "DD.MM.YYYY HH:MM"
+        # 21:30 UTC 31 января = 00:30 1 февраля в Москве (UTC+3) — перевод пояса меняет дату
+        # ячейки, не только время.
+        assert cell.value == dt.datetime(2026, 2, 1, 0, 30)
+
+    def test_column_widths_are_within_the_documented_bounds(self) -> None:
+        content = render_xlsx(self._dataset_with_datetime())
+        sheet = self._load(content).active
+        for column in ("A", "B"):
+            width = sheet.column_dimensions[column].width
+            assert 8 <= width <= 60
+
+    def test_header_row_is_frozen_and_bold(self) -> None:
+        content = render_xlsx(self._dataset_with_datetime())
+        sheet = self._load(content).active
+        assert sheet.freeze_panes == "A2"
+        assert sheet.cell(row=1, column=1).font.bold is True
+
+    def test_autofilter_covers_the_whole_table(self) -> None:
+        content = render_xlsx(self._dataset_with_datetime())
+        sheet = self._load(content).active
+        assert sheet.auto_filter.ref == "A1:B2"
+
+    def test_print_setup_is_landscape_and_fits_the_page_width(self) -> None:
+        content = render_xlsx(self._dataset_with_datetime())
+        sheet = self._load(content).active
+        assert sheet.page_setup.orientation == "landscape"
+        assert sheet.page_setup.fitToWidth == 1
+        assert sheet.page_setup.fitToHeight == 0
+        assert sheet.print_title_rows == "$1:$1"
+
+    def test_decimal_value_is_a_real_number_not_text(self) -> None:
+        dataset = ReportDataset(
+            title="Сумма",
+            columns=["Сумма, ₽"],
+            rows=[[Decimal("150000.50")]],
+            kinds=["money"],
+        )
+        content = render_xlsx(dataset)
+        sheet = self._load(content).active
+        cell = sheet.cell(row=2, column=1)
+        assert cell.value == 150000.50
+        assert cell.number_format == "#,##0.00"
+
+
+class TestReportFileName:
+    """B1-6: раньше `f"{dataset.title}.{job.format}"` (`reporting.service.generate`) давало
+    одно и то же имя файла при каждой выгрузке — повторное скачивание различалось только
+    припиской браузера `(1)`/`(2)`."""
+
+    def test_combines_title_date_and_extension(self) -> None:
+        generated_at = dt.datetime(2026, 10, 16, 14, 5, tzinfo=dt.UTC)
+        assert report_file_name("Причины отказов", generated_at, "xlsx") == (
+            "Причины отказов_2026-10-16.xlsx"
+        )
+
+    def test_forbidden_characters_are_replaced(self) -> None:
+        generated_at = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+        name = report_file_name('Отчёт: янв/фев*2026?<>"', generated_at, "pdf")
+        assert all(ch not in name for ch in '\\/:*?"<>')
+
+    def test_empty_title_falls_back_to_a_default(self) -> None:
+        generated_at = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+        assert report_file_name("", generated_at, "json") == "Отчёт_2026-01-01.json"
+
+    def test_result_is_never_longer_than_the_documented_bound(self) -> None:
+        generated_at = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+        long_title = "А" * 500
+        name = report_file_name(long_title, generated_at, "xlsx")
+        assert len(name) <= 100 + len(".xlsx")
+
+
 class TestPdfRendering:
     def test_produces_valid_pdf_with_cyrillic_content(self) -> None:
         content = render_pdf(_sample_dataset())
@@ -106,6 +205,16 @@ class TestPdfRendering:
     def test_empty_rows_still_renders(self) -> None:
         content = render_pdf(ReportDataset(title="Пусто", columns=["A"], rows=[]))
         assert content.startswith(b"%PDF")
+
+    def test_page_is_landscape_a4(self) -> None:
+        """B1-6: портретный A4 не помещал 10 колонок — альбомная ориентация через CSS `@page`
+        (вариант A из сравнения в задаче, без перехода на reportlab Platypus)."""
+        from pypdf import PdfReader
+
+        content = render_pdf(_sample_dataset())
+        reader = PdfReader(io.BytesIO(content))
+        box = reader.pages[0].mediabox
+        assert float(box.width) > float(box.height)
 
 
 class TestPngRendering:
@@ -284,30 +393,29 @@ class TestReportFilterClauses:
         assert "products.direction_id IN" in sql
 
 
-class TestLearningProgressStub:
-    async def test_returns_empty_dataset_with_honest_note_not_fake_data(self) -> None:
-        # Единственный builder, не трогающий сессию/принципала вообще — см.
-        # докстринг модуля и `build_learning_progress` самой.
-        dataset = await build_learning_progress(None, None, {})  # type: ignore[arg-type]
-        assert dataset.rows == []
-        assert dataset.note is not None
-        assert "LMS" in dataset.note
-
-
 class TestBuilderRegistry:
     def test_eight_builders_match_new_spec_4_13_literal_list_plus_the_lms_upload(self) -> None:
         # Восемь видов раздела 4.13, девятый — выгрузка учащихся для LMS (`lms_users_upload`),
-        # десятый — `deal_register` (буквальное прочтение Функц.4/§4.2, см. докстринг модуля).
-        assert len(REPORT_BUILDERS) == 10
+        # десятый — `deal_register` (буквальное прочтение Функц.4/§4.2, см. докстринг модуля),
+        # одиннадцатый — `product_demand` (B1-9, раздел «Цель» ТЗ), двенадцатый —
+        # `license_register` (B1-11, ТЗ §4 п.1).
+        assert len(REPORT_BUILDERS) == 12
         assert "lms_users_upload" in REPORT_BUILDERS
         assert "deal_register" in REPORT_BUILDERS
+        assert "product_demand" in REPORT_BUILDERS
+        assert "license_register" in REPORT_BUILDERS
 
     def test_only_listings_have_a_real_row_estimator(self) -> None:
         # Раздел 4.13: агрегаты структурно малы (статусы/регионы/КАМы/
-        # месяцы/причины отказов) и всегда идут по лёгкому пути — только
-        # построчные листинги (`stuck_deals`, `deal_register`) могут реально
-        # превысить порог.
-        assert set(REPORT_ESTIMATORS) == {"stuck_deals", "deal_register"}
+        # месяцы/причины отказов, B1-9: продукты/направления) и всегда идут по лёгкому пути —
+        # только построчные листинги (`stuck_deals`, `deal_register`, B1-10:
+        # `learning_progress`, B1-11: `license_register`) могут реально превысить порог.
+        assert set(REPORT_ESTIMATORS) == {
+            "stuck_deals",
+            "deal_register",
+            "learning_progress",
+            "license_register",
+        }
 
     def test_sync_threshold_matches_spec_literal_number(self) -> None:
         assert SYNC_ROW_THRESHOLD == 1000
@@ -389,7 +497,9 @@ class TestDealRegisterReport:
 
 class TestSeedTemplates:
     def test_ten_templates_seeded(self) -> None:
-        assert len(_DEFAULT_TEMPLATES) == 10
+        # B1-9/B1-11: одиннадцатый код `product_demand`, двенадцатый `license_register` — имя
+        # теста не переименовано, чтобы не распухал diff ради комментария; число обновлено.
+        assert len(_DEFAULT_TEMPLATES) == 12
 
     def test_no_duplicate_codes(self) -> None:
         codes = [row[0] for row in _DEFAULT_TEMPLATES]
@@ -759,3 +869,123 @@ class TestTemplateTexts:
         for code, _name, description, *_rest in _DEFAULT_TEMPLATES:
             for marker in ("раздел", "new_spec", "§"):
                 assert marker not in description, (code, description)
+
+
+class TestStuckDealsTruncation:
+    """B1-6: то же усечение по `limit`, что и `deal_register` (`TestTruncation`,
+    `tests/test_reporting_register.py`) — здесь для `stuck_deals`, у которого раньше не было ни
+    усечения, ни `keys`/`kinds`. Настоящая Postgres обязательна (своя мини-фабрика: сделки с
+    просроченным SLA, никакого общего с `deal_register` мира не нужно)."""
+
+    pytestmark = pytest.mark.skipif(
+        not TEST_DATABASE_URL, reason="нужен TEST_DATABASE_URL с применёнными миграциями"
+    )
+
+    async def _make_breached_deals(self, count: int) -> uuid.UUID:
+        """Возвращает `owner_id` — тесты строят `Principal` с ролью KAM и этим же
+        `user_id`, чтобы скоуп (`deal_scope_clause`) ограничил выдачу только созданными здесь
+        сделками. ADMIN без фильтра увидел бы ЛЮБЫЕ просроченные сделки во всей (общей для
+        сессии) тестовой БД, включая оставшиеся от других тестов — `total_rows`/`truncated`
+        стали бы случайными числами, а не детерминированной проверкой этого теста."""
+        from app.core.db import session_scope
+        from app.modules.catalog.models import Organization
+        from app.modules.identity.models import User
+        from app.modules.workflow.models import Workflow, WorkflowStatus
+
+        token = uuid.uuid4().hex[:10]
+        async with session_scope() as session:
+            owner = User(
+                keycloak_id=str(uuid.uuid4()),
+                email=f"kam-stuck-{token}@rt-it-school.ru",
+                full_name="Застряловa З. З.",
+                role="KAM",
+                status="active",
+                consent_version="1.0",
+            )
+            session.add(owner)
+            workflow = Workflow(code=f"wf-stuck-{token}", name="Воронка просрочки", deal_type="b2b")
+            session.add(workflow)
+            await session.flush()
+            status = WorkflowStatus(
+                workflow_id=workflow.id,
+                code="negotiation",
+                name="Переговоры",
+                type="intermediate",
+                sort_order=0,
+            )
+            organization = Organization(
+                name=f"ВУЗ просрочки {token}", org_type="university", owner_id=owner.id
+            )
+            session.add_all([status, organization])
+            await session.flush()
+
+            now = dt.datetime.now(dt.UTC)
+            for index in range(count):
+                session.add(
+                    Deal(
+                        number=f"D-stuck-{token}-{index}",
+                        title=f"Просроченная сделка {index}",
+                        deal_type="b2b",
+                        workflow_id=workflow.id,
+                        status_id=status.id,
+                        organization_id=organization.id,
+                        owner_id=owner.id,
+                        sla_due_at=now - dt.timedelta(days=index + 1),
+                        sla_state="breached",
+                    )
+                )
+            await session.flush()
+            return owner.id
+
+    def _owner_principal(self, owner_id: uuid.UUID):
+        from app.core.security import Principal
+
+        return Principal(
+            user_id=owner_id,
+            keycloak_id="k",
+            role="KAM",
+            status="active",
+            email=None,
+            full_name="x",
+            team_id=None,
+            manager_id=None,
+            perm_epoch=1,
+            session_id=None,
+            consent_version="1.0",
+            must_change_password=False,
+            claims=None,  # type: ignore[arg-type]
+        )
+
+    def _build(self, client, owner_id: uuid.UUID, params: dict):
+        from app.core.db import session_scope
+        from app.modules.reporting.builders import build_stuck_deals
+
+        async def _run() -> ReportDataset:
+            async with session_scope() as session:
+                return await build_stuck_deals(session, self._owner_principal(owner_id), params)
+
+        return run(client, _run)
+
+    def test_limit_below_the_total_marks_truncated(self, client) -> None:
+        owner_id = run(client, self._make_breached_deals, 3)
+        dataset = self._build(client, owner_id, {"limit": 1})
+        assert len(dataset.rows) == 1
+        assert dataset.truncated is True
+        assert dataset.total_rows == 3
+        assert dataset.note is not None and "отчёт усечён по параметру limit" in dataset.note
+        assert dataset.keys == [
+            "number",
+            "title",
+            "owner",
+            "status",
+            "organization",
+            "days_overdue",
+        ]
+        assert dataset.kinds == ["text", "text", "text", "text", "text", "days"]
+
+    def test_limit_above_the_total_skips_the_estimate(self, client) -> None:
+        owner_id = run(client, self._make_breached_deals, 2)
+        dataset = self._build(client, owner_id, {"limit": 5000})
+        assert len(dataset.rows) == 2
+        assert dataset.truncated is False
+        assert dataset.total_rows is None

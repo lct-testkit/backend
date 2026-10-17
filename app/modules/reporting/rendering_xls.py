@@ -23,12 +23,14 @@ from __future__ import annotations
 import datetime as dt
 import io
 import re
+import zoneinfo
+from decimal import Decimal
 from typing import Any
 
 import xlwt
 
 from app.modules.imports.parsing import sanitize_formula
-from app.modules.reporting.builders import ReportDataset
+from app.modules.reporting.builders import DEFAULT_TIMEZONE_NAME, ReportDataset
 
 #: 65 536 строк — предел формата (16-битный индекс строки BIFF8). Одна строка уходит под шапку
 #: таблицы (заголовки колонок) — реальный лимит данных на единицу меньше.
@@ -63,13 +65,22 @@ def _xls_text(value: str) -> str:
     return text
 
 
-def _to_naive(value: dt.datetime) -> dt.datetime:
+def resolve_tz(tz_name: str | None) -> dt.tzinfo:
+    """Пояс по IANA-имени (B1-6) — неизвестное/отсутствующее имя откатывается на пояс по
+    умолчанию (`DEFAULT_TIMEZONE_NAME`), а не роняет весь рендер."""
+    try:
+        return zoneinfo.ZoneInfo(tz_name) if tz_name else zoneinfo.ZoneInfo(DEFAULT_TIMEZONE_NAME)
+    except (zoneinfo.ZoneInfoNotFoundError, ValueError):
+        return zoneinfo.ZoneInfo(DEFAULT_TIMEZONE_NAME)
+
+
+def _to_naive(value: dt.datetime, tz: dt.tzinfo) -> dt.datetime:
     """`xlwt` не умеет aware-`datetime` (падает `TypeError`) — Excel вообще не хранит пояс в
-    ячейке даты, поэтому значение переводится в UTC и становится наивным. Настоящий перевод в
-    пояс ПОЛЬЗОВАТЕЛЯ (не UTC) — доработка B1-6 (`RenderContext.tz_name`), когда рендер получит
-    контекст запроса; здесь — тот же уровень точности, что у сегодняшнего `render_xlsx` (UTC)."""
+    ячейке даты, поэтому значение переводится в пояс ПОЛЬЗОВАТЕЛЯ (B1-6, `tz`, не UTC — черновик
+    B1-4 переводил в UTC как временную меру до появления контекста запроса в рендере) и
+    становится наивным."""
     if value.tzinfo is not None:
-        return value.astimezone(dt.UTC).replace(tzinfo=None)
+        return value.astimezone(tz).replace(tzinfo=None)
     return value
 
 
@@ -109,10 +120,11 @@ def _column_width(title: str) -> int:
     return 256 * chars
 
 
-def render_xls(dataset: ReportDataset) -> bytes:
+def render_xls(dataset: ReportDataset, *, tz_name: str | None = None) -> bytes:
     """Рендер `ReportDataset` в xls (BIFF8). Лимит строк проверяется ДО записи — `ReportJobService`
     должен отловить `ReportTooLargeError` и завершить задание понятным сообщением, а не падать на
-    середине записи файла."""
+    середине записи файла. `tz_name` (B1-6) — пояс пользователя для перевода `datetime`;
+    `None` (вызов без контекста, например прямые тесты) откатывается на `DEFAULT_TIMEZONE_NAME`."""
     if len(dataset.rows) > XLS_MAX_ROWS:
         raise ReportTooLargeError(
             f"xls вмещает не более {XLS_MAX_ROWS} строк: выберите xlsx или сузьте период "
@@ -122,6 +134,7 @@ def render_xls(dataset: ReportDataset) -> bytes:
     book = xlwt.Workbook(encoding="utf-8")
     sheet = book.add_sheet(sheet_title(dataset.title))
     styles = _XlsStyles()
+    tz = resolve_tz(tz_name)
     kinds: list[str | None] = (
         list(dataset.kinds) if dataset.kinds is not None else [None] * len(dataset.columns)
     )
@@ -137,11 +150,16 @@ def render_xls(dataset: ReportDataset) -> bytes:
             if value is None:
                 sheet.write(row_index, col_index, "", style)
             elif isinstance(value, dt.datetime):
-                sheet.write(row_index, col_index, _to_naive(value), style)
+                sheet.write(row_index, col_index, _to_naive(value, tz), style)
             elif isinstance(value, dt.date):
                 sheet.write(row_index, col_index, value, style)
             elif isinstance(value, bool):
                 sheet.write(row_index, col_index, str(value), styles.text)
+            elif isinstance(value, Decimal):
+                # B1-6: `Decimal` (значения денежных колонок до приведения builder'ом к `float`)
+                # не совпадало ни с одной веткой выше и падало в текст ниже — число отображалось
+                # строкой и не суммировалось в Excel.
+                sheet.write(row_index, col_index, float(value), style)
             elif isinstance(value, int | float):
                 sheet.write(row_index, col_index, value, style)
             else:

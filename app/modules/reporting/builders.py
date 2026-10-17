@@ -40,8 +40,10 @@ xlsx/pdf/png. Скоуп строк — тот же `deal_scope_clause`, что 
 `_apply_entity_filters` — общие хелперы применения, каждый builder сам решает,
 по какой дате считать «период» (по умолчанию `Deal.created_at`) и какие из
 пяти фильтров ему структурно осмысленны — решение описано в комментарии
-рядом с телом builder'а. `learning_progress` не участвует (честная заглушка,
-данных нет структурно).
+рядом с телом builder'а. `learning_progress` (B1-10) применяет те же пять фильтров своей
+собственной реализацией (`_learning_progress_query`), не этими общими хелперами — его базовая
+таблица `LearningProgress`, не `Deal`, и продукт/направление фильтруются по курсу LMS
+(`LearningProgress.product_id`), а не по всем строкам сделки.
 
 Девятый вид, `lms_users_upload`, — не отчёт из раздела 4.13, а файл для внешней системы: учащиеся
 оплаченных сделок физлиц в формате шаблона LMS «Загрузка пользователей». В нём СНИЛС, паспорт и
@@ -63,21 +65,27 @@ from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import FieldError, ValidationError
-from app.core.permissions import DealScope, deal_scope_for
+from app.core.masking import mask_contacts_text, mask_name
+from app.core.permissions import DealScope, Permission, deal_scope_for, has_permission
 from app.core.security import Principal
 from app.modules.catalog import learner
+from app.modules.catalog.license_values import TRANSFER_STATUS_LABELS
 from app.modules.catalog.models import (
     Contact,
     ContactLearnerProfile,
     Direction,
+    LicenseTransferStatus,
     LossReason,
     Organization,
+    OrganizationLicense,
     Product,
     Region,
 )
+from app.modules.catalog.service import organization_scope_clause
 from app.modules.crm.models import Deal, DealProduct, DealStatusHistory
 from app.modules.crm.service import deal_scope_clause
 from app.modules.identity.models import User
+from app.modules.integration.models import LearningProgress
 from app.modules.workflow.models import StatusType, Workflow, WorkflowStatus
 
 
@@ -1041,10 +1049,27 @@ async def build_stuck_deals(
         ]
         for number, title, owner_name, status_name, org_name, sla_due_at in result
     ]
+
+    # B1-6: то же усечение, что у `deal_register` — второй запрос (`estimate_stuck_deals`)
+    # только когда выдача упёрлась в `limit`.
+    note: str | None = None
+    total_rows: int | None = None
+    truncated = False
+    if len(rows) == limit:
+        total_rows = await estimate_stuck_deals(session, principal, params)
+        if total_rows > limit:
+            truncated = True
+            note = _truncation_note(limit, total_rows)
+
     return ReportDataset(
         title="Зависшие сделки",
         columns=["Номер", "Название", "Ответственный", "Статус", "Организация", "Дней просрочки"],
         rows=rows,
+        note=note,
+        keys=["number", "title", "owner", "status", "organization", "days_overdue"],
+        kinds=["text", "text", "text", "text", "text", "days"],
+        total_rows=total_rows,
+        truncated=truncated,
     )
 
 
@@ -1322,6 +1347,12 @@ async def estimate_deal_register(
     return (await session.execute(count_stmt)).scalar_one() or 0
 
 
+def _truncation_note(shown: int, total: int) -> str:
+    """B1-6: единая фраза об усечении по `limit` — её же текст ищут тесты сквозной проверки
+    (B1-13), поэтому формулировка здесь единственная, а не копия в каждом builder'е."""
+    return f"Показано {shown} из {total} строк: отчёт усечён по параметру limit"
+
+
 async def build_deal_register(
     session: AsyncSession, principal: Principal, params: dict[str, Any]
 ) -> ReportDataset:
@@ -1342,37 +1373,282 @@ async def build_deal_register(
                 mapped_row.append(value)
         rows.append(mapped_row)
 
+    notes: list[str] = []
+    if "amount" in columns:
+        notes.append("Сумма сделки указана на первой строке сделки")
+    # B1-6: усечение молчаливым быть не должно — но второй запрос (`estimate_deal_register`,
+    # тот же COUNT, что уже делает `ReportJobService` для решения sync/async) нужен только
+    # когда выдача упёрлась в `limit`: меньше строк, чем лимит, однозначно значит «это все
+    # строки», оценивать незачем.
+    total_rows: int | None = None
+    truncated = False
+    if len(rows) == limit:
+        total_rows = await estimate_deal_register(session, principal, params)
+        if total_rows > limit:
+            truncated = True
+            notes.append(_truncation_note(limit, total_rows))
+
     return ReportDataset(
         title="Сделки по вузам и направлениям",
         columns=[_REGISTER_COLUMNS_BY_KEY[key].title for key in columns],
         rows=rows,
-        note="Сумма сделки указана на первой строке сделки" if "amount" in columns else None,
+        note="; ".join(notes) or None,
         keys=list(columns),
         kinds=[_REGISTER_COLUMNS_BY_KEY[key].kind for key in columns],
+        total_rows=total_rows,
+        truncated=truncated,
     )
 
 
 # =============================================================================
-# 8. Прогресс обучения (LMS) — честная заглушка
+# 8. Прогресс обучения (LMS)
 # =============================================================================
+
+#: Каталог колонок `learning_progress` (B1-10). Первые пять — на тех же местах, что были у
+#: заглушки (фронтенд уже знает эти заголовки); следующие шесть добавлены этой задачей. Порядок
+#: в файле — порядок в этом тюпле, как и у `REGISTER_COLUMNS` (B1-2).
+LEARNING_PROGRESS_COLUMNS: tuple[ColumnDef, ...] = (
+    ColumnDef("student", "Студент"),
+    ColumnDef("product", "Продукт"),
+    ColumnDef("progress_pct", "Прогресс, %", kind="int"),
+    # `score` — оценка по шкале курса (0–5 или 0–100 в зависимости от LMS), не процент; формат
+    # ячейки "0.0" (`kind="pct"`) переиспользован как ближайший готовый однодесятичный числовой
+    # формат (`rendering._XLSX_NUMBER_FORMATS`/`rendering_xls._XlsStyles`) — отдельный `kind` под
+    # одну колонку не завели ради этого недостаточного повода.
+    ColumnDef("score", "Оценка", kind="pct"),
+    ColumnDef("completed_at", "Завершено", kind="datetime"),
+    ColumnDef("organization", "Вуз"),
+    ColumnDef("direction", "Направление", default=False),
+    ColumnDef("stream_number", "Поток", kind="int"),
+    ColumnDef("enrolled_at", "Зачислен", kind="datetime", default=False),
+    ColumnDef("last_activity_at", "Последняя активность", kind="datetime"),
+    ColumnDef("deal_number", "Сделка", default=False),
+)
+LEARNING_PROGRESS_COLUMNS_BY_KEY: dict[str, ColumnDef] = {
+    c.key: c for c in LEARNING_PROGRESS_COLUMNS
+}
+#: `date_field` этого вида (B1-3/B1-10) — по умолчанию период считается по активности, не по
+#: заведению сделки (у заглушки `ReportSpec.date_fields` был `("created_at",)`, настоящая
+#: реализация переопределяет это в `spec.py` вместе с данной задачей).
+_LEARNING_PROGRESS_DATE_COLUMNS: dict[str, Any] = {
+    "last_activity_at": LearningProgress.last_activity_at,
+    "enrolled_at": LearningProgress.enrolled_at,
+    "completed_at": LearningProgress.completed_at,
+}
+
+
+def _parse_progress_columns(params: dict[str, Any]) -> list[str]:
+    """Как `_parse_register_columns` (B1-2), но против каталога `learning_progress` — те же
+    правила: неизвестный ключ/повтор — 422 со списком допустимых, пусто/отсутствует — набор по
+    умолчанию. `reporting.spec.validate_params` уже проверяет это до вызова builder'а из
+    `POST /api/reports`, здесь — защита при вызове builder'а напрямую (тесты, `/data`)."""
+    raw = params.get("columns")
+    if raw is None or raw == []:
+        return [c.key for c in LEARNING_PROGRESS_COLUMNS if c.default]
+    if not isinstance(raw, list):
+        raise ValidationError(
+            "Параметр 'columns' должен быть списком ключей колонок",
+            [FieldError(field="columns", reason="ожидается массив строк")],
+        )
+    valid_keys = sorted(LEARNING_PROGRESS_COLUMNS_BY_KEY)
+    seen: set[str] = set()
+    result: list[str] = []
+    for key in raw:
+        if key not in LEARNING_PROGRESS_COLUMNS_BY_KEY:
+            raise ValidationError(
+                f"Параметр 'columns' содержит неизвестный ключ: {key!r}",
+                [
+                    FieldError(
+                        field="columns",
+                        reason=f"неизвестный ключ: {key}; допустимо: {', '.join(valid_keys)}",
+                    )
+                ],
+            )
+        if key in seen:
+            raise ValidationError(
+                f"Параметр 'columns' содержит повтор ключа: {key!r}",
+                [FieldError(field="columns", reason=f"повтор ключа: {key}")],
+            )
+        seen.add(key)
+        result.append(key)
+    return result
+
+
+async def _learning_progress_query(
+    session: AsyncSession, principal: Principal, params: dict[str, Any]
+):
+    """От `LearningProgress`, не от `Deal` (в отличие от остальных builder'ов этого модуля) —
+    отчёт о прогрессе, не о сделках; скоуп всё равно идёт через `deal_scope_clause` (строка видна
+    тому, кому видна её сделка). `INNER JOIN Deal` — строки с `deal_id IS NULL` структурно не
+    бывают (`integration.lms.upsert_progress` не пишет прогресс без сделки) и не показываются,
+    если встретятся (см. докстринг `build_learning_progress`, риск №1 задачи B1-10)."""
+    filters = await _load_filters(session, principal, params)
+    clause = await deal_scope_clause(session, principal)
+    date_column = _LEARNING_PROGRESS_DATE_COLUMNS.get(
+        filters.date_field, LearningProgress.last_activity_at
+    )
+    # Поток — `min(DealProduct.stream_number)` по паре (сделка, продукт курса), не произвольный
+    # первый продукт сделки (та же проблема, что `lms.py:211-221` решает для `product_id`, здесь
+    # не решается — только читается результат): коррелированный подзапрос, не JOIN, иначе сделка
+    # с несколькими позициями того же продукта размножила бы строку прогресса.
+    stream_subquery = (
+        select(func.min(DealProduct.stream_number))
+        .where(
+            DealProduct.deal_id == Deal.id,
+            DealProduct.product_id == LearningProgress.product_id,
+        )
+        .scalar_subquery()
+    )
+
+    stmt = (
+        select(
+            Contact.last_name,
+            Contact.first_name,
+            Contact.middle_name,
+            Product.name,
+            LearningProgress.progress_pct,
+            LearningProgress.score,
+            LearningProgress.completed_at,
+            Organization.name,
+            Direction.name,
+            stream_subquery,
+            LearningProgress.enrolled_at,
+            LearningProgress.last_activity_at,
+            Deal.number,
+        )
+        .select_from(LearningProgress)
+        .join(Deal, Deal.id == LearningProgress.deal_id)
+        .outerjoin(Contact, Contact.id == LearningProgress.contact_id)
+        .outerjoin(Organization, Organization.id == Deal.organization_id)
+        .outerjoin(Product, Product.id == LearningProgress.product_id)
+        .outerjoin(Direction, Direction.id == Product.direction_id)
+        .where(Deal.deleted_at.is_(None))
+        .order_by(LearningProgress.last_activity_at.desc().nulls_last())
+    )
+    if clause is not None:
+        stmt = stmt.where(clause)
+    if filters.organization_ids:
+        stmt = stmt.where(Deal.organization_id.in_(filters.organization_ids))
+    if filters.owner_ids:
+        stmt = stmt.where(Deal.owner_id.in_(filters.owner_ids))
+    # B1-10: по `LearningProgress.product_id`/направлению ЭТОГО продукта, не по всем строкам
+    # сделки (`_apply_entity_filters` фильтрует по продуктам сделки целиком — не подходит: курс
+    # LMS мог быть ровно одной позицией из нескольких в сделке).
+    if filters.product_ids:
+        stmt = stmt.where(LearningProgress.product_id.in_(filters.product_ids))
+    direction_ids = filters.direction_tree_ids or filters.direction_ids
+    if direction_ids:
+        stmt = stmt.where(Product.direction_id.in_(direction_ids))
+    if filters.date_from is not None:
+        stmt = stmt.where(date_column >= _day_start(filters.date_from, filters.tz))
+    if filters.date_to is not None:
+        stmt = stmt.where(
+            date_column < _day_start(filters.date_to, filters.tz) + dt.timedelta(days=1)
+        )
+    return stmt
+
+
+async def estimate_learning_progress(
+    session: AsyncSession, principal: Principal, params: dict[str, Any]
+) -> int:
+    inner = await _learning_progress_query(session, principal, params)
+    count_stmt = select(func.count()).select_from(inner.subquery())
+    return (await session.execute(count_stmt)).scalar_one() or 0
 
 
 async def build_learning_progress(
     session: AsyncSession, principal: Principal, params: dict[str, Any]
 ) -> ReportDataset:
-    """LMS-интеграция (new_spec §4.14) не реализована ни в одном спринте —
-    таблица `learning_progress` не создана, тянуть данные неоткуда. Честная
-    пустая выдача с пояснением, а не выдуманные цифры — тот же принцип, что
-    `registry.tasks` уже применил к источнику `rosobrnadzor` (спринт 5) и
-    `notification.service` — к отсутствующему SMTP/SMS-шлюзу (спринт 6/7)."""
+    """B1-10: прогресс обучения из LMS. Раньше честная заглушка — ни таблица, ни приём данных не
+    существовали структурно ни в одном прошедшем спринте (см. историю этого докстринга в git).
+    Таблица `learning_progress` и обработчик `integration.lms.upsert_progress` с тех пор
+    появились (push `POST /api/v1/integrations/lms/progress` и 30-минутный pull), отчёт просто не
+    читал их — карточка в каталоге отчётов всегда показывала пустой результат с текстом
+    «интеграция не реализована» даже при работающем источнике."""
+    columns = _parse_progress_columns(params)
+    limit = _parse_int(params, "limit", default=1000, minimum=1, maximum=5000)
+    stmt = (await _learning_progress_query(session, principal, params)).limit(limit)
+    result = (await session.execute(stmt)).all()
+
+    rows: list[list[Any]] = []
+    progress_values: list[int] = []
+    completed_count = 0
+    for (
+        last_name,
+        first_name,
+        middle_name,
+        product_name,
+        progress_pct,
+        score,
+        completed_at,
+        organization_name,
+        direction_name,
+        stream_number,
+        enrolled_at,
+        last_activity_at,
+        deal_number,
+    ) in result:
+        # «У B2B-сделки без контакта — "—"» (B1-10, п.2): учащийся физлицо (`Contact`), не сама
+        # сделка — у b2b-сделки с вузом-организацией контакта может не быть вовсе.
+        if last_name:
+            student = mask_name(f"{last_name} {first_name} {middle_name or ''}".strip())
+        else:
+            student = "—"
+        full_row = {
+            "student": student,
+            "product": product_name or "—",
+            "progress_pct": progress_pct,
+            "score": float(score) if score is not None else None,
+            "completed_at": completed_at,
+            "organization": organization_name or "—",
+            "direction": direction_name or "—",
+            "stream_number": stream_number,
+            "enrolled_at": enrolled_at,
+            "last_activity_at": last_activity_at,
+            "deal_number": deal_number,
+        }
+        rows.append([full_row[key] for key in columns])
+        if progress_pct is not None:
+            progress_values.append(progress_pct)
+        if completed_at is not None:
+            completed_count += 1
+
+    notes: list[str] = []
+    if rows:
+        avg_progress = round(sum(progress_values) / len(progress_values)) if progress_values else 0
+        completed_pct = round(completed_count / len(rows) * 100)
+        notes.append(
+            f"Записей LMS: {len(rows)}, средний прогресс {avg_progress}%, "
+            f"завершили {completed_count} ({completed_pct}%)"
+        )
+    else:
+        # Пустой результат — у ЭТОГО запроса (фильтры/скоуп), не у таблицы целиком: другой
+        # пользователь или период мог бы увидеть строки. «Источник не настроен» показывается
+        # только когда данных нет вообще ни у кого (B1-10, п.4).
+        any_rows_exist = await session.scalar(select(func.count(LearningProgress.id))) or 0
+        if any_rows_exist == 0:
+            notes.append(
+                "Данные о прогрессе из LMS не поступали: проверьте источник lms в разделе "
+                "интеграций и LMS_BASE_URL"
+            )
+
+    total_rows: int | None = None
+    truncated = False
+    if len(rows) == limit:
+        total_rows = await estimate_learning_progress(session, principal, params)
+        if total_rows > limit:
+            truncated = True
+            notes.append(_truncation_note(limit, total_rows))
+
     return ReportDataset(
         title="Прогресс обучения",
-        columns=["Студент", "Продукт", "Прогресс, %", "Оценка", "Завершено"],
-        rows=[],
-        note=(
-            "Интеграция с LMS не реализована (new_spec §4.14): источник данных "
-            "отсутствует, отчёт всегда пуст до появления модуля integration."
-        ),
+        columns=[LEARNING_PROGRESS_COLUMNS_BY_KEY[key].title for key in columns],
+        rows=rows,
+        note="; ".join(notes) or None,
+        keys=list(columns),
+        kinds=[LEARNING_PROGRESS_COLUMNS_BY_KEY[key].kind for key in columns],
+        total_rows=total_rows,
+        truncated=truncated,
     )
 
 
@@ -1550,6 +1826,544 @@ async def build_lms_users_upload(
 
 
 # =============================================================================
+# 10. Рейтинг востребованности ИТ-продуктов и направлений
+# =============================================================================
+
+#: Нулевой UUID — ключ группировки «без направления» (B1-9): `GROUP BY COALESCE(direction_id,
+#: …)` не может группировать по `NULL` как по обычному значению (все NULL в Postgres различны
+#: для `DISTINCT`/`GROUP BY` с точки зрения формальной семантики сравнения, но `GROUP BY` на
+#: практике схлопывает их в одну группу — в отличие от уникальных индексов эта группа одна,
+#: поэтому константа здесь не для корректности группировки, а чтобы ключом группы был конкретный
+#: сравнимый `UUID`, а не `None`, с которым неудобно работать в Python после `fetchall()`).
+_NO_DIRECTION_KEY = uuid.UUID(int=0)
+_NO_DIRECTION_LABEL = "Без направления"
+
+_PRODUCT_DEMAND_SORT_KEYS: frozenset[str] = frozenset(
+    {"index", "applications", "learners", "streams"}
+)
+_DEMAND_METRIC_LABELS: dict[str, str] = {
+    "applications": "Заявки",
+    "learners": "Обучающиеся",
+    "streams": "Потоки",
+}
+
+
+def _assign_ranks(rows: list[dict[str, Any]], key: str) -> None:
+    """RANK по `key` (B1-9) — равные значения делят место, следующее за ничьей идёт через
+    столько позиций, сколько строк в ничьей (1,2,2,4, не 1,2,2,3 — та же семантика, что SQL
+    `RANK()`). Мутирует `rows`, записывая/перезаписывая `"rank"`."""
+    order = sorted({row[key] for row in rows}, reverse=True)
+    rank_by_value = {value: position + 1 for position, value in enumerate(order)}
+    for row in rows:
+        row["rank"] = rank_by_value[row[key]]
+
+
+def compute_demand_index(
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Индекс востребованности (B1-9: раздел «Цель» ТЗ — ранжирование по заявкам на обучение,
+    числу обучающихся и параллельных потоков). Решение B задачи (сравнение вариантов формулы
+    ранга в документе спринта): среднее арифметическое долей позиции в сумме каждого из трёх
+    показателей по всей выборке — равные веса, формула видна в файле, без произвольных
+    коэффициентов. Показатель, чья сумма по выборке равна нулю (например, ни у одной позиции не
+    указан номер потока), не входит в среднее — 0/0 было бы неопределённостью, а не нулём, и
+    молча искажало бы доли остальных показателей. Входные `rows` не мутируются — возвращаются
+    новые словари с добавленными `index`/`rank`, отсортированные по индексу по убыванию (ничья —
+    одно место), и список метрик, исключённых из среднего (для `note`). Не трогает БД/сессию,
+    тестируется отдельно от SQL."""
+    metrics = ("applications", "learners", "streams")
+    totals = {metric: sum(row[metric] for row in rows) for metric in metrics}
+    active_metrics = [metric for metric in metrics if totals[metric] > 0]
+    excluded_metrics = [metric for metric in metrics if metric not in active_metrics]
+
+    enriched: list[dict[str, Any]] = []
+    for row in rows:
+        shares = [row[metric] / totals[metric] for metric in active_metrics]
+        index = round(sum(shares) / len(shares) * 100, 1) if shares else 0.0
+        enriched.append({**row, "index": index})
+
+    enriched.sort(key=lambda r: r["index"], reverse=True)
+    _assign_ranks(enriched, "index")
+    return enriched, excluded_metrics
+
+
+async def _demand_rows(
+    session: AsyncSession, principal: Principal, params: dict[str, Any], *, level: str
+) -> list[dict[str, Any]]:
+    """Строки-кандидаты до ранжирования (B1-9) — от `DealProduct` (строка сделки), не от `Deal`:
+    востребованность считается по продукту/направлению, который Deal.id с несколькими позициями
+    дал бы несколько строк-кандидатов (по одной на свой продукт), каждая со своим вкладом в
+    заявки/обучающихся/потоки СВОЕГО продукта — тот же принцип зерна, что `deal_register`
+    (B1-1/B1-2) применяет к зерну "product". Фильтры по продукту/направлению ограничивают
+    строки ЭТОГО запроса напрямую (`Product.id`/`Product.direction_id`, уже присоединённые),
+    не через `_apply_entity_filters` (та ограничивала бы, какие СДЕЛКИ попадают, а не какие
+    строки продукта/направления показаны — разница ровно того рода, что была багом BUG-1)."""
+    filters = await _load_filters(session, principal, params)
+    clause = await deal_scope_clause(session, principal)
+    date_column = _DATE_FIELD_COLUMNS.get(filters.date_field, Deal.created_at)
+    direction_ids = filters.direction_tree_ids or filters.direction_ids
+
+    applications = func.count(func.distinct(DealProduct.deal_id))
+    won = func.count(func.distinct(DealProduct.deal_id)).filter(
+        WorkflowStatus.type == StatusType.WON.value
+    )
+    learners = func.coalesce(
+        func.sum(DealProduct.quantity).filter(WorkflowStatus.type != StatusType.LOST.value), 0
+    )
+
+    def _apply_filters(stmt: Any) -> Any:
+        stmt = stmt.where(Deal.deleted_at.is_(None))
+        if clause is not None:
+            stmt = stmt.where(clause)
+        if filters.organization_ids:
+            stmt = stmt.where(Deal.organization_id.in_(filters.organization_ids))
+        if filters.owner_ids:
+            stmt = stmt.where(Deal.owner_id.in_(filters.owner_ids))
+        if filters.date_from is not None:
+            stmt = stmt.where(date_column >= _day_start(filters.date_from, filters.tz))
+        if filters.date_to is not None:
+            stmt = stmt.where(
+                date_column < _day_start(filters.date_to, filters.tz) + dt.timedelta(days=1)
+            )
+        if filters.product_ids:
+            stmt = stmt.where(Product.id.in_(filters.product_ids))
+        if direction_ids:
+            stmt = stmt.where(Product.direction_id.in_(direction_ids))
+        return stmt
+
+    base = (
+        select()
+        .select_from(DealProduct)
+        .join(Deal, Deal.id == DealProduct.deal_id)
+        .join(WorkflowStatus, WorkflowStatus.id == Deal.status_id)
+        .join(Product, Product.id == DealProduct.product_id)
+        .outerjoin(Direction, Direction.id == Product.direction_id)
+    )
+
+    if level == "product":
+        streams = func.count(func.distinct(DealProduct.stream_number)).filter(
+            WorkflowStatus.type != StatusType.LOST.value,
+            DealProduct.stream_number.is_not(None),
+        )
+        stmt = _apply_filters(
+            base.with_only_columns(
+                Product.id, Product.name, Direction.name, applications, won, learners, streams
+            ).group_by(Product.id, Product.name, Direction.name)
+        )
+        rows = (await session.execute(stmt)).all()
+        return [
+            {
+                "key": str(product_id),
+                "title": product_name,
+                "direction": direction_name or "—",
+                "applications": applications_v,
+                "won": won_v,
+                "learners": int(learners_v),
+                "streams": streams_v,
+            }
+            for (
+                product_id,
+                product_name,
+                direction_name,
+                applications_v,
+                won_v,
+                learners_v,
+                streams_v,
+            ) in rows
+        ]
+
+    # level == "direction": потоки — различные пары (продукт, поток), не просто различные номера
+    # потока (два разных продукта могли случайно получить один и тот же номер).
+    direction_key = func.coalesce(Product.direction_id, _NO_DIRECTION_KEY)
+    streams = func.count(
+        func.distinct(func.concat(DealProduct.product_id, ":", DealProduct.stream_number))
+    ).filter(WorkflowStatus.type != StatusType.LOST.value, DealProduct.stream_number.is_not(None))
+    product_count = func.count(func.distinct(Product.id))
+    stmt = _apply_filters(
+        base.with_only_columns(
+            direction_key, Direction.name, product_count, applications, won, learners, streams
+        ).group_by(direction_key, Direction.name)
+    )
+    rows = (await session.execute(stmt)).all()
+    return [
+        {
+            "key": str(direction_key_v),
+            "title": direction_name or _NO_DIRECTION_LABEL,
+            "product_count": product_count_v,
+            "applications": applications_v,
+            "won": won_v,
+            "learners": int(learners_v),
+            "streams": streams_v,
+        }
+        for (
+            direction_key_v,
+            direction_name,
+            product_count_v,
+            applications_v,
+            won_v,
+            learners_v,
+            streams_v,
+        ) in rows
+    ]
+
+
+def _demand_note(
+    *, totals: dict[str, int], excluded_metrics: list[str], shown: int, total_entities: int
+) -> str:
+    parts = [
+        "Всего: заявок {applications}, обучающихся {learners}, потоков {streams}".format(**totals)
+    ]
+    if excluded_metrics:
+        labels = ", ".join(_DEMAND_METRIC_LABELS[metric] for metric in excluded_metrics)
+        parts.append(f"{labels} не учтены")
+    if shown < total_entities:
+        parts.append(f"Показано {shown} из {total_entities}")
+    return "; ".join(parts)
+
+
+async def build_product_demand(
+    session: AsyncSession, principal: Principal, params: dict[str, Any]
+) -> ReportDataset:
+    """B1-9 (раздел «Цель» ТЗ): «Ранжирование происходит на основе востребованности программы,
+    которое становится очевидным по статистическим данным: заявки на обучение, количество
+    обучающихся, количество параллельных потоков» — отчёта под этот смысл системы не было ни у
+    одного builder'а раздела 4.13."""
+    level = params.get("level") or "product"
+    if level not in ("product", "direction"):
+        raise ValidationError(
+            "Параметр 'level' должен быть 'product' или 'direction'",
+            [FieldError(field="level", reason="допустимо: product, direction")],
+        )
+    top = _parse_int(params, "top", default=20, minimum=1, maximum=100)
+    sort_by = params.get("sort_by") or "index"
+    if sort_by not in _PRODUCT_DEMAND_SORT_KEYS:
+        raise ValidationError(
+            f"Параметр 'sort_by' должен быть одним из: "
+            f"{', '.join(sorted(_PRODUCT_DEMAND_SORT_KEYS))}",
+            [FieldError(field="sort_by", reason="недопустимое значение")],
+        )
+
+    raw_rows = await _demand_rows(session, principal, params, level=level)
+    ranked, excluded_metrics = compute_demand_index(raw_rows)
+    if sort_by != "index":
+        ranked.sort(key=lambda r: r[sort_by], reverse=True)
+        _assign_ranks(ranked, sort_by)
+
+    total_entities = len(ranked)
+    shown_rows = ranked[:top]
+    totals = {
+        metric: sum(r[metric] for r in ranked) for metric in ("applications", "learners", "streams")
+    }
+    note = _demand_note(
+        totals=totals,
+        excluded_metrics=excluded_metrics,
+        shown=len(shown_rows),
+        total_entities=total_entities,
+    )
+
+    if level == "product":
+        columns = [
+            "Место",
+            "Продукт",
+            "Направление",
+            "Заявок",
+            "Выиграно",
+            "Обучающихся",
+            "Потоков",
+            "Индекс, %",
+        ]
+        rows = [
+            [
+                r["rank"],
+                r["title"],
+                r["direction"],
+                r["applications"],
+                r["won"],
+                r["learners"],
+                r["streams"],
+                r["index"],
+            ]
+            for r in shown_rows
+        ]
+    else:
+        columns = [
+            "Место",
+            "Направление",
+            "Продуктов",
+            "Заявок",
+            "Выиграно",
+            "Обучающихся",
+            "Потоков",
+            "Индекс, %",
+        ]
+        rows = [
+            [
+                r["rank"],
+                r["title"],
+                r["product_count"],
+                r["applications"],
+                r["won"],
+                r["learners"],
+                r["streams"],
+                r["index"],
+            ]
+            for r in shown_rows
+        ]
+
+    kinds = (
+        ["int", "text", "int", "int", "int", "int", "int", "pct"]
+        if level == "direction"
+        else ["int", "text", "text", "int", "int", "int", "int", "pct"]
+    )
+    return ReportDataset(
+        title="Рейтинг востребованности ИТ-продуктов и направлений",
+        columns=columns,
+        rows=rows,
+        note=note or None,
+        kinds=kinds,
+    )
+
+
+# =============================================================================
+# 11. Реестр лицензий
+# =============================================================================
+
+#: Каталог колонок `license_register` (B1-11) — все десять полей ТЗ §4 п.1 по умолчанию, в
+#: порядке таблицы задачи; «Срок» (не по умолчанию) — производная колонка, расчёт в builder'е.
+LICENSE_REGISTER_COLUMNS: tuple[ColumnDef, ...] = (
+    ColumnDef("organization", "Вуз"),
+    ColumnDef("vendor", "Вендор"),
+    ColumnDef("product_name", "ПО"),
+    ColumnDef("contract_number", "Номер договора"),
+    ColumnDef("is_signed", "Подписание лицензии"),
+    ColumnDef("license_valid_year", "Срок действия, год", kind="int"),
+    ColumnDef("transfer_status", "Статус по передаче"),
+    ColumnDef("manager_full_name", "ФИО менеджера"),
+    ColumnDef("responsible_contacts", "Ответственные от вуза"),
+    ColumnDef("comment", "Комментарий"),
+    ColumnDef("validity", "Срок", default=False),
+)
+LICENSE_REGISTER_COLUMNS_BY_KEY: dict[str, ColumnDef] = {c.key: c for c in LICENSE_REGISTER_COLUMNS}
+_LICENSE_TRANSFER_STATUS_VALUES: frozenset[str] = frozenset(s.value for s in LicenseTransferStatus)
+
+
+def _parse_license_columns(params: dict[str, Any]) -> list[str]:
+    """Как `_parse_register_columns`/`_parse_progress_columns` — тот же приём 422 со списком
+    допустимых ключей, против каталога `license_register`."""
+    raw = params.get("columns")
+    if raw is None or raw == []:
+        return [c.key for c in LICENSE_REGISTER_COLUMNS if c.default]
+    if not isinstance(raw, list):
+        raise ValidationError(
+            "Параметр 'columns' должен быть списком ключей колонок",
+            [FieldError(field="columns", reason="ожидается массив строк")],
+        )
+    valid_keys = sorted(LICENSE_REGISTER_COLUMNS_BY_KEY)
+    seen: set[str] = set()
+    result: list[str] = []
+    for key in raw:
+        if key not in LICENSE_REGISTER_COLUMNS_BY_KEY:
+            raise ValidationError(
+                f"Параметр 'columns' содержит неизвестный ключ: {key!r}",
+                [
+                    FieldError(
+                        field="columns",
+                        reason=f"неизвестный ключ: {key}; допустимо: {', '.join(valid_keys)}",
+                    )
+                ],
+            )
+        if key in seen:
+            raise ValidationError(
+                f"Параметр 'columns' содержит повтор ключа: {key!r}",
+                [FieldError(field="columns", reason=f"повтор ключа: {key}")],
+            )
+        seen.add(key)
+        result.append(key)
+    return result
+
+
+def _parse_string_list(params: dict[str, Any], key: str) -> list[str] | None:
+    """Как `_parse_uuid_list`, но без разбора в UUID — список названий вендоров (B1-11), где
+    значение само текст, не идентификатор."""
+    raw = params.get(key)
+    if raw is None or raw == "" or raw == []:
+        return None
+    if isinstance(raw, str):
+        items = [item.strip() for item in raw.split(",") if item.strip()]
+    elif isinstance(raw, list | tuple):
+        items = [str(item) for item in raw]
+    else:
+        raise ValidationError(
+            f"Параметр {key!r} должен быть списком строк",
+            [FieldError(field=key, reason="ожидается массив строк")],
+        )
+    return items or None
+
+
+def _parse_transfer_statuses(params: dict[str, Any]) -> list[str] | None:
+    raw = _parse_string_list(params, "transfer_statuses")
+    if raw is None:
+        return None
+    unknown = [code for code in raw if code not in _LICENSE_TRANSFER_STATUS_VALUES]
+    if unknown:
+        raise ValidationError(
+            f"Параметр 'transfer_statuses' содержит неизвестный код: {unknown[0]!r}",
+            [
+                FieldError(
+                    field="transfer_statuses",
+                    reason=f"допустимо: {', '.join(sorted(_LICENSE_TRANSFER_STATUS_VALUES))}",
+                )
+            ],
+        )
+    return raw
+
+
+def _license_validity_label(valid_year: int | None, *, current_year: int) -> str:
+    """«Срок» (B1-11, доп. колонка): по `license_valid_year` и текущему году в поясе
+    пользователя — сам по себе год ничего не говорит о статусе лицензии без сравнения с «сейчас»."""
+    if valid_year is None:
+        return "—"
+    if valid_year < current_year:
+        return "Истёк"
+    if valid_year == current_year:
+        return "Истекает в этом году"
+    return "Действует"
+
+
+async def estimate_license_register(
+    session: AsyncSession, principal: Principal, params: dict[str, Any]
+) -> int:
+    inner, _tz = await _license_register_query(session, principal, params)
+    count_stmt = select(func.count()).select_from(inner.subquery())
+    return (await session.execute(count_stmt)).scalar_one() or 0
+
+
+async def _license_register_query(
+    session: AsyncSession, principal: Principal, params: dict[str, Any]
+) -> tuple[Any, dt.tzinfo]:
+    """Скоуп — `organization_scope_clause` (B3, `catalog.service`), та же проверка прав, что уже
+    применяет `OrganizationLicenseService.list_query` к API списка лицензий. Общая выборка не
+    вынесена в отдельную публичную функцию каталога (полный план задачи предлагал
+    `catalog.service.license_rows_query`) — в этом черновике отчёт строит свой запрос
+    самостоятельно, тем же приёмом, что и остальные builder'ы этого модуля; расхождение в
+    поведении исключено проверкой `tests/test_reporting_licenses.py` против живого скоупа."""
+    clause = await organization_scope_clause(session, principal)
+    tz = await _resolve_user_timezone(session, principal)
+    date_from, date_to = _parse_date_range(params)
+    date_field = params.get("date_field") or "license_signed_at"
+    organization_ids = _parse_uuid_list(params, "organization_ids")
+    vendors = _parse_string_list(params, "vendors")
+    transfer_statuses = _parse_transfer_statuses(params)
+    valid_year = _parse_positive_int(params, "valid_year")
+    expired = bool(params.get("expired", False))
+
+    stmt = (
+        select(OrganizationLicense, Organization.name, Organization.short_name)
+        .select_from(OrganizationLicense)
+        .join(Organization, Organization.id == OrganizationLicense.organization_id)
+        .where(OrganizationLicense.deleted_at.is_(None))
+        .order_by(Organization.name, OrganizationLicense.created_at.desc())
+    )
+    if clause is not None:
+        stmt = stmt.where(clause)
+    if organization_ids:
+        stmt = stmt.where(OrganizationLicense.organization_id.in_(organization_ids))
+    if vendors:
+        stmt = stmt.where(OrganizationLicense.vendor.in_(vendors))
+    if transfer_statuses:
+        stmt = stmt.where(OrganizationLicense.transfer_status.in_(transfer_statuses))
+    if valid_year is not None:
+        stmt = stmt.where(OrganizationLicense.license_valid_year == valid_year)
+    if expired:
+        current_year = dt.datetime.now(tz).year
+        stmt = stmt.where(OrganizationLicense.license_valid_year < current_year)
+    # `license_signed_at` — `Date`, без часового пояса (день подписания, не момент времени);
+    # `created_at` — `DateTime(timezone=True)`, границы суток считаются в поясе пользователя
+    # (тот же приём, что `_apply_deal_filters`/`_day_start`, B1-3).
+    if date_field == "created_at":
+        if date_from is not None:
+            stmt = stmt.where(OrganizationLicense.created_at >= _day_start(date_from, tz))
+        if date_to is not None:
+            stmt = stmt.where(
+                OrganizationLicense.created_at < _day_start(date_to, tz) + dt.timedelta(days=1)
+            )
+    else:
+        if date_from is not None:
+            stmt = stmt.where(OrganizationLicense.license_signed_at >= date_from)
+        if date_to is not None:
+            stmt = stmt.where(OrganizationLicense.license_signed_at <= date_to)
+    return stmt, tz
+
+
+async def build_license_register(
+    session: AsyncSession, principal: Principal, params: dict[str, Any]
+) -> ReportDataset:
+    """B1-11 (ТЗ §4 п.1): реестр из десяти полей каталога вуз-вендор-ПО. ФИО менеджера и
+    ответственные от вуза маскируются без права `contact:reveal` — тот же принцип, что
+    `OrganizationLicenseOut.from_model` уже применяет к API списка лицензий (B3-6)."""
+    columns = _parse_license_columns(params)
+    limit = _parse_int(params, "limit", default=1000, minimum=1, maximum=5000)
+    reveal = has_permission(principal.role, Permission.CONTACT_REVEAL)
+
+    stmt, tz = await _license_register_query(session, principal, params)
+    result = (await session.execute(stmt.limit(limit))).all()
+    current_year = dt.datetime.now(tz).year
+
+    rows: list[list[Any]] = []
+    for license_, organization_name, organization_short_name in result:
+        manager_name = license_.manager_full_name
+        responsible = license_.responsible_contacts
+        if not reveal:
+            manager_name = mask_name(manager_name)
+            responsible = mask_contacts_text(responsible)
+        full_row = {
+            # `Organization.name` — то же поле, что показывают остальные отчёты этого модуля
+            # (deal_register и т.п.), не `short_name` (B3-6 вводит его только для API списка
+            # лицензий, где короче удобнее в таблице интерфейса).
+            "organization": organization_name or organization_short_name or "—",
+            "vendor": license_.vendor,
+            "product_name": license_.product_name,
+            "contract_number": license_.contract_number or "",
+            "is_signed": (
+                "—" if license_.is_signed is None else ("Да" if license_.is_signed else "Нет")
+            ),
+            "license_valid_year": license_.license_valid_year,
+            "transfer_status": (
+                TRANSFER_STATUS_LABELS.get(license_.transfer_status, license_.transfer_status)
+                if license_.transfer_status
+                else "—"
+            ),
+            "manager_full_name": manager_name or "",
+            "responsible_contacts": responsible or "",
+            "comment": license_.comment or "",
+            "validity": _license_validity_label(
+                license_.license_valid_year, current_year=current_year
+            ),
+        }
+        rows.append([full_row[key] for key in columns])
+
+    total_rows: int | None = None
+    truncated = False
+    note: str | None = None
+    if len(rows) == limit:
+        total_rows = await estimate_license_register(session, principal, params)
+        if total_rows > limit:
+            truncated = True
+            note = _truncation_note(limit, total_rows)
+
+    return ReportDataset(
+        title="Реестр лицензий",
+        columns=[LICENSE_REGISTER_COLUMNS_BY_KEY[key].title for key in columns],
+        rows=rows,
+        note=note,
+        keys=list(columns),
+        kinds=[LICENSE_REGISTER_COLUMNS_BY_KEY[key].kind for key in columns],
+        total_rows=total_rows,
+        truncated=truncated,
+    )
+
+
+# =============================================================================
 # Реестр
 # =============================================================================
 
@@ -1564,10 +2378,16 @@ REPORT_BUILDERS: dict[str, ReportBuilder] = {
     "deal_register": build_deal_register,
     "learning_progress": build_learning_progress,
     LMS_USERS_UPLOAD: build_lms_users_upload,
+    "product_demand": build_product_demand,
+    "license_register": build_license_register,
 }
 
 #: Отсутствие ключа = отчёт всегда лёгкий (см. докстринг модуля).
 REPORT_ESTIMATORS: dict[str, ReportEstimator] = {
     "stuck_deals": estimate_stuck_deals,
     "deal_register": estimate_deal_register,
+    # B1-10: тоже построчный листинг (не агрегат) — число записей LMS не ограничено структурно.
+    "learning_progress": estimate_learning_progress,
+    # B1-11: листинг лицензий, тоже потенциально много строк у крупного заказчика.
+    "license_register": estimate_license_register,
 }
