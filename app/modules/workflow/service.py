@@ -1252,6 +1252,14 @@ def _validate_graph_data(
                     f"transitions[{label}].actions.request_signature.on_rejected: "
                     f"статус {on_rejected!r} не найден в воронке"
                 )
+            # B7-4: `on_signed` — только код статуса этой воронки (без `previous_status`,
+            # вперёд-переход не откат).
+            on_signed = action.get("on_signed")
+            if on_signed is not None and on_signed not in live_codes:
+                errors.append(
+                    f"transitions[{label}].actions.request_signature.on_signed: "
+                    f"статус {on_signed!r} не найден в воронке"
+                )
 
         to_status = by_id.get(t.to_status_id)
         if to_status is None:

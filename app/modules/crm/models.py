@@ -81,6 +81,9 @@ class HistoryReason(StrEnum):
     INTEGRATION = "integration"
     AUTO = "auto"
     SIGNATURE_REJECTED = "signature_rejected"
+    # B7 (мелкая правка): истечение срока подписания — раньше делило причину с отказом
+    # (`signature_rejected`), хотя в журнале сделки это разные события.
+    SIGNATURE_EXPIRED = "signature_expired"
 
 
 class DealEventType(StrEnum):
@@ -265,7 +268,8 @@ class DealStatusHistory(UuidPkMixin, Base):
     __table_args__ = (
         Index("ix_deal_status_history_deal_changed", "deal_id", "changed_at"),
         CheckConstraint(
-            "reason IN ('manual','workflow_migration','integration','auto','signature_rejected')",
+            "reason IN ('manual','workflow_migration','integration','auto',"
+            "'signature_rejected','signature_expired')",
             name="deal_status_history_reason_valid",
         ),
     )

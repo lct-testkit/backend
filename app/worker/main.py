@@ -45,6 +45,7 @@ from app.modules.signing.tasks import (
     sweep_signature_deadlines,
     sweep_signature_orphans,
     sweep_signature_otp_cleanup,
+    sweep_signature_reminders,
 )
 from app.modules.workflow.tasks import sweep_status_mapping_jobs
 
@@ -132,6 +133,7 @@ class WorkerSettings:
         sweep_signature_deadlines,
         sweep_signature_otp_cleanup,
         sweep_signature_orphans,
+        sweep_signature_reminders,
         dispatch_pending_notifications,
         sweep_report_jobs,
         expire_report_files,
@@ -169,6 +171,8 @@ class WorkerSettings:
         cron(sweep_signature_otp_cleanup, hour=4, minute=45),
         # Раз в сутки: объекты бакета signatures под signed/ без строки files (B7-6).
         cron(sweep_signature_orphans, hour=4, minute=50),
+        # Раз в 30 минут: напоминания подписантам о приближающемся дедлайне (B7-1).
+        cron(sweep_signature_reminders, minute={5, 35}),
         # Раз в минуту: доставка уведомлений во внешние каналы
         # (`notifications.dispatch`, spec.txt §6.11/строка 890).
         cron(dispatch_pending_notifications, minute=set(range(60))),

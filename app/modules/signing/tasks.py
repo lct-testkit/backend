@@ -23,7 +23,7 @@ from app.core.metrics import track_task
 from app.core.storage import delete_object, list_objects
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
-from app.modules.crm.models import Deal
+from app.modules.crm.models import Deal, HistoryReason
 from app.modules.crm.models import SignatureStatus as DealSignatureStatus
 from app.modules.files.models import File
 from app.modules.notification.service import NotificationPriority, get_notification_service
@@ -39,6 +39,7 @@ from app.modules.signing.models import SignatureDocumentStatus as DocStatus
 from app.modules.signing.models import SignatureRequestStatus as ReqStatus
 from app.modules.signing.service import (
     TPL_SIGNATURE_EXPIRED,
+    SignatureDocumentService,
     _apply_deal_signature_outcome,
     _sync_deal_signature_status,
     suspend_requests_of_agreement,
@@ -116,6 +117,7 @@ async def sweep_signature_deadlines(ctx: dict[str, Any]) -> dict[str, int]:
                         deal,
                         rule=document.on_expired,
                         note=f"Истёк срок подписания документа «{document.title}»",
+                        reason=HistoryReason.SIGNATURE_EXPIRED.value,
                     )
             expired += 1
 
@@ -126,6 +128,52 @@ async def sweep_signature_deadlines(ctx: dict[str, Any]) -> dict[str, int]:
             "signature_deadlines_swept", expired=expired, agreements_expired=agreements_expired
         )
     return {"expired": expired, "agreements_expired": agreements_expired}
+
+
+@track_task
+async def sweep_signature_reminders(ctx: dict[str, Any]) -> dict[str, int]:
+    """B7-1: напоминания подписантам о приближающемся дедлайне (`SIGNATURE_REMIND_BEFORE_HOURS`,
+    по умолчанию за 48 и 4 часа), не чаще `SIGNATURE_REMIND_MIN_GAP_HOURS`. `FOR UPDATE OF
+    signature_requests SKIP LOCKED` — запрос, который в этот момент подписывают (`sign()`
+    держит замок строки), пропускается до следующего тика, а не ждёт."""
+    now = dt.datetime.now(dt.UTC)
+    settings = get_settings()
+    thresholds = settings.signature_remind_before_hours_list
+    if not thresholds:
+        return {"reminded": 0, "checked": 0}
+    horizon = now + dt.timedelta(hours=max(thresholds))
+
+    reminded = 0
+    checked = 0
+    async with session_scope() as session:
+        stmt = (
+            select(SignatureRequest)
+            .join(SignatureDocument, SignatureDocument.id == SignatureRequest.document_id)
+            .where(
+                SignatureRequest.status.in_([ReqStatus.SENT.value, ReqStatus.VIEWED.value]),
+                SignatureDocument.status.in_(
+                    [DocStatus.PENDING.value, DocStatus.PARTIALLY_SIGNED.value]
+                ),
+                SignatureDocument.deadline_at.is_not(None),
+                SignatureDocument.deadline_at > now,
+                SignatureDocument.deadline_at <= horizon,
+            )
+            .order_by(SignatureRequest.id)
+            .with_for_update(of=SignatureRequest, skip_locked=True)
+        )
+        requests = list((await session.execute(stmt)).scalars().all())
+        checked = len(requests)
+        service = SignatureDocumentService(session)
+        for request in requests:
+            document = await session.get(SignatureDocument, request.document_id)
+            if document is None:
+                continue
+            if await service.maybe_remind(request, document):
+                reminded += 1
+
+    if reminded:
+        logger.info("signature_reminders_swept", reminded=reminded, checked=checked)
+    return {"reminded": reminded, "checked": checked}
 
 
 async def _expire_edm_agreements(session: AsyncSession, *, today: dt.date) -> int:

@@ -142,6 +142,9 @@ class SignatureRequestOut(BaseModel):
     viewed_at: dt.datetime | None
     decided_at: dt.datetime | None
     reject_reason: str | None
+    # B7-1: число отправленных напоминаний о дедлайне и время последнего.
+    reminders_sent: int = 0
+    last_reminded_at: dt.datetime | None = None
     created_at: dt.datetime
     # Контекст документа для списка «Мне на подпись» (заполняется в `/me/signature-requests`):
     # без него интерфейсу пришлось бы делать по запросу на каждый документ.

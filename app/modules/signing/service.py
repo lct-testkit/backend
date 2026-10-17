@@ -139,6 +139,12 @@ TPL_SIGNATURE_REJECTED = "SIGNATURE_DOCUMENT_REJECTED"
 TPL_SIGNATURE_EXPIRED = "SIGNATURE_DOCUMENT_EXPIRED"
 TPL_SIGNATURE_OTP_LOCKED = "SIGNATURE_OTP_LOCKED"
 TPL_EDM_AGREEMENT_MISSING = "EDM_AGREEMENT_MISSING"
+# B7-1: напоминание о приближающемся дедлайне.
+TPL_SIGNATURE_DEADLINE_REMINDER = "SIGNATURE_DEADLINE_REMINDER"
+# Внешний подписант без настроенного SMTP: инициатору — «выдайте ссылку заново».
+TPL_SIGNATURE_REMINDER_MANUAL = "SIGNATURE_REMINDER_MANUAL"
+# B7-4: сделка сама перешла на следующий статус после подписи всех сторон.
+TPL_SIGNATURE_AUTO_ADVANCED = "SIGNATURE_AUTO_ADVANCED"
 
 # Причины аннулирования из dop §10.7 — используются identity.
 VOID_REASON_CREDENTIALS_CHANGED = "credentials_changed"
@@ -959,6 +965,10 @@ class SignatureDocumentService:
             created_by=principal_id,
             on_rejected=action.get("on_rejected"),
             on_expired=action.get("on_expired"),
+            # B7-4: статус сделки на момент запроса подписи — автопереход после последней
+            # подписи срабатывает только если сделка всё ещё в нём (не ушла вручную).
+            on_signed=action.get("on_signed"),
+            requested_in_status_id=deal.status_id,
         )
         self._session.add(document)
         await self._session.flush()
@@ -1370,6 +1380,67 @@ class SignatureDocumentService:
             },
         )
         return token
+
+    async def maybe_remind(self, request: SignatureRequest, document: SignatureDocument) -> bool:
+        """B7-1: напоминание о дедлайне, если очередной порог (`SIGNATURE_REMIND_BEFORE_HOURS`)
+        достигнут и прошёл минимальный зазор с прошлого напоминания. Возвращает `True`, если
+        напоминание отправлено (вызывающий — `sweep_signature_reminders` — считает их для лога).
+        """
+        if document.deadline_at is None:
+            return False
+        now = dt.datetime.now(dt.UTC)
+        remaining_hours = (document.deadline_at - now).total_seconds() / 3600
+        thresholds = self._settings.signature_remind_before_hours_list
+        due_count = sum(1 for threshold in thresholds if remaining_hours <= threshold)
+        if due_count == 0 or request.reminders_sent >= due_count:
+            return False
+        if request.last_reminded_at is not None:
+            gap_hours = (now - request.last_reminded_at).total_seconds() / 3600
+            if gap_hours < self._settings.signature_remind_min_gap_hours:
+                return False
+
+        if request.signer_type == SignerType.EXTERNAL.value:
+            # Новая ссылка гасит прежнюю — выпускаем только когда можем сразу её доставить.
+            # Без SMTP письмо получателю всё равно не ушло бы: инициатор получает подсказку
+            # вместо тихо погашенной ссылки без замены.
+            if smtp_configured():
+                token = self._issue_token(request, now)
+                await self._queue_link_email(document, request, token)
+            elif document.created_by:
+                await get_notification_service().notify_user(
+                    self._session,
+                    recipient_id=document.created_by,
+                    template_code=TPL_SIGNATURE_REMINDER_MANUAL,
+                    priority=NotificationPriority.NORMAL,
+                    entity_type="signature_request",
+                    entity_id=request.id,
+                    payload={"title": document.title},
+                )
+        elif request.signer_user_id:
+            await get_notification_service().notify_user(
+                self._session,
+                recipient_id=request.signer_user_id,
+                template_code=TPL_SIGNATURE_DEADLINE_REMINDER,
+                priority=NotificationPriority.HIGH,
+                entity_type="signature_request",
+                entity_id=request.id,
+                payload={
+                    "title": document.title,
+                    "deadline_at": document.deadline_at.isoformat(),
+                },
+            )
+
+        previous = request.reminders_sent
+        request.reminders_sent += 1
+        request.last_reminded_at = now
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.SIGNATURE_REMINDED,
+            entity_type="signature_request",
+            entity_id=request.id,
+            changes={"reminders_sent": {"old": previous, "new": request.reminders_sent}},
+        )
+        return True
 
     async def signatures_by_document(
         self, document_ids: list[uuid.UUID]
@@ -1808,7 +1879,7 @@ class SignatureRequestService:
             .select_from(SignatureOtpCode)
             .where(SignatureOtpCode.request_id == request.id)
         )
-        if (sent_count or 0) >= 5:
+        if (sent_count or 0) >= self._settings.signature_otp_max_sends:
             raise AppError(
                 ErrorCode.SIGNATURE_OTP_INVALID, "Превышен лимит отправок кода на этот запрос"
             )
@@ -1958,8 +2029,8 @@ class SignatureRequestService:
             request, document, unavailable="Запрос сейчас недоступен для подписания"
         )
         # Подпись на запрос одна. Под замком строки запроса статус уже перечитан, но повторная
-        # подпись не должна получиться и при любом другом пути к этой точке: уникального индекса
-        # по `signatures.request_id` нет.
+        # подпись не должна получиться и при любом другом пути к этой точке: последний рубеж —
+        # уникальный индекс `uq_signatures_request_id` (миграция 0020).
         already_signed = await self._session.scalar(
             select(Signature.id).where(Signature.request_id == request.id).limit(1)
         )
@@ -2222,7 +2293,47 @@ class SignatureRequestService:
                         },
                     )
                 )
+                # B7-4: автопереход после подписи ВСЕХ сторон (`on_signed`) — только если
+                # сделка всё ещё в статусе, где подпись запрашивалась (не ушла вручную), и
+                # это действительно её активный документ подписи.
+                if (
+                    not remaining
+                    and document.on_signed
+                    and deal.active_signature_document_id == document.id
+                    and deal.status_id == document.requested_in_status_id
+                ):
+                    await self._auto_advance_after_signature(deal, document)
         return signature
+
+    async def _auto_advance_after_signature(self, deal: Deal, document: SignatureDocument) -> None:
+        """B7-4: переводит сделку в `document.on_signed` тем же протоколом, что
+        `_apply_deal_signature_outcome` (история, событие, причина `auto`). Выполняется под
+        SAVEPOINT в той же транзакции, что сама подпись: ошибка здесь (целевой статус исчез
+        из воронки, гонка с ручным переходом) логируется и не откатывает уже записанную
+        подпись — документ останется `signed`, переход сделку просто не случится сам."""
+        try:
+            async with self._session.begin_nested():
+                await _apply_deal_signature_outcome(
+                    self._session,
+                    deal,
+                    rule=document.on_signed,
+                    note=f"Документ «{document.title}» подписан всеми сторонами — автопереход",
+                    reason=HistoryReason.AUTO.value,
+                )
+        except Exception:  # noqa: BLE001 — сбой автоперехода не должен ронять подпись
+            logger.warning(
+                "signature_auto_advance_failed", document_id=str(document.id), exc_info=True
+            )
+            return
+        if document.created_by:
+            await get_notification_service().notify_user(
+                self._session,
+                recipient_id=document.created_by,
+                template_code=TPL_SIGNATURE_AUTO_ADVANCED,
+                priority=NotificationPriority.NORMAL,
+                entity_type="deal",
+                entity_id=deal.id,
+            )
 
     async def _chain_head(self) -> str | None:
         await self._session.execute(
@@ -2406,7 +2517,9 @@ class SignatureRequestService:
                 token, link = await doc_service._issue_download_link(  # noqa: SLF001
                     document_id=document.id, request_id=request.id
                 )
-                await self._queue_download_link_email(document, request, token, link.expires_at)
+                await doc_service._queue_download_link_email(  # noqa: SLF001
+                    document, request, token, link.expires_at
+                )
 
         if document.created_by:
             await get_notification_service().notify_user(
@@ -2627,7 +2740,12 @@ def check_signature_evidence(
 
 
 async def _apply_deal_signature_outcome(
-    session: AsyncSession, deal: Deal, *, rule: str | None, note: str
+    session: AsyncSession,
+    deal: Deal,
+    *,
+    rule: str | None,
+    note: str,
+    reason: str = HistoryReason.SIGNATURE_REJECTED.value,
 ) -> None:
     """Откат статуса сделки при отклонении/истечении срока подписи (dop.md
     §10.6): `previous_status` — назад по `deal_status_history`, код статуса —
@@ -2669,7 +2787,7 @@ async def _apply_deal_signature_outcome(
             from_status_id=previous_status_id,
             to_status_id=target_status_id,
             changed_by=None,
-            reason=HistoryReason.SIGNATURE_REJECTED.value,
+            reason=reason,
             comment=note,
             changed_at=now,
         )

@@ -11650,6 +11650,18 @@
             "title": "Id",
             "type": "string"
           },
+          "last_reminded_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Reminded At"
+          },
           "reject_reason": {
             "anyOf": [
               {
@@ -11660,6 +11672,11 @@
               }
             ],
             "title": "Reject Reason"
+          },
+          "reminders_sent": {
+            "default": 0,
+            "title": "Reminders Sent",
+            "type": "integer"
           },
           "sent_at": {
             "anyOf": [

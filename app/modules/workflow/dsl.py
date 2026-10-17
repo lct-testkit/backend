@@ -335,7 +335,16 @@ def _validate_notify(action: Mapping[str, Any], path: str) -> list[str]:
 def _validate_request_signature(action: Mapping[str, Any], path: str) -> list[str]:
     errors = _reject_unknown(
         action,
-        {"type", "template", "signers", "order", "deadline_days", "on_rejected", "on_expired"},
+        {
+            "type",
+            "template",
+            "signers",
+            "order",
+            "deadline_days",
+            "on_rejected",
+            "on_expired",
+            "on_signed",
+        },
         path,
     )
     if not _non_empty_str(action.get("template")):
@@ -372,6 +381,11 @@ def _validate_request_signature(action: Mapping[str, Any], path: str) -> list[st
     on_rejected = action.get("on_rejected")
     if on_rejected is not None and not _non_empty_str(on_rejected):
         errors.append(f"{path}.on_rejected: previous_status или код статуса воронки")
+    # B7-4: `on_signed` — код статуса, в который сделка переходит сама после подписи ВСЕХ
+    # сторон. Существование кода в воронке проверяет валидатор графа, здесь — только тип.
+    on_signed = action.get("on_signed")
+    if on_signed is not None and not _non_empty_str(on_signed):
+        errors.append(f"{path}.on_signed: код статуса воронки")
     return errors
 
 
