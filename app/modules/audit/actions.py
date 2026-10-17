@@ -112,6 +112,13 @@ class AuditAction(StrEnum):
     WORKFLOW_UPDATED = "WORKFLOW_UPDATED"
     WORKFLOW_PUBLISHED = "WORKFLOW_PUBLISHED"
     WORKFLOW_VALIDATED = "WORKFLOW_VALIDATED"
+    # B9-7 (OPEN-ISSUES B-4): `WorkflowState.ARCHIVED` существовал (и `_ensure_not_archived`
+    # блокировал правки архивной воронки), но ничто его не присваивало — архивировать воронку
+    # целиком было нельзя никак. См. `workflow.service.WorkflowService.archive_workflow`:
+    # разрешено только без единой сделки на воронке — перенос сделок между воронками не
+    # делается здесь (другая задача, спринт B2); живую воронку выводят из обращения по одному
+    # статусу (`STATUS_ARCHIVED`/`archive_status`), это не отменяет.
+    WORKFLOW_ARCHIVED = "WORKFLOW_ARCHIVED"
     STATUS_ARCHIVED = "STATUS_ARCHIVED"
     STATUS_MAPPING_STARTED = "STATUS_MAPPING_STARTED"
     STATUS_MAPPING_COMPLETED = "STATUS_MAPPING_COMPLETED"

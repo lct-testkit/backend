@@ -372,9 +372,10 @@ async def get_mapping_job(
     description=(
         "Только для воронки в состоянии draft, которая никогда не "
         "публиковалась и на которую не заведено ни одной сделки — иначе 409 "
-        "CRM-1207. Опубликованную воронку удалить нельзя ни при каких "
-        "условиях, только архивировать статусы по одному "
-        "(`POST .../statuses/{status_id}/archive`). Роль: запись воронок."
+        "CRM-1207. Опубликованную воронку удалить нельзя ни при каких условиях: "
+        "либо вывести из обращения статусы по одному "
+        "(`POST .../statuses/{status_id}/archive`), либо, если на воронке уже нет ни одной "
+        "сделки, архивировать воронку целиком (`POST .../archive`). Роль: запись воронок."
     ),
     status_code=status.HTTP_204_NO_CONTENT,
 )
@@ -386,3 +387,30 @@ async def delete_workflow(
     service = WorkflowService(session)
     workflow = await service.get_or_404(workflow_id)
     await service.delete_draft(workflow, principal)
+
+
+@router.post(
+    "/{workflow_id}/archive",
+    summary="Архивировать воронку целиком",
+    description=(
+        "Переводит воронку в терминальное состояние `archived`: дальше нельзя ни править "
+        "граф, ни публиковать, ни архивировать статусы по одной — воронка выведена из "
+        "обращения насовсем. Разрешено только если на воронке уже нет ни одной сделки "
+        "(любого состояния — черновик или опубликована) и она не воронка по умолчанию "
+        "своего типа сделок — иначе 409 CRM-1303. Перенос сделок на другую воронку не "
+        "делается этим вызовом: выводите статусы из обращения по одному "
+        "(`POST .../statuses/{status_id}/archive`), пока сделок не останется. "
+        "Обязателен If-Match. Роль: публикация воронок."
+    ),
+    response_model=WorkflowOut,
+)
+async def archive_workflow(
+    session: DbSession,
+    principal: WorkflowPublish,
+    if_match: IfMatch,
+    workflow_id: Annotated[uuid.UUID, Path()],
+) -> WorkflowOut:
+    service = WorkflowService(session)
+    workflow = await service.get_or_404(workflow_id)
+    workflow = await service.archive_workflow(workflow, principal, expected_version=if_match)
+    return _workflow_out(workflow, unpublished=False)
