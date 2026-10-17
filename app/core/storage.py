@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import time
 from dataclasses import dataclass
 from functools import lru_cache
+from urllib.parse import quote
 
 import boto3
 from botocore.client import Config as BotoConfig
@@ -30,6 +32,24 @@ from app.core.errors import DependencyStatus
 _HASH_CHUNK_SIZE = 1024 * 1024
 # Достаточно для проверки самых длинных сигнатур из раздела 9 (OLE2 — 8 байт).
 _MAGIC_BYTES_LEN = 16
+
+# B1-15: имя файла вне ASCII (кириллица — название отчёта/документа, см. `reporting.rendering.
+# report_file_name`) не входит в кавычки `filename="…"` по HTTP/1.1 (RFC 6266 требует отдельный
+# `filename*`, ASCII-параметр — только запасной вариант для клиентов без его поддержки). Без
+# этого браузер получал бы кириллицу как есть внутри `filename="…"`, что не входит в грамматику
+# заголовка — поведение не специфицировано (на практике большинство браузеров её всё равно
+# показывают, но не все; SeaweedFS на живом стенде не проверялся, P3).
+_ASCII_ONLY = re.compile(r"[^\x20-\x7e]+")
+
+
+def _content_disposition(disposition: str, filename: str) -> str:
+    """RFC 6266: `filename` — ASCII-приближение для клиентов без `filename*` (непечатаемые и
+    не-ASCII символы заменены на `_`, кавычка — на апостроф, чтобы не разорвать значение
+    заголовка); `filename*=UTF-8''...` — точное имя, percent-encoded, его читают современные
+    браузеры и `curl`/`wget`."""
+    ascii_name = _ASCII_ONLY.sub("_", filename).replace('"', "'") or "file"
+    encoded_name = quote(filename, safe="")
+    return f"{disposition}; filename=\"{ascii_name}\"; filename*=UTF-8''{encoded_name}"
 
 
 @lru_cache(maxsize=1)
@@ -109,7 +129,7 @@ async def generate_presigned_get(
         if inline:
             params["ResponseContentDisposition"] = "inline"
         elif filename:
-            params["ResponseContentDisposition"] = f'attachment; filename="{filename}"'
+            params["ResponseContentDisposition"] = _content_disposition("attachment", filename)
         return _public_client().generate_presigned_url(
             "get_object", Params=params, ExpiresIn=expires_seconds
         )

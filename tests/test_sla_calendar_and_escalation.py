@@ -356,3 +356,53 @@ class TestSweepEscalation:
         assert result["breached"] >= 2
         assert self._state(client, first["id"])["sla_state"] == "breached"
         assert self._state(client, second["id"])["sla_state"] == "breached"
+
+
+@pytestmark_db
+class TestStatusHistoryRecordsTheStateBeingLeft:
+    """B1-15: `DealStatusHistory.sla_state_at_change` должен хранить состояние SLA статуса,
+    который сделка ПОКИДАЕТ — раньше `apply_sla` (вызванный для НОВОГО статуса, сбрасывающий
+    `deal.sla_state` на `ok`) успевал отработать до записи истории, поэтому поле почти всегда
+    было `ok` независимо от того, было ли нарушение в предыдущем статусе."""
+
+    async def _force_breached(self, deal_id: str) -> None:
+        from app.core.db import session_scope
+        from app.modules.crm.models import Deal
+
+        async with session_scope() as session:
+            deal = await session.get(Deal, uuid.UUID(deal_id))
+            assert deal is not None
+            deal.sla_state = "breached"
+
+    async def _latest_history_sla_state(self, deal_id: str) -> str | None:
+        from sqlalchemy import select
+
+        from app.core.db import session_scope
+        from app.modules.crm.models import DealStatusHistory
+
+        async with session_scope() as session:
+            return await session.scalar(
+                select(DealStatusHistory.sla_state_at_change)
+                .where(DealStatusHistory.deal_id == uuid.UUID(deal_id))
+                .order_by(DealStatusHistory.changed_at.desc())
+                .limit(1)
+            )
+
+    def test_transition_out_of_a_breached_status_keeps_breached_in_history(self, client) -> None:
+        login(client)
+        workflow = create_published_workflow(client)
+        statuses = by_code(workflow)
+        deal = create_deal(client, workflow["workflow"]["id"])
+
+        # new -> work: обычный переход без нарушения.
+        deal = transition_deal(client, deal, statuses["work"]["id"]).json()["deal"]
+        # Сделка "ломается" в "work" уже после перехода — то же самое, что сканер SLA сделал бы
+        # по истечении срока, но без ожидания реального времени.
+        run(client, self._force_breached, deal["id"])
+
+        # work -> won: ИМЕННО этот переход покидает "work", где сделка была breached.
+        response = transition_deal(client, deal, statuses["won"]["id"])
+        assert response.status_code == 200, response.text
+
+        recorded = run(client, self._latest_history_sla_state, deal["id"])
+        assert recorded == "breached"

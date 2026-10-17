@@ -1,6 +1,6 @@
-"""Тесты модуля отчётности и дашбордов (спринт 8, new_spec §4.13/§7.9).
+"""Тесты модуля отчётности и дашбордов (спринт 8, new_spec §4.13/§7.9; спринт B1).
 
-Как и `tests/test_notifications.py`/`tests/test_signing.py`, здесь нет
+Как и `tests/test_notifications.py`/`tests/test_signing.py`, здесь по большей части нет
 поднятых PostgreSQL/Redis: покрываются чистые функции — рендеринг xlsx/pdf/
 png из готового `ReportDataset` (реально запускает openpyxl/xhtml2pdf/
 matplotlib и проверяет магические байты результата, тем же приёмом, что
@@ -8,14 +8,16 @@ matplotlib и проверяет магические байты результ�
 парсинг параметров, содержимое сида (кросс-проверка с
 `reporting.builders.REPORT_BUILDERS`/`rendering.CHART_KINDS` — чтобы шаблон,
 обещающий `png`, не оказался без зарегистрированного графика) и права.
-`build_learning_progress` (B1-10) читает настоящую БД — тесты его содержимого в
-`tests/test_reporting_progress.py`, не здесь. Остальные builders (реальные
-SQL-запросы с RBAC-скоупом) и материализованное представление проверены
-вживую против настоящего Postgres в этой же сессии, не как pytest-тест —
-кроме `TestReportDataEndpoint` (П2) и `TestReportJobs`
-(коды CRM-1601/1602/1603, `progress_pct`, фильтр `template_code`): настоящая
-Postgres обязательна, тот же приём, что `tests/test_imports.py::
-TestLicenseImportEndToEnd` — см. `tests/conftest.py`.
+Содержимое видов отчёта на настоящей БД (B1-9/B1-10/B1-11) — отдельными файлами, не здесь:
+`tests/test_reporting_demand.py` (`product_demand`), `tests/test_reporting_progress.py`
+(`learning_progress`), `tests/test_reporting_licenses.py` (`license_register`),
+`tests/test_reporting_register.py` (`deal_register`, усечение B1-6), `tests/
+test_reporting_seed.py` (`seed_demo_report_history`, B1-14). Остальные builders раздела 4.13
+(реальные SQL-запросы с RBAC-скоупом) и материализованное представление проверены вживую
+против настоящего Postgres в этой же сессии, не как pytest-тест — кроме
+`TestReportDataEndpoint` (П2) и `TestReportJobs` (коды CRM-1601/1602/1603, `progress_pct`,
+фильтр `template_code`): настоящая Postgres обязательна, тот же приём, что
+`tests/test_imports.py::TestLicenseImportEndToEnd` — см. `tests/conftest.py`.
 """
 
 from __future__ import annotations
@@ -394,12 +396,14 @@ class TestReportFilterClauses:
 
 
 class TestBuilderRegistry:
-    def test_eight_builders_match_new_spec_4_13_literal_list_plus_the_lms_upload(self) -> None:
-        # Восемь видов раздела 4.13, девятый — выгрузка учащихся для LMS (`lms_users_upload`),
-        # десятый — `deal_register` (буквальное прочтение Функц.4/§4.2, см. докстринг модуля),
-        # одиннадцатый — `product_demand` (B1-9, раздел «Цель» ТЗ), двенадцатый —
-        # `license_register` (B1-11, ТЗ §4 п.1).
-        assert len(REPORT_BUILDERS) == 12
+    def test_builders_match_new_spec_4_13_plus_b1_additions(self) -> None:
+        # Восемь видов раздела 4.13, плюс выгрузка для LMS (`lms_users_upload`), `deal_register`
+        # (буквальное прочтение Функц.4/§4.2, см. докстринг модуля), `product_demand` (B1-9,
+        # раздел «Цель» ТЗ) и `license_register` (B1-11, ТЗ §4 п.1). Число — `len(REPORT_SPECS)`
+        # (B1-15): растёт с каждым новым видом без правки литерала здесь.
+        from app.modules.reporting.spec import REPORT_SPECS
+
+        assert len(REPORT_BUILDERS) == len(REPORT_SPECS)
         assert "lms_users_upload" in REPORT_BUILDERS
         assert "deal_register" in REPORT_BUILDERS
         assert "product_demand" in REPORT_BUILDERS
@@ -496,10 +500,13 @@ class TestDealRegisterReport:
 
 
 class TestSeedTemplates:
-    def test_ten_templates_seeded(self) -> None:
-        # B1-9/B1-11: одиннадцатый код `product_demand`, двенадцатый `license_register` — имя
-        # теста не переименовано, чтобы не распухал diff ради комментария; число обновлено.
-        assert len(_DEFAULT_TEMPLATES) == 12
+    def test_one_template_per_builder(self) -> None:
+        # B1-15: число шаблонов растёт с каждым новым видом (B1-9 `product_demand`, B1-11
+        # `license_register`) — литерал здесь обновлялся бы каждый раз. Полное соответствие
+        # кодов множеству `REPORT_BUILDERS` (не только числа) проверяет соседний тест ниже
+        # (`test_every_body_free_of_undefined_kind`, по полю `kind`, не `code` — в этом сиде они
+        # совпадают всегда, но формально это разные поля одной строки).
+        assert len(_DEFAULT_TEMPLATES) == len(REPORT_BUILDERS)
 
     def test_no_duplicate_codes(self) -> None:
         codes = [row[0] for row in _DEFAULT_TEMPLATES]
