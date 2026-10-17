@@ -62,6 +62,12 @@ class ReportTemplateListResponse(BaseModel):
 
 
 class ReportJobCreateRequest(BaseModel):
+    # B9-2: пример — реальное тело из `tests/test_reporting.py` (`TestReportDataEndpoint`),
+    # лёгкий отчёт без параметров сверх шаблона.
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"template_code": "sla_compliance", "format": "xlsx"}}
+    )
+
     template_code: NonEmptyStr = Field(max_length=64)
     format: FormatLiteral
     params: dict[str, Any] = Field(
