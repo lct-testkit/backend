@@ -650,6 +650,155 @@ class TestLicenseImportEndToEnd:
         assert comment2 == "обновлённая запись"
         assert version2 == 2
 
+    def test_apply_resolves_vendor_and_product_from_the_catalog_when_unambiguous(
+        self, client, monkeypatch
+    ) -> None:
+        """B3-2: `LicenseMatcher` (B3-4) теперь подключён к импорту — раньше `vendor_id`/
+        `product_id` оставались `NULL` для каждой лицензии, заведённой импортом, независимо от
+        точности совпадения текста с каталогом. Вендор и ПО совпадают однозначно с каталогом —
+        `vendor_id`/`product_id` заполняются; текст (`vendor`/`product_name`) не трогается."""
+        from sqlalchemy import select
+
+        from app.core.db import session_scope
+        from app.modules.catalog.models import Organization, OrganizationLicense, Product
+
+        org_name = f"Тестовый университет П3 {uuid.uuid4().hex[:8]}"
+        vendor_name = f"Вендор каталога {uuid.uuid4().hex[:8]}"
+        product_name = f"ПО каталога {uuid.uuid4().hex[:8]}"
+        contract_number = f"TU-{uuid.uuid4().hex[:10]}"
+
+        async def _seed_catalog() -> tuple[uuid.UUID, uuid.UUID]:
+            async with session_scope() as session:
+                vendor = Organization(name=vendor_name, org_type="company")
+                session.add(vendor)
+                await session.flush()
+                product = Product(
+                    code=f"prod-{uuid.uuid4().hex[:8]}",
+                    name=product_name,
+                    kind="software",
+                    vendor_id=vendor.id,
+                )
+                session.add(product)
+                await session.flush()
+                return vendor.id, product.id
+
+        vendor_id, product_id = run(client, _seed_catalog)
+
+        rows = [
+            [
+                org_name,
+                vendor_name,
+                product_name,
+                contract_number,
+                "2026-01-10",
+                "3",
+                "not_started",
+                "Иванов И.И.",
+                "Петров П.П.",
+                "сопоставление с каталогом",
+            ],
+        ]
+        content = self._xlsx_bytes(rows)
+        self._stub_storage(monkeypatch, content)
+        head = run(client, _make_user, "HEAD")
+        _org_id, file_id = run(client, self._seed_organization_and_file, org_name, content, head.id)
+        csrf = authenticate(client, head)
+        client.headers["X-CSRF-Token"] = csrf
+
+        job_id = client.post(
+            "/api/imports",
+            json={
+                "file_id": str(file_id),
+                "entity_type": "license",
+                "mode": "upsert",
+                "source_format": "xlsx",
+            },
+        ).json()["id"]
+        client.put(f"/api/imports/{job_id}/mapping", json={"mapping": self._MAPPING})
+        dry = client.post(f"/api/imports/{job_id}/dry-run").json()
+        assert dry["ok_rows"] == 1, dry
+        run(client, self._apply_synchronously, uuid.UUID(job_id))
+
+        async def _fetch():
+            async with session_scope() as session:
+                return (
+                    await session.execute(
+                        select(OrganizationLicense).where(
+                            OrganizationLicense.contract_number == contract_number
+                        )
+                    )
+                ).scalar_one()
+
+        license_ = run(client, _fetch)
+        assert license_.vendor == vendor_name
+        assert license_.vendor_id == vendor_id
+        assert license_.product_name == product_name
+        assert license_.product_id == product_id
+
+    def test_apply_leaves_vendor_and_product_ids_empty_when_not_found_in_the_catalog(
+        self, client, monkeypatch
+    ) -> None:
+        """Без совпадения в каталоге — не ошибка строки: текст сохраняется, `vendor_id`/
+        `product_id` остаются `NULL` (так же, как ручной ввод текстом без выбора из каталога в
+        API лицензий, B3-6)."""
+        from sqlalchemy import select
+
+        from app.core.db import session_scope
+        from app.modules.catalog.models import OrganizationLicense
+
+        org_name = f"Тестовый университет П3 {uuid.uuid4().hex[:8]}"
+        contract_number = f"TU-{uuid.uuid4().hex[:10]}"
+        rows = [
+            [
+                org_name,
+                "Вендор без каталога",
+                "ПО без каталога",
+                contract_number,
+                "2026-01-10",
+                "3",
+                "not_started",
+                "Иванов И.И.",
+                "Петров П.П.",
+                "без совпадения в каталоге",
+            ],
+        ]
+        content = self._xlsx_bytes(rows)
+        self._stub_storage(monkeypatch, content)
+        head = run(client, _make_user, "HEAD")
+        _org_id, file_id = run(client, self._seed_organization_and_file, org_name, content, head.id)
+        csrf = authenticate(client, head)
+        client.headers["X-CSRF-Token"] = csrf
+
+        job_id = client.post(
+            "/api/imports",
+            json={
+                "file_id": str(file_id),
+                "entity_type": "license",
+                "mode": "upsert",
+                "source_format": "xlsx",
+            },
+        ).json()["id"]
+        client.put(f"/api/imports/{job_id}/mapping", json={"mapping": self._MAPPING})
+        dry = client.post(f"/api/imports/{job_id}/dry-run").json()
+        assert dry["ok_rows"] == 1, dry
+        run(client, self._apply_synchronously, uuid.UUID(job_id))
+
+        async def _fetch():
+            async with session_scope() as session:
+                return (
+                    await session.execute(
+                        select(OrganizationLicense).where(
+                            OrganizationLicense.contract_number == contract_number
+                        )
+                    )
+                ).scalar_one()
+
+        license_ = run(client, _fetch)
+        assert license_.vendor == "Вендор без каталога"
+        assert license_.vendor_id is None
+        assert license_.product_name == "ПО без каталога"
+        assert license_.product_id is None
+
     def test_same_contract_number_different_product_creates_two_rows(
         self, client, monkeypatch
     ) -> None:

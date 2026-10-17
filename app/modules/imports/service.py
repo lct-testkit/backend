@@ -45,6 +45,7 @@ from app.core.storage import (
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
 from app.modules.catalog.license_keys import LicenseKey
+from app.modules.catalog.license_matching import LicenseMatcher
 from app.modules.catalog.license_values import parse_signed, parse_term
 from app.modules.catalog.models import Direction, Organization, OrganizationLicense, Product, Region
 from app.modules.files.models import Attachment, File, FileStatus
@@ -864,6 +865,17 @@ class ImportService:
         await self._set_actor(job)
         handler = HANDLERS.get(job.entity_type)
         batch = Batch(self._session, job) if handler is not None else None
+        # B3-2: один `LicenseMatcher` на партию, не на строку — кандидаты (вендоры/ПО) кэшируются
+        # внутри инстанса (докстринг класса), повторный `select()` на каждой из `batch_size`
+        # (по умолчанию 500) строк был бы лишней нагрузкой на БД без выигрыша в точности: каталог
+        # не меняется в процессе применения одной партии. `SAVEPOINT` ниже откатывает только
+        # ЗАПИСИ строки-неудачи, кэш матчера — не часть этой транзакции (только читал, до начала
+        # партии), откат соседней строки его не портит.
+        license_matcher = (
+            LicenseMatcher(self._session)
+            if job.entity_type == ImportEntityType.LICENSE.value
+            else None
+        )
         for row in pending:
             previous_status, previous_errors = row.status, list(row.errors or [])
             try:
@@ -878,8 +890,8 @@ class ImportService:
                         await self._apply_organization_row(job, row)
                     elif job.entity_type == ImportEntityType.PRODUCT.value:
                         await self._apply_product_row(job, row)
-                    else:
-                        await self._apply_license_row(job, row)
+                    elif license_matcher is not None:
+                        await self._apply_license_row(job, row, license_matcher)
             except Exception as exc:  # noqa: BLE001 — любая ошибка строки -> ошибка строки, не задания
                 if batch is not None:
                     batch.invalidate()
@@ -1136,15 +1148,22 @@ class ImportService:
                 )
         return result
 
-    async def _apply_license_row(self, job: ImportJob, row: ImportRowResult) -> None:
-        """B3-1/B3-3: ключ строки — составной (вуз, вендор, ПО, номер
+    async def _apply_license_row(
+        self, job: ImportJob, row: ImportRowResult, matcher: LicenseMatcher
+    ) -> None:
+        """B3-1/B3-3/B3-2: ключ строки — составной (вуз, вендор, ПО, номер
         договора; `catalog.license_keys.LicenseKey`), а не только
         `contract_number` (BUG-9: один договор на несколько ПО раньше
-        молча терял строки). Полноценный поиск вуза/вендора/ПО по
-        каталогу (B3-4) и перевод на обработчик (B3-5) — отдельная
-        задача; здесь состав колонок и ключ уже соответствуют модели
-        после миграции 0026, само сопоставление остаётся точным
-        совпадением организации, как было."""
+        молча терял строки). Вуз (`organization_id`, уже разрешён раньше в конвейере, к этому
+        месту приходит готовым UUID) по-прежнему ищется точным совпадением — поле есть в
+        маппинге наравне с остальными `_FK_TARGETS`, это не относится к B3-4. Вендор/ПО теперь
+        ищутся по каталогу тем же `LicenseMatcher`, что и API лицензий (B3-6,
+        `catalog.service.OrganizationLicenseService._resolve_vendor`/`_resolve_product`) —
+        раньше (B3-4, до этой задачи) `vendor_id`/`product_id` оставались `NULL` для каждой
+        лицензии, заведённой импортом, независимо от того, насколько однозначно текст совпадал
+        с каталогом. Неоднозначное/не найденное совпадение — не ошибка строки: `vendor`/
+        `product_name` (текст) сохраняются всегда, `vendor_id`/`product_id` остаются `NULL`,
+        так же, как API лицензий делает при ручном вводе текстом без выбора из каталога."""
         data = dict(row.row_data)
         vendor = data.get("vendor")
         product_name = data.get("product_name")
@@ -1155,6 +1174,14 @@ class ImportService:
             vendor=vendor,
             product_name=product_name,
             contract_number=contract_number,
+        )
+        vendor_match = await matcher.match_vendor(vendor)
+        vendor_id = (
+            vendor_match.entity.id if vendor_match.is_unique and vendor_match.entity else None
+        )
+        product_match = await matcher.match_software(product_name, vendor_id=vendor_id)
+        product_id = (
+            product_match.entity.id if product_match.is_unique and product_match.entity else None
         )
         existing = await self._session.scalar(
             select(OrganizationLicense).where(
@@ -1187,7 +1214,9 @@ class ImportService:
             license_ = OrganizationLicense(
                 organization_id=organization_id,
                 vendor=vendor,
+                vendor_id=vendor_id,
                 product_name=product_name,
+                product_id=product_id,
                 contract_number=contract_number,
                 vendor_key=key.vendor_key,
                 product_key=key.product_key,
@@ -1221,6 +1250,10 @@ class ImportService:
         # строки, иначе переименование вендора/ПО обновило бы текст, но
         # оставило бы старый `*_key` — `GET.../organization-licenses` (B3-6)
         # и повторный импорт того же файла перестали бы находить запись.
+        # B3-2: `vendor_id`/`product_id` — туда же: запись каталога могла появиться (или
+        # исчезнуть) между двумя прогонами импорта того же файла, а текст вендора/ПО при этом
+        # мог не измениться вовсе — опираться на наличие ключа в `data` (как обычные поля) было
+        # бы неверно, пересчёт нужен при каждом применении.
         always_fields = {
             "organization_id",
             "license_signed_at",
@@ -1228,11 +1261,15 @@ class ImportService:
             "vendor_key",
             "product_key",
             "contract_key",
+            "vendor_id",
+            "product_id",
         }
         new_values: dict[str, Any] = {
             "organization_id": organization_id,
             "vendor": data.get("vendor"),
+            "vendor_id": vendor_id,
             "product_name": data.get("product_name"),
+            "product_id": product_id,
             "license_signed_at": signed_at,
             "license_valid_year": data.get("license_valid_year"),
             "transfer_status": data.get("transfer_status"),
