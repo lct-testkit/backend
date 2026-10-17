@@ -323,7 +323,7 @@ flowchart LR
 | `integration` | вебхуки CMS/LMS/Bitrix24 с HMAC-подписью, исходящий outbox с backoff, административный контур источников | `POST /api/v1/integrations/{cms,lms,bitrix}/*`, `GET/PATCH /api/admin/integrations/sources`, `POST /api/admin/integrations/outbox-events/{id}/retry` — 9 операций · 6 таблиц (`integration_sources`, `inbound_messages`, `outbox_events`, …) |
 | `notification` | уведомления (in-app, заглушки email/telegram), шаблоны Jinja2, настройки получателя | `GET /api/notifications`, `/read`, `GET/PUT /api/me/notification-prefs`, `GET/POST/DELETE /api/admin/notification-templates`, `GET /api/notifications/unread-count`, `/event-codes`, `POST /api/admin/notification-templates/preview` — 11 операций · 4 таблицы |
 | `registry` | автоподстановка и проверка ИНН/ОГРН, локальный реестр ЕГРЮЛ, сверка реквизитов (drift) | `GET /api/org-lookup/suggest`, `POST /validate`, `POST /api/admin/registry/import`, `DELETE /api/admin/registry/versions/{id}` — 6 операций · 4 таблицы (`registry_versions`, `egrul_entries`, …) |
-| `reporting` | 10 видов отчётов (xlsx/pdf/png через matplotlib и xhtml2pdf; `lms_users_upload` — выгрузка учащихся по шаблону LMS), дашборды с виджетами | `GET/POST /api/reports`, `/report-templates`, `GET /{id}/data` (датасет в JSON без файла), `GET/POST /api/dashboards`, `/widgets` — 15 операций · `report_templates`, `report_jobs`, `dashboards`, `dashboard_widgets` |
+| `reporting` | 12 видов отчётов (xlsx/xls/pdf/png/json; png через matplotlib, pdf через xhtml2pdf, xls через xlwt; `lms_users_upload` — выгрузка учащихся по шаблону LMS; `product_demand` — рейтинг востребованности; `license_register` — реестр лицензий), дашборды с виджетами | `GET/POST /api/reports`, `/report-templates`, `GET /{id}/data` (датасет в JSON без файла), `GET/POST /api/dashboards`, `/widgets` — 15 операций · `report_templates`, `report_jobs`, `dashboards`, `dashboard_widgets` |
 | `signing` | ПЭП: документы и запросы на подпись, OTP-код, публичная страница подписания и проверки, соглашения об ЭДО | `POST /api/signature-documents`, `/send`, `POST /api/signature-requests/{id}/{challenge,sign}`, `GET /public/sign/{token}`, `POST /api/signatures/verify`, `GET /public/sign/{token}/file`, `POST /api/signature-requests/{id}/reissue-link` — 24 операции · 6 таблиц |
 | `workflow` | конструктор воронок: статусы, переходы, DSL условий, валидация, публикация со снимком, архивирование статуса, удаление черновика | `GET/POST /api/workflows`, `PUT /{id}/graph`, `POST /{id}/publish`, `POST /{id}/statuses/{sid}/archive`, `DELETE /api/workflows/{id}`, `PATCH /api/workflows/{id}`, `GET /{id}/mapping-jobs/{job_id}` — 11 операций · `workflows`, `workflow_statuses`, `workflow_transitions`, `sla_rules`, `status_mapping_jobs` |
 
@@ -441,15 +441,15 @@ alembic revision --autogenerate -m "описание"
 
 Новая модель добавляется в `app/modules/<module>/models.py` и обязательно импортируется в `app/db/models.py` — иначе Alembic не увидит её при автогенерации.
 
-**Сидинг.** Единая точка входа контейнера — `deploy/entrypoint.sh` (`api`\|`worker`\|`migrate`\|`seed`\|`sms-gateway-mock`\|`shell`). Режим `seed` запускает только `python -m app.modules.workflow.seed` (две демо-воронки); сиды отчётов, уведомлений и интеграций в контейнер не входят и запускаются вручную (все идемпотентны):
+**Сидинг.** Единая точка входа контейнера — `deploy/entrypoint.sh` (`api`\|`worker`\|`migrate`\|`seed`\|`sms-gateway-mock`\|`shell`). Режим `seed` запускает все четыре модульных сида подряд: `workflow` (две демо-воронки), `reporting`, `notification`, `integration` — каждый идемпотентен по коду/маркеру, повторный запуск на заполненной базе ничего не меняет. Запускать по отдельности (например, после ручного изменения одного модуля) можно и вручную:
 
 ```bash
-docker compose exec api python -m app.modules.reporting.seed       # 10 шаблонов отчётов
+docker compose exec api python -m app.modules.reporting.seed       # 12 шаблонов отчётов
 docker compose exec api python -m app.modules.notification.seed    # 28 шаблонов уведомлений
 docker compose exec api python -m app.modules.integration.seed     # источники интеграций (заведены is_active=false)
 ```
 
-На чистой базе сиды дают 10 шаблонов отчётов, 28 шаблонов уведомлений и 3 источника интеграций (`is_active: false`, кроме `cms` при заданном `CMS_WEBHOOK_SECRET_REF`).
+На чистой базе сиды дают 12 шаблонов отчётов, 28 шаблонов уведомлений и 3 источника интеграций (`is_active: false`, кроме `cms` при заданном `CMS_WEBHOOK_SECRET_REF`).
 
 **Нагрузочные тесты.** `loadtest/` — Locust: `provision.py` создаёт в БД напрямую (минуя API, через опубликованный порт `5433`) организацию-фикстуру и пул сделок; `locustfile_transition.py` и `locustfile_comment.py` гоняют `POST /api/deals/{id}/transition` и `POST /api/deals/{id}/comments` под прямым password-grant токеном Keycloak. Цель — `new_spec §0`: p95 ≤ 300 мс при 50 RPS; `loadtest/README.md` содержит зафиксированный прогон (p95 79 мс на переходах, 49 мс на комментариях, 3 реплики `api`). Спека называет инструмент k6, в репозитории Locust — осознанное отклонение (сценарии на Python уже написаны и отлажены); критерий и пороги те же.
 
@@ -520,7 +520,6 @@ locust -f loadtest/locustfile_transition.py --headless -u 50 -r 25 -t 60s --host
 | `GET /api/admin/audit/verify-chain` находил разрывы цепочки при параллельных записях | причина найдена и исправлена: время записи бралось как начало транзакции (`now()`), а не момент захвата замка цепочки; теперь `clock_timestamp()` под замком, порядок хэшей и времени совпадает (тест `test_audit_chain_concurrency.py` падал на старом коде); хэш версионирован (`audit_log.hash_version`: v2 покрывает роль, подмену личности, IP и User-Agent), старые записи проверяются по-старому |
 | `PUT /workflows/{id}/graph` раньше удалял и создавал заново все статусы и переходы → `500`, как только по переходу прошла хотя бы одна сделка (внешний ключ истории) | исправлено: переходы обновляются по `id`; исчезнувший, но использованный в истории — `409 CRM-1209`, статус со сделками — `409 CRM-1208`, а не `500` (тесты `TestSaveGraphWithDeals`) |
 | `GET /api/auth/login?next=…` был открытым редиректом | исправлено: `safe_next_path` принимает только путь внутри сайта, проверено тестами и живым запросом (см. «Безопасность») |
-| Сиды `reporting`/`notification`/`integration` не входят в `entrypoint.sh seed` (только воронки) | запускаются вручную, идемпотентны (см. «Разработка»); на этом стенде уже применены |
 | Автоподстановка по ИНН не имеет реального внешнего провайдера | цепочка «локальный реестр → подтверждённые организации → мок» — мок работает только вне `prod`; в `prod` доступен только локальный реестр и уже подтверждённые организации |
 | Мастер передачи дел (offboard) принимает только одного преемника, «по-сделочно» нет | точечное распределение — через отдельную массовую ручку `POST /deals/bulk/reassign` |
 
