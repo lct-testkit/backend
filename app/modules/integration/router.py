@@ -20,18 +20,37 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Path, Query, Response
 from sqlalchemy import DateTime, func, literal, select
 
+from app.core.config import get_settings
 from app.core.deps import DbSession, require_permission
+from app.core.errors import AppError, ErrorCode
+from app.core.masking import mask_email, mask_phone
 from app.core.pagination import Cursor, Page, keyset_before
 from app.core.permissions import Permission
+from app.core.rate_limit import enforce as rate_limit_enforce
 from app.core.security import Principal
+from app.modules.catalog.lookup import ProductIndex
+from app.modules.integration.cms_client import CmsClient
+from app.modules.integration.field_mapping import TARGETS, FieldMapping, apply_mapping
+from app.modules.integration.lead_payload import parse_lead_payload
 from app.modules.integration.models import ExternalRef, InboundMessage, OutboxEvent
+from app.modules.integration.routing import Routing
 from app.modules.integration.schemas import (
     ExternalRefOut,
     InboundMessageOut,
     IntegrationSourceOut,
     IntegrationSourceUpdateRequest,
+    IntegrationStatusOut,
+    MappingGetResponse,
+    MappingPreviewRequest,
+    MappingPreviewResponse,
+    MappingValidationErrorOut,
     OutboxEventOut,
+    PullRequestBody,
+    PullRequestResponse,
+    RoutingGetResponse,
+    TargetOut,
 )
+from app.modules.integration.security import check_outbound_url_resolved, resolve_secret
 from app.modules.integration.service import IntegrationSourceService, OutboxEventService
 
 IntegrationAdminPerm = Annotated[
@@ -89,6 +108,227 @@ async def update_source(
 ) -> IntegrationSourceOut:
     source = await IntegrationSourceService(session).update(code, payload)
     return IntegrationSourceOut.model_validate(source)
+
+
+# =============================================================================
+# B5-3: настраиваемый маппинг «утверждённых полей»
+# =============================================================================
+
+
+@integration_admin_router.get(
+    "/sources/{code}/mapping",
+    summary="Текущий маппинг полей и каталог целей",
+    response_model=MappingGetResponse,
+)
+async def get_source_mapping(
+    session: DbSession, _principal: IntegrationAdminPerm, code: Annotated[str, Path()]
+) -> MappingGetResponse:
+    mapping = await IntegrationSourceService(session).get_mapping(code)
+    targets = [
+        TargetOut(code=spec.code, label=spec.label) for spec in TARGETS.get(code, {}).values()
+    ]
+    return MappingGetResponse(mapping=mapping, targets=targets)
+
+
+@integration_admin_router.put(
+    "/sources/{code}/mapping",
+    summary="Сохранить маппинг полей",
+    description=(
+        "B5-3: администратор задаёт, какие поля источника принимаются, куда они ложатся и как "
+        "преобразуются, без релиза. 422 с errors[] — неизвестная цель, лишние правила, нет цели "
+        "email/phone, custom_fields.<код> без активного определения."
+    ),
+    response_model=FieldMapping,
+)
+async def put_source_mapping(
+    session: DbSession,
+    principal: IntegrationAdminPerm,
+    code: Annotated[str, Path()],
+    payload: FieldMapping,
+) -> FieldMapping:
+    return await IntegrationSourceService(session).set_mapping(
+        code, payload, approved_by=principal.user_id
+    )
+
+
+@integration_admin_router.delete(
+    "/sources/{code}/mapping",
+    summary="Вернуть прежнее поведение (без маппинга)",
+    status_code=204,
+)
+async def delete_source_mapping(
+    session: DbSession, _principal: IntegrationAdminPerm, code: Annotated[str, Path()]
+) -> None:
+    await IntegrationSourceService(session).reset_mapping(code)
+
+
+@integration_admin_router.post(
+    "/sources/{code}/mapping/preview",
+    summary="Предпросмотр маппинга без записи в БД",
+    response_model=MappingPreviewResponse,
+)
+async def preview_source_mapping(
+    session: DbSession,
+    _principal: IntegrationAdminPerm,
+    code: Annotated[str, Path()],
+    payload: MappingPreviewRequest,
+) -> MappingPreviewResponse:
+    record = payload.record
+    if payload.from_remote:
+        settings = get_settings()
+        base_url = settings.cms_base_url if code == "cms" else None
+        if not base_url:
+            raise AppError(
+                ErrorCode.INTEGRATION_SOURCE_INACTIVE,
+                "Адрес источника не настроен — from_remote недоступен",
+            )
+        base_url = await check_outbound_url_resolved(base_url, strict=settings.is_prod)
+        client = CmsClient(base_url, resolve_secret(settings.cms_auth_ref))
+        page = await client.list_leads(updated_since=None, cursor=None, limit=1)
+        if not page.items:
+            raise AppError(ErrorCode.NOT_FOUND, "Источник не вернул ни одной записи")
+        record = page.items[0]
+    if record is None:
+        # Недостижимо: `MappingPreviewRequest` требует ровно один источник образца, а оба пути
+        # выше либо присваивают `record`, либо бросают ошибку раньше.
+        raise AppError(ErrorCode.VALIDATION, "Нужен либо record, либо from_remote: true")
+
+    mapping = payload.mapping
+    if mapping is None:
+        mapping = await IntegrationSourceService(session).get_mapping(code)
+
+    mapped = apply_mapping(record, mapping, code)
+    errors: list[MappingValidationErrorOut] = []
+    product: dict[str, Any] | None = None
+    try:
+        lead = parse_lead_payload(mapped.payload)
+    except AppError as exc:
+        errors = [
+            MappingValidationErrorOut(field=error.field, reason=error.reason)
+            for error in exc.errors
+        ]
+    else:
+        for candidate in lead.course_candidates:
+            found = await ProductIndex(session).get(candidate)
+            if found is not None:
+                product = {"code": found.code, "name": found.name}
+                break
+
+    masked_record = dict(record)
+    if "phone" in masked_record:
+        masked_record["phone"] = mask_phone(str(masked_record["phone"]))
+    if "email" in masked_record:
+        masked_record["email"] = mask_email(str(masked_record["email"]))
+
+    return MappingPreviewResponse(
+        record=masked_record,
+        payload=mapped.payload,
+        ignored_keys=mapped.ignored_keys,
+        product=product,
+        errors=errors,
+        warnings=mapped.warnings,
+    )
+
+
+@integration_admin_router.get(
+    "/sources/{code}/routing",
+    summary="Текущая маршрутизация (воронка/тип сделки на источник)",
+    response_model=RoutingGetResponse,
+)
+async def get_source_routing(
+    session: DbSession, _principal: IntegrationAdminPerm, code: Annotated[str, Path()]
+) -> RoutingGetResponse:
+    routing = await IntegrationSourceService(session).get_routing(code)
+    return RoutingGetResponse(routing=routing)
+
+
+@integration_admin_router.put(
+    "/sources/{code}/routing",
+    summary="Сохранить маршрутизацию",
+    description=(
+        "B5-4 (BUG-15): правила «если поле заявки равно/в списке — вот воронка, тип сделки и "
+        "ответственный», плюс маршрут по умолчанию. 422 с errors[] — воронка не найдена/не "
+        "опубликована/не того deal_type, статус не найден в опубликованном графе, "
+        "fixed_owner_id не найден или неактивен, больше 10 правил."
+    ),
+    response_model=Routing,
+)
+async def put_source_routing(
+    session: DbSession,
+    _principal: IntegrationAdminPerm,
+    code: Annotated[str, Path()],
+    payload: Routing,
+) -> Routing:
+    return await IntegrationSourceService(session).set_routing(code, payload)
+
+
+@integration_admin_router.delete(
+    "/sources/{code}/routing",
+    summary="Вернуть прежнее поведение (без маршрутизации)",
+    status_code=204,
+)
+async def delete_source_routing(
+    session: DbSession, _principal: IntegrationAdminPerm, code: Annotated[str, Path()]
+) -> None:
+    await IntegrationSourceService(session).reset_routing(code)
+
+
+# =============================================================================
+# B5-5: ручной запуск «Забрать сейчас» и статус синхронизации
+# =============================================================================
+
+_PULL_RATE_LIMIT_ROUTE = "integration_pull"
+_PULL_RATE_LIMIT_PER_MIN = 6
+_PULL_RATE_WINDOW_SECONDS = 60
+
+
+@integration_admin_router.post(
+    "/sources/{code}/pull",
+    summary="Забрать сейчас",
+    description=(
+        "Ручной запуск забора по API вне расписания cron — следующий тик (не больше минуты, "
+        "`worker/main.py`) выполнит его независимо от `pull_enabled` и интервала источника. "
+        "Источник выключен или адрес не настроен — 409 (CRM-1703); запрос уже стоит в очереди "
+        "— 409 (CRM-1705). Лимит 6 запросов в минуту на пользователя."
+    ),
+    response_model=PullRequestResponse,
+    status_code=202,
+)
+async def request_source_pull(
+    session: DbSession,
+    principal: IntegrationAdminPerm,
+    code: Annotated[str, Path()],
+    payload: PullRequestBody,
+) -> PullRequestResponse:
+    await rate_limit_enforce(
+        str(principal.user_id),
+        _PULL_RATE_LIMIT_ROUTE,
+        limit=_PULL_RATE_LIMIT_PER_MIN,
+        window_seconds=_PULL_RATE_WINDOW_SECONDS,
+        detail="Слишком много запросов «Забрать сейчас», повторите позже",
+    )
+    pull_request = await IntegrationSourceService(session).request_pull(
+        code, principal, updated_since=payload.updated_since
+    )
+    return PullRequestResponse(
+        status="queued", requested_at=dt.datetime.fromisoformat(pull_request["requested_at"])
+    )
+
+
+@integration_admin_router.get(
+    "/sources/{code}/status",
+    summary="Статус синхронизации источника",
+    description=(
+        "Настройки забора, курсоры, итог последнего прогона (`last_run`) и живые счётчики за "
+        "последние 24 часа по журналу входящих и очереди исходящих."
+    ),
+    response_model=IntegrationStatusOut,
+)
+async def get_source_status(
+    session: DbSession, _principal: IntegrationAdminPerm, code: Annotated[str, Path()]
+) -> IntegrationStatusOut:
+    status = await IntegrationSourceService(session).get_status(code)
+    return IntegrationStatusOut(**status)
 
 
 @integration_admin_router.get(

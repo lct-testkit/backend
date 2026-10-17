@@ -105,15 +105,22 @@ class TestBuildEnrollmentDetails:
         contact = scene["contact"]
         assert details == {
             "deal_number": scene["deal_number"],
+            "deal_ref": scene["deal_number"],
             "order_number": scene["order_number"],
             "stream_number": 4,
             "product": {"code": scene["products"][0]["code"], "name": "Промпт-инжиниринг"},
+            "external_course_id": scene["products"][0]["code"],
             "learner": {
                 "last_name": "Осипенко",
                 "first_name": "Дарья",
                 "middle_name": "Игоревна",
                 "email": contact["email"],
                 "phone": "+79990234365",
+            },
+            "student": {
+                "last_name": "Осипенко",
+                "first_name": "Дарья",
+                "email": contact["email"],
             },
         }
 
@@ -150,7 +157,9 @@ class TestBuildEnrollmentDetails:
 
         assert details == {
             "deal_number": scene["deal_number"],
+            "deal_ref": scene["deal_number"],
             "learner": {"last_name": "Осипенко", "first_name": "Дарья"},
+            "student": {"last_name": "Осипенко", "first_name": "Дарья"},
         }
 
     def test_line_without_a_stream_has_no_stream_number(self, client) -> None:
@@ -252,18 +261,27 @@ class TestDelivery:
         assert body["deal_id"] == str(scene["deal_id"])
         assert body["event_type"] == event_type
         assert body["deal_number"] == scene["deal_number"]
+        # B5-6 (BUG-17): мок требует именно эти имена — `deal_ref`, `external_course_id`,
+        # `student` (ровно три поля) — помимо прежних `deal_number`/`product`/`learner`.
+        assert body["deal_ref"] == scene["deal_number"]
         assert body["order_number"] == scene["order_number"]
         assert body["stream_number"] == 3
         assert body["product"] == {
             "code": scene["products"][0]["code"],
             "name": scene["products"][0]["name"],
         }
+        assert body["external_course_id"] == scene["products"][0]["code"]
         assert body["learner"] == {
             "last_name": "Осипенко",
             "first_name": "Дарья",
             "middle_name": "Игоревна",
             "email": scene["contact"]["email"],
             "phone": "+79990234365",
+        }
+        assert body["student"] == {
+            "last_name": "Осипенко",
+            "first_name": "Дарья",
+            "email": scene["contact"]["email"],
         }
         assert run(self.client, _event_state, event_id)["status"] == "sent"
 
@@ -339,7 +357,9 @@ class TestDelivery:
             "deal_id": str(scene["deal_id"]),
             "event_type": "LEARNING_ENROLLMENT_SENT",
             "deal_number": scene["deal_number"],
+            "deal_ref": scene["deal_number"],
             "learner": {"last_name": "Осипенко", "first_name": "Дарья"},
+            "student": {"last_name": "Осипенко", "first_name": "Дарья"},
         }
         assert run(self.client, _event_state, event_id)["status"] == "sent"
 

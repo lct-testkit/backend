@@ -102,6 +102,14 @@ async def test_ordinary_tables_stay_writable(app_role: AsyncConnection) -> None:
     assert await _refused(app_role, "UPDATE users SET id = id WHERE false") == ""
 
 
+async def test_new_b4_tables_are_writable(app_role: AsyncConnection) -> None:
+    # B4-5/B4-12: таблица создана той же ролью, что настраивала `ALTER DEFAULT
+    # PRIVILEGES` в 0002_identity_sprint — права наследуются автоматически, но
+    # регресс здесь остался бы незамеченным без отдельной проверки под `crm_app`.
+    assert await _refused(app_role, "SELECT count(*) FROM user_access_rules") == ""
+    assert await _refused(app_role, "DELETE FROM user_access_rules WHERE false") == ""
+
+
 async def test_the_audit_log_is_append_only(app_role: AsyncConnection) -> None:
     assert await _refused(app_role, "SELECT count(*) FROM audit_log") == ""
     # Проверка прав идёт до чтения строк: `WHERE false` ничего не вставит и не изменит.

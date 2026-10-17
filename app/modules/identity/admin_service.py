@@ -35,7 +35,8 @@ from app.core.security import Principal
 from app.modules.admin.models import AdminApproval
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService, diff_changes
-from app.modules.crm.service import DealService, UserWorkload, get_ownership_service
+from app.modules.crm.handover import ExecutionResult, HandoverPlan, HandoverRule
+from app.modules.crm.service import UserWorkload, get_ownership_service
 from app.modules.identity.keycloak import keycloak_client
 from app.modules.identity.models import (
     DataErasureRequest,
@@ -91,6 +92,8 @@ class UserFilters:
     manager_id: uuid.UUID | None = None
     region_id: uuid.UUID | None = None
     q: str | None = None
+    # B4-5: показать только пользователей с ограничением видимости по вузам/направлениям.
+    access_restricted: bool | None = None
 
 
 class ApprovalService:
@@ -280,6 +283,8 @@ class AdminUserService:
             stmt = stmt.where(User.team_id == filters.team_id)
         if filters.manager_id:
             stmt = stmt.where(User.manager_id == filters.manager_id)
+        if filters.access_restricted is not None:
+            stmt = stmt.where(User.access_restricted == filters.access_restricted)
         if filters.region_id:
             # Регион живёт на команде: фильтр по нему — это фильтр по дереву команд.
             from app.modules.identity.models import Team
@@ -830,19 +835,34 @@ class AdminUserService:
         successor_id: uuid.UUID,
         reason: str,
         deal_successors: dict[uuid.UUID, uuid.UUID] | None = None,
+        organization_successors: dict[uuid.UUID, uuid.UUID] | None = None,
+        rules: list[HandoverRule] | None = None,
+        pool_ids: list[uuid.UUID] | None = None,
+        include_closed_deals: bool = True,
+        include_organizations: bool = True,
     ) -> dict[str, Any]:
         await self._ensure_successor(user, successor_id)
         await self._identity.ensure_not_last_admin(user)
 
-        # Сделки с назначенным преемником уходят первыми обычным переназначением
-        # сделки; `reassign_all` потом забирает у увольняемого всё, что осталось.
-        individually = await self._reassign_individually(
-            user, principal, deal_successors or {}, reason=reason
+        # B4-4: один и тот же движок мастера передачи дел — одиночный `deal_successors`
+        # проходит как явное правило плана, остальное уходит `successor_id` (default).
+        plan = HandoverPlan(
+            default_successor_id=successor_id,
+            deal_successors=deal_successors or {},
+            organization_successors=organization_successors or {},
+            rules=rules or [],
+            pool_ids=pool_ids or [],
+            include_closed_deals=include_closed_deals,
+            include_organizations=include_organizations,
         )
-        bulk = await get_ownership_service().reassign_all(
-            self._session, user.id, successor_id=successor_id, reason=reason
+        execution: ExecutionResult = await get_ownership_service().reassign_plan(
+            self._session,
+            user.id,
+            plan,
+            principal=principal,
+            reason=reason,
+            deal_notification_template=TPL_OFFBOARD_SUCCESSOR,
         )
-        reassigned = [*individually, *bulk]
         signatures = await get_signing_service().reassign_pending(
             self._session, user.id, successor_id=successor_id
         )
@@ -859,13 +879,6 @@ class AdminUserService:
         invalidate_principal_after_commit(self._session, user.id, keycloak_id=user.keycloak_id)
         await self._identity.revoke_invites(user.id)
 
-        await get_notification_service().notify_user(
-            self._session,
-            recipient_id=successor_id,
-            template_code=TPL_OFFBOARD_SUCCESSOR,
-            priority=NotificationPriority.HIGH,
-            payload={"deals": [str(d) for d in bulk], "from_user": str(user.id)},
-        )
         await self._audit.record(
             AuditAction.USER_OFFBOARDED,
             entity_type="user",
@@ -873,7 +886,11 @@ class AdminUserService:
             changes={
                 "successor_id": {"old": None, "new": str(successor_id)},
                 "reason": {"old": None, "new": reason},
-                "deals_reassigned": {"old": None, "new": len(reassigned)},
+                "deals_reassigned": {"old": None, "new": len(execution.reassigned_deals)},
+                "organizations_reassigned": {
+                    "old": None,
+                    "new": len(execution.reassigned_organizations),
+                },
                 "signature_requests_reassigned": {"old": None, "new": signatures},
             },
         )
@@ -884,7 +901,9 @@ class AdminUserService:
             changes={"status": {"old": UserStatus.ACTIVE.value, "new": user.status}},
         )
         return {
-            "reassigned_deals": reassigned,
+            "reassigned_deals": execution.reassigned_deals,
+            "reassigned_organizations": execution.reassigned_organizations,
+            "distribution": execution.distribution,
             "signature_requests_reassigned": signatures,
             "sessions_terminated": terminated,
         }
@@ -900,39 +919,6 @@ class AdminUserService:
                 extra={"status": successor.status, "user_id": str(successor_id)},
             )
         return successor
-
-    async def _reassign_individually(
-        self,
-        user: User,
-        principal: Principal,
-        deal_successors: dict[uuid.UUID, uuid.UUID],
-        *,
-        reason: str,
-    ) -> list[uuid.UUID]:
-        """Переназначает названные сделки их преемникам. Любая ошибка (чужая
-        сделка, неактивный преемник) откатывает весь увольнение целиком."""
-        if not deal_successors:
-            return []
-        deals = DealService(self._session)
-        moved: list[uuid.UUID] = []
-        for deal_id, deal_successor_id in deal_successors.items():
-            await self._ensure_successor(user, deal_successor_id)
-            deal = await deals.get_or_404(deal_id, principal)
-            if deal.owner_id != user.id:
-                raise AppError(
-                    ErrorCode.VALIDATION,
-                    "Сделка не принадлежит увольняемому сотруднику",
-                    errors=[FieldError(field="deal_successors", reason=str(deal_id))],
-                )
-            await deals.reassign(
-                deal,
-                principal,
-                owner_id=deal_successor_id,
-                reason=reason,
-                expected_version=deal.version,
-            )
-            moved.append(deal_id)
-        return moved
 
     # --- 152-ФЗ: запрос на удаление --------------------------------------
 

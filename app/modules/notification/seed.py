@@ -211,6 +211,20 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str | None, str]] = [
         "Изменения реквизитов организации применены из реестра ЕГРЮЛ.",
     ),
     (
+        # B4-1/B4-2: смена ответственного за вуз (одиночная и массовая —
+        # `payload.count` заполнен только при массовой передаче).
+        "ORG_OWNER_ASSIGNED",
+        "in_app",
+        None,
+        "Вы назначены ответственным за вуз" "{% if count %} ({{ count }} шт.){% endif %}.",
+    ),
+    (
+        "ORG_OWNER_REMOVED",
+        "in_app",
+        None,
+        "Вы больше не ответственны за вуз" "{% if count %} ({{ count }} шт.){% endif %}.",
+    ),
+    (
         "ORG_LIQUIDATION_DETECTED",
         "in_app",
         None,
@@ -249,6 +263,14 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str | None, str]] = [
         "in_app",
         None,
         "Вам назначена сделка в качестве ответственного.",
+    ),
+    (
+        # B4-3: мягкое удаление сделки (A-16) — владелец должен узнать, а не
+        # обнаружить пропажу по 404 в своём списке.
+        "DEAL_DELETED",
+        "in_app",
+        None,
+        "Ваша сделка удалена администратором.",
     ),
     (
         "DEAL_MENTION",

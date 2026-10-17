@@ -716,18 +716,25 @@ class TestReportJobs:
         assert response.json()["code"] == "CRM-1603"
 
     def test_too_many_unfinished_reports_are_refused(self, client, monkeypatch) -> None:
+        # B8-11: личный лимит — `reports_max_per_user`, а не `reports_max_concurrent`
+        # (семафор одновременных рендеров воркера, другой смысл с этой задачи).
         from app.core.config import get_settings
 
         self._stub_s3(monkeypatch)
         self._ensure_templates(client, "sla_compliance")
         kam = self._kam(client)
-        for _ in range(get_settings().reports_max_concurrent):
+        limit = get_settings().reports_max_per_user
+        for _ in range(limit):
             self._insert_job(client, kam, status="queued")
 
         request = {"template_code": "sla_compliance", "format": "xlsx"}
         refused = client.post("/api/reports", json=request)
         assert refused.status_code == 429, refused.text
-        assert refused.json()["code"] == "CRM-1601"
+        body = refused.json()
+        assert body["code"] == "CRM-1601"
+        assert body["limit"] == limit
+        assert body["unfinished"] == limit
+        assert refused.headers["Retry-After"] == "10"
 
         # Лимит личный: чужая очередь другому сотруднику не мешает.
         self._kam(client)

@@ -14,10 +14,13 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Path, Query, Request, status
 
 from app.core.deps import DbSession, IdempotencyKeyHeader, IfMatch, Pagination, require_permission
+from app.core.errors import ForbiddenError
 from app.core.idempotency import IdempotencyGuard
+from app.core.masking import mask_channel_value
 from app.core.pagination import Page, keyset_before
 from app.core.permissions import Permission, has_permission
 from app.core.security import Principal
+from app.modules.audit.service import defer_denied_audit
 from app.modules.catalog.models import (
     Contact,
     Direction,
@@ -27,6 +30,11 @@ from app.modules.catalog.models import (
 )
 from app.modules.catalog.schemas import (
     ApplyDriftRequest,
+    BulkOrganizationOwnerRequest,
+    BulkOrganizationOwnerResponse,
+    BulkOwnerSkipOut,
+    ContactChannelListResponse,
+    ContactChannelOut,
     ContactCreateRequest,
     ContactListResponse,
     ContactOut,
@@ -56,10 +64,13 @@ from app.modules.catalog.schemas import (
     LossReasonOut,
     LossReasonUpdateRequest,
     OrganizationCreateRequest,
+    OrganizationDeleteRequest,
     OrganizationLicenseListResponse,
     OrganizationLicenseOut,
     OrganizationListResponse,
     OrganizationOut,
+    OrganizationOwnerRemoveRequest,
+    OrganizationOwnerSetRequest,
     OrganizationRevealOut,
     OrganizationUpdateRequest,
     ProductContactLinkRequest,
@@ -90,6 +101,7 @@ from app.modules.catalog.service import (
     organization_in_scope,
     region_list_query,
 )
+from app.modules.identity.schemas import OperationResult
 
 organizations_router = APIRouter(prefix="/organizations", tags=["organizations"])
 contacts_router = APIRouter(prefix="/contacts", tags=["contacts"])
@@ -107,6 +119,8 @@ OrgRead = Annotated[Principal, Depends(require_permission(Permission.ORG_READ))]
 OrgWrite = Annotated[Principal, Depends(require_permission(Permission.ORG_WRITE))]
 OrgReveal = Annotated[Principal, Depends(require_permission(Permission.ORG_REVEAL))]
 OrgRestore = Annotated[Principal, Depends(require_permission(Permission.ORG_RESTORE))]
+OrgOwnerAssign = Annotated[Principal, Depends(require_permission(Permission.ORG_OWNER_ASSIGN))]
+OrgDelete = Annotated[Principal, Depends(require_permission(Permission.ORG_DELETE))]
 ContactRead = Annotated[Principal, Depends(require_permission(Permission.CONTACT_READ))]
 ContactWrite = Annotated[Principal, Depends(require_permission(Permission.CONTACT_WRITE))]
 ContactReveal = Annotated[Principal, Depends(require_permission(Permission.CONTACT_REVEAL))]
@@ -134,7 +148,14 @@ async def list_organizations(
     is_accredited: Annotated[bool | None, Query()] = None,
     source: Annotated[str | None, Query()] = None,
     q: Annotated[str | None, Query()] = None,
+    deleted: Annotated[bool, Query()] = False,
 ) -> OrganizationListResponse:
+    # B4-3: список мягко удалённых вузов — иначе восстановить что-то нельзя, id
+    # удалённой организации больше нигде не виден. Отдельное право: `ORG_RESTORE`,
+    # не `ORG_DELETE` (само удаление организации — право, которого нет даже у HEAD).
+    if deleted and not has_permission(principal.role, Permission.ORG_RESTORE):
+        defer_denied_audit(session, entity_type="organization", reason="deleted_list_forbidden")
+        raise ForbiddenError("Список удалённых организаций доступен только с правом восстановления")
     filters = OrganizationFilters(
         name=name,
         inn=inn,
@@ -146,6 +167,7 @@ async def list_organizations(
         is_accredited=is_accredited,
         source=source,
         q=q,
+        deleted=deleted,
     )
     stmt = (await OrganizationService(session).list_query(principal, filters)).order_by(
         Organization.created_at.desc(), Organization.id.desc()
@@ -176,6 +198,16 @@ async def create_organization(
     principal: OrgWrite,
     idempotency_key: IdempotencyKeyHeader,
 ) -> OrganizationOut:
+    # B4-1: KAM заводит вуз только на себя — чужого `owner_id` без права
+    # `ORG_OWNER_ASSIGN` принять нельзя (раньше проходило молча, `service.py:463`).
+    if (
+        payload.owner_id is not None
+        and payload.owner_id != principal.user_id
+        and not has_permission(principal.role, Permission.ORG_OWNER_ASSIGN)
+    ):
+        defer_denied_audit(session, entity_type="organization", reason="owner_assign_forbidden")
+        raise ForbiddenError("Назначить ответственным другого сотрудника может только руководитель")
+
     guard = IdempotencyGuard(session, actor_id=principal.user_id)
     body = await request.body()
     if idempotency_key:
@@ -198,6 +230,38 @@ async def create_organization(
             body=result.model_dump(mode="json"),
         )
     return result
+
+
+@organizations_router.post(
+    "/bulk/owner",
+    summary="Массовая смена ответственного за вуз",
+    description=(
+        "B4-2: передать все вузы одного менеджера другому (или снять ответственного) "
+        "одним действием, до 100 вузов за вызов. Объявлена раньше /{organization_id}, "
+        "иначе 'bulk' попал бы в параметризованный маршрут."
+    ),
+    response_model=BulkOrganizationOwnerResponse,
+)
+async def bulk_set_organization_owner(
+    payload: BulkOrganizationOwnerRequest,
+    session: DbSession,
+    principal: OrgOwnerAssign,
+) -> BulkOrganizationOwnerResponse:
+    result = await OrganizationService(session).bulk_set_owner(
+        principal,
+        organization_ids=payload.organization_ids,
+        from_owner_id=payload.from_owner_id,
+        owner_id=payload.owner_id,
+        reason=payload.reason,
+        carry_open_deals=payload.carry_open_deals,
+    )
+    return BulkOrganizationOwnerResponse(
+        batch_id=result.batch_id,
+        changed=len(result.changed),
+        skipped=[BulkOwnerSkipOut(**item) for item in result.skipped],
+        deals_reassigned=result.deals_reassigned,
+        remaining=result.remaining,
+    )
 
 
 @organizations_router.get(
@@ -260,7 +324,86 @@ async def update_organization(
 ) -> OrganizationOut:
     service = OrganizationService(session)
     organization = await service.get_or_404(organization_id, principal)
-    organization = await service.update(organization, payload, expected_version=if_match)
+    version = if_match
+
+    # B4-1: `owner_id` больше не правится обычным PATCH — только через `set_owner`
+    # (убран из `_PATCHABLE_FIELDS`), и только с правом `ORG_OWNER_ASSIGN`. KAM,
+    # шлющий поле без изменений (та же форма, что раньше отправляла весь объект),
+    # не должен получать 403 — только попытка реальной смены.
+    if "owner_id" in payload.model_fields_set and payload.owner_id != organization.owner_id:
+        if not has_permission(principal.role, Permission.ORG_OWNER_ASSIGN):
+            defer_denied_audit(
+                session,
+                entity_type="organization",
+                entity_id=organization_id,
+                reason="owner_assign_forbidden",
+            )
+            raise ForbiddenError(
+                "Сменить ответственного за вуз может только руководитель или администратор"
+            )
+        organization = await service.set_owner(
+            organization,
+            principal,
+            owner_id=payload.owner_id,
+            reason="Изменено в карточке организации",
+            expected_version=version,
+        )
+        version = organization.version
+
+    organization = await service.update(organization, payload, expected_version=version)
+    return OrganizationOut.from_model(organization)
+
+
+@organizations_router.put(
+    "/{organization_id}/owner",
+    summary="Назначить или сменить ответственного за вуз",
+    description=(
+        "B4-1: ТЗ Функц.11 — Руководитель меняет ответственных за вузы. "
+        "Роль: HEAD (только в своей команде), ADMIN."
+    ),
+    response_model=OrganizationOut,
+)
+async def set_organization_owner(
+    payload: OrganizationOwnerSetRequest,
+    session: DbSession,
+    principal: OrgOwnerAssign,
+    if_match: IfMatch,
+    organization_id: Annotated[uuid.UUID, Path()],
+) -> OrganizationOut:
+    service = OrganizationService(session)
+    organization = await service.get_or_404(organization_id, principal)
+    organization = await service.set_owner(
+        organization,
+        principal,
+        owner_id=payload.owner_id,
+        reason=payload.reason,
+        expected_version=if_match,
+    )
+    return OrganizationOut.from_model(organization)
+
+
+@organizations_router.delete(
+    "/{organization_id}/owner",
+    summary="Снять ответственного за вуз",
+    description="B4-2: вуз становится «ничьим». Роль: HEAD (в своей команде), ADMIN.",
+    response_model=OrganizationOut,
+)
+async def remove_organization_owner(
+    payload: OrganizationOwnerRemoveRequest,
+    session: DbSession,
+    principal: OrgOwnerAssign,
+    if_match: IfMatch,
+    organization_id: Annotated[uuid.UUID, Path()],
+) -> OrganizationOut:
+    service = OrganizationService(session)
+    organization = await service.get_or_404(organization_id, principal)
+    organization = await service.set_owner(
+        organization,
+        principal,
+        owner_id=None,
+        reason=payload.reason,
+        expected_version=if_match,
+    )
     return OrganizationOut.from_model(organization)
 
 
@@ -304,6 +447,28 @@ async def reveal_organization(
     organization = await service.get_or_404(organization_id, principal)
     await service.reveal(organization)
     return OrganizationRevealOut.model_validate(organization)
+
+
+@organizations_router.delete(
+    "/{organization_id}",
+    summary="Удалить организацию",
+    description=(
+        "B4-3 (A-16): мягкое удаление. 409 CRM-1303 со списком `blockers`, если есть "
+        "живые (не мягко удалённые) сделки, контакты или лицензии. Роль: ADMIN."
+    ),
+    response_model=OperationResult,
+)
+async def delete_organization(
+    payload: OrganizationDeleteRequest,
+    session: DbSession,
+    principal: OrgDelete,
+    if_match: IfMatch,
+    organization_id: Annotated[uuid.UUID, Path()],
+) -> OperationResult:
+    service = OrganizationService(session)
+    organization = await service.get_or_404(organization_id, principal)
+    await service.delete(organization, reason=payload.reason, expected_version=if_match)
+    return OperationResult(ok=True, detail="Организация удалена")
 
 
 @organizations_router.post(
@@ -415,6 +580,36 @@ async def update_contact(
     contact = await service.get_or_404(contact_id, principal)
     contact = await service.update(contact, payload, principal=principal, expected_version=if_match)
     return ContactOut.from_model(contact)
+
+
+@contacts_router.get(
+    "/{contact_id}/channels",
+    summary="Каналы связи контакта (маскированные)",
+    description=(
+        "Telegram/WhatsApp/доп. телефон/доп. email контакта с маскированными значениями "
+        "(B4-9). Полные значения — только `POST /contacts/{id}/reveal`. Скоуп — как у "
+        "карточки контакта. Роль: чтение контактов."
+    ),
+    response_model=ContactChannelListResponse,
+)
+async def list_contact_channels(
+    session: DbSession, principal: ContactRead, contact_id: Annotated[uuid.UUID, Path()]
+) -> ContactChannelListResponse:
+    service = ContactService(session)
+    contact = await service.get_or_404(contact_id, principal)
+    channels = await service.channels(contact.id)
+    return ContactChannelListResponse(
+        items=[
+            ContactChannelOut(
+                id=row.id,
+                type=row.type,
+                value=mask_channel_value(row.type, row.value) or "",
+                is_primary=row.is_primary,
+                is_verified=row.is_verified,
+            )
+            for row in channels
+        ]
+    )
 
 
 @contacts_router.post(

@@ -62,6 +62,7 @@ from app.modules.identity.models import (
     SecurityEvent,
     Team,
     User,
+    UserAccessRule,
     UserDelegation,
     UserInvite,
 )
@@ -185,6 +186,7 @@ __all__ = [
     "Team",
     "UniversityRegistry",
     "User",
+    "UserAccessRule",
     "UserDelegation",
     "UserInvite",
     "UserNotificationPref",

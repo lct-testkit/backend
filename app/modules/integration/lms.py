@@ -35,8 +35,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
@@ -46,30 +45,20 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.normalize import normalize_email
 from app.modules.catalog.models import Contact, Organization, Product
 from app.modules.crm.models import Deal, DealProduct
+from app.modules.integration.http import TIMEOUT as _TIMEOUT
+from app.modules.integration.http import http_errors_without_url as _http_errors_without_url_base
 from app.modules.integration.models import LearningProgress, SyncCursor
 
 logger = structlog.get_logger(__name__)
 
-_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 
-
-@asynccontextmanager
-async def _http_errors_without_url(operation: str) -> AsyncIterator[None]:
-    """Ошибка HTTP без адреса в тексте. `raise_for_status()` вшивает `response.url` в сообщение,
-    а оно уходит в `outbox_events.last_error` и оттуда в ответ админской ручки и в лог; адрес
-    LMS, заданный с логином или ключом в строке, не должен там оказаться (так же устроен
-    `BitrixClient._call`). Наружу — только операция и статус либо тип сбоя."""
-    try:
-        yield
-    except httpx.HTTPStatusError as exc:
-        raise RuntimeError(
-            f"lms {operation} http error: "
-            f"{exc.response.status_code} {exc.response.reason_phrase}"
-        ) from None
-    except httpx.HTTPError as exc:
-        raise RuntimeError(f"lms {operation} request failed: {type(exc).__name__}") from None
+def _http_errors_without_url(operation: str) -> AbstractAsyncContextManager[None]:
+    """B5-2: обёртка вынесена в `integration.http` (общая с `CmsClient`) — тонкая прокладка здесь,
+    чтобы не трогать остальные вызовы этого модуля."""
+    return _http_errors_without_url_base("lms", operation)
 
 
 #: События воронки, при доставке которых LMS получает сведения об учащемся.
@@ -89,18 +78,43 @@ class LmsClient:
             headers["Idempotency-Key"] = idempotency_key
         return headers
 
-    async def pull_progress(self, *, updated_since: str | None) -> list[dict[str, Any]]:
-        params = {"updated_since": updated_since} if updated_since else {}
-        async with (
-            _http_errors_without_url("students/progress"),
-            httpx.AsyncClient(timeout=_TIMEOUT) as client,
-        ):
-            response = await client.get(
-                f"{self._base_url}/students/progress", params=params, headers=self._headers()
-            )
-            response.raise_for_status()
-            body = response.json()
-            return body.get("items", []) if isinstance(body, dict) else body
+    async def pull_progress(
+        self, *, updated_since: str | None, max_pages: int = 20, page_size: int = 100
+    ) -> list[dict[str, Any]]:
+        """B5-6 (BUG-16): постранично — раньше читалась только первая страница ответа мока
+        (`next_cursor` игнорировался), и строки сверх `page_size` терялись молча."""
+        items: list[dict[str, Any]] = []
+        cursor: str | None = None
+        for _page in range(max_pages):
+            params: dict[str, Any] = {"limit": page_size}
+            if updated_since:
+                params["updated_since"] = updated_since
+            if cursor:
+                params["cursor"] = cursor
+            async with (
+                _http_errors_without_url("students/progress"),
+                httpx.AsyncClient(timeout=_TIMEOUT) as client,
+            ):
+                response = await client.get(
+                    f"{self._base_url}/students/progress", params=params, headers=self._headers()
+                )
+                response.raise_for_status()
+                body = response.json()
+            if isinstance(body, dict):
+                page_items = body.get("items", [])
+                cursor = body.get("next_cursor")
+            else:
+                page_items = body
+                cursor = None
+            if not isinstance(page_items, list) or not page_items:
+                # Мусорный ответ (строка/число вместо списка) — тот же защитный приём, что
+                # раньше жил в `sweep_lms_progress_pull` (`isinstance(rows, list)`): без него
+                # `extend()` на строку развалил бы её на отдельные символы-«строки».
+                break
+            items.extend(page_items)
+            if not cursor:
+                break
+        return items
 
     async def push_enrollment(
         self, payload: dict[str, Any], *, idempotency_key: str | None = None
@@ -173,30 +187,89 @@ def _parse_score(value: Any) -> Decimal | None:
     return number.quantize(Decimal("0.01"))
 
 
+def normalize_progress_row(row: dict[str, Any]) -> dict[str, Any]:
+    """B5-6 (BUG-16): мок отдаёт `external_course_id`/`email`/`external_student_id` — старые
+    ключи (`course_external_id`, `deal_id`) остаются рабочими (push-приём и прежние тесты их
+    используют уже сейчас): это дополнение алиасами, не замена. Если в строке УЖЕ есть старое
+    имя, оно не перезатирается новым."""
+    normalized = dict(row)
+    if "course_external_id" not in normalized and "external_course_id" in normalized:
+        normalized["course_external_id"] = normalized["external_course_id"]
+    if "student_email" not in normalized and "email" in normalized:
+        normalized["student_email"] = normalized["email"]
+    if "student_ref" not in normalized and "external_student_id" in normalized:
+        normalized["student_ref"] = normalized["external_student_id"]
+    return normalized
+
+
+async def _find_deal_by_contact_and_course(
+    session: AsyncSession, *, student_email: str, course_external_id: str
+) -> Deal | None:
+    """B5-6 (BUG-16): мок не присылает `deal_id` вовсе — привязка по email учащегося и курсу,
+    когда строка не называет сделку напрямую. Продукт ищется по совпадению `course_external_id`
+    с `Product.code` (значение мока — код курса; соответствие кодам каталога, если они разные,
+    даёт настраиваемый маппинг B5-3/B5-7, здесь — прямое совпадение). Предпочитается открытая
+    сделка контакта с этим продуктом, иначе — последняя по дате создания."""
+    normalized_email = normalize_email(student_email)
+    if not normalized_email:
+        return None
+    contact = await session.scalar(select(Contact).where(Contact.email == normalized_email))
+    if contact is None or contact.deleted_at is not None:
+        return None
+    product = await session.scalar(select(Product).where(Product.code == course_external_id))
+    if product is None:
+        return None
+    candidates = (
+        (
+            await session.execute(
+                select(Deal)
+                .join(DealProduct, DealProduct.deal_id == Deal.id)
+                .where(
+                    Deal.contact_id == contact.id,
+                    Deal.deleted_at.is_(None),
+                    DealProduct.product_id == product.id,
+                )
+                .order_by(Deal.closed_at.is_(None).desc(), Deal.created_at.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return candidates[0] if candidates else None
+
+
 async def upsert_progress(session: AsyncSession, row: dict[str, Any]) -> LearningProgress | None:
     """Один элемент ответа LMS → строка `learning_progress`; `None` — строка ни к какой нашей сделке
-    не относится (нет `deal_id`/`course_external_id`, чужой или удалённый `deal_id`): LMS знает и
-    учащихся, которых в CRM нет, это не ошибка. Значения неверного типа или вне диапазона —
+    не относится (нет способа её привязать, чужой или удалённый `deal_id`/контакт/продукт): LMS
+    знает и учащихся, которых в CRM нет, это не ошибка. Значения неверного типа или вне диапазона —
     `ProgressRowRejected` (вызывающий пропускает строку, см. `apply_progress_rows`).
 
     Неполная строка не затирает известное: поле, которого в строке нет (или оно `null`), у
     существующей записи остаётся как было — LMS присылает и «только процент», и «только
     завершение», и обнулять остальное они не просят. `raw` — последняя присланная строка."""
+    row = normalize_progress_row(row)
     deal_id_raw = row.get("deal_id")
     course_external_id = row.get("course_external_id")
-    if not deal_id_raw or not course_external_id:
+    if not course_external_id:
         logger.warning("lms_progress_row_unmatched", deal_id=str(deal_id_raw)[:64])
         return None
 
-    try:
-        deal_id = uuid.UUID(str(deal_id_raw))
-    except ValueError:
-        logger.warning("lms_progress_row_bad_deal_id", deal_id_raw=str(deal_id_raw)[:64])
-        return None
+    deal: Deal | None = None
+    if deal_id_raw:
+        try:
+            deal_id = uuid.UUID(str(deal_id_raw))
+        except ValueError:
+            logger.warning("lms_progress_row_bad_deal_id", deal_id_raw=str(deal_id_raw)[:64])
+            return None
+        deal = await session.get(Deal, deal_id)
+    elif row.get("student_email"):
+        # BUG-16: мок не называет сделку напрямую — привязка по email учащегося и коду курса.
+        deal = await _find_deal_by_contact_and_course(
+            session, student_email=str(row["student_email"]), course_external_id=course_external_id
+        )
 
-    deal = await session.get(Deal, deal_id)
     if deal is None or deal.deleted_at is not None:
-        logger.warning("lms_progress_deal_not_found", deal_id=str(deal_id))
+        logger.warning("lms_progress_deal_not_found", deal_id=str(deal_id_raw))
         return None
 
     # Значения проверяются до записи: отвергнутая строка не оставляет полузаписанной записи.
@@ -362,6 +435,9 @@ async def build_enrollment_details(session: AsyncSession, deal_id: uuid.UUID) ->
         {
             "deal_number": deal.number,
             "order_number": deal.order_number,
+            # B5-6 (BUG-17): мок требует именно `deal_ref` — старое `deal_number` остаётся как
+            # дополнение, не замена (прежние получатели зачисления не ломаются).
+            "deal_ref": deal.number,
         }
     )
 
@@ -383,6 +459,8 @@ async def build_enrollment_details(session: AsyncSession, deal_id: uuid.UUID) ->
         product = await session.get(Product, line.product_id)
         if product is not None:
             details["product"] = _compact({"code": product.code, "name": product.name})
+            # B5-6 (BUG-17): мок ждёт код курса на верхнем уровне нагрузки, не только в `product`.
+            details["external_course_id"] = product.code
 
     if deal.deal_type == "b2c" and deal.contact_id is not None:
         contact = await session.get(Contact, deal.contact_id)
@@ -399,6 +477,17 @@ async def build_enrollment_details(session: AsyncSession, deal_id: uuid.UUID) ->
             )
             if learner:
                 details["learner"] = learner
+                # B5-6 (BUG-17): мок требует вложенный объект `student` с именно этими тремя
+                # полями (без отчества/телефона) — `learner` выше остаётся для совместимости.
+                student = _compact(
+                    {
+                        "email": contact.email,
+                        "first_name": contact.first_name,
+                        "last_name": contact.last_name,
+                    }
+                )
+                if student:
+                    details["student"] = student
     elif deal.deal_type == "b2b" and deal.organization_id is not None:
         organization = await session.get(Organization, deal.organization_id)
         if organization is not None and organization.deleted_at is None:

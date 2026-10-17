@@ -162,7 +162,21 @@ class Settings(BaseSettings):
     clamav_sync_max_bytes: int = 26214400
 
     # --- Отчёты ----------------------------------------------------------
+    # B8-11: раньше одна переменная (`reports_max_concurrent`) и ограничивала одновременные
+    # рендеры воркера, и была личным лимитом «незавершённых» на пользователя — теперь два
+    # разных смысла под разными именами, плюс общий потолок очереди на всех.
     reports_max_concurrent: int = 10
+    reports_max_per_user: int = 10
+    reports_queue_max: int = 200
+    # `false` — поведение «только cron» (откат без деплоя): API не ставит задание в arq,
+    # `sweep_report_jobs`/`sweep_import_jobs` рендерят/обрабатывают сами, как раньше.
+    reports_enqueue: bool = True
+    # Добор: `queued` старше этого порога считается потерянным (сбой постановки в Redis)
+    # и переставляется в очередь тем же `job_id` — arq отбрасывает дубль.
+    reports_enqueue_retry_after_s: int = 30
+    # `processing` старше этого порога — воркер упал посреди рендера; порог заметно больше
+    # таймаута самой задачи (600 с), чтобы живой рендер не был переотдан добором.
+    reports_stale_processing_minutes: int = 15
     reports_link_ttl_minutes: int = 15
     reports_retention_days: int = 7
 
@@ -227,9 +241,20 @@ class Settings(BaseSettings):
     # B6-8: токен заголовка `X-Health-Token` для `GET /health/details`. Без него (пусто) —
     # ручка всегда отдаёт 404, как «несуществующий» путь (не 401/403, чтобы не подсказывать).
     health_details_token: SecretStr | None = None
+    # B7-3: ссылка «только скачать» подписанный файл/протокол — не токен подписания.
+    signature_download_ttl_days: int = 30
+    signature_download_max_per_link: int = 20
+    # Откат без деплоя: false отключает выдачу и сами публичные ручки (404).
+    signature_public_download_enabled: bool = True
+    # B7-1: пороги напоминаний (часов до дедлайна) и минимальный зазор между ними.
+    signature_remind_before_hours: str = "48,4"
+    signature_remind_min_gap_hours: int = 6
+    # Мелкая правка B7 (бывшая зашитая константа `service.py:1551`).
+    signature_otp_max_sends: int = 5
     # Сколько секунд транзакция может простаивать «открытой» до принудительного закрытия сервером
     # Postgres (`idle_in_transaction_session_timeout`): зависший клиент не должен держать замки.
     db_idle_in_transaction_timeout_seconds: int = 60
+
     # --- Почта (ссылки подписантам, email-уведомления) ---------------------
     # Пустой `smtp_host` — письма не отправляются, доставка email остаётся заглушкой.
     smtp_host: str = ""
@@ -249,16 +274,6 @@ class Settings(BaseSettings):
     # dop.md §10.8: «при рассинхроне > 5 с подписание блокируется».
     signature_max_clock_drift_ms: int = 5000
     sms_gateway_url: str = "http://sms-gateway-mock:8090"
-    # B7-3: ссылка «только скачать» подписанный файл/протокол — не токен подписания.
-    signature_download_ttl_days: int = 30
-    signature_download_max_per_link: int = 20
-    # Откат без деплоя: false отключает выдачу и сами публичные ручки (404).
-    signature_public_download_enabled: bool = True
-    # B7-1: пороги напоминаний (часов до дедлайна) и минимальный зазор между ними.
-    signature_remind_before_hours: str = "48,4"
-    signature_remind_min_gap_hours: int = 6
-    # Мелкая правка B7 (бывшая зашитая константа `service.py:1551`).
-    signature_otp_max_sends: int = 5
 
     # --- Уведомления -------------------------------------------------------
     notification_dispatch_batch_size: int = 200
@@ -266,8 +281,17 @@ class Settings(BaseSettings):
 
     # --- Интеграции ------------------------------------------------------
     cms_webhook_secret_ref: str | None = None
+    # B5-1: забор данных по API (pull) — у сайта и LMS раньше не было ни адреса,
+    # ни места для Bearer-токена в `x-api-env` (CMS_BASE_URL отсутствовал вовсе,
+    # LMS_AUTH_REF указывал на переменную, которой не было ни в одном compose).
+    cms_base_url: str | None = None
+    cms_auth_ref: str | None = "CMS_AUTH_TOKEN"
     lms_base_url: str | None = None
-    lms_auth_ref: str | None = None
+    lms_auth_ref: str | None = "LMS_AUTH_TOKEN"
+    # Размер страницы и число страниц за один запуск забора (B5-2/B5-6):
+    # ограничивают и нагрузку на источник, и память одного тика cron.
+    integration_pull_page_size: int = Field(default=100, ge=1, le=500)
+    integration_pull_max_pages: int = Field(default=20, ge=1, le=500)
     bitrix_connector_enabled: bool = False
     # Секрет живёт преимущественно на `integration_sources.credentials_ref`
     # (раздел 7.8, админ настраивает без деплоя) — это в `.env` только
@@ -339,15 +363,24 @@ class Settings(BaseSettings):
         "field_encryption_key",
         "field_encryption_key_prev",
         "health_details_token",
+        "cms_base_url",
+        "lms_base_url",
         mode="before",
     )
     @classmethod
     def _blank_is_unset(cls, value: object) -> object:
         """docker-compose передаёт незаданную переменную пустой строкой (`${VAR:-}`): для
-        необязательных значений это «не задано», а не пустой ключ и не ошибка разбора булева."""
+        необязательных значений это «не задано», а не пустой ключ и не ошибка разбора булева.
+        `CMS_BASE_URL=`/`LMS_BASE_URL=` в `.env` без значения — то же самое: `urlsplit('')`
+        не даёт `not settings.cms_base_url`, поэтому пустая строка отдельно сводится к `None`."""
         if isinstance(value, str) and not value.strip():
             return None
         return value
+
+    @field_validator("cms_base_url", "lms_base_url", mode="after")
+    @classmethod
+    def _strip_trailing_slash(cls, value: str | None) -> str | None:
+        return value.rstrip("/") if value else value
 
     @field_validator("field_encryption_key", "field_encryption_key_prev", mode="after")
     @classmethod
@@ -533,7 +566,7 @@ class Settings(BaseSettings):
     def keycloak_logout_url(self) -> str:
         return f"{self._keycloak_internal_realm}/protocol/openid-connect/logout"
 
-    # Swagger UI в prod закрыт, если не включён явно.
+    # Swagger UI в prod закрыт, если включён явно.
     @property
     def expose_docs(self) -> bool:
         return self.docs_enabled and not self.is_prod
