@@ -396,3 +396,8 @@ class DataErasureRequest(UuidPkMixin, TimestampMixin, Base):
     act_signature_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("signatures.id", ondelete="RESTRICT"), nullable=True
     )
+    # B6-9: ПЭП ответственного лица делает акт доказательством — связывает акт, подписанную
+    # копию и протокол (`SignatureDocument.manifest`). `RESTRICT`, как у `act_signature_id`.
+    act_document_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("signature_documents.id", ondelete="RESTRICT"), nullable=True
+    )
