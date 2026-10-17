@@ -303,6 +303,17 @@ async def _resolve_user_timezone(session: AsyncSession, principal: Principal) ->
         return _default_timezone()
 
 
+async def resolve_user_timezone_name(session: AsyncSession, principal: Principal) -> str:
+    """B1-5/B1-6: публичная обёртка над `_resolve_user_timezone` — IANA-имя пояса строкой, для
+    шапки файла и конверта JSON (`rendering.render_json`), которым сам `ReportFilters` не нужен,
+    только имя пояса. Отдельный маленький запрос в `ReportJobService.generate`, а не протаскивание
+    через `ReportDataset`: пояс у всех builder'ов этого модуля — один и тот же принцип (`User.
+    timezone` с откатом на Europe/Moscow), трогать сигнатуру каждого из них ради одного поля
+    конверта было бы лишним churn."""
+    tz = await _resolve_user_timezone(session, principal)
+    return getattr(tz, "key", DEFAULT_TIMEZONE_NAME)
+
+
 async def _load_filters(
     session: AsyncSession, principal: Principal, params: dict[str, Any]
 ) -> ReportFilters:

@@ -46,7 +46,7 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str, str, list[str], dict[str, Any], li
         "deal_funnel",
         [],
         {"deal_type": "b2b"},
-        ["xlsx", "pdf", "png"],
+        ["xlsx", "xls", "pdf", "png", "json"],
     ),
     (
         "kam_summary",
@@ -55,7 +55,7 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str, str, list[str], dict[str, Any], li
         "kam_summary",
         ["HEAD", "ADMIN"],
         {},
-        ["xlsx", "pdf"],
+        ["xlsx", "xls", "pdf", "json"],
     ),
     (
         "region_summary",
@@ -64,7 +64,7 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str, str, list[str], dict[str, Any], li
         "region_summary",
         [],
         {},
-        ["xlsx", "pdf"],
+        ["xlsx", "xls", "pdf", "json"],
     ),
     (
         "loss_reasons",
@@ -73,7 +73,7 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str, str, list[str], dict[str, Any], li
         "loss_reasons",
         [],
         {},
-        ["xlsx", "pdf"],
+        ["xlsx", "xls", "pdf", "json"],
     ),
     (
         "sla_compliance",
@@ -82,7 +82,7 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str, str, list[str], dict[str, Any], li
         "sla_compliance",
         [],
         {},
-        ["xlsx", "pdf"],
+        ["xlsx", "xls", "pdf", "json"],
     ),
     (
         "monthly_dynamics",
@@ -91,7 +91,7 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str, str, list[str], dict[str, Any], li
         "monthly_dynamics",
         [],
         {"months": 12},
-        ["xlsx", "pdf", "png"],
+        ["xlsx", "xls", "pdf", "png", "json"],
     ),
     (
         "stuck_deals",
@@ -100,7 +100,7 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str, str, list[str], dict[str, Any], li
         "stuck_deals",
         [],
         {"limit": 500},
-        ["xlsx", "pdf"],
+        ["xlsx", "xls", "pdf", "json"],
     ),
     (
         "deal_register",
@@ -108,11 +108,11 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str, str, list[str], dict[str, Any], li
         "Реестр сделок за период в разрезе вуза, направления, продукта, статуса и ответственного. "
         "Строка на пару сделка-продукт (у сделки без продуктов — одна строка с пустым продуктом и "
         "направлением). Параметры: date_from/date_to, organization_ids, direction_ids, "
-        "product_ids, owner_ids, limit.",
+        "product_ids, owner_ids, columns, date_field, limit.",
         "deal_register",
         [],
         {"limit": 1000},
-        ["xlsx", "pdf"],
+        ["xlsx", "xls", "pdf", "json"],
     ),
     (
         "learning_progress",
@@ -121,7 +121,7 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str, str, list[str], dict[str, Any], li
         "learning_progress",
         [],
         {},
-        ["xlsx", "pdf"],
+        ["xlsx", "xls", "pdf", "json"],
     ),
     (
         "lms_users_upload",

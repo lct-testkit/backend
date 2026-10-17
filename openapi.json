@@ -11255,8 +11255,10 @@
           "format": {
             "enum": [
               "xlsx",
+              "xls",
               "pdf",
-              "png"
+              "png",
+              "json"
             ],
             "title": "Format",
             "type": "string"
@@ -11353,8 +11355,10 @@
           "format": {
             "enum": [
               "xlsx",
+              "xls",
               "pdf",
-              "png"
+              "png",
+              "json"
             ],
             "title": "Format",
             "type": "string"
@@ -11372,6 +11376,18 @@
             "format": "uuid",
             "title": "Requested By",
             "type": "string"
+          },
+          "result_meta": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result Meta"
           },
           "row_count": {
             "anyOf": [
@@ -11502,8 +11518,10 @@
             "items": {
               "enum": [
                 "xlsx",
+                "xls",
                 "pdf",
-                "png"
+                "png",
+                "json"
               ],
               "type": "string"
             },
