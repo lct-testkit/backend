@@ -27,8 +27,8 @@ from __future__ import annotations
 import datetime as dt
 import io
 import json
+import re
 import uuid
-import zoneinfo
 from decimal import Decimal
 from typing import Any
 
@@ -38,7 +38,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402 — backend должен быть выбран до импорта pyplot
 from openpyxl import Workbook
 from openpyxl.cell import WriteOnlyCell
-from openpyxl.styles import Alignment, Font
+from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
@@ -50,7 +50,12 @@ from app.modules.reporting.builders import (
     ReportDataset,
 )
 from app.modules.reporting.models import ReportFormat
-from app.modules.reporting.rendering_xls import ReportTooLargeError, render_xls, sheet_title
+from app.modules.reporting.rendering_xls import (
+    ReportTooLargeError,
+    render_xls,
+    resolve_tz,
+    sheet_title,
+)
 from app.modules.reporting.spec import derived_chart_kinds
 from app.modules.signing.rendering import html_to_pdf, render_template_html
 
@@ -67,6 +72,7 @@ __all__ = [
     "render_report",
     "render_xls",
     "render_xlsx",
+    "report_file_name",
 ]
 
 CONTENT_TYPES: dict[str, str] = {
@@ -84,6 +90,25 @@ CONTENT_TYPES: dict[str, str] = {
 #: единообразным местом правки, если когда-нибудь появится формат, где это не так.
 FILE_EXTENSIONS: dict[str, str] = {fmt.value: fmt.value for fmt in ReportFormat}
 
+#: Запрещённые в имени файла Windows знаки (`\/:*?"<>`) и управляющие символы (B1-6) — то же
+#: правило, что сайт заказчика предполагает для скачанного файла независимо от ОС пользователя.
+_FORBIDDEN_FILENAME_CHARS = re.compile(r'[\\/:*?"<>\x00-\x1f]')
+#: Предел длины имени файла без расширения (B1-6) — длинное название отчёта/параметров не должно
+#: упираться в ограничения файловой системы (Windows — 260 знаков на весь путь, с запасом).
+_MAX_FILENAME_LENGTH = 100
+
+
+def report_file_name(title: str, generated_at: dt.datetime, extension: str) -> str:
+    """Имя файла отчёта (B1-6): `{название}_{ГГГГ-ММ-ДД}.{расширение}` — раньше (`f"{dataset.
+    title}.{job.format}"`, `reporting.service.generate`) повторная выгрузка одного и того же
+    вида отчёта в разные дни давала одинаковое имя файла, браузер различал их только
+    `(1)`/`(2)` в скачанных копиях. Дата — по `generated_at` (момент рендера, не момент запроса
+    задания: тяжёлый отчёт может уйти в очередь и построиться позже)."""
+    safe_title = _FORBIDDEN_FILENAME_CHARS.sub("_", title).strip() or "Отчёт"
+    name = f"{safe_title}_{generated_at.strftime('%Y-%m-%d')}"[:_MAX_FILENAME_LENGTH]
+    return f"{name}.{extension}"
+
+
 #: Виды отчёта, для которых определён график. Ключ — `report_templates.code`. B1-2/B1-8:
 #: производный от `ReportSpec.chart` (`reporting.spec`), а не самостоятельный литерал — иначе
 #: новый график в `ReportSpec` и регистрация в `rendering.render_png` могли бы расползтись.
@@ -100,16 +125,27 @@ class RenderNotSupportedError(Exception):
     """
 
 
+#: B1-6, сокращённый вариант A (полный план задачи сравнивал его с переходом на reportlab
+#: Platypus — вариант B, не сделан в этом черновике): CSS `@page` на существующем xhtml2pdf,
+#: без замены движка. Альбомная ориентация проверена (`tests/test_reporting.py` —
+#: `mediabox.width > mediabox.height`); `thead { display: table-header-group }` — попытка
+#: повторить строку заголовка на каждой печатной странице, поддержка xhtml2pdf для этого на
+#: длинных таблицах не проверена (в отличие от ориентации) и не покрыта тестом.
 _TABLE_TEMPLATE = """
+<style>
+  @page { size: A4 landscape; margin: 10mm; }
+  table { width:100%; border-collapse:collapse; font-size:9px; }
+  thead { display: table-header-group; }
+  th { border:1px solid #999; padding:4px 8px; background:#eef1fa; text-align:left; }
+  td { border:1px solid #ccc; padding:4px 8px; }
+</style>
 <h2>{{ title }}</h2>
 {% if note %}<p><em>{{ note }}</em></p>{% endif %}
-<table style="width:100%; border-collapse:collapse;">
+<table>
   <thead>
     <tr>
       {% for col in columns %}
-      <th style="border:1px solid #999; padding:4px 8px; background:#eef1fa; text-align:left;">
-        {{ col }}
-      </th>
+      <th>{{ col }}</th>
       {% endfor %}
     </tr>
   </thead>
@@ -117,7 +153,7 @@ _TABLE_TEMPLATE = """
     {% for row in rows %}
     <tr>
       {% for cell in row %}
-      <td style="border:1px solid #ccc; padding:4px 8px;">{{ "" if cell is none else cell }}</td>
+      <td>{{ "" if cell is none else cell }}</td>
       {% endfor %}
     </tr>
     {% endfor %}
@@ -132,7 +168,12 @@ def _xlsx_cell(value: Any) -> Any:
     конечном счёте происходят из свободных текстовых полей (название
     организации, ФИО КАМа, название сделки), которые пользователь мог
     ввести с ведущим `=`/`+`/`-`/`@`. `imports.parsing.sanitize_formula` уже
-    решает это для сгенерированных xlsx импорта — тот же риск, тот же приём."""
+    решает это для сгенерированных xlsx импорта — тот же риск, тот же приём.
+
+    Не знает про `kind` каталога колонок (B1-2) и не трогает дату/время — этим занимается
+    `_xlsx_data_cell` в `render_xlsx`, эта функция осталась как есть (в т.ч. для существующих
+    тестов `TestXlsxRendering`/`TestCsvInjectionProtection`) и используется ей как последний шаг
+    для всего, что не дата/`Decimal`."""
     if value is None:
         return ""
     if isinstance(value, str):
@@ -142,14 +183,108 @@ def _xlsx_cell(value: Any) -> Any:
     return str(value)
 
 
-def render_xlsx(dataset: ReportDataset) -> bytes:
+#: Числовой формат ячейки xlsx по `kind` каталога колонок (B1-2/B1-6) — те же форматы, что уже
+#: применяет xls (`rendering_xls._XlsStyles`), чтобы оба формата показывали одно и то же число
+#: одинаково оформленным.
+_XLSX_NUMBER_FORMATS: dict[str, str] = {
+    "int": "0",
+    "money": "#,##0.00",
+    "pct": "0.0",
+    "days": "0.0",
+    "date": "DD.MM.YYYY",
+    "datetime": "DD.MM.YYYY HH:MM",
+}
+
+
+def _xlsx_column_width(title: str) -> float:
+    """Ширина колонки по заголовку (B1-6) — та же эвристика 8–60 знаков, что уже применяет xls
+    (`rendering_xls._column_width`), в единицах xlsx (символы, без множителя 1/256 у BIFF8).
+    Точный расчёт по 95-му процентилю длины значений первых строк — из полного плана B1-6, в эту
+    сокращённую реализацию не вошёл: оценка по одному заголовку даёт разумный результат уже
+    сейчас и не требует второго прохода по строкам перед записью (write-only не допускает
+    произвольный доступ назад к уже записанным ячейкам)."""
+    return float(max(8, min(60, len(title) + 2)))
+
+
+def _xlsx_data_cell(sheet: Any, value: Any, kind: str | None, tz: dt.tzinfo) -> Any:
+    """Ячейка таблицы отчёта с учётом `kind` каталога колонок (B1-2/B1-6). Раньше (черновик
+    B1-4/`_xlsx_cell`) `datetime`/`date` превращались в `str(value)` — ячейка в файле получала
+    текст вида `2026-01-05 00:00:00+00:00` вместо настоящей даты Excel с форматом ячейки; то же
+    было с `Decimal` (денежные колонки до приведения конкретным builder'ом к `float`) — число
+    отображалось строкой и не суммировалось формулами Excel. `kind=None` (вид отчёта без
+    каталога колонок, B1-2) — дата получает формат по умолчанию, не наследует поведение
+    `_xlsx_cell`."""
+    if isinstance(value, dt.datetime):
+        local = value.astimezone(tz) if value.tzinfo is not None else value
+        cell = WriteOnlyCell(sheet, value=local.replace(tzinfo=None))
+        cell.number_format = _XLSX_NUMBER_FORMATS.get(kind or "datetime", "DD.MM.YYYY HH:MM")
+        return cell
+    if isinstance(value, dt.date):
+        cell = WriteOnlyCell(sheet, value=value)
+        cell.number_format = _XLSX_NUMBER_FORMATS.get(kind or "date", "DD.MM.YYYY")
+        return cell
+    if isinstance(value, Decimal):
+        value = float(value)
+    if (
+        kind in _XLSX_NUMBER_FORMATS
+        and isinstance(value, int | float)
+        and not isinstance(value, bool)
+    ):
+        cell = WriteOnlyCell(sheet, value=value)
+        cell.number_format = _XLSX_NUMBER_FORMATS[kind]
+        return cell
+    return _xlsx_cell(value)
+
+
+def render_xlsx(dataset: ReportDataset, *, tz_name: str | None = None) -> bytes:
     workbook = Workbook(write_only=True)
     # B1-4: `sheet_title` — общая с xls функция (`rendering_xls`), чистит запрещённые Excel
     # знаки (`[]:*?/\`) из названия отчёта, не только обрезает длину до 31 знака, как было.
     sheet = workbook.create_sheet(title=sheet_title(dataset.title))
-    sheet.append(dataset.columns)
+    # B1-6: закреплённая шапка (первая строка видна при скролле) — у write-only листа openpyxl
+    # `freeze_panes` должен быть задан ДО первого `append()`: присвоение после молча не попадает
+    # в сохранённый файл (проверено round-trip через `load_workbook`), это не очевидно из
+    # документации openpyxl.
+    sheet.freeze_panes = "A2"
+    tz = resolve_tz(tz_name)
+    kinds: list[str | None] = (
+        list(dataset.kinds) if dataset.kinds is not None else [None] * len(dataset.columns)
+    )
+
+    header_font = Font(bold=True)
+    header_fill = PatternFill("solid", fgColor="D9D9D9")
+    header_align = Alignment(wrap_text=True, vertical="center")
+    header_cells = []
+    for title in dataset.columns:
+        header_cell = WriteOnlyCell(sheet, value=title)
+        header_cell.font = header_font
+        header_cell.fill = header_fill
+        header_cell.alignment = header_align
+        header_cells.append(header_cell)
+    sheet.append(header_cells)
+
     for row in dataset.rows:
-        sheet.append([_xlsx_cell(value) for value in row])
+        sheet.append(
+            [
+                _xlsx_data_cell(sheet, value, kinds[index] if index < len(kinds) else None, tz)
+                for index, value in enumerate(row)
+            ]
+        )
+
+    for index, title in enumerate(dataset.columns, start=1):
+        sheet.column_dimensions[get_column_letter(index)].width = _xlsx_column_width(title)
+
+    if dataset.columns:
+        last_column = get_column_letter(len(dataset.columns))
+        sheet.auto_filter.ref = f"A1:{last_column}{len(dataset.rows) + 1}"
+    # Печать: альбомная ориентация на одну страницу в ширину, строка заголовка повторяется на
+    # каждой печатной странице — те же требования B1-6, что уже выполняет xls (`render_xls`).
+    sheet.print_title_rows = "1:1"
+    sheet.page_setup.orientation = "landscape"
+    sheet.page_setup.fitToWidth = 1
+    sheet.page_setup.fitToHeight = 0
+    sheet.sheet_properties.pageSetUpPr.fitToPage = True
+
     buffer = io.BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
@@ -329,10 +464,9 @@ def render_json(
     ломает интегратора, который уже читает файл по ключам. Кодировка UTF-8 без BOM (`ensure_
     ascii=False`), `allow_nan=False` — `float('nan')`/`inf` в данных поднимет понятную `ValueError`
     при сериализации, а не отдаст невалидный JSON наружу."""
-    try:
-        tz = zoneinfo.ZoneInfo(tz_name) if tz_name else zoneinfo.ZoneInfo(DEFAULT_TIMEZONE_NAME)
-    except (zoneinfo.ZoneInfoNotFoundError, ValueError):
-        tz = zoneinfo.ZoneInfo(DEFAULT_TIMEZONE_NAME)
+    # B1-6: `resolve_tz` — общая с xls/xlsx функция (`rendering_xls`), один и тот же откат на
+    # `DEFAULT_TIMEZONE_NAME` для неизвестного/отсутствующего имени во всех трёх форматах.
+    tz = resolve_tz(tz_name)
 
     keys = dataset.keys if dataset.keys is not None else [None] * len(dataset.columns)
     kinds = dataset.kinds if dataset.kinds is not None else ["text"] * len(dataset.columns)
@@ -583,16 +717,17 @@ def render_report(
     params: dict[str, Any] | None = None,
     tz_name: str | None = None,
 ) -> bytes:
-    """`job_id`/`params`/`tz_name` — только для `format=json` (B1-5): конверт файла несёт, с
-    какими параметрами и для какого задания он построен. Остальные форматы их не используют —
-    они приходят через один и тот же вызов из `reporting.service._render_serialized`, чтобы не
-    заводить отдельную функцию рендера ради трёх новых аргументов одного формата из пяти."""
+    """`job_id`/`params` — только для `format=json` (B1-5): конверт файла несёт, с какими
+    параметрами и для какого задания он построен. `tz_name` (B1-6) нужен и xlsx/xls — перевод
+    `datetime` в пояс пользователя при рендере ячейки, не только конверту json. Все аргументы
+    приходят через один и тот же вызов из `reporting.service._render_serialized`, чтобы не
+    заводить отдельную функцию рендера на каждый формат."""
     if format == ReportFormat.XLSX.value:
         if template_code == LMS_USERS_UPLOAD:
             return render_lms_users_xlsx(dataset)
-        return render_xlsx(dataset)
+        return render_xlsx(dataset, tz_name=tz_name)
     if format == ReportFormat.XLS.value:
-        return render_xls(dataset)
+        return render_xls(dataset, tz_name=tz_name)
     if format == ReportFormat.PDF.value:
         return render_pdf(dataset)
     if format == ReportFormat.PNG.value:

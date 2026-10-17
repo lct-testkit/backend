@@ -145,6 +145,8 @@ async def get_report_data(
         note=dataset.note,
         generated_at=dataset.generated_at,
         row_count=len(dataset.rows),
+        total_rows=dataset.total_rows,
+        truncated=dataset.truncated,
     )
 
 

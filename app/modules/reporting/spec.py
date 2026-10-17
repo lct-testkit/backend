@@ -23,6 +23,8 @@ from typing import Any
 from app.core.errors import FieldError, ValidationError
 from app.modules.reporting.builders import (
     FILE_ONLY_REPORTS,
+    LEARNING_PROGRESS_COLUMNS,
+    LICENSE_REGISTER_COLUMNS,
     LMS_USERS_UPLOAD,
     REGISTER_COLUMNS,
     REPORT_BUILDERS,
@@ -136,10 +138,14 @@ REPORT_SPECS: dict[str, ReportSpec] = {
     "learning_progress": ReportSpec(
         code="learning_progress",
         builder=REPORT_BUILDERS["learning_progress"],
-        # Переопределяется в B1-10 (`last_activity_at`/`enrolled_at`/`completed_at`) вместе с
-        # настоящей реализацией builder'а — пока заглушка, одного значения достаточно.
-        date_fields=("created_at",),
-        data_categories=("ФИО контактов/учащихся", "прогресс обучения"),
+        estimator=REPORT_ESTIMATORS["learning_progress"],
+        columns=LEARNING_PROGRESS_COLUMNS,
+        # `limit` — структурный ключ (`_STRUCTURAL_KEYS` этого модуля), не нужен в `params`
+        # явно — тот же приём, что у `deal_register` чуть выше.
+        # B1-10: период по умолчанию — активность учащегося, не заведение сделки (у заглушки
+        # было только `created_at`, которого даже не существовало бы в выборе пользователя).
+        date_fields=("last_activity_at", "enrolled_at", "completed_at"),
+        data_categories=("ФИО учащихся (инициалы)", "прогресс обучения"),
     ),
     LMS_USERS_UPLOAD: ReportSpec(
         code=LMS_USERS_UPLOAD,
@@ -152,6 +158,33 @@ REPORT_SPECS: dict[str, ReportSpec] = {
         data_categories=(
             "ФИО, телефон и email учащихся",
             "ПДн учащихся (СНИЛС, паспорт, дата рождения, адрес регистрации, диплом)",
+        ),
+    ),
+    "product_demand": ReportSpec(
+        code="product_demand",
+        builder=REPORT_BUILDERS["product_demand"],
+        # Нет оценщика — та же причина, что у остальных агрегатов этого модуля (kam_summary,
+        # region_summary, …): группировка по каталогу продуктов/направлений структурно мала.
+        params=frozenset({"level", "top", "sort_by"}),
+        date_fields=("created_at", "closed_at", "updated_at"),
+        # B1-8 (диаграмма "demand") не сделан в этом черновике — `chart` остаётся `None`, отчёт
+        # отдаёт только табличные форматы, пока график не зарегистрирован.
+        data_categories=(),
+    ),
+    "license_register": ReportSpec(
+        code="license_register",
+        builder=REPORT_BUILDERS["license_register"],
+        estimator=REPORT_ESTIMATORS["license_register"],
+        columns=LICENSE_REGISTER_COLUMNS,
+        params=frozenset({"vendors", "transfer_statuses", "valid_year", "expired"}),
+        # Нет продуктов/направлений/ответственных — лицензия привязана к вузу, не к сделке
+        # (`vendors`/`transfer_statuses`/`valid_year`/`expired` — свои параметры выше, не из
+        # общего набора). `organization_ids` остаётся, потому что реестр и правда по вузам.
+        common_filters=frozenset({"date_from", "date_to", "organization_ids"}),
+        date_fields=("license_signed_at", "created_at"),
+        # B1-8 (диаграмма "license_status") не сделан в этом черновике.
+        data_categories=(
+            "ФИО менеджеров и ответственных от вуза (маскируются без права contact:reveal)",
         ),
     ),
 }

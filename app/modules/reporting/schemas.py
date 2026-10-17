@@ -124,6 +124,12 @@ class ReportDataOut(BaseModel):
     note: str | None = None
     generated_at: dt.datetime
     row_count: int
+    # B1-6: то же усечение по `limit`, что и у файла (`ReportDataset.total_rows`/`truncated`,
+    # `reporting.builders`) — `/data` отдаёт тот же датасет, значит, и то же предупреждение о
+    # неполной выдаче. `None`/`False` у builder'ов без оценки (агрегаты, см. докстринг
+    # `ReportDataset`) — усечения не было, оценивать незачем.
+    total_rows: int | None = None
+    truncated: bool = False
 
 
 # =============================================================================

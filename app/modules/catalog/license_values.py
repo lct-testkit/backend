@@ -96,6 +96,16 @@ _STATUS_LABELS: dict[str, str] = {
     "not_started": "не начато",
     "declined": "отказ",
 }
+#: Отображение статуса в отчёте «Реестр лицензий» (B1-11) — существительное/краткое
+#: прилагательное с большой буквы, не глагольная форма `_STATUS_LABELS` выше (та — для подсказки
+#: парсера). Согласовано со значениями B3-3 (`parse_transfer_status`), а не самостоятельный
+#: словарь: новый код статуса добавляется в оба места одной правкой рядом.
+TRANSFER_STATUS_LABELS: dict[str, str] = {
+    "not_started": "Не начата",
+    "in_progress": "В работе",
+    "transferred": "Передано",
+    "declined": "Отказ",
+}
 _STATUS_HINT = ", ".join(_STATUS_LABELS[code] for code in _ENGLISH_STATUSES)
 
 _SIGNED_TRUE = frozenset({"да", "подписан", "подписана", "подписано", "+", "1", "true", "yes"})

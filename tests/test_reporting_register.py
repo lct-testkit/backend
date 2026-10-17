@@ -354,3 +354,131 @@ class TestColumns:
         assert response.json()["code"] == "CRM-1001"
         after = run(client, _job_count)
         assert after == before
+
+
+class TestTruncation:
+    """B1-6: усечение по `limit` не должно быть молчаливым. Мир `make_register_world` даёт пять
+    строк зерна "product" под HEAD без фильтров (D1-P, D1-Q, D2-P, D3-Q, D4 без продукта) — D5
+    мягко удалена и не считается."""
+
+    def test_limit_below_the_total_marks_truncated_with_the_real_total(self, client) -> None:
+        world = run(client, make_register_world)
+        dataset = run(client, _dataset, world, "HEAD", {"limit": 2})
+        assert len(dataset.rows) == 2
+        assert dataset.truncated is True
+        assert dataset.total_rows == 5
+        assert dataset.note is not None
+        assert "Показано 2 из 5" in dataset.note
+
+    def test_limit_matching_the_total_exactly_is_not_truncated(self, client) -> None:
+        world = run(client, make_register_world)
+        dataset = run(client, _dataset, world, "HEAD", {"limit": 5})
+        assert len(dataset.rows) == 5
+        assert dataset.truncated is False
+        # Оценка всё равно выполняется (строк столько же, сколько лимит — по одному этому
+        # нельзя отличить «ровно лимит» от «лимит меньше реального числа строк»), но раз она
+        # не больше лимита, усечения нет — только `total_rows` подтверждает это.
+        assert dataset.total_rows == 5
+
+    def test_limit_above_the_total_skips_the_estimate_query(self, client) -> None:
+        world = run(client, make_register_world)
+        dataset = run(client, _dataset, world, "HEAD", {"limit": 1000})
+        assert len(dataset.rows) == 5
+        assert dataset.truncated is False
+        assert dataset.total_rows is None
+
+    def test_truncation_note_combines_with_the_amount_note(self, client) -> None:
+        """Оба замечания (про сумму на первой строке сделки и про усечение) видны в файле
+        одновременно, не теряя друг друга."""
+        world = run(client, make_register_world)
+        columns = [
+            "organization",
+            "direction",
+            "product",
+            "status",
+            "owner",
+            "number",
+            "title",
+            "amount",
+        ]
+        dataset = run(client, _dataset, world, "HEAD", {"limit": 2, "columns": columns})
+        assert dataset.note is not None
+        assert "Сумма сделки указана на первой строке сделки" in dataset.note
+
+
+class TestDataEndpointReflectsTruncation:
+    """B1-6: `ReportDataOut` (`GET /api/reports/{id}/data`) несёт то же усечение, что и файл
+    (`ReportDataset.total_rows`/`truncated`) — раньше схема ответа не содержала этих полей
+    вовсе."""
+
+    def _ensure_deal_register_template(self, client) -> None:
+        from sqlalchemy import select as sa_select
+
+        from app.core.db import session_scope
+        from app.modules.reporting.models import ReportTemplate
+
+        async def _ensure() -> None:
+            async with session_scope() as session:
+                existing = await session.scalar(
+                    sa_select(ReportTemplate.id).where(ReportTemplate.code == "deal_register")
+                )
+                if existing is not None:
+                    return
+                session.add(
+                    ReportTemplate(
+                        code="deal_register",
+                        name="Сделки по вузам и направлениям",
+                        description="Реестр сделок.",
+                        query_def={"kind": "deal_register"},
+                        allowed_roles=[],
+                        default_params={"limit": 1000},
+                        output_formats=["xlsx", "json"],
+                        is_active=True,
+                    )
+                )
+
+        run(client, _ensure)
+
+    async def _load_user(self, user_id: uuid.UUID):
+        from app.core.db import session_scope
+        from app.modules.identity.models import User
+
+        async with session_scope() as session:
+            user = await session.get(User, user_id)
+            assert user is not None
+            session.expunge(user)
+            return user
+
+    def test_data_endpoint_reports_total_rows_and_truncated(self, client, monkeypatch) -> None:
+        import app.modules.reporting.service as reporting_service
+
+        async def fake_ensure_bucket(bucket: str) -> None:
+            return None
+
+        async def fake_upload(*, bucket: str, key: str, body: bytes, content_type: str) -> None:
+            return None
+
+        monkeypatch.setattr(reporting_service, "ensure_bucket", fake_ensure_bucket)
+        monkeypatch.setattr(reporting_service, "upload_object_bytes", fake_upload)
+
+        world = run(client, make_register_world)
+        self._ensure_deal_register_template(client)
+        # `make_register_world` уже завела HEAD-пользователя с нужным `team_id` — здесь он
+        # только загружается, чтобы авторизоваться им же (`authenticate`), а не создаётся
+        # заново: новый `_make_user("HEAD")` не входил бы в `world.team_id` и видел бы 0 строк.
+        head = run(client, self._load_user, world.user_ids["HEAD"])
+        client.headers["X-CSRF-Token"] = authenticate(client, head)
+
+        job = client.post(
+            "/api/reports",
+            json={"template_code": "deal_register", "format": "json", "params": {"limit": 2}},
+        ).json()
+        assert job["status"] == "completed", job
+
+        data = client.get(f"/api/reports/{job['id']}/data")
+        assert data.status_code == 200, data.text
+        body = data.json()
+        assert body["truncated"] is True
+        assert body["total_rows"] == 5
+        assert len(body["rows"]) == 2
+        assert body["note"] is not None and "Показано 2 из 5" in body["note"]

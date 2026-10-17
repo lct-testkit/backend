@@ -62,7 +62,12 @@ from app.modules.reporting.models import (
     ReportJobStatus,
     ReportTemplate,
 )
-from app.modules.reporting.rendering import CONTENT_TYPES, FILE_EXTENSIONS, render_report
+from app.modules.reporting.rendering import (
+    CONTENT_TYPES,
+    FILE_EXTENSIONS,
+    render_report,
+    report_file_name,
+)
 from app.modules.reporting.rendering_xls import XLS_MAX_ROWS, ReportTooLargeError
 from app.modules.reporting.schemas import ReportColumnOut, ReportTemplateOut
 from app.modules.reporting.spec import REPORT_SPECS, derived_data_categories, validate_params
@@ -371,7 +376,10 @@ class ReportJobService:
             id=file_id,
             storage_key=storage_key,
             bucket=bucket,
-            original_filename=f"{dataset.title}.{extension}",
+            # B1-6: `{название}_{ГГГГ-ММ-ДД}.{расширение}`, не просто `{dataset.title}.{extension}`
+            # — повторная выгрузка одного и того же вида отчёта в другой день давала то же имя
+            # файла, браузер различал копии только припиской `(1)`/`(2)`.
+            original_filename=report_file_name(dataset.title, dataset.generated_at, extension),
             mime_type=CONTENT_TYPES[job.format],
             size_bytes=len(content),
             sha256=hashlib.sha256(content).hexdigest(),
