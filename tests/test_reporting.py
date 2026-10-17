@@ -777,8 +777,28 @@ class TestReportJobs:
             "/api/reports", json={"template_code": "sla_compliance", "format": "xlsx"}
         )
         assert response.status_code == 201, response.text
-        assert response.json()["status"] == "completed"
-        assert response.json()["progress_pct"] == 100
+        body = response.json()
+        assert body["status"] == "completed"
+        assert body["progress_pct"] == 100
+        # B9-8 (OPEN-ISSUES B-18): `file_id`/`params` были на модели (`ReportJob`), но не в
+        # `ReportJobOut` — клиент не мог узнать параметры запуска или ссылку на файл без БД.
+        assert body["params"] == {}
+        assert body["file_id"] is not None
+
+    def test_seed_marker_is_hidden_from_params(self, client, monkeypatch) -> None:
+        """B9-8: `_seed` (демо-история отчётов, B1-14, `reporting.seed.seed_demo_report_history`)
+        — служебный ключ, не для интегратора; тот же фильтр, что `rendering.render_json`
+        уже применяет к конверту json-файла."""
+        self._stub_s3(monkeypatch)
+        self._ensure_templates(client, "sla_compliance")
+        kam = self._kam(client)
+        job_id = self._insert_job(
+            client, kam, status="completed", params={"_seed": "demo", "months": 3}
+        )
+
+        response = client.get(f"/api/reports/{job_id}")
+        assert response.status_code == 200, response.text
+        assert response.json()["params"] == {"months": 3}
 
     def test_download_of_an_unfinished_report_is_not_ready(self, client) -> None:
         kam = self._kam(client)

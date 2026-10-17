@@ -125,10 +125,11 @@ async def list_reports(
     "/{report_id}",
     summary="Статус отчёта",
     description=(
-        "Статус задачи (`queued`/`processing`/`completed`/`failed`), прогресс и `result_meta` "
-        "готового результата (строки, усечение, момент снимка данных). Доступен только тому, "
-        "кто запросил отчёт, либо ADMIN — иначе 403 CRM-1102; не найден — 404 CRM-9004. "
-        "Роль: KAM, HEAD, ADMIN."
+        "Статус задачи (`queued`/`processing`/`completed`/`failed`), прогресс, параметры "
+        "запуска (`params`) и `result_meta` готового результата (строки, усечение, момент "
+        "снимка данных); `file_id` — только внутренняя ссылка на файл, скачивание — через "
+        "`GET /api/reports/{report_id}/download`. Доступен только тому, кто запросил отчёт, "
+        "либо ADMIN — иначе 403 CRM-1102; не найден — 404 CRM-9004. Роль: KAM, HEAD, ADMIN."
     ),
     response_model=ReportJobOut,
 )

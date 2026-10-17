@@ -5306,6 +5306,17 @@
             ],
             "title": "Initiated By"
           },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
           "mapping": {
             "additionalProperties": {
               "type": "string"
@@ -11366,6 +11377,18 @@
             ],
             "title": "Expires At"
           },
+          "file_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "File Id"
+          },
           "finished_at": {
             "anyOf": [
               {
@@ -11393,6 +11416,11 @@
             "format": "uuid",
             "title": "Id",
             "type": "string"
+          },
+          "params": {
+            "additionalProperties": true,
+            "title": "Params",
+            "type": "object"
           },
           "progress_pct": {
             "title": "Progress Pct",
@@ -11444,6 +11472,7 @@
         "required": [
           "id",
           "template_code",
+          "params",
           "format",
           "status",
           "progress_pct",
@@ -18514,6 +18543,72 @@
           }
         ],
         "summary": "Удалить версию реестра",
+        "tags": [
+          "registry"
+        ]
+      },
+      "get": {
+        "description": "Прогресс разбора конкретной выгрузки без постраничного поиска в списке: статус (`pending`/`running`/`completed`/`failed`) и `entries_count` — счётчик растёт по ходу фоновой задачи, пока `status=running`. Не существует — 404 CRM-9004. Роль: ADMIN.",
+        "operationId": "get_registry_version_api_admin_registry_versions__version_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Version Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistryVersionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "summary": "Карточка версии реестра",
         "tags": [
           "registry"
         ]
@@ -25680,6 +25775,79 @@
         ]
       }
     },
+    "/api/import-presets/{preset_id}": {
+      "delete": {
+        "description": "Жёсткое удаление — пресет только сохранённый маппинг колонок, не бизнес-сущность с историей; на уже созданные задания импорта не влияет (маппинг скопирован в них при применении пресета). Не существует — 404 CRM-9004. Роль: HEAD, ADMIN.",
+        "operationId": "delete_import_preset_api_import_presets__preset_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "preset_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Preset Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Удалить пресет маппинга",
+        "tags": [
+          "imports"
+        ]
+      }
+    },
     "/api/imports": {
       "get": {
         "description": "Задания импорта всех типов (организации, продукты, лицензии и т.п.) со статусом и счётчиками строк, от новых к старым. Роль: HEAD, ADMIN.",
@@ -30691,7 +30859,7 @@
     },
     "/api/reports/{report_id}": {
       "get": {
-        "description": "Статус задачи (`queued`/`processing`/`completed`/`failed`), прогресс и `result_meta` готового результата (строки, усечение, момент снимка данных). Доступен только тому, кто запросил отчёт, либо ADMIN — иначе 403 CRM-1102; не найден — 404 CRM-9004. Роль: KAM, HEAD, ADMIN.",
+        "description": "Статус задачи (`queued`/`processing`/`completed`/`failed`), прогресс, параметры запуска (`params`) и `result_meta` готового результата (строки, усечение, момент снимка данных); `file_id` — только внутренняя ссылка на файл, скачивание — через `GET /api/reports/{report_id}/download`. Доступен только тому, кто запросил отчёт, либо ADMIN — иначе 403 CRM-1102; не найден — 404 CRM-9004. Роль: KAM, HEAD, ADMIN.",
         "operationId": "get_report_api_reports__report_id__get",
         "parameters": [
           {

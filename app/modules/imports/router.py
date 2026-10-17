@@ -309,3 +309,21 @@ async def list_import_presets(
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
     built: Page = Page.build(rows, limit=page.limit, serializer=ImportPresetOut.model_validate)
     return ImportPresetListResponse(items=built.items, next_cursor=built.next_cursor)
+
+
+@import_presets_router.delete(
+    "/{preset_id}",
+    summary="Удалить пресет маппинга",
+    description=(
+        "Жёсткое удаление — пресет только сохранённый маппинг колонок, не бизнес-сущность с "
+        "историей; на уже созданные задания импорта не влияет (маппинг скопирован в них при "
+        "применении пресета). Не существует — 404 CRM-9004. Роль: HEAD, ADMIN."
+    ),
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_import_preset(
+    session: DbSession, _: ImportRunPerm, preset_id: Annotated[uuid.UUID, Path()]
+) -> None:
+    service = ImportService(session)
+    preset = await service.get_preset_or_404(preset_id)
+    await service.delete_preset(preset)

@@ -40,6 +40,8 @@ from app.modules.imports.fields import (
 from app.modules.imports.mapping import _levenshtein, suggest_mapping
 from app.modules.imports.parsing import parse_csv, parse_xlsx, sanitize_formula
 from tests.conftest import TEST_DATABASE_URL, _make_user, authenticate, run
+from tests.crm_helpers import login
+from tests.import_helpers import make_inn, start_import, xlsx_bytes
 
 
 class TestPhoneNormalization:
@@ -960,3 +962,64 @@ class TestLicenseImportEndToEnd:
         assert job.status == ImportJobStatus.FAILED.value
         assert job.last_error
         assert job.finished_at is not None
+
+        # B9-8 (OPEN-ISSUES B-14): миграция 0025 и запись причины в `imports.tasks` были с
+        # прошлого спринта, но `ImportJobOut` не отдавал поле — пользователь видел только
+        # статус `failed` без объяснения.
+        api_job = client.get(f"/api/imports/{job_id}").json()
+        assert api_job["last_error"] == job.last_error
+
+
+class TestImportPresets:
+    """B9-8 (OPEN-ISSUES B-15): `DELETE /api/import-presets/{id}` не было вовсе. Настоящая
+    Postgres обязательна — см. докстринг модуля."""
+
+    pytestmark = pytest.mark.skipif(
+        not TEST_DATABASE_URL, reason="нужен TEST_DATABASE_URL с применёнными миграциями"
+    )
+
+    def _org_rows(self) -> tuple[bytes, dict[str, str]]:
+        content = xlsx_bytes(["Наименование", "ИНН"], [[f"Университет {make_inn()}", make_inn()]])
+        return content, {"Наименование": "name", "ИНН": "inn"}
+
+    def test_save_as_preset_then_list_and_delete(self, client, monkeypatch) -> None:
+        head = login(client, "HEAD")
+        content, mapping = self._org_rows()
+        preset_name = f"Пресет {uuid.uuid4().hex[:8]}"
+
+        started = start_import(
+            client,
+            monkeypatch,
+            head,
+            entity_type="organization",
+            content=content,
+            source_format="xlsx",
+            mapping=mapping,
+            dry_run=False,
+        )
+        # `start_import` уже сохранил маппинг без пресета; второй вызов — с `save_as_preset`
+        # (B9-8 проверяет жизненный цикл пресета, не форму самого маппинга).
+        saved = client.put(
+            f"/api/imports/{started['id']}/mapping",
+            json={"mapping": mapping, "save_as_preset": preset_name},
+        )
+        assert saved.status_code == 200, saved.text
+
+        listed = client.get("/api/import-presets", params={"entity_type": "organization"})
+        assert listed.status_code == 200, listed.text
+        items = {item["name"]: item for item in listed.json()["items"]}
+        assert preset_name in items
+        preset_id = items[preset_name]["id"]
+        assert items[preset_name]["mapping"] == mapping
+
+        delete_resp = client.delete(f"/api/import-presets/{preset_id}")
+        assert delete_resp.status_code == 204, delete_resp.text
+
+        after = client.get("/api/import-presets", params={"entity_type": "organization"})
+        assert preset_name not in {item["name"] for item in after.json()["items"]}
+
+    def test_deleting_an_unknown_preset_is_404(self, client) -> None:
+        login(client, "HEAD")
+        response = client.delete(f"/api/import-presets/{uuid.uuid4()}")
+        assert response.status_code == 404, response.text
+        assert response.json()["code"] == "CRM-9004"
