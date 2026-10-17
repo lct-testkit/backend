@@ -98,7 +98,7 @@ from app.modules.crm.models import (
 from app.modules.crm.models import (
     SignatureStatus as DealSignatureStatus,
 )
-from app.modules.files.models import Attachment
+from app.modules.files.models import Attachment, File, FileStatus
 from app.modules.identity.models import Role, Team, User, UserStatus
 from app.modules.identity.service import IdentityService
 from app.modules.integration.service import get_outbox_service
@@ -942,8 +942,15 @@ async def build_deal_context(session: AsyncSession, deal: Deal) -> dict[str, Any
 
     `attachments` — файлы, привязанные к сделке, по категориям: условие
     `attachments.contract exists` выполняется, когда у сделки есть хотя бы одно
-    неудалённое вложение этой категории. Категории без вложений в словаре нет,
-    а DSL по конструкции не падает на отсутствующем поле (раздел 8).
+    неудалённое вложение этой категории, независимо от шага, на котором оно
+    приложено. Категории без вложений в словаре нет, а DSL по конструкции не
+    падает на отсутствующем поле (раздел 8).
+
+    `step_attachments` (B2-7) — тот же разрез, но только по вложениям с
+    `status_id == deal.status_id`: файл, приложенный на предыдущем шаге, не
+    засчитывается условию `step_attachments.contract exists`, хотя и остаётся
+    в `attachments.contract`. Используется этим же контекстом и в
+    `available_transitions` (чек-лист перехода получает условия без правок).
     """
     open_tasks = await session.scalar(
         select(func.count())
@@ -958,15 +965,18 @@ async def build_deal_context(session: AsyncSession, deal: Deal) -> dict[str, Any
         select(func.count()).select_from(DealProduct).where(DealProduct.deal_id == deal.id)
     )
     attachments: dict[str, list[str]] = {}
+    step_attachments: dict[str, list[str]] = {}
     attachment_rows = await session.execute(
-        select(Attachment.category, Attachment.file_id).where(
+        select(Attachment.category, Attachment.file_id, Attachment.status_id).where(
             Attachment.entity_type == "deal",
             Attachment.entity_id == deal.id,
             Attachment.deleted_at.is_(None),
         )
     )
-    for category, file_id in attachment_rows.all():
+    for category, file_id, status_id in attachment_rows.all():
         attachments.setdefault(category, []).append(str(file_id))
+        if status_id == deal.status_id:
+            step_attachments.setdefault(category, []).append(str(file_id))
     return {
         "amount": deal.amount,
         "currency": deal.currency,
@@ -980,6 +990,7 @@ async def build_deal_context(session: AsyncSession, deal: Deal) -> dict[str, Any
         "students_planned": deal.students_planned,
         "custom_fields": deal.custom_fields or {},
         "attachments": attachments,
+        "step_attachments": step_attachments,
         "tasks": {"open_count": int(open_tasks or 0)},
         "products": {"count": int(products_count or 0)},
     }
@@ -1174,6 +1185,9 @@ class HistoryPage:
     events: list[DealEvent]
     next_statuses_cursor: str | None = None
     next_events_cursor: str | None = None
+    # B2-8: {history_id: число неудалённых вложений этой записи}; записи без вложений в словаре
+    # нет (роутер подставляет 0 по умолчанию, см. `DealStatusHistoryOut.attachments_count`).
+    attachments_counts: dict[uuid.UUID, int] = field(default_factory=dict)
 
 
 async def _ascending_page(
@@ -1948,6 +1962,7 @@ class DealService:
         comment: str | None,
         fields: dict[str, Any],
         expected_version: int,
+        attachment_ids: Sequence[uuid.UUID] = (),
     ) -> Deal:
         conflicting = {"status_id": str(deal.status_id)}
         if deal.version != expected_version:
@@ -2024,6 +2039,13 @@ class DealService:
             new_value = _transition_field_value(deal, key)
             if _json_safe(old_value) != _json_safe(new_value):
                 field_changes[key] = {"old": _json_safe(old_value), "new": _json_safe(new_value)}
+
+        # B2-7: вложения приложенные к переходу привязываются к текущему статусу ДО вычисления
+        # условий — так `step_attachments.*` в `context` ниже видит их как «приложенные на этом
+        # шаге». Привязка к записи истории (`status_history_id`) происходит позже, только если
+        # переход действительно состоится (см. ниже): отказ по условиям откатывает транзакцию
+        # целиком, и даже `status_id` этой привязки не сохранится.
+        bound_attachments = await self._bind_transition_attachments(deal, attachment_ids)
 
         context = await build_deal_context(self._session, deal)
         evaluation = dsl.evaluate(transition["conditions"], context)
@@ -2105,20 +2127,19 @@ class DealService:
             select(WorkflowTransition.id).where(WorkflowTransition.id == transition_id)
         ):
             transition_id = None
-        self._session.add(
-            DealStatusHistory(
-                deal_id=deal.id,
-                from_status_id=previous_status_id,
-                to_status_id=deal.status_id,
-                changed_by=principal.user_id,
-                transition_id=transition_id,
-                reason=HistoryReason.MANUAL.value,
-                comment=comment,
-                duration_in_prev=duration_in_prev,
-                sla_state_at_change=deal.sla_state,
-                changed_at=now,
-            )
+        history_row = DealStatusHistory(
+            deal_id=deal.id,
+            from_status_id=previous_status_id,
+            to_status_id=deal.status_id,
+            changed_by=principal.user_id,
+            transition_id=transition_id,
+            reason=HistoryReason.MANUAL.value,
+            comment=comment,
+            duration_in_prev=duration_in_prev,
+            sla_state_at_change=deal.sla_state,
+            changed_at=now,
         )
+        self._session.add(history_row)
         if comment:
             self._session.add(
                 DealComment(
@@ -2126,6 +2147,13 @@ class DealService:
                 )
             )
         await self._session.flush()
+        for attachment in bound_attachments:
+            # B2-7: привязка к записи истории происходит только сейчас, когда переход точно
+            # состоится — до этого момента любой отказ (условия, обязательные поля, роль)
+            # откатывал бы транзакцию целиком, и `status_history_id` не сохранился бы.
+            attachment.status_history_id = history_row.id
+        if bound_attachments:
+            await self._session.flush()
 
         # Раздел 4.9 п.6, дословно: «Транзакция: UPDATE deals ... + INSERT
         # outbox_events» — на КАЖДОМ переходе, не только там, где DSL
@@ -2161,6 +2189,11 @@ class DealService:
             changes={
                 "status_id": {"old": str(previous_status_id), "new": str(deal.status_id)},
                 **field_changes,
+                **(
+                    {"attachments": {"old": None, "new": [str(a.id) for a in bound_attachments]}}
+                    if bound_attachments
+                    else {}
+                ),
             },
         )
         if deal.closed_at is not None:
@@ -2171,6 +2204,72 @@ class DealService:
                 changes={"status_code": {"old": None, "new": to_status["code"]}},
             )
         return deal
+
+    async def _bind_transition_attachments(
+        self, deal: Deal, attachment_ids: Sequence[uuid.UUID]
+    ) -> list[Attachment]:
+        """B2-7: вложения, присланные в `TransitionRequest.attachments`.
+
+        Каждое обязано: существовать, принадлежать именно этой сделке (не удалённое), быть
+        файлом в статусе `ready` и не быть уже привязанным к другому переходу
+        (`status_history_id is None`). Любое нарушение — 422 `CRM-1001`, ни одно вложение не
+        привязывается (всё или ничего). Строки выбираются `FOR UPDATE`: два параллельных
+        перехода с одним и тем же вложением не должны оба решить, что оно свободно.
+        """
+        if not attachment_ids:
+            return []
+        unique_ids = list(dict.fromkeys(attachment_ids))
+        if len(unique_ids) != len(attachment_ids):
+            raise ValidationError(
+                "Вложение указано в списке дважды",
+                errors=[FieldError(field="attachments", reason="дублирующийся id вложения")],
+            )
+        rows = (
+            await self._session.execute(
+                select(Attachment, File)
+                .join(File, File.id == Attachment.file_id)
+                .where(Attachment.id.in_(unique_ids))
+                .with_for_update(of=Attachment)
+            )
+        ).all()
+        found: dict[uuid.UUID, tuple[Attachment, File]] = {
+            attachment.id: (attachment, file) for attachment, file in rows
+        }
+        errors: list[FieldError] = []
+        attachments: list[Attachment] = []
+        for attachment_id in unique_ids:
+            pair = found.get(attachment_id)
+            if pair is None:
+                errors.append(
+                    FieldError(field="attachments", reason=f"вложение {attachment_id} не найдено")
+                )
+                continue
+            attachment, file = pair
+            if attachment.entity_type != "deal" or attachment.entity_id != deal.id:
+                errors.append(
+                    FieldError(field="attachments", reason="вложение принадлежит другой сделке")
+                )
+            elif attachment.deleted_at is not None:
+                errors.append(FieldError(field="attachments", reason="вложение удалено"))
+            elif attachment.status_history_id is not None:
+                errors.append(
+                    FieldError(
+                        field="attachments",
+                        reason="вложение уже приложено к другому переходу",
+                    )
+                )
+            elif file.status != FileStatus.READY.value:
+                errors.append(FieldError(field="attachments", reason="файл ещё не прошёл проверку"))
+            else:
+                attachments.append(attachment)
+        if errors:
+            raise ValidationError("Вложения перехода не прошли проверку", errors=errors)
+        for attachment in attachments:
+            # Привязываем к статусу, ИЗ которого уходит сделка — это и есть «шаг, на котором
+            # приложен файл» для условия `step_attachments.*` этого перехода.
+            attachment.status_id = deal.status_id
+        await self._session.flush()
+        return attachments
 
     # --- Действия перехода (раздел 8 DSL) -----------------------------------
 
@@ -2494,7 +2593,20 @@ class DealService:
             limit=limit,
             cursor=events_cursor,
         )
-        return HistoryPage(statuses, events, next_statuses, next_events)
+        attachments_counts: dict[uuid.UUID, int] = {}
+        history_ids = [row.id for row in statuses]
+        if history_ids:
+            # B2-8: один запрос на всю страницу, не один на запись (`test_query_budget`).
+            rows = await self._session.execute(
+                select(Attachment.status_history_id, func.count())
+                .where(
+                    Attachment.status_history_id.in_(history_ids),
+                    Attachment.deleted_at.is_(None),
+                )
+                .group_by(Attachment.status_history_id)
+            )
+            attachments_counts = dict(rows.all())
+        return HistoryPage(statuses, events, next_statuses, next_events, attachments_counts)
 
     # --- Счётчики карточки -------------------------------------------------
 

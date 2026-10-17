@@ -22,8 +22,15 @@ from app.core.logging import configure_logging
 from app.core.metrics import start_worker_metrics_server, stop_worker_metrics_server, track_task
 from app.core.redis_client import close_redis
 from app.modules.admin.models import IdempotencyKey
+from app.modules.admin.tasks import sweep_retention
 from app.modules.crm.tasks import sweep_sla_breaches
-from app.modules.identity.tasks import sweep_erasure_requests, sweep_user_lifecycle
+from app.modules.files.antivirus import build_scanner as build_antivirus_scanner
+from app.modules.files.service import register_antivirus_scanner
+from app.modules.identity.tasks import (
+    sweep_erasure_requests,
+    sweep_keycloak_events,
+    sweep_user_lifecycle,
+)
 from app.modules.imports.tasks import sweep_import_jobs
 from app.modules.integration.service import RealOutboxService, register_outbox_service
 from app.modules.integration.tasks import sweep_lms_progress_pull, sweep_outbox_events
@@ -35,7 +42,11 @@ from app.modules.reporting.tasks import (
     refresh_report_materialized_views,
     sweep_report_jobs,
 )
-from app.modules.signing.tasks import sweep_signature_deadlines, sweep_signature_otp_cleanup
+from app.modules.signing.tasks import (
+    sweep_signature_deadlines,
+    sweep_signature_orphans,
+    sweep_signature_reminders,
+)
 from app.modules.workflow.tasks import sweep_status_mapping_jobs
 
 logger = structlog.get_logger(__name__)
@@ -86,6 +97,13 @@ async def startup(ctx: dict[str, Any]) -> None:
     # процессе, публикация (crm/signing) — в `api`. Оба обязаны
     # зарегистрировать реализацию независимо.
     register_outbox_service(RealOutboxService())
+    # B6-4: тот же приём — регистрация реального сканера per-процесс. Воркер пока не
+    # сканирует сам (sweep_quarantined_files не реализован в этом эпике), но будущий код
+    # воркера, который позовёт `get_antivirus_scanner()`, не должен попасть на заглушку
+    # молча только потому, что забыли продублировать регистрацию.
+    clamav_scanner = build_antivirus_scanner(settings)
+    if clamav_scanner is not None:
+        register_antivirus_scanner(clamav_scanner)
     # Метрики фоновых задач считаются в этом процессе, api их не видит: отдаём сами.
     ctx["metrics_server"] = start_worker_metrics_server(settings.worker_metrics_port)
 
@@ -107,13 +125,15 @@ class WorkerSettings:
     functions = [
         ensure_audit_partitions,
         purge_expired_idempotency_keys,
+        sweep_retention,
         sweep_status_mapping_jobs,
         sweep_sla_breaches,
         sweep_registry_imports,
         sweep_registry_drift,
         sweep_import_jobs,
         sweep_signature_deadlines,
-        sweep_signature_otp_cleanup,
+        sweep_signature_orphans,
+        sweep_signature_reminders,
         dispatch_pending_notifications,
         sweep_report_jobs,
         expire_report_files,
@@ -122,8 +142,11 @@ class WorkerSettings:
         sweep_lms_progress_pull,
         sweep_erasure_requests,
         sweep_user_lifecycle,
+        sweep_keycloak_events,
     ]
     cron_jobs = [
+        # Раз в сутки, до партиций аудита: очистка по сроку хранения (B6-6, 152-ФЗ ст. 5 ч. 7).
+        cron(sweep_retention, hour=2, minute=30),
         # Раз в сутки: партиции аудита на будущее.
         cron(ensure_audit_partitions, hour=3, minute=0),
         # Раз в час: чистка просроченных идемпотентных ключей.
@@ -146,8 +169,10 @@ class WorkerSettings:
         # Раз в 15 минут: просроченные запросы на подпись (spec.txt §15
         # `signature.expire_deadlines`).
         cron(sweep_signature_deadlines, minute={0, 15, 30, 45}),
-        # Раз в сутки: чистка OTP-кодов старше 30 дней (`signature.clean_otp`).
-        cron(sweep_signature_otp_cleanup, hour=4, minute=45),
+        # Раз в сутки: объекты бакета signatures под signed/ без строки files (B7-6).
+        cron(sweep_signature_orphans, hour=4, minute=50),
+        # Раз в 30 минут: напоминания подписантам о приближающемся дедлайне (B7-1).
+        cron(sweep_signature_reminders, minute={5, 35}),
         # Раз в минуту: доставка уведомлений во внешние каналы
         # (`notifications.dispatch`, spec.txt §6.11/строка 890).
         cron(dispatch_pending_notifications, minute=set(range(60))),
@@ -179,6 +204,10 @@ class WorkerSettings:
         # Раз в 5 минут: снятие блокировки по `auto_unblock_at` и `INVITE_EXPIRED`
         # (приглашение не принято за 30 дней) — new_spec §4.5, §4.1.
         cron(sweep_user_lifecycle, minute=set(range(0, 60, 5))),
+        # Раз в минуту: опрос Admin API Keycloak на LOGIN_ERROR -> LOGIN_FAILED/
+        # BRUTE_FORCE_LOCK (B6-3, группа АУД). Нет-оп, пока KEYCLOAK_EVENTS_POLL_ENABLED=false
+        # (дефолт, до включения событий в realm — спринт D1).
+        cron(sweep_keycloak_events, minute=set(range(60))),
     ]
     on_startup = startup
     on_shutdown = shutdown

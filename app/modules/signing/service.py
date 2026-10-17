@@ -36,10 +36,11 @@ import hashlib
 import hmac
 import secrets
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol, TypeVar, runtime_checkable
+from typing import Any, Literal, Protocol, TypeVar, runtime_checkable
 from urllib.parse import quote
 
 import bcrypt
@@ -49,7 +50,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
 from app.core.config import get_settings
-from app.core.db import run_after_commit
+from app.core.context import get_client
+from app.core.db import run_after_commit, run_after_rollback
 from app.core.errors import (
     AppError,
     ErrorCode,
@@ -60,10 +62,13 @@ from app.core.errors import (
 )
 from app.core.ids import uuid7
 from app.core.masking import mask_email, mask_phone
+from app.core.metrics import signature_complete_seconds
 from app.core.permissions import Permission, has_permission
 from app.core.rate_limit import enforce as rate_limit_enforce
+from app.core.redis_client import get_redis
 from app.core.security import Principal
 from app.core.storage import (
+    delete_object,
     download_object_bytes,
     ensure_bucket,
     generate_presigned_get,
@@ -84,7 +89,8 @@ from app.modules.crm.models import (
 )
 from app.modules.crm.models import SignatureStatus as DealSignatureStatus
 from app.modules.files.models import Attachment, AttachmentCategory, File, FileStatus
-from app.modules.identity.models import User
+from app.modules.identity.models import DataErasureRequest, SecurityEventType, Severity, User
+from app.modules.identity.service import IdentityService
 from app.modules.integration.service import get_outbox_service
 from app.modules.notification.email_transport import (
     EmailSendError,
@@ -100,6 +106,7 @@ from app.modules.signing.models import (
     Signature,
     SignatureDocument,
     SignatureDocumentStatus,
+    SignatureDownloadLink,
     SignatureMethod,
     SignatureOtpCode,
     SignatureRequest,
@@ -132,6 +139,12 @@ TPL_SIGNATURE_REJECTED = "SIGNATURE_DOCUMENT_REJECTED"
 TPL_SIGNATURE_EXPIRED = "SIGNATURE_DOCUMENT_EXPIRED"
 TPL_SIGNATURE_OTP_LOCKED = "SIGNATURE_OTP_LOCKED"
 TPL_EDM_AGREEMENT_MISSING = "EDM_AGREEMENT_MISSING"
+# B7-1: напоминание о приближающемся дедлайне.
+TPL_SIGNATURE_DEADLINE_REMINDER = "SIGNATURE_DEADLINE_REMINDER"
+# Внешний подписант без настроенного SMTP: инициатору — «выдайте ссылку заново».
+TPL_SIGNATURE_REMINDER_MANUAL = "SIGNATURE_REMINDER_MANUAL"
+# B7-4: сделка сама перешла на следующий статус после подписи всех сторон.
+TPL_SIGNATURE_AUTO_ADVANCED = "SIGNATURE_AUTO_ADVANCED"
 
 # Причины аннулирования из dop §10.7 — используются identity.
 VOID_REASON_CREDENTIALS_CHANGED = "credentials_changed"
@@ -233,6 +246,34 @@ def render_sign_link_email(
     return _SIGN_LINK_SUBJECT, "\n".join(lines)
 
 
+def build_download_url(token: str, *, variant: Literal["signed", "protocol"] = "signed") -> str:
+    """Ссылка «только скачать» (B7-3): `/public/signed/{token}` или `.../protocol`. Отдельная
+    от `build_sign_url` — этот токен не даёт права подписывать."""
+    base = get_settings().base_url.rstrip("/")
+    suffix = "/protocol" if variant == "protocol" else ""
+    return f"{base}{get_settings().public_prefix}/signed/{token}{suffix}"
+
+
+_DOWNLOAD_LINK_SUBJECT = "Документ подписан: скачайте копию"
+
+
+def render_signed_document_email(
+    *, title: str, url: str, expires_at: dt.datetime
+) -> tuple[str, str]:
+    """Тема и текст письма со ссылкой на подписанный файл (B7-3) — после последней подписи."""
+    until = expires_at.astimezone(dt.UTC)
+    lines = [
+        "Здравствуйте!",
+        "",
+        f"Документ «{title}» подписан всеми сторонами.",
+        "",
+        f"Скачать подписанный файл: {url}",
+        "",
+        f"Ссылка действует до {until:%d.%m.%Y %H:%M} UTC и личная: не пересылайте её другим людям.",
+    ]
+    return _DOWNLOAD_LINK_SUBJECT, "\n".join(lines)
+
+
 def _agreement_is_effective(agreement: EdmAgreement | None, today: dt.date | None = None) -> bool:
     """Соглашение об ЭДО действует: не отозвано, не истекло и попадает в срок."""
     if agreement is None or agreement.status != EdmAgreementStatus.ACTIVE.value:
@@ -241,6 +282,29 @@ def _agreement_is_effective(agreement: EdmAgreement | None, today: dt.date | Non
     if agreement.valid_from is not None and agreement.valid_from > today:
         return False
     return agreement.valid_to is None or agreement.valid_to >= today
+
+
+async def _revoke_download_links(
+    session: AsyncSession,
+    document_ids: list[uuid.UUID] | None = None,
+    *,
+    document_id: uuid.UUID | None = None,
+) -> int:
+    """B7-3: гасит активные ссылки «только скачать» — при `void` документа и при
+    компрометации подписанта (`mark_disputed_since`). Отозванная ссылка отвечает так же, как
+    неизвестная или просроченная (один код ошибки, без оракула)."""
+    ids = document_ids if document_ids is not None else ([document_id] if document_id else [])
+    if not ids:
+        return 0
+    result = await session.execute(
+        update(SignatureDownloadLink)
+        .where(
+            SignatureDownloadLink.document_id.in_(ids),
+            SignatureDownloadLink.revoked_at.is_(None),
+        )
+        .values(revoked_at=dt.datetime.now(dt.UTC))
+    )
+    return result.rowcount or 0
 
 
 def _sync_deal_signature_status(deal: Deal, document: SignatureDocument, status: str) -> bool:
@@ -901,6 +965,10 @@ class SignatureDocumentService:
             created_by=principal_id,
             on_rejected=action.get("on_rejected"),
             on_expired=action.get("on_expired"),
+            # B7-4: статус сделки на момент запроса подписи — автопереход после последней
+            # подписи срабатывает только если сделка всё ещё в нём (не ушла вручную).
+            on_signed=action.get("on_signed"),
+            requested_in_status_id=deal.status_id,
         )
         self._session.add(document)
         await self._session.flush()
@@ -962,17 +1030,35 @@ class SignatureDocumentService:
         return requests
 
     async def _store_generated_pdf(
-        self, pdf_bytes: bytes, *, filename: str, uploaded_by: uuid.UUID | None
+        self,
+        pdf_bytes: bytes,
+        *,
+        filename: str,
+        uploaded_by: uuid.UUID | None,
+        key: str | None = None,
     ) -> uuid.UUID:
+        """Загружает сгенерированный PDF в бакет подписей и заводит запись `files`.
+
+        `key`, если задан, — детерминированный ключ объекта (B7-6: `_complete_document`
+        передаёт `signed/{document_id}/signed.pdf` и `.../protocol.pdf` — повторная подпись
+        после сбоя перезаписывает тот же объект, а не плодит сироту). Без `key` — прежний
+        случайный `{file_id}/{filename}` (создание документа из шаблона: `document_id` на
+        этом шаге ещё не существует). В обоих случаях при откате транзакции запроса объект
+        удаляется (`run_after_rollback`) — на успешную загрузку, но провалившийся дальше
+        запрос (аудит, отправка) не оставляет объект без записи `files`.
+        """
         await ensure_bucket(self._settings.s3_bucket_signatures)
         file_id = uuid7()
-        storage_key = f"{file_id}/{filename}"
+        storage_key = key or f"{file_id}/{filename}"
+        bucket = self._settings.s3_bucket_signatures
         await upload_object_bytes(
-            bucket=self._settings.s3_bucket_signatures,
-            key=storage_key,
-            body=pdf_bytes,
-            content_type="application/pdf",
+            bucket=bucket, key=storage_key, body=pdf_bytes, content_type="application/pdf"
         )
+
+        async def _cleanup_orphan() -> None:
+            await delete_object(bucket=bucket, key=storage_key)
+
+        run_after_rollback(self._session, _cleanup_orphan)
         file = File(
             id=file_id,
             storage_key=storage_key,
@@ -987,6 +1073,23 @@ class SignatureDocumentService:
         self._session.add(file)
         await self._session.flush()
         return file_id
+
+    async def _issue_download_link(
+        self, *, document_id: uuid.UUID, request_id: uuid.UUID | None
+    ) -> tuple[str, SignatureDownloadLink]:
+        """B7-3: новая ссылка «только скачать» подписанный файл/протокол. В БД — только
+        sha256; возвращает исходный токен — положить в письмо/ответ API."""
+        token = secrets.token_urlsafe(32)
+        link = SignatureDownloadLink(
+            document_id=document_id,
+            request_id=request_id,
+            token_hash=hashlib.sha256(token.encode()).hexdigest(),
+            expires_at=dt.datetime.now(dt.UTC)
+            + dt.timedelta(days=self._settings.signature_download_ttl_days),
+        )
+        self._session.add(link)
+        await self._session.flush()
+        return token, link
 
     def _requests_query(self, document_id: uuid.UUID):
         return (
@@ -1196,6 +1299,41 @@ class SignatureDocumentService:
 
         run_after_commit(self._session, _send)
 
+    async def _queue_download_link_email(
+        self,
+        document: SignatureDocument,
+        request: SignatureRequest,
+        token: str,
+        expires_at: dt.datetime,
+    ) -> None:
+        """B7-3: ссылка на подписанный файл внешнему подписанту — тот же приём, что
+        `_queue_link_email`, письмо уходит после коммита. Без SMTP инициатор видит
+        `ERROR_SIGNATURE_REMINDER_MANUAL`-подобную подсказку только в B7-1 (напоминания); здесь
+        отсутствие адреса просто не отправляет письмо — ссылку инициатор может получить через
+        `POST /api/signature-documents/{id}/download-links`."""
+        if not smtp_configured():
+            return
+        contact = (
+            await self._session.get(Contact, request.signer_contact_id)
+            if request.signer_contact_id
+            else None
+        )
+        address = contact.email if contact else None
+        if not address:
+            logger.warning("signature_download_email_no_address", request_id=str(request.id))
+            return
+        subject, body = render_signed_document_email(
+            title=document.title, url=build_download_url(token), expires_at=expires_at
+        )
+
+        async def _send() -> None:
+            try:
+                await send_email(to=address, subject=subject, body=body)
+            except EmailSendError:
+                logger.warning("signature_download_email_failed", request_id=str(request.id))
+
+        run_after_commit(self._session, _send)
+
     def _issue_token(self, request: SignatureRequest, now: dt.datetime) -> str:
         """Новый токен внешнему подписанту. В БД остаётся только его sha256,
         поэтому прежняя ссылка перестаёт работать."""
@@ -1243,6 +1381,67 @@ class SignatureDocumentService:
         )
         return token
 
+    async def maybe_remind(self, request: SignatureRequest, document: SignatureDocument) -> bool:
+        """B7-1: напоминание о дедлайне, если очередной порог (`SIGNATURE_REMIND_BEFORE_HOURS`)
+        достигнут и прошёл минимальный зазор с прошлого напоминания. Возвращает `True`, если
+        напоминание отправлено (вызывающий — `sweep_signature_reminders` — считает их для лога).
+        """
+        if document.deadline_at is None:
+            return False
+        now = dt.datetime.now(dt.UTC)
+        remaining_hours = (document.deadline_at - now).total_seconds() / 3600
+        thresholds = self._settings.signature_remind_before_hours_list
+        due_count = sum(1 for threshold in thresholds if remaining_hours <= threshold)
+        if due_count == 0 or request.reminders_sent >= due_count:
+            return False
+        if request.last_reminded_at is not None:
+            gap_hours = (now - request.last_reminded_at).total_seconds() / 3600
+            if gap_hours < self._settings.signature_remind_min_gap_hours:
+                return False
+
+        if request.signer_type == SignerType.EXTERNAL.value:
+            # Новая ссылка гасит прежнюю — выпускаем только когда можем сразу её доставить.
+            # Без SMTP письмо получателю всё равно не ушло бы: инициатор получает подсказку
+            # вместо тихо погашенной ссылки без замены.
+            if smtp_configured():
+                token = self._issue_token(request, now)
+                await self._queue_link_email(document, request, token)
+            elif document.created_by:
+                await get_notification_service().notify_user(
+                    self._session,
+                    recipient_id=document.created_by,
+                    template_code=TPL_SIGNATURE_REMINDER_MANUAL,
+                    priority=NotificationPriority.NORMAL,
+                    entity_type="signature_request",
+                    entity_id=request.id,
+                    payload={"title": document.title},
+                )
+        elif request.signer_user_id:
+            await get_notification_service().notify_user(
+                self._session,
+                recipient_id=request.signer_user_id,
+                template_code=TPL_SIGNATURE_DEADLINE_REMINDER,
+                priority=NotificationPriority.HIGH,
+                entity_type="signature_request",
+                entity_id=request.id,
+                payload={
+                    "title": document.title,
+                    "deadline_at": document.deadline_at.isoformat(),
+                },
+            )
+
+        previous = request.reminders_sent
+        request.reminders_sent += 1
+        request.last_reminded_at = now
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.SIGNATURE_REMINDED,
+            entity_type="signature_request",
+            entity_id=request.id,
+            changes={"reminders_sent": {"old": previous, "new": request.reminders_sent}},
+        )
+        return True
+
     async def signatures_by_document(
         self, document_ids: list[uuid.UUID]
     ) -> dict[uuid.UUID, list[Signature]]:
@@ -1275,6 +1474,8 @@ class SignatureDocumentService:
         for request in requests:
             if request.status in OPEN_REQUEST_STATUSES:
                 request.status = SignatureRequestStatus.VOID.value
+        # B7-3: ссылки на подписанный файл/протокол не должны переживать аннулирование документа.
+        await _revoke_download_links(self._session, document_id=document.id)
         await self._session.flush()
 
         if document.entity_type == "deal":
@@ -1310,6 +1511,63 @@ class SignatureDocumentService:
             filename=file.original_filename,
         )
         return url, dt.datetime.now(dt.UTC) + dt.timedelta(seconds=ttl)
+
+    # --- B7-3: скачивание подписанного файла/протокола по отдельной ссылке ------------------
+
+    async def get_download_link(self, token: str) -> SignatureDownloadLink:
+        """Ссылка по токену. Один код ошибки (`SIGNATURE_TOKEN_INVALID`) для неизвестного,
+        просроченного и отозванного токена — без оракула о причине отказа."""
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        stmt = select(SignatureDownloadLink).where(SignatureDownloadLink.token_hash == token_hash)
+        link = (await self._session.execute(stmt)).scalars().first()
+        now = dt.datetime.now(dt.UTC)
+        if link is None or link.revoked_at is not None or link.expires_at < now:
+            raise AppError(ErrorCode.SIGNATURE_TOKEN_INVALID, "Ссылка недействительна")
+        return link
+
+    async def record_download(self, link: SignatureDownloadLink, *, variant: str) -> None:
+        """Счётчик скачиваний под замком строки ссылки — параллельные скачивания одной
+        ссылки сериализуются, 21-е (по умолчанию) скачивание отказывает до того, как файл
+        читается из S3."""
+        await self._session.refresh(link, with_for_update=True)
+        now = dt.datetime.now(dt.UTC)
+        if link.revoked_at is not None or link.expires_at < now:
+            raise AppError(ErrorCode.SIGNATURE_TOKEN_INVALID, "Ссылка недействительна")
+        if link.downloads >= self._settings.signature_download_max_per_link:
+            raise AppError(ErrorCode.RATE_LIMITED, "Превышен лимит скачиваний по этой ссылке")
+        link.downloads += 1
+        link.last_downloaded_at = now
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.SIGNATURE_DOWNLOADED,
+            entity_type="signature_document",
+            entity_id=link.document_id,
+            changes={"variant": {"old": None, "new": variant}},
+        )
+
+    async def load_pdf_for_download_link(
+        self, link: SignatureDownloadLink, *, variant: Literal["signed", "protocol"]
+    ) -> tuple[bytes, str]:
+        document = await self._session.get(SignatureDocument, link.document_id)
+        if document is None:
+            raise NotFoundError("Документ на подпись", link.document_id)
+        file_id = document.protocol_file_id if variant == "protocol" else document.signed_file_id
+        if file_id is None:
+            raise AppError(ErrorCode.DOCUMENT_NOT_SIGNABLE, "Файл ещё не готов")
+        file = await self._session.get(File, file_id)
+        if file is None:
+            raise NotFoundError("Файл документа", file_id)
+        data = await download_object_bytes(bucket=file.bucket, key=file.storage_key)
+        return data, f"{variant}-{document.id}.pdf"
+
+    async def public_download(
+        self, token: str, *, variant: Literal["signed", "protocol"]
+    ) -> tuple[bytes, str]:
+        """Проверка токена, счётчик, затем файл — в этом порядке: лимит и отзыв проверяются
+        до траты времени на S3."""
+        link = await self.get_download_link(token)
+        await self.record_download(link, variant=variant)
+        return await self.load_pdf_for_download_link(link, variant=variant)
 
 
 # =============================================================================
@@ -1359,10 +1617,47 @@ class SignatureRequestService:
         stmt = select(SignatureRequest).where(SignatureRequest.access_token_hash == token_hash)
         request = (await self._session.execute(stmt)).scalars().first()
         if request is None:
+            # B7-5: токен, не найденный ни у одного запроса, — угадывание, а не истёкшая
+            # настоящая ссылка (та ветка ниже событие не считает).
+            await self._record_invalid_token_probe()
             raise AppError(ErrorCode.SIGNATURE_TOKEN_INVALID, "Ссылка недействительна")
         if request.token_expires_at and request.token_expires_at < dt.datetime.now(dt.UTC):
             raise AppError(ErrorCode.SIGNATURE_TOKEN_INVALID, "Срок действия ссылки истёк")
         return request
+
+    #: Не менее этого числа неверных токенов с одного IP за окно — перебор ссылок (B7-5).
+    _TOKEN_PROBE_THRESHOLD = 5
+    _TOKEN_PROBE_WINDOW_SECONDS = 600
+    _TOKEN_PROBE_LOCK_SECONDS = 600
+
+    async def _record_invalid_token_probe(self) -> None:
+        """SIGNATURE_TOKEN_PROBE — один раз на окно, не на каждую неудачу (иначе шестая и
+        далее попытки раздували бы журнал). Пишется с немедленным коммитом (тот же приём, что
+        `audit.service.record_denied_and_commit`): запрос завершается исключением сразу после
+        вызова, и обычный коммит транзакции до записи не доходит."""
+        client = get_client()
+        if client is None or not client.ip:
+            return
+        try:
+            redis = get_redis()
+            counter_key = f"sig:token_probe:count:{client.ip}"
+            count = await redis.incr(counter_key)
+            if count == 1:
+                await redis.expire(counter_key, self._TOKEN_PROBE_WINDOW_SECONDS)
+            if count < self._TOKEN_PROBE_THRESHOLD:
+                return
+            lock_key = f"sig:token_probe:lock:{client.ip}"
+            if not await redis.set(lock_key, "1", nx=True, ex=self._TOKEN_PROBE_LOCK_SECONDS):
+                return  # уже зафиксировано в этом окне
+        except Exception:  # noqa: BLE001 — недоступность Redis не должна ронять проверку токена
+            logger.warning("signature_token_probe_counter_failed")
+            return
+        await IdentityService(self._session).record_security_event(
+            SecurityEventType.SIGNATURE_TOKEN_PROBE,
+            severity=Severity.WARNING,
+            details={"ip": client.ip},
+        )
+        await self._session.commit()
 
     async def my_requests(self, principal: Principal) -> list[SignatureRequest]:
         stmt = (
@@ -1395,9 +1690,15 @@ class SignatureRequestService:
                 changes={"viewed_at": {"old": None, "new": request.viewed_at.isoformat()}},
             )
 
-        file = await self._session.get(File, document.file_id)
+        # B7-2: страница подписанта показывает подписанный файл (со штампом и QR), а не
+        # исходник, если документ уже подписан.
+        is_signed = document.status == SignatureDocumentStatus.SIGNED.value
+        preview_file_id = (
+            document.signed_file_id if is_signed and document.signed_file_id else document.file_id
+        )
+        file = await self._session.get(File, preview_file_id)
         if file is None:
-            raise NotFoundError("Файл документа", document.file_id)
+            raise NotFoundError("Файл документа", preview_file_id)
         preview_url = await generate_presigned_get(
             bucket=file.bucket,
             key=file.storage_key,
@@ -1414,6 +1715,8 @@ class SignatureRequestService:
                 deadline_at=document.deadline_at,
                 status=document.status,
                 preview_url=preview_url,
+                is_signed=is_signed,
+                has_protocol=bool(document.protocol_file_id),
             ),
             signers=[
                 SigningSignerPreview(
@@ -1429,16 +1732,44 @@ class SignatureRequestService:
             agreement_text=AGREEMENT_TEXT,
         )
 
-    async def load_document_pdf(self, request: SignatureRequest) -> tuple[bytes, str]:
-        """PDF документа запроса и его имя — для просмотра с origin приложения."""
+    async def load_document_pdf(
+        self, request: SignatureRequest, *, variant: str = "auto"
+    ) -> tuple[bytes, str]:
+        """PDF документа запроса и его имя — для просмотра с origin приложения (B7-2:
+        подписанный файл вместо исходного после последней подписи).
+
+        `variant`:
+        * `auto` (по умолчанию) — документ `signed` со `signed_file_id` отдаёт подписанный
+          файл со штампом и QR; иначе (включая документы без подписи) — исходный;
+        * `original` — всегда исходный `document.file_id`, явно, для сравнения с подписанным;
+        * `protocol` — протокол подписания; доступен только у `signed`-документа с
+          заполненным `protocol_file_id`, иначе `DOCUMENT_NOT_SIGNABLE` (та же ошибка, что у
+          `protocol_download`).
+        """
         document = await self._session.get(SignatureDocument, request.document_id)
         if document is None:
             raise NotFoundError("Документ на подпись", request.document_id)
-        file = await self._session.get(File, document.file_id)
+        is_signed = document.status == SignatureDocumentStatus.SIGNED.value
+
+        name_prefix: str | None
+        if variant == "protocol":
+            if not (is_signed and document.protocol_file_id):
+                raise AppError(
+                    ErrorCode.DOCUMENT_NOT_SIGNABLE,
+                    "Протокол подписания доступен только у подписанного документа",
+                )
+            file_id, name_prefix = document.protocol_file_id, "protocol"
+        elif variant == "original" or not (is_signed and document.signed_file_id):
+            file_id, name_prefix = document.file_id, None
+        else:
+            file_id, name_prefix = document.signed_file_id, "signed"
+
+        file = await self._session.get(File, file_id)
         if file is None:
-            raise NotFoundError("Файл документа", document.file_id)
+            raise NotFoundError("Файл документа", file_id)
         data = await download_object_bytes(bucket=file.bucket, key=file.storage_key)
-        return data, file.original_filename
+        filename = f"{name_prefix}-{document.id}.pdf" if name_prefix else file.original_filename
+        return data, filename
 
     # --- OTP ---------------------------------------------------------------
 
@@ -1548,7 +1879,7 @@ class SignatureRequestService:
             .select_from(SignatureOtpCode)
             .where(SignatureOtpCode.request_id == request.id)
         )
-        if (sent_count or 0) >= 5:
+        if (sent_count or 0) >= self._settings.signature_otp_max_sends:
             raise AppError(
                 ErrorCode.SIGNATURE_OTP_INVALID, "Превышен лимит отправок кода на этот запрос"
             )
@@ -1652,6 +1983,18 @@ class SignatureRequestService:
                 "status": {"old": None, "new": "locked"},
             },
         )
+        # B7-5: перебор кода подписи — главный вектор атаки на публичные ручки ПЭП; без этого
+        # события он виден только в аудите, не в журнале безопасности (B6-2). Тело кода, токен
+        # и адрес получателя сюда не попадают — только счётчик попыток и канал.
+        await IdentityService(self._session).record_security_event(
+            SecurityEventType.SIGNATURE_OTP_FAILED,
+            severity=Severity.WARNING,
+            details={
+                "request_id": str(request.id),
+                "attempts": otp.attempts,
+                "channel": otp.channel,
+            },
+        )
         document = await self._session.get(SignatureDocument, request.document_id)
         if document and document.created_by:
             await get_notification_service().notify_user(
@@ -1686,8 +2029,8 @@ class SignatureRequestService:
             request, document, unavailable="Запрос сейчас недоступен для подписания"
         )
         # Подпись на запрос одна. Под замком строки запроса статус уже перечитан, но повторная
-        # подпись не должна получиться и при любом другом пути к этой точке: уникального индекса
-        # по `signatures.request_id` нет.
+        # подпись не должна получиться и при любом другом пути к этой точке: последний рубеж —
+        # уникальный индекс `uq_signatures_request_id` (миграция 0020).
         already_signed = await self._session.scalar(
             select(Signature.id).where(Signature.request_id == request.id).limit(1)
         )
@@ -1950,7 +2293,47 @@ class SignatureRequestService:
                         },
                     )
                 )
+                # B7-4: автопереход после подписи ВСЕХ сторон (`on_signed`) — только если
+                # сделка всё ещё в статусе, где подпись запрашивалась (не ушла вручную), и
+                # это действительно её активный документ подписи.
+                if (
+                    not remaining
+                    and document.on_signed
+                    and deal.active_signature_document_id == document.id
+                    and deal.status_id == document.requested_in_status_id
+                ):
+                    await self._auto_advance_after_signature(deal, document)
         return signature
+
+    async def _auto_advance_after_signature(self, deal: Deal, document: SignatureDocument) -> None:
+        """B7-4: переводит сделку в `document.on_signed` тем же протоколом, что
+        `_apply_deal_signature_outcome` (история, событие, причина `auto`). Выполняется под
+        SAVEPOINT в той же транзакции, что сама подпись: ошибка здесь (целевой статус исчез
+        из воронки, гонка с ручным переходом) логируется и не откатывает уже записанную
+        подпись — документ останется `signed`, переход сделку просто не случится сам."""
+        try:
+            async with self._session.begin_nested():
+                await _apply_deal_signature_outcome(
+                    self._session,
+                    deal,
+                    rule=document.on_signed,
+                    note=f"Документ «{document.title}» подписан всеми сторонами — автопереход",
+                    reason=HistoryReason.AUTO.value,
+                )
+        except Exception:  # noqa: BLE001 — сбой автоперехода не должен ронять подпись
+            logger.warning(
+                "signature_auto_advance_failed", document_id=str(document.id), exc_info=True
+            )
+            return
+        if document.created_by:
+            await get_notification_service().notify_user(
+                self._session,
+                recipient_id=document.created_by,
+                template_code=TPL_SIGNATURE_AUTO_ADVANCED,
+                priority=NotificationPriority.NORMAL,
+                entity_type="deal",
+                entity_id=deal.id,
+            )
 
     async def _chain_head(self) -> str | None:
         await self._session.execute(
@@ -1971,6 +2354,18 @@ class SignatureRequestService:
     ) -> None:
         """Штамп, протокол и вложение — на последней подписи. Сама подпись `last` ещё не
         записана (см. `_seal`): её данные приходят отдельно и входят в штамп и протокол."""
+        started = time.perf_counter()
+        try:
+            await self._complete_document_inner(document, requests, last)
+        finally:
+            signature_complete_seconds.observe(time.perf_counter() - started)
+
+    async def _complete_document_inner(
+        self,
+        document: SignatureDocument,
+        requests: list[SignatureRequest],
+        last: _SignatureEntry,
+    ) -> None:
         now = dt.datetime.now(dt.UTC)
         document.status = SignatureDocumentStatus.SIGNED.value
         document.completed_at = now
@@ -2033,7 +2428,10 @@ class SignatureRequestService:
             ) from exc
         doc_service = SignatureDocumentService(self._session)
         signed_file_id = await doc_service._store_generated_pdf(  # noqa: SLF001
-            stamped_bytes, filename=f"signed-{document.id}.pdf", uploaded_by=document.created_by
+            stamped_bytes,
+            filename=f"signed-{document.id}.pdf",
+            uploaded_by=document.created_by,
+            key=f"signed/{document.id}/signed.pdf",
         )
         document.signed_file_id = signed_file_id
 
@@ -2055,7 +2453,10 @@ class SignatureRequestService:
             verify_url=verify_url.format(sig_id=final_sig_id),
         )
         protocol_file_id = await doc_service._store_generated_pdf(  # noqa: SLF001
-            protocol_bytes, filename=f"protocol-{document.id}.pdf", uploaded_by=document.created_by
+            protocol_bytes,
+            filename=f"protocol-{document.id}.pdf",
+            uploaded_by=document.created_by,
+            key=f"signed/{document.id}/protocol.pdf",
         )
         document.protocol_file_id = protocol_file_id
         document.manifest = {
@@ -2086,6 +2487,14 @@ class SignatureRequestService:
                 .execution_options(synchronize_session=False)
             )
             await self._session.flush()
+        elif document.entity_type == "erasure_request":
+            # B6-9: подпись ответственного лица на акте об уничтожении ПДн — записывается в той
+            # же транзакции, что завершение документа, последней подписью (signatures[-1]).
+            erasure_request = await self._session.get(DataErasureRequest, document.entity_id)
+            if erasure_request is not None:
+                erasure_request.act_document_id = document.id
+                erasure_request.act_signature_id = signatures[-1].id
+                await self._session.flush()
 
         await get_outbox_service().publish(
             self._session,
@@ -2106,6 +2515,20 @@ class SignatureRequestService:
                     entity_type="signature_document",
                     entity_id=document.id,
                 )
+
+        # B7-3: внешний подписант получает отдельную ссылку «только скачать» подписанный файл
+        # и протокол — токен подписания 7 дней даёт право подписывать, эта ссылка только читает.
+        if self._settings.signature_public_download_enabled:
+            for request in requests:
+                if request.signer_type != SignerType.EXTERNAL.value:
+                    continue
+                token, link = await doc_service._issue_download_link(  # noqa: SLF001
+                    document_id=document.id, request_id=request.id
+                )
+                await doc_service._queue_download_link_email(  # noqa: SLF001
+                    document, request, token, link.expires_at
+                )
+
         if document.created_by:
             await get_notification_service().notify_user(
                 self._session,
@@ -2195,6 +2618,22 @@ def pdf_inline_headers(filename: str) -> dict[str, str]:
         "Content-Disposition": disposition,
         "Cache-Control": "private, no-store",
         "X-Content-Type-Options": "nosniff",
+    }
+
+
+def pdf_download_headers(filename: str) -> dict[str, str]:
+    """B7-3: заголовки ответа ссылки «только скачать» — `attachment`, без кэша нигде по пути
+    (`no-store`, не только `private`: прокси и CDN на пути тоже не должны сохранять файл с
+    ПДн), без реферера на следующий переход и без индексации поисковиками токена в пути."""
+    disposition = (
+        f"attachment; filename=\"document.pdf\"; filename*=UTF-8''{quote(filename, safe='')}"
+    )
+    return {
+        "Content-Disposition": disposition,
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "no-referrer",
+        "X-Robots-Tag": "noindex",
     }
 
 
@@ -2309,7 +2748,12 @@ def check_signature_evidence(
 
 
 async def _apply_deal_signature_outcome(
-    session: AsyncSession, deal: Deal, *, rule: str | None, note: str
+    session: AsyncSession,
+    deal: Deal,
+    *,
+    rule: str | None,
+    note: str,
+    reason: str = HistoryReason.SIGNATURE_REJECTED.value,
 ) -> None:
     """Откат статуса сделки при отклонении/истечении срока подписи (dop.md
     §10.6): `previous_status` — назад по `deal_status_history`, код статуса —
@@ -2351,7 +2795,7 @@ async def _apply_deal_signature_outcome(
             from_status_id=previous_status_id,
             to_status_id=target_status_id,
             changed_by=None,
-            reason=HistoryReason.SIGNATURE_REJECTED.value,
+            reason=reason,
             comment=note,
             changed_at=now,
         )
@@ -2498,6 +2942,22 @@ class SigningService(Protocol):
         """Действие `request_signature` DSL-перехода (`app/modules/crm/
         service.py._run_actions`)."""
 
+    async def create_erasure_act_document(
+        self,
+        session: AsyncSession,
+        *,
+        erasure_request_id: uuid.UUID,
+        file_id: uuid.UUID,
+        signer_user_ids: list[uuid.UUID],
+        deadline_days: int = 14,
+    ) -> uuid.UUID | None:
+        """B6-9: подпись ответственного лица на акте об уничтожении ПДн — системный вызов (без
+        проверки прав, как `create_from_workflow_action`), документ `doc_type='erasure_act'`,
+        `signing_order='parallel'`, сразу `send()`. Без подписантов (`signer_user_ids` пуст) —
+        документ не создаётся, вызывающий сам решает, как уведомить ADMIN. Возвращает id
+        документа или `None`."""
+        ...
+
 
 class RealSigningService:
     async def void_pending_for_user(
@@ -2598,8 +3058,12 @@ class RealSigningService:
             update(Signature)
             .where(Signature.request_id.in_(subq), Signature.signed_at >= since)
             .values(is_disputed=True)
+            .returning(Signature.document_id)
         )
-        return result.rowcount or 0
+        touched_document_ids = list(result.scalars().all())
+        # B7-3: компрометация ключа подписанта гасит и ссылки «только скачать» на эти документы.
+        await _revoke_download_links(session, list(set(touched_document_ids)))
+        return len(touched_document_ids)
 
     async def count_signatures(self, session: AsyncSession, user_id: uuid.UUID) -> int:
         subq = select(SignatureRequest.id).where(SignatureRequest.signer_user_id == user_id)
@@ -2669,6 +3133,72 @@ class RealSigningService:
         await SignatureDocumentService(session).create_from_workflow_action(
             deal=deal, action=action, principal_id=principal.user_id
         )
+
+    async def create_erasure_act_document(
+        self,
+        session: AsyncSession,
+        *,
+        erasure_request_id: uuid.UUID,
+        file_id: uuid.UUID,
+        signer_user_ids: list[uuid.UUID],
+        deadline_days: int = 14,
+    ) -> uuid.UUID | None:
+        if not signer_user_ids:
+            return None
+        file = await session.get(File, file_id)
+        if file is None:
+            raise NotFoundError("Файл акта", file_id)
+        now = dt.datetime.now(dt.UTC)
+        document = SignatureDocument(
+            doc_type="erasure_act",
+            title="Акт об уничтожении персональных данных",
+            entity_type="erasure_request",
+            entity_id=erasure_request_id,
+            file_id=file_id,
+            content_hash=file.sha256 or hashlib.sha256(b"").hexdigest(),
+            signing_order="parallel",
+            status=SignatureDocumentStatus.DRAFT.value,
+            deadline_at=now + dt.timedelta(days=deadline_days),
+            created_by=None,
+        )
+        session.add(document)
+        await session.flush()
+
+        doc_service = SignatureDocumentService(session)
+        users = {
+            u.id: u
+            for u in (
+                await session.execute(select(User).where(User.id.in_(signer_user_ids)))
+            ).scalars()
+        }
+        resolved = [
+            ResolvedSigner(
+                signer_type=SignerType.INTERNAL.value,
+                user_id=user_id,
+                contact_id=None,
+                role_code=None,
+                name_snapshot=users[user_id].effective_name if user_id in users else "Неизвестно",
+                identifier_masked=mask_email(users[user_id].email) if user_id in users else None,
+                phone=users[user_id].phone if user_id in users else None,
+                email=users[user_id].email if user_id in users else None,
+            )
+            for user_id in signer_user_ids
+            if user_id in users
+        ]
+        if not resolved:
+            return None
+        await doc_service._create_requests(document, resolved)  # noqa: SLF001
+        await AuditService(session).record(
+            AuditAction.SIGNATURE_DOCUMENT_CREATED,
+            entity_type="signature_document",
+            entity_id=document.id,
+            changes={
+                "doc_type": {"old": None, "new": "erasure_act"},
+                "erasure_request_id": {"old": None, "new": str(erasure_request_id)},
+            },
+        )
+        await doc_service.send(document)
+        return document.id
 
 
 _service: SigningService = RealSigningService()

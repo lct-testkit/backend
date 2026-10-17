@@ -55,6 +55,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.field_crypto import EncryptedDate, EncryptedText
 from app.db.base import Base, Money, SoftDeleteMixin, TimestampMixin, UuidPkMixin, VersionMixin
 
 
@@ -386,31 +387,36 @@ class ContactLearnerProfile(Base):
     contact_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("contacts.id", ondelete="CASCADE"), primary_key=True
     )
-    snils: Mapped[str | None] = mapped_column(String(14), nullable=True)
-    passport_series: Mapped[str | None] = mapped_column(String(8), nullable=True)
-    passport_number: Mapped[str | None] = mapped_column(String(16), nullable=True)
-    passport_issued_by: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    passport_issued_at: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
-    passport_dept_code: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # B6-7: поля из `app.core.masking.LEARNER_PII_KEYS` плюс даты паспорта/диплома — зашифрованы
+    # в приложении (`EncryptedText`/`EncryptedDate`, ключ `FIELD_ENCRYPTION_KEY`). Колонка в БД —
+    # `text` (миграция 0029): Fernet-токен заметно длиннее исходных `varchar(N)`/`date`. Не
+    # шифруются (остаются обычными колонками): `sex`, `education`, падежные формы имени,
+    # профессия и наименование вуза диплома — это не ПДн, требующие отдельной защиты поля.
+    snils: Mapped[str | None] = mapped_column(EncryptedText(), nullable=True)
+    passport_series: Mapped[str | None] = mapped_column(EncryptedText(), nullable=True)
+    passport_number: Mapped[str | None] = mapped_column(EncryptedText(), nullable=True)
+    passport_issued_by: Mapped[str | None] = mapped_column(EncryptedText(), nullable=True)
+    passport_issued_at: Mapped[dt.date | None] = mapped_column(EncryptedDate(), nullable=True)
+    passport_dept_code: Mapped[str | None] = mapped_column(EncryptedText(), nullable=True)
     sex: Mapped[str | None] = mapped_column(String(1), nullable=True)
-    birth_date: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
-    reg_region: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    reg_city: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    reg_street: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    reg_house: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    reg_apartment: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    reg_zip: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    birth_date: Mapped[dt.date | None] = mapped_column(EncryptedDate(), nullable=True)
+    reg_region: Mapped[str | None] = mapped_column(EncryptedText(), nullable=True)
+    reg_city: Mapped[str | None] = mapped_column(EncryptedText(), nullable=True)
+    reg_street: Mapped[str | None] = mapped_column(EncryptedText(), nullable=True)
+    reg_house: Mapped[str | None] = mapped_column(EncryptedText(), nullable=True)
+    reg_apartment: Mapped[str | None] = mapped_column(EncryptedText(), nullable=True)
+    reg_zip: Mapped[str | None] = mapped_column(EncryptedText(), nullable=True)
     first_name_dative: Mapped[str | None] = mapped_column(String(128), nullable=True)
     last_name_dative: Mapped[str | None] = mapped_column(String(128), nullable=True)
     middle_name_dative: Mapped[str | None] = mapped_column(String(128), nullable=True)
     education: Mapped[str | None] = mapped_column(String(32), nullable=True)
     diploma_profession: Mapped[str | None] = mapped_column(String(255), nullable=True)
     diploma_institution: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    diploma_surname: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    diploma_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    diploma_series: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    diploma_reg_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    diploma_issued_at: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    diploma_surname: Mapped[str | None] = mapped_column(EncryptedText(), nullable=True)
+    diploma_number: Mapped[str | None] = mapped_column(EncryptedText(), nullable=True)
+    diploma_series: Mapped[str | None] = mapped_column(EncryptedText(), nullable=True)
+    diploma_reg_number: Mapped[str | None] = mapped_column(EncryptedText(), nullable=True)
+    diploma_issued_at: Mapped[dt.date | None] = mapped_column(EncryptedDate(), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(server_default=text("now()"), nullable=False)
     updated_at: Mapped[dt.datetime] = mapped_column(
         server_default=text("now()"), onupdate=func.now(), nullable=False

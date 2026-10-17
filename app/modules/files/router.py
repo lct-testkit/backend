@@ -161,11 +161,15 @@ async def list_attachments(
     principal: FileDownloadPerm,
     entity_type: Annotated[str, Query(max_length=32)],
     entity_id: Annotated[uuid.UUID, Query()],
+    status_id: Annotated[uuid.UUID | None, Query()] = None,
 ) -> AttachmentListResponse:
+    # B2-8: вкладка «Файлы в статусе» — фильтр по шагу воронки имеет смысл только для сделок.
+    if status_id is not None and entity_type != "deal":
+        raise AppError(ErrorCode.VALIDATION, "Фильтр status_id применим только к вложениям сделки")
     await check_entity_access(session, principal, entity_type=entity_type, entity_id=entity_id)
     stmt = (
         AttachmentService(session)
-        .list_query(entity_type=entity_type, entity_id=entity_id)
+        .list_query(entity_type=entity_type, entity_id=entity_id, status_id=status_id)
         .order_by(Attachment.created_at.desc(), Attachment.id.desc())
     )
     cursor = page.decoded_cursor
@@ -205,7 +209,11 @@ async def create_attachment(
         )
 
     await check_entity_access(
-        session, principal, entity_type=payload.entity_type, entity_id=payload.entity_id
+        session,
+        principal,
+        entity_type=payload.entity_type,
+        entity_id=payload.entity_id,
+        write=True,
     )
     file = await FileService(session).get_or_404(payload.file_id)
     attachment = await AttachmentService(session).create(
@@ -247,6 +255,7 @@ async def delete_attachment(
         principal,
         entity_type=attachment.entity_type,
         entity_id=attachment.entity_id,
+        write=True,
     )
-    await service.delete(attachment)
+    await service.delete(attachment, actor_id=principal.user_id)
     return OperationResult(ok=True, detail="Вложение отвязано")

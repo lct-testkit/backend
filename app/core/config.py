@@ -12,31 +12,13 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import unquote, urlsplit
 
+from cryptography.fernet import Fernet
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-AppProfile = Literal["dev", "demo", "prod"]
+from app.core.secret_rules import DEMO_SECRET_VALUES, check_secrets
 
-# Демо-значения из .env.example / docker-compose / realm-crm.json. В prod их
-# наличие означает, что оператор забыл сменить секреты: приложение обязано не
-# стартовать, а не работать с публично известными ключами.
-_DEMO_SECRET_VALUES = frozenset(
-    {
-        "change-me-in-prod",
-        "crm-bff-secret",
-        "crm-admin-secret",
-        "crm_access",
-        "crm_secret_key",
-        "crm_sign_access",
-        "crm_sign_secret_key",
-        "crm_app",
-        "crm",
-        "admin",
-        "secret",
-        "password",
-    }
-)
-_MIN_PROD_SECRET_LENGTH = 16
+AppProfile = Literal["dev", "demo", "prod"]
 
 
 class Settings(BaseSettings):
@@ -99,6 +81,13 @@ class Settings(BaseSettings):
     keycloak_admin_client_secret: SecretStr | None = None
     keycloak_jwks_ttl: int = 3600
     keycloak_verify_audience: bool = True
+    # B6-3: опрос Admin API событий (LOGIN_ERROR -> LOGIN_FAILED/BRUTE_FORCE_LOCK). Выключен по
+    # умолчанию: требует eventsEnabled в realm и роль view-events у сервисного клиента
+    # (спринт D1, не в этом репозитории) — без них задача просто не делает запросов.
+    keycloak_events_poll_enabled: bool = False
+    # Накладка на повторный опрос — события Keycloak могут прийти с задержкой относительно
+    # своего `time`, курсор без накладки бы их пропустил.
+    keycloak_events_overlap_seconds: int = 120
 
     # --- S3 / SeaweedFS --------------------------------------------------
     # MinIO использовать запрещено: раздел «Стек» спецификации.
@@ -120,6 +109,9 @@ class Settings(BaseSettings):
     s3_bucket_reports: str = "reports"
     s3_bucket_signatures: str = "signatures"
     s3_bucket_registry: str = "registry"
+    # B6-5: карантин заражённых объектов — download_url никогда не выдаётся на этот бакет
+    # (требует status=ready, а карантинная запись files удаляется из активных).
+    s3_bucket_quarantine: str = "quarantine"
 
     # --- Сессии и токены -------------------------------------------------
     session_ttl: int = 43200
@@ -152,10 +144,44 @@ class Settings(BaseSettings):
     # json — `files.service._check_magic_bytes`).
     allowed_file_extensions: str = "png,jpeg,jpg,pdf,zip,gz,gzip,rar,doc,docx,xls,xlsx,xml,csv,json"
 
+    # --- Антивирус (B6-4) -------------------------------------------------
+    # Выключен по умолчанию (dev/demo без clamd поднятого рядом): `FileService.commit`
+    # остаётся на `NullAntivirusScanner`, пока явно не включено. Группа АВЗ приказа № 117.
+    clamav_enabled: bool = False
+    clamav_host: str = "clamav"
+    clamav_port: int = 3310
+    clamav_connect_timeout_seconds: float = 3.0
+    clamav_scan_timeout_seconds: float = 120.0
+    # closed — commit отказывает/ставит quarantined, пока антивирус недоступен (prod);
+    # open — принимает файл со скана, пропущенного по недоступности сервиса (dev/demo),
+    # с предупреждением в логе и метрике.
+    clamav_fail_mode: Literal["open", "closed"] = "open"
+    # Больше этого — скан не держит HTTP-запрос синхронно (B6-4 п.6, воркер `sweep_
+    # quarantined_files` не реализован в этом эпике, см. отчёт — файл остаётся quarantined
+    # до ручной проверки).
+    clamav_sync_max_bytes: int = 26214400
+
     # --- Отчёты ----------------------------------------------------------
     reports_max_concurrent: int = 10
     reports_link_ttl_minutes: int = 15
     reports_retention_days: int = 7
+
+    # --- Сроки хранения (B6-6, 152-ФЗ ст. 5 ч. 7) --------------------------
+    # Область этой итерации сужена: архивация audit_log в S3 с DETACH PARTITION и
+    # SECURITY DEFINER функциями (самое рискованное и трудоёмкое — работа с неизменяемым
+    # журналом аудита) не реализована, см. отчёт. Реализованные категории ниже не трогают
+    # неизменяемые/архивные данные.
+    retention_enabled: bool = True
+    # Первый запуск на живом стенде — только с этим true и сверкой чисел вручную (риск
+    # необратимого удаления).
+    retention_dry_run: bool = False
+    retention_batch_size: int = 1000
+    retention_security_events_months: int = 36
+    # Было константой `OTP_RETENTION_DAYS` в `signing/tasks.py`.
+    retention_otp_days: int = 30
+    retention_pending_upload_hours: int = 24
+    retention_deleted_files_days: int = 30
+    retention_notifications_days: int = 180
 
     # --- Импорт ----------------------------------------------------------
     # new_spec §4.12, фаза 2: «лимит 50 МБ / 100 000 строк» — 5 000 строк
@@ -186,6 +212,21 @@ class Settings(BaseSettings):
     # Ключ HMAC записей аудита (версия хэша 3): голый SHA-256 может пересчитать тот, у кого есть
     # доступ к БД, ключ лежит вне БД. Пусто — хэш без ключа (версия 2), как раньше.
     audit_hmac_key: SecretStr | None = None
+    # B6-8: тот же Fernet-ключ, что читает `setting_crypto._SecretsConfig` напрямую из
+    # окружения (своя независимая настройка — её тестовый контракт на подмену
+    # переменной и сброс кэша не трогаем). Поле здесь нужно для prod-гварда и
+    # `preflight`: обе проверки должны знать, что ключ задан, не читая внутренний
+    # модуль admin-настроек.
+    settings_encryption_key: SecretStr | None = None
+    # B6-7: шифрование полей СНИЛС/паспорта/адреса учащегося (`field_crypto.py`). Ключ
+    # отдельный от `SETTINGS_ENCRYPTION_KEY` — утечка одного не раскрывает другое.
+    field_encryption_key: SecretStr | None = None
+    # На время ротации: `MultiFernet([Fernet(active), Fernet(prev)])` расшифровывает
+    # токены старым ключом, пока `tools/encrypt_learner_profiles.py rotate` их не переписал.
+    field_encryption_key_prev: SecretStr | None = None
+    # B6-8: токен заголовка `X-Health-Token` для `GET /health/details`. Без него (пусто) —
+    # ручка всегда отдаёт 404, как «несуществующий» путь (не 401/403, чтобы не подсказывать).
+    health_details_token: SecretStr | None = None
     # Сколько секунд транзакция может простаивать «открытой» до принудительного закрытия сервером
     # Postgres (`idle_in_transaction_session_timeout`): зависший клиент не должен держать замки.
     db_idle_in_transaction_timeout_seconds: int = 60
@@ -208,6 +249,16 @@ class Settings(BaseSettings):
     # dop.md §10.8: «при рассинхроне > 5 с подписание блокируется».
     signature_max_clock_drift_ms: int = 5000
     sms_gateway_url: str = "http://sms-gateway-mock:8090"
+    # B7-3: ссылка «только скачать» подписанный файл/протокол — не токен подписания.
+    signature_download_ttl_days: int = 30
+    signature_download_max_per_link: int = 20
+    # Откат без деплоя: false отключает выдачу и сами публичные ручки (404).
+    signature_public_download_enabled: bool = True
+    # B7-1: пороги напоминаний (часов до дедлайна) и минимальный зазор между ними.
+    signature_remind_before_hours: str = "48,4"
+    signature_remind_min_gap_hours: int = 6
+    # Мелкая правка B7 (бывшая зашитая константа `service.py:1551`).
+    signature_otp_max_sends: int = 5
 
     # --- Уведомления -------------------------------------------------------
     notification_dispatch_batch_size: int = 200
@@ -280,13 +331,35 @@ class Settings(BaseSettings):
     # OpenAPI-схема нужна фронтенду и в prod; закрывается только UI.
     openapi_enabled: bool = True
 
-    @field_validator("signature_expose_debug_otp", "audit_hmac_key", "smtp_password", mode="before")
+    @field_validator(
+        "signature_expose_debug_otp",
+        "audit_hmac_key",
+        "smtp_password",
+        "settings_encryption_key",
+        "field_encryption_key",
+        "field_encryption_key_prev",
+        "health_details_token",
+        mode="before",
+    )
     @classmethod
     def _blank_is_unset(cls, value: object) -> object:
         """docker-compose передаёт незаданную переменную пустой строкой (`${VAR:-}`): для
         необязательных значений это «не задано», а не пустой ключ и не ошибка разбора булева."""
         if isinstance(value, str) and not value.strip():
             return None
+        return value
+
+    @field_validator("field_encryption_key", "field_encryption_key_prev", mode="after")
+    @classmethod
+    def _valid_fernet_key(cls, value: SecretStr | None) -> SecretStr | None:
+        """Невалидный Fernet-ключ должен ронять старт процесса, а не первое шифрование
+        (B6-7: `AppError` на первом использовании прячет проблему до боевого запроса)."""
+        if value is None:
+            return value
+        try:
+            Fernet(value.get_secret_value().encode())
+        except (ValueError, TypeError) as exc:
+            raise ValueError("не является корректным Fernet-ключом") from exc
         return value
 
     @field_validator("database_url", "kc_database_url", mode="after")
@@ -298,7 +371,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _reject_demo_secrets_in_prod(self) -> Settings:
-        """`APP_PROFILE=prod` не стартует с демо-секретами и короткими ключами."""
+        """`APP_PROFILE=prod` не стартует с демо-секретами, короткими ключами, а также без
+        ключей, от которых зависит защита журнала аудита и шифрование (B6-8)."""
         if self.app_profile != "prod":
             return self
         secrets: dict[str, str] = {
@@ -312,13 +386,17 @@ class Settings(BaseSettings):
             secrets["KEYCLOAK_ADMIN_CLIENT_SECRET"] = (
                 self.keycloak_admin_client_secret.get_secret_value()
             )
-        # Пароль роли приложения сидит и в строке подключения: проверялся только отдельный
-        # CRM_APP_PASSWORD, и демо-пароль в DATABASE_URL проходил.
-        db_password = urlsplit(self.database_url).password
-        if db_password:
-            secrets["DATABASE_URL (пароль)"] = unquote(db_password)
-        if self.audit_hmac_key is not None:
-            secrets["AUDIT_HMAC_KEY"] = self.audit_hmac_key.get_secret_value()
+        # Пароль роли приложения сидит и в строках подключения: проверялся только отдельный
+        # CRM_APP_PASSWORD, и демо-пароль в DATABASE_URL проходил. KC_DATABASE_URL и
+        # MIGRATIONS_DATABASE_URL — та же роль суперпользователя в других строках подключения.
+        for url_name, url_value in (
+            ("DATABASE_URL", self.database_url),
+            ("KC_DATABASE_URL", self.kc_database_url),
+            ("MIGRATIONS_DATABASE_URL", self.migrations_database_url),
+        ):
+            password = urlsplit(url_value).password if url_value else None
+            if password:
+                secrets[f"{url_name} (пароль)"] = unquote(password)
         # POSTGRES_PASSWORD и KEYCLOAK_ADMIN_PASSWORD — не поля Settings (их читают контейнеры
         # postgres/keycloak, не это приложение), но раз уж переменная всё равно долетела и до
         # api (не у каждого способа деплоя это так — Helm её сюда не пробрасывает), грех не
@@ -331,13 +409,33 @@ class Settings(BaseSettings):
         webhook_secret = os.environ.get(self.cms_webhook_secret_ref or "CMS_WEBHOOK_SECRET", "")
         if webhook_secret:
             secrets["CMS_WEBHOOK_SECRET"] = webhook_secret
-        problems = [
-            f"{name}: демо-значение"
-            if value in _DEMO_SECRET_VALUES
-            else f"{name}: слишком короткий"
-            for name, value in secrets.items()
-            if value in _DEMO_SECRET_VALUES or len(value) < _MIN_PROD_SECRET_LENGTH
-        ]
+
+        # AUDIT_HMAC_KEY проверяется отдельно (порог 32, а не общие 16 — это ключ HMAC цепочки
+        # аудита) и не попадает в общий словарь, чтобы не получить два разных сообщения об одной
+        # и той же переменной.
+        problems = check_secrets(secrets)
+
+        # Без этих трёх ключей защита, которую они дают (неизменяемость журнала аудита,
+        # шифрование секретных настроек и полей ПДн), в prod молча не работает — отсутствие
+        # ключа не ошибка значения, а отдельная проблема конфигурации.
+        for env_name, value in (
+            ("AUDIT_HMAC_KEY", self.audit_hmac_key),
+            ("SETTINGS_ENCRYPTION_KEY", self.settings_encryption_key),
+            ("FIELD_ENCRYPTION_KEY", self.field_encryption_key),
+        ):
+            if value is None:
+                problems.append(f"{env_name}: обязателен в prod, не задан")
+        if self.audit_hmac_key is not None:
+            key = self.audit_hmac_key.get_secret_value()
+            if key in DEMO_SECRET_VALUES:
+                problems.append("AUDIT_HMAC_KEY: демо-значение")
+            elif len(key) < 32:
+                problems.append("AUDIT_HMAC_KEY: короче 32 символов")
+        if self.health_details_token is not None:
+            token = self.health_details_token.get_secret_value()
+            if len(token) < 24:
+                problems.append("HEALTH_DETAILS_TOKEN: короче 24 символов")
+
         if problems:
             raise ValueError(
                 "APP_PROFILE=prod отвергает небезопасные секреты — "
@@ -381,6 +479,21 @@ class Settings(BaseSettings):
             ext.strip().lower().lstrip(".")
             for ext in self.allowed_file_extensions.split(",")
             if ext.strip()
+        )
+
+    @property
+    def signature_remind_before_hours_list(self) -> tuple[int, ...]:
+        """Пороги напоминаний (часов до дедлайна), по убыванию — `sweep_signature_reminders`
+        (B7-1) идёт по ним по порядку и не напоминает чаще `signature_remind_min_gap_hours`."""
+        return tuple(
+            sorted(
+                (
+                    int(part.strip())
+                    for part in self.signature_remind_before_hours.split(",")
+                    if part.strip()
+                ),
+                reverse=True,
+            )
         )
 
     @property

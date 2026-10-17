@@ -31,6 +31,11 @@ import pytest
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 
+# B6-7: фиксированный Fernet-ключ для тестов (`EncryptedText`/`EncryptedDate`,
+# `app.core.field_crypto`) — не настоящий секрет, просто валидный ключ, чтобы CI проходил
+# зашифрованный путь, а не только "ключа нет".
+TEST_FIELD_ENCRYPTION_KEY = "OnkqcWC6Wn4JMjNYnJiR2i9orwEMgF34hfQLXOClMBg="
+
 
 def run(client, func, *args: Any) -> Any:
     """Выполняет корутину в событийном цикле TestClient."""
@@ -60,14 +65,21 @@ def client(monkeypatch):
     os.environ.setdefault("S3_ACCESS_KEY", "a")
     os.environ.setdefault("S3_SECRET_KEY", "b")
     os.environ.setdefault("SIGNATURE_SERVER_SECRET", "test-secret")
+    # B6-7: фиксированный тестовый Fernet-ключ — тесты не должны требовать настоящего ключа,
+    # но должны проходить именно зашифрованный путь (TEST_FIELD_ENCRYPTION_KEY), а не только
+    # ветку "ключа нет" в `field_crypto`. Тесты, которым нужно явно отсутствие ключа, сами
+    # делают `monkeypatch.delenv(...)` + `get_settings.cache_clear()` +
+    # `field_crypto.reset_field_crypto_cache()`.
+    os.environ.setdefault("FIELD_ENCRYPTION_KEY", TEST_FIELD_ENCRYPTION_KEY)
 
     from fastapi.testclient import TestClient
 
-    from app.core import redis_client
+    from app.core import field_crypto, redis_client
     from app.core.config import get_settings
     from app.main import create_app
 
     get_settings.cache_clear()
+    field_crypto.reset_field_crypto_cache()
     monkeypatch.setattr(
         redis_client, "_client", fakeredis.aioredis.FakeRedis(decode_responses=True)
     )

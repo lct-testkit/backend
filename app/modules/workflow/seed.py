@@ -1,28 +1,37 @@
 """Сиды B2B- и B2C-воронок (раздел 7 текущего спринта, new_spec §1).
 
-Запускается один раз при подготовке демо-окружения:
+Запускается один раз при подготовке демо-окружения, и повторно на каждом
+`docker compose up`/хуке Helm перед `install`/`upgrade`:
 
     python -m app.modules.workflow.seed
 
-Идемпотентно: если воронка с данным `code` уже существует, сид её не
-трогает — повторный запуск на уже заполненной базе безопасен. Единственное исключение —
-`backfill_resume_transitions`: воронки, развёрнутые до появления выхода из «Заморожена», получают
-недостающие переходы «Возобновить» (см. его докстринг: только когда это безопасно).
+Идемпотентно: если воронка с данным `code` уже существует, сид её не трогает — повторный
+запуск на уже заполненной базе безопасен. Два исключения:
 
-Обе воронки создаются сразу опубликованными. Это осознанное отличие от
-обычного пути «черновик → правка → публикация»: цель сидов — дать рабочую
-воронку сразу после `docker compose up`, а не черновик, который ещё нужно
-довести руками до публикуемого состояния. Публикация идёт тем же
-валидатором и той же процедурой снимка, что и `POST /workflows/{id}/publish`
-(`_validate_graph_data`, `_build_snapshot` переиспользуются напрямую) —
-если сид пропустит вход в воронку или оставит статус-ловушку, скрипт
-откажется его опубликовать, а не создаст молча нерабочий граф.
+1. `backfill_resume_transitions`: воронки, развёрнутые до появления выхода из «Заморожена»,
+   получают недостающие переходы «Возобновить» (см. его докстринг: только когда это безопасно).
+2. `_demote_seed_default` (B2-2): при появлении новой default-воронки типа сделки (например
+   `b2b_university_v2` на стенде, где default всё ещё прежняя сидовая `b2b_university_v1`) сид
+   сам снимает `is_default` со своей прежней воронки — иначе уникальный индекс «одна default-
+   воронка на тип сделки» упал бы, а вместе с ним и `helm upgrade`. Трогается только СИДОВАЯ
+   воронка (`_SEED_OWNED_DEFAULTS`); решение администратора о default сид не отменяет.
+
+Три воронки (с B2-1): `b2b_university_v2` (основная B2B, 14 шагов задания, default),
+`b2b_university_v1` (дополнительная продажная с ПЭП-согласованием КП, не default) и
+`b2c_individual_v1` (B2C). Все создаются сразу опубликованными. Это осознанное отличие от
+обычного пути «черновик → правка → публикация»: цель сидов — дать рабочую воронку сразу после
+`docker compose up`, а не черновик, который ещё нужно довести руками до публикуемого
+состояния. Публикация идёт тем же валидатором и той же процедурой снимка, что и
+`POST /workflows/{id}/publish` (`_validate_graph_data`, `_build_snapshot` переиспользуются
+напрямую) — если сид пропустит вход в воронку или оставит статус-ловушку, скрипт откажется его
+опубликовать, а не создаст молча нерабочий граф.
 """
 
 from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -104,6 +113,34 @@ class TransitionSpec:
 
 
 @dataclass(slots=True)
+class StepDef:
+    """Шаг линейного участка воронки (B2-1).
+
+    `label` — короткий ярлык для переходов «назад» и «возобновить» («Вернуться
+    на шаг 5», «Возобновить на шаге 5»): полные дословные названия задания
+    доходят до 105 символов (шаг 10) и не годятся для подписи кнопки
+    («Вернуться к статусу «Актуализация учебной программы …»»). `None` —
+    старое поведение: полное имя статуса в этих переходах (см. `_legacy_steps`
+    — адаптер для `_b2b_sales_spec`/`_b2c_spec`, их граф не меняется).
+    `sla_hours=None` — старое поведение `_linear_funnel` (24ч начальный,
+    72ч промежуточные); воронка v2 задаёт срок каждого шага явно по таблице
+    задания.
+    """
+
+    code: str
+    name: str
+    sla_hours: int | None = None
+    label: str | None = None
+
+
+def _legacy_steps(steps: list[tuple[str, str]]) -> list[StepDef]:
+    """Адаптер для воронок, граф которых не меняется (`_b2b_sales_spec`,
+    `_b2c_spec`): те же код/имя, что раньше, SLA и имена переходов
+    назад/возобновления — по умолчанию `_linear_funnel` (см. `StepDef`)."""
+    return [StepDef(code=code, name=name) for code, name in steps]
+
+
+@dataclass(slots=True)
 class WorkflowSpec:
     code: str
     name: str
@@ -112,27 +149,29 @@ class WorkflowSpec:
     transitions: list[TransitionSpec]
 
 
-def _linear_funnel(
-    steps: list[tuple[str, str]],
-) -> tuple[list[StatusSpec], list[TransitionSpec]]:
+def _linear_funnel(steps: list[StepDef]) -> tuple[list[StatusSpec], list[TransitionSpec]]:
     """Строит статусы и переходы обычного «шаг за шагом» участка воронки.
 
     Для каждого шага: переход вперёд, переход назад (с комментарием —
     раздел 4.9 требует объяснять откат), переход в `lost` и в `parked`.
     Специфика конкретных шагов (действия ПЭП, события интеграции, условия
-    выхода) добавляется вызывающей стороной поверх (см. `_b2b_spec`,
-    `_b2c_spec`): переходы с той же парой статусов заменяют сгенерированные
-    здесь заготовки.
+    выхода) добавляется вызывающей стороной поверх (см. `_b2b_sales_spec`,
+    `_b2b_spec`, `_b2c_spec`): переходы с той же парой статусов заменяют
+    сгенерированные здесь заготовки.
     """
     statuses: list[StatusSpec] = [
         StatusSpec(
-            code=code,
-            name=name,
+            code=step.code,
+            name=step.name,
             type=StatusType.INITIAL.value if index == 0 else StatusType.INTERMEDIATE.value,
             sort_order=(index + 1) * 10,
-            sla_hours=_INITIAL_SLA_HOURS if index == 0 else _STEP_SLA_HOURS,
+            sla_hours=(
+                step.sla_hours
+                if step.sla_hours is not None
+                else (_INITIAL_SLA_HOURS if index == 0 else _STEP_SLA_HOURS)
+            ),
         )
-        for index, (code, name) in enumerate(steps)
+        for index, step in enumerate(steps)
     ]
 
     statuses += [
@@ -159,31 +198,36 @@ def _linear_funnel(
     ]
 
     transitions: list[TransitionSpec] = []
-    for index, (code, step_name) in enumerate(steps):
+    for index, step in enumerate(steps):
         if index + 1 < len(steps):
-            next_code, next_name = steps[index + 1]
+            nxt = steps[index + 1]
             transitions.append(
                 TransitionSpec(
-                    from_code=code,
-                    to_code=next_code,
-                    name=f"Перейти к статусу «{next_name}»",
+                    from_code=step.code,
+                    to_code=nxt.code,
+                    name=f"Перейти к статусу «{nxt.name}»",
                     sort_order=10,
                 )
             )
         if index > 0:
-            prev_code, prev_name = steps[index - 1]
+            prev = steps[index - 1]
+            back_name = (
+                f"Вернуться на шаг {prev.label}"
+                if step.label is not None
+                else f"Вернуться к статусу «{prev.name}»"
+            )
             transitions.append(
                 TransitionSpec(
-                    from_code=code,
-                    to_code=prev_code,
-                    name=f"Вернуться к статусу «{prev_name}»",
+                    from_code=step.code,
+                    to_code=prev.code,
+                    name=back_name,
                     requires_comment=True,
                     sort_order=20,
                 )
             )
         transitions.append(
             TransitionSpec(
-                from_code=code,
+                from_code=step.code,
                 to_code="lost",
                 name="Отказ",
                 requires_comment=True,
@@ -193,7 +237,7 @@ def _linear_funnel(
         )
         transitions.append(
             TransitionSpec(
-                from_code=code,
+                from_code=step.code,
                 to_code="parked",
                 name="Заморозить",
                 requires_comment=True,
@@ -203,11 +247,16 @@ def _linear_funnel(
         )
         # Выход из заморозки: parked — пауза, а не закрытие (SLA стоит, время копится в
         # `sla_paused_total`). Без возврата на любой шаг сделка «зависла» бы навсегда.
+        resume_name = (
+            f"Возобновить на шаге {step.label}"
+            if step.label is not None
+            else f"Возобновить: вернуть на статус «{step.name}»"
+        )
         transitions.append(
             TransitionSpec(
                 from_code="parked",
-                to_code=code,
-                name=f"Возобновить: вернуть на статус «{step_name}»",
+                to_code=step.code,
+                name=resume_name,
                 requires_comment=True,
                 sort_order=100 + index,
             )
@@ -216,23 +265,32 @@ def _linear_funnel(
     return statuses, transitions
 
 
-def _b2b_spec() -> WorkflowSpec:
-    steps = [
-        ("identification", "Идентификация вуза"),
-        ("first_contact", "Первичный контакт"),
-        ("qualification", "Квалификация"),
-        ("meeting_scheduled", "Назначение встречи"),
-        ("meeting_held", "Проведение встречи"),
-        ("requirements", "Сбор требований"),
-        ("kp_preparation", "Формирование КП"),
-        ("kp_approval", "Согласование КП"),
-        ("legal_approval", "Юридическое согласование"),
-        ("contract_signing", "Подписание договора"),
-        ("lms_transfer", "Передача материалов в LMS"),
-        ("training_launch", "Запуск обучения"),
-        ("monitoring", "Мониторинг успеваемости"),
-        ("closing_prolongation", "Закрытие периода и пролонгация"),
-    ]
+def _b2b_sales_spec() -> WorkflowSpec:
+    """B2-1 (вариант B): старая продажная воронка B2B — граф НЕ меняется (живые сделки на
+    стенде ссылаются на неё, мастер архивации требует 14 прогонов для перестройки графа на
+    месте). Переименована только функция (была `_b2b_spec`) и имя воронки — чтобы не путать с
+    новой `_b2b_spec` (v2, 14 шагов задания, см. ниже). Код `b2b_university_v1` и структура
+    статусов/переходов остаются прежними: ПЭП-согласование КП (переход `kp_preparation →
+    kp_approval`) живёт только здесь, в v2 подпись запрашивается вручную на шаге 6 (`signing`).
+    Сидится с `is_default=False` (B2-2): на чистой БД по умолчанию идёт v2."""
+    steps = _legacy_steps(
+        [
+            ("identification", "Идентификация вуза"),
+            ("first_contact", "Первичный контакт"),
+            ("qualification", "Квалификация"),
+            ("meeting_scheduled", "Назначение встречи"),
+            ("meeting_held", "Проведение встречи"),
+            ("requirements", "Сбор требований"),
+            ("kp_preparation", "Формирование КП"),
+            ("kp_approval", "Согласование КП"),
+            ("legal_approval", "Юридическое согласование"),
+            ("contract_signing", "Подписание договора"),
+            ("lms_transfer", "Передача материалов в LMS"),
+            ("training_launch", "Запуск обучения"),
+            ("monitoring", "Мониторинг успеваемости"),
+            ("closing_prolongation", "Закрытие периода и пролонгация"),
+        ]
+    )
 
     extra = [
         # Раздел 7: вход в kp_approval запускает ПЭП-согласование КП
@@ -322,7 +380,240 @@ def _b2b_spec() -> WorkflowSpec:
     transitions = forward_and_backward + extra
     return WorkflowSpec(
         code="b2b_university_v1",
-        name="B2B: продвижение продукта вузу",
+        name="B2B: продажа КП с юридическим согласованием (дополнительная)",
+        deal_type="b2b",
+        statuses=statuses,
+        transitions=transitions,
+    )
+
+
+#: 14 шагов задания (раздел 2, дословно из `rtk_requiriments.md:25-38`; шаг 5 —
+#: с пометкой «(опционально)», как в таблице B2-1; шаг 2 сохраняет «с ним»).
+#: SLA — предложение разработчика (вопрос владельцу, см. отчёт спринта B2),
+#: в рабочих сутках (`sla_hours = 24 × дней`).
+_B2B_STEPS: list[StepDef] = [
+    StepDef("contact_search", "Поиск контактов ответственного в вузе", 24 * 3, "1"),
+    StepDef(
+        "communication",
+        "Коммуникация с ним и уточнение актуальности программ по ИТ-направлениям",
+        24 * 5,
+        "2",
+    ),
+    StepDef("meeting", "Организация встречи с представителями вуза", 24 * 10, "3"),
+    StepDef(
+        "documents_exchange", "Обмен необходимым пакетом документов для подписания", 24 * 5, "4"
+    ),
+    StepDef(
+        "documents_correction",
+        "Корректировка документов перед подписанием (опционально)",
+        24 * 3,
+        "5",
+    ),
+    StepDef("signing", "Подписание документов", 24 * 10, "6"),
+    StepDef(
+        "materials_transfer",
+        "Передача обучающих материалов по ИТ-направлению, лицензии ИТ-продукта "
+        "и его документации в вуз",
+        24 * 5,
+        "7",
+    ),
+    StepDef("implementation_support", "Сопровождение внедрения ИТ-продуктов в вузе", 24 * 20, "8"),
+    StepDef("teacher_training", "Обучение преподавателей", 24 * 20, "9"),
+    StepDef(
+        "curriculum_update",
+        "Актуализация учебной программы по ИТ-направлению с учётом обучения "
+        "преподавателя и добавления ИТ-продукта",
+        24 * 20,
+        "10",
+    ),
+    StepDef("classes", "Ведение занятий", 24 * 60, "11"),
+    StepDef(
+        "docs_update",
+        "Актуализация документации по продукту и обучающим материалам",
+        24 * 10,
+        "12",
+    ),
+    StepDef("teacher_qualification", "Повышение квалификации преподавателей", 24 * 20, "13"),
+    StepDef("execution_control", "Контроль за исполнением каждого этапа", 24 * 5, "14"),
+]
+
+#: Условие шагов 4/5/6: к шагу приложен файл-договор (черновик на 4/5, подписанный скан на 6).
+_STEP_CONTRACT_ATTACHED = {"field": "step_attachments.contract", "op": "exists"}
+_STEP_ACT_ATTACHED = {"field": "step_attachments.act", "op": "exists"}
+
+
+def _b2b_spec() -> WorkflowSpec:
+    """B2-1 (вариант B): новая основная воронка B2B — 14 шагов задания плюс won/lost/parked
+    (17 статусов, 71 переход, 14 SLA-правил). Замена `_b2b_sales_spec` (v1) по умолчанию для
+    типа сделки `b2b`: сид снимает default с v1 при первом запуске (B2-2).
+
+    Шаг 5 опционален: 4→6 — главный путь вперёд (минуя корректировку), 4→5 — явный уход на
+    правки. ПЭП запрашивается вручную на вкладке «Подписание» (не действием DSL, как в v1):
+    переход 6→7 открывается либо по `signature_status=signed`, либо по приложенному на шаге
+    подписанному сканy (`step_attachments.contract`). Шаг 14 («контроль за исполнением каждого
+    этапа») закрывает сделку успешно только HEAD (`allowed_roles`, ADMIN проходит всегда) и
+    несёт отдельный переход «новый цикл» на шаг 11 (пролонгация обучения на новый семестр).
+    """
+    extra = [
+        TransitionSpec(
+            from_code="contact_search",
+            to_code="communication",
+            name="Контакт найден: начать коммуникацию",
+            conditions={"field": "contact_id", "op": "not_null"},
+            sort_order=10,
+        ),
+        TransitionSpec(
+            from_code="communication",
+            to_code="meeting",
+            name="Программы актуальны: организовать встречу",
+            requires_comment=True,
+            sort_order=10,
+        ),
+        TransitionSpec(
+            from_code="meeting",
+            to_code="documents_exchange",
+            name="Встреча проведена: обменяться документами",
+            sort_order=10,
+        ),
+        # Необязательный шаг 5: 4→6 — главная кнопка «вперёд» (минуя корректировку),
+        # 4→5 — явный уход на правки. Фронтенд делит вперёд/назад по sort_order статусов, не
+        # переходов, поэтому обе ветки из шага 4 остаются «вперёд» (new_spec: statusUtils.ts).
+        TransitionSpec(
+            from_code="documents_exchange",
+            to_code="signing",
+            name="Документы согласованы без правок: к подписанию",
+            conditions=_STEP_CONTRACT_ATTACHED,
+            sort_order=10,
+        ),
+        TransitionSpec(
+            from_code="documents_exchange",
+            to_code="documents_correction",
+            name="Отправить документы на корректировку",
+            requires_comment=True,
+            conditions=_STEP_CONTRACT_ATTACHED,
+            sort_order=20,
+        ),
+        TransitionSpec(
+            from_code="documents_correction",
+            to_code="signing",
+            name="Документы скорректированы: к подписанию",
+            requires_comment=True,
+            conditions=_STEP_CONTRACT_ATTACHED,
+            sort_order=10,
+        ),
+        # ПЭП запрашивается вручную на вкладке «Подписание» сделки (не действием DSL): условие
+        # ниже пропускает и готовый `signature_status=signed`, и подписанный скан, приложенный
+        # прямо на этом шаге — демо не должно зависеть от прохождения полного цикла ПЭП.
+        TransitionSpec(
+            from_code="signing",
+            to_code="materials_transfer",
+            name="Документы подписаны: передать материалы и лицензию",
+            conditions={
+                "any": [
+                    {"field": "signature_status", "op": "eq", "value": "signed"},
+                    _STEP_CONTRACT_ATTACHED,
+                ]
+            },
+            actions=[{"type": "integration_event", "event_code": "LEARNING_TRANSFER_REQUESTED"}],
+            sort_order=10,
+        ),
+        TransitionSpec(
+            from_code="materials_transfer",
+            to_code="implementation_support",
+            name="Материалы переданы: сопровождать внедрение",
+            conditions=_STEP_ACT_ATTACHED,
+            actions=[
+                {
+                    "type": "create_task",
+                    "title": "Провести установку и настройку ПО в вузе",
+                    "assignee": "owner",
+                    "due_days": 10,
+                }
+            ],
+            sort_order=10,
+        ),
+        TransitionSpec(
+            from_code="implementation_support",
+            to_code="teacher_training",
+            name="ПО внедрено: обучить преподавателей",
+            actions=[
+                {"type": "integration_event", "event_code": "LEARNING_ENROLLMENT_SENT"},
+                {
+                    "type": "create_task",
+                    "title": "Согласовать график обучения",
+                    "assignee": "owner",
+                },
+            ],
+            sort_order=10,
+        ),
+        TransitionSpec(
+            from_code="teacher_training",
+            to_code="curriculum_update",
+            name="Обучение преподавателей завершено: актуализировать программу",
+            requires_comment=True,
+            sort_order=10,
+        ),
+        TransitionSpec(
+            from_code="curriculum_update",
+            to_code="classes",
+            name="Программа актуализирована: начать занятия",
+            sort_order=10,
+        ),
+        TransitionSpec(
+            from_code="classes",
+            to_code="docs_update",
+            name="Занятия ведутся: актуализировать документацию",
+            sort_order=10,
+        ),
+        TransitionSpec(
+            from_code="docs_update",
+            to_code="teacher_qualification",
+            name="Документация актуализирована: повысить квалификацию преподавателей",
+            sort_order=10,
+        ),
+        TransitionSpec(
+            from_code="teacher_qualification",
+            to_code="execution_control",
+            name="Квалификация преподавателей повышена: перейти к контролю исполнения",
+            sort_order=10,
+        ),
+        # Итоговая приёмка: закрывает успешно только HEAD (критично для демо — KAM не должен
+        # уметь закрыть взаимодействие сам). ADMIN проходит всегда (crm.service.transition).
+        TransitionSpec(
+            from_code="execution_control",
+            to_code="won",
+            name="Принять результаты и закрыть взаимодействие",
+            requires_comment=True,
+            allowed_roles=["HEAD"],
+            conditions={
+                "all": [
+                    {"field": "amount", "op": "not_null"},
+                    {"field": "expected_close_date", "op": "not_null"},
+                    _STEP_ACT_ATTACHED,
+                ]
+            },
+            sort_order=10,
+        ),
+        # Новый цикл: занятия, документация и повышение квалификации повторяются каждый
+        # семестр — это не "возврат" (не требует lost/parked), отдельный переход на шаг 11.
+        TransitionSpec(
+            from_code="execution_control",
+            to_code="classes",
+            name="Начать новый цикл занятий (пролонгация)",
+            requires_comment=True,
+            sort_order=50,
+        ),
+    ]
+
+    overridden_pairs = {(t.from_code, t.to_code) for t in extra}
+    statuses, base_transitions = _linear_funnel(_B2B_STEPS)
+    forward_and_backward = [
+        t for t in base_transitions if (t.from_code, t.to_code) not in overridden_pairs
+    ]
+    transitions = forward_and_backward + extra
+    return WorkflowSpec(
+        code="b2b_university_v2",
+        name="B2B: взаимодействие с вузом (14 шагов задания)",
         deal_type="b2b",
         statuses=statuses,
         transitions=transitions,
@@ -330,14 +621,16 @@ def _b2b_spec() -> WorkflowSpec:
 
 
 def _b2c_spec() -> WorkflowSpec:
-    steps = [
-        ("site_application", "Заявка с сайта"),
-        ("contact_verification", "Верификация контакта"),
-        ("consultation", "Консультация"),
-        ("payment_contract", "Оплата и договор оферты"),
-        ("lms_enrollment", "Зачисление в LMS"),
-        ("training_completed", "Завершение обучения"),
-    ]
+    steps = _legacy_steps(
+        [
+            ("site_application", "Заявка с сайта"),
+            ("contact_verification", "Верификация контакта"),
+            ("consultation", "Консультация"),
+            ("payment_contract", "Оплата и договор оферты"),
+            ("lms_enrollment", "Зачисление в LMS"),
+            ("training_completed", "Завершение обучения"),
+        ]
+    )
 
     extra = [
         TransitionSpec(
@@ -490,6 +783,60 @@ async def backfill_resume_transitions(
     return len(added)
 
 
+#: B2-2: на каждом `docker compose up`/хуке Helm сид запускается заново. Если бы он слепо
+#: создавал новую default-воронку, уникальный индекс `uq_workflows_default_per_deal_type`
+#: (одна опубликованная default-воронка на тип сделки) упал бы, а вместе с ним и
+#: `helm upgrade` — сид обязан снять default со СВОЕЙ прежней воронки сам, тем же приёмом,
+#: что `WorkflowService._demote_other_defaults` в API (см. `_demote_seed_default`).
+_SEED_OWNED_DEFAULTS: dict[str, str] = {"b2b": "b2b_university_v1"}
+
+#: Переключатель смены default сидом. `true` (демо/dev) — сид сам снимает default со своей
+#: прежней воронки (`_SEED_OWNED_DEFAULTS`) при появлении новой; `false` (рекомендация для
+#: prod, вопрос владельцу №7 отчёта спринта B2) — сид только добавляет воронку, не трогая
+#: текущий default, администратор переключает вручную (`PATCH /api/workflows/{id}`).
+#: Переменная окружения, а не поле `Settings`: сид — CLI-скрипт, не часть процесса api/worker.
+_SEED_SWITCH_DEFAULT_WORKFLOW_ENV = "SEED_SWITCH_DEFAULT_WORKFLOW"
+
+
+def _seed_switch_default_workflow_enabled() -> bool:
+    raw = os.environ.get(_SEED_SWITCH_DEFAULT_WORKFLOW_ENV, "true").strip().lower()
+    return raw not in {"false", "0", "no", ""}
+
+
+async def _demote_seed_default(session: AsyncSession, deal_type: str, new_code: str) -> bool:
+    """Снимает `is_default` с опубликованной default-воронки `deal_type`, если ею остаётся
+    прежняя СИДОВАЯ воронка (`_SEED_OWNED_DEFAULTS`) — то есть решение администратора не
+    трогается: воронка, назначенная default вручную через API, сидом не демотируется."""
+    current = (
+        await session.execute(
+            select(Workflow).where(
+                Workflow.deal_type == deal_type,
+                Workflow.is_default.is_(True),
+                Workflow.state == WorkflowState.PUBLISHED.value,
+            )
+        )
+    ).scalar_one_or_none()
+    if current is None or current.code == new_code:
+        return False
+    owned_code = _SEED_OWNED_DEFAULTS.get(deal_type)
+    if owned_code is None or current.code != owned_code:
+        logger.info("workflow_seed_default_kept", deal_type=deal_type, current_default=current.code)
+        return False
+    current.is_default = False
+    current.version += 1
+    await session.flush()
+    workflow_id = current.id
+    run_after_commit(session, lambda: invalidate_workflow_cache(workflow_id))
+    await AuditService(session).record(
+        AuditAction.WORKFLOW_UPDATED,
+        entity_type="workflow",
+        entity_id=current.id,
+        changes={"is_default": {"old": True, "new": False}},
+    )
+    logger.info("workflow_seed_default_demoted", code=current.code, new_default=new_code)
+    return True
+
+
 async def seed_workflow(
     session: AsyncSession, spec: WorkflowSpec, *, is_default: bool = True
 ) -> Workflow | None:
@@ -501,11 +848,25 @@ async def seed_workflow(
         logger.info("workflow_seed_skip_existing", code=spec.code)
         return None
 
+    if is_default and _seed_switch_default_workflow_enabled():
+        await _demote_seed_default(session, spec.deal_type, spec.code)
+    # Если default на этот тип сделки уже есть (чужой или переключатель выключен), новая
+    # воронка создаётся НЕ default — иначе уникальный индекс упадёт, а сид обязан не падать
+    # на предсказуемой коллизии (риск спринта: сид — хук Helm с backoffLimit).
+    existing_default = await session.scalar(
+        select(Workflow.id).where(
+            Workflow.deal_type == spec.deal_type,
+            Workflow.is_default.is_(True),
+            Workflow.state == WorkflowState.PUBLISHED.value,
+        )
+    )
+    effective_default = is_default and existing_default is None
+
     workflow = Workflow(
         code=spec.code,
         name=spec.name,
         deal_type=spec.deal_type,
-        is_default=is_default,
+        is_default=effective_default,
         state=WorkflowState.DRAFT.value,
     )
     session.add(workflow)
@@ -621,10 +982,13 @@ _KP_APPROVAL_TEMPLATE = """
 
 
 async def seed_signature_templates(session: AsyncSession) -> None:
-    """Единственный шаблон, на который в этом спринте реально ссылается сид
-    воронки (`kp_approval`, переход `kp_preparation → kp_approval` ниже).
-    Идемпотентно — тем же приёмом, что `seed_workflow`: существующий `code`
-    сид не трогает."""
+    """Шаблон `kp_approval`, на который ссылается переход `kp_preparation →
+    kp_approval` ТОЛЬКО дополнительной воронки `_b2b_sales_spec` (v1, ПЭП-
+    согласование КП руководителем). Основная воронка `_b2b_spec` (v2, 14
+    шагов задания) этот шаблон не использует: подпись там запрашивается
+    вручную на вкладке «Подписание» сделки (шаг 6, `signing`), а не
+    действием DSL `request_signature`. Идемпотентно — тем же приёмом, что
+    `seed_workflow`: существующий `code` сид не трогает."""
     existing = await session.scalar(
         select(SignatureTemplate.id).where(SignatureTemplate.code == "kp_approval")
     )
@@ -645,9 +1009,14 @@ async def seed_signature_templates(session: AsyncSession) -> None:
 
 
 async def seed_default_workflows() -> None:
+    """Порядок важен (B2-2): v2 сидится первой и на чистой БД занимает default для `b2b`;
+    дополнительная v1 — следом, явно `is_default=False`, независимо от переключателя (она
+    никогда не default); на стенде со старым сидом `_demote_seed_default` внутри `seed_workflow`
+    снимет default с уже существующей v1, прежде чем v1 дойдёт до ветки «уже есть»."""
     async with session_scope() as session:
         await seed_signature_templates(session)
         await seed_workflow(session, _b2b_spec())
+        await seed_workflow(session, _b2b_sales_spec(), is_default=False)
         await seed_workflow(session, _b2c_spec())
 
 

@@ -31,10 +31,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.db import run_after_rollback
 from app.core.errors import AppError, ErrorCode, NotFoundError
 from app.core.ids import uuid7
 from app.core.security import Principal
-from app.core.storage import ensure_bucket, upload_object_bytes
+from app.core.storage import delete_object, ensure_bucket, upload_object_bytes
+from app.modules.admin.models import SystemSetting
+from app.modules.admin.setting_crypto import decrypt_value
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
 from app.modules.catalog.models import Contact, ContactChannel, Organization
@@ -45,6 +48,7 @@ from app.modules.identity.keycloak import keycloak_client
 from app.modules.identity.models import (
     DataErasureRequest,
     ErasureStatus,
+    Role,
     SubjectType,
     User,
     UserStatus,
@@ -52,9 +56,17 @@ from app.modules.identity.models import (
 from app.modules.notification.service import (
     TPL_ERASURE_BLOCKED,
     TPL_ERASURE_COMPLETED,
+    NotificationPriority,
     get_notification_service,
 )
 from app.modules.signing.rendering import render_erasure_act_pdf
+from app.modules.signing.service import get_signing_service
+
+#: B6-9: ответственный за акт об уничтожении ПДн — задаётся через
+#: `PUT /api/admin/system-settings/pdn.responsible_user_id` (значение — строка UUID).
+_PDN_RESPONSIBLE_SETTING_KEY = "pdn.responsible_user_id"
+#: Инициатору уходит, когда ни настроенный ответственный, ни активный ADMIN не найдены.
+TPL_ERASURE_ACT_NO_SIGNER = "ERASURE_ACT_NO_SIGNER"
 
 logger = structlog.get_logger(__name__)
 
@@ -459,6 +471,9 @@ class ErasureExecutionService:
             )
             return {"executed": False, "blockers": [b["code"] for b in blockers]}
 
+        # B6-9: дата исполнения — до рендера акта, а не время рендера (акт её печатает).
+        request.executed_at = dt.datetime.now(dt.UTC)
+
         if request.subject_type == SubjectType.USER.value:
             result = await self._execute_user(request, mode=mode)
         elif request.subject_type == SubjectType.ORGANIZATION.value:
@@ -467,7 +482,6 @@ class ErasureExecutionService:
             result = await self._execute_contact(request, mode=mode)
 
         request.status = ErasureStatus.COMPLETED.value
-        request.executed_at = dt.datetime.now(dt.UTC)
         request.grace_until = None
         await self._session.flush()
         await self._audit.record(
@@ -684,6 +698,45 @@ class ErasureExecutionService:
                 target=source_code,
             )
 
+    async def _resolve_act_signer(self, request: DataErasureRequest) -> uuid.UUID | None:
+        """B6-9: порядок поиска подписанта акта — настроенный ответственный
+        (`pdn.responsible_user_id`) → инициатор заявки (`requested_by`) → любой активный ADMIN.
+        Субъект самой заявки (если это сотрудник) исключается — не может подписывать акт о
+        собственном уничтожении."""
+        excluded = request.subject_id if request.subject_type == SubjectType.USER.value else None
+
+        async def _active(user_id: uuid.UUID | None) -> uuid.UUID | None:
+            if user_id is None or user_id == excluded:
+                return None
+            user = await self._session.get(User, user_id)
+            if user is None or user.status != UserStatus.ACTIVE.value:
+                return None
+            return user.id
+
+        setting = await self._session.get(SystemSetting, _PDN_RESPONSIBLE_SETTING_KEY)
+        if setting is not None:
+            raw = decrypt_value(setting.value)
+            if isinstance(raw, str) and raw:
+                try:
+                    configured = await _active(uuid.UUID(raw))
+                except ValueError:
+                    configured = None
+                if configured is not None:
+                    return configured
+
+        requested_by = await _active(request.requested_by)
+        if requested_by is not None:
+            return requested_by
+
+        stmt = (
+            select(User.id)
+            .where(User.role == Role.ADMIN.value, User.status == UserStatus.ACTIVE.value)
+            .order_by(User.created_at)
+        )
+        if excluded is not None:
+            stmt = stmt.where(User.id != excluded)
+        return await self._session.scalar(stmt.limit(1))
+
     async def _issue_act(
         self,
         request: DataErasureRequest,
@@ -695,37 +748,82 @@ class ErasureExecutionService:
     ) -> uuid.UUID:
         """Акт об уничтожении ПДн (new_spec §4.8.4 шаг 6, dop.md §10.7) —
 
-        обязательный документ, который заказчик обязан предъявить при
-        проверке Роскомнадзора; хранится в S3 бессрочно (`act_file_id`,
-        `ON DELETE RESTRICT`, см. docstring `DataErasureRequest`).
+        обязательный документ, который заказчик обязан предъявить при проверке Роскомнадзора;
+        хранится в S3 бессрочно (`act_file_id`, `ON DELETE RESTRICT`, см. docstring
+        `DataErasureRequest`). Подпись ответственного лица (B6-9) делает акт доказательством, а
+        не справкой «система уничтожила» — исполнение запроса не ждёт подписи: заявка становится
+        `completed` сразу, акт висит как отдельная задача на подпись.
         """
+        signer_id = await self._resolve_act_signer(request)
+        responsible_display = "ответственный не назначен"
+        if signer_id is not None:
+            signer = await self._session.get(User, signer_id)
+            if signer is not None:
+                position = f", {signer.position}" if signer.position else ""
+                responsible_display = f"{signer.full_name}{position}"
+        executed_at = request.executed_at or dt.datetime.now(dt.UTC)
         pdf_bytes = render_erasure_act_pdf(
             subject_type=subject_type,
             subject_display=subject_display,
             request_id=str(request.id),
             legal_basis=request.legal_basis or "не указано",
-            executed_at_iso=dt.datetime.now(dt.UTC).isoformat(),
-            responsible_display="система (плановое исполнение по истечении отсрочки)",
+            executed_at_iso=executed_at.isoformat(),
+            responsible_display=responsible_display,
             categories_erased=categories_erased,
             categories_retained=categories_retained,
         )
-        return await self._store_pdf(pdf_bytes, filename=f"erasure-act-{request.id}.pdf")
+        file_id = await self._store_pdf(pdf_bytes, filename="act.pdf", request_id=request.id)
+        if signer_id is not None:
+            await get_signing_service().create_erasure_act_document(
+                self._session,
+                erasure_request_id=request.id,
+                file_id=file_id,
+                signer_user_ids=[signer_id],
+            )
+        else:
+            admin_ids = list(
+                (
+                    await self._session.execute(
+                        select(User.id).where(
+                            User.role == Role.ADMIN.value, User.status == UserStatus.ACTIVE.value
+                        )
+                    )
+                ).scalars()
+            )
+            for admin_id in admin_ids:
+                await get_notification_service().notify_user(
+                    self._session,
+                    recipient_id=admin_id,
+                    template_code=TPL_ERASURE_ACT_NO_SIGNER,
+                    priority=NotificationPriority.HIGH,
+                    entity_type="data_erasure_request",
+                    entity_id=request.id,
+                )
+        return file_id
 
-    async def _store_pdf(self, pdf_bytes: bytes, *, filename: str) -> uuid.UUID:
+    async def _store_pdf(
+        self, pdf_bytes: bytes, *, filename: str, request_id: uuid.UUID
+    ) -> uuid.UUID:
         """Тот же приём, что `signing.service.SignatureDocumentService.
 
-        _store_generated_pdf` — сервер сам формирует файл, поэтому
-        presigned-upload (раздел 3.7) не нужен: загружать себе самому через
-        HTTP было бы избыточным кругом.
+        _store_generated_pdf` — сервер сам формирует файл, поэтому presigned-upload (раздел
+        3.7) не нужен. Ключ детерминирован по заявке (B6-9/B7-6): `erasure-acts/{request_id}/
+        act.pdf` — повторный тик `sweep_erasure_requests` перезаписывает тот же объект вместо
+        нового. Откат транзакции удаляет загруженный объект (`run_after_rollback`).
         """
         settings = get_settings()
         bucket = settings.s3_bucket_signatures
         await ensure_bucket(bucket)
         file_id = uuid7()
-        storage_key = f"erasure-acts/{file_id}/{filename}"
+        storage_key = f"erasure-acts/{request_id}/{filename}"
         await upload_object_bytes(
             bucket=bucket, key=storage_key, body=pdf_bytes, content_type="application/pdf"
         )
+
+        async def _cleanup_orphan() -> None:
+            await delete_object(bucket=bucket, key=storage_key)
+
+        run_after_rollback(self._session, _cleanup_orphan)
         file = File(
             id=file_id,
             storage_key=storage_key,

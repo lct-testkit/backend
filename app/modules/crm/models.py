@@ -81,6 +81,9 @@ class HistoryReason(StrEnum):
     INTEGRATION = "integration"
     AUTO = "auto"
     SIGNATURE_REJECTED = "signature_rejected"
+    # B7 (мелкая правка): истечение срока подписания — раньше делило причину с отказом
+    # (`signature_rejected`), хотя в журнале сделки это разные события.
+    SIGNATURE_EXPIRED = "signature_expired"
 
 
 class DealEventType(StrEnum):
@@ -88,6 +91,11 @@ class DealEventType(StrEnum):
     OWNER_CHANGED = "OWNER_CHANGED"
     FIELD_CHANGED = "FIELD_CHANGED"
     FILE_ADDED = "FILE_ADDED"
+    # B2-8: отвязка файла от сделки (`DELETE /api/attachments/{id}`) должна
+    # оставлять след в ленте так же, как привязка — иначе «куда пропал
+    # договор» не узнать из истории. CHECK расширен миграцией 0026 вместе с
+    # добавлением колонок `attachments.status_id`/`status_history_id`.
+    FILE_REMOVED = "FILE_REMOVED"
     SIGNATURE_REQUESTED = "SIGNATURE_REQUESTED"
     SIGNATURE_SIGNED = "SIGNATURE_SIGNED"
     SIGNATURE_REJECTED = "SIGNATURE_REJECTED"
@@ -260,7 +268,8 @@ class DealStatusHistory(UuidPkMixin, Base):
     __table_args__ = (
         Index("ix_deal_status_history_deal_changed", "deal_id", "changed_at"),
         CheckConstraint(
-            "reason IN ('manual','workflow_migration','integration','auto','signature_rejected')",
+            "reason IN ('manual','workflow_migration','integration','auto',"
+            "'signature_rejected','signature_expired')",
             name="deal_status_history_reason_valid",
         ),
     )
@@ -298,7 +307,7 @@ class DealEvent(UuidPkMixin, Base):
     __table_args__ = (
         Index("ix_deal_events_deal_created", "deal_id", "created_at"),
         CheckConstraint(
-            "event_type IN ('CREATED','OWNER_CHANGED','FIELD_CHANGED','FILE_ADDED',"
+            "event_type IN ('CREATED','OWNER_CHANGED','FIELD_CHANGED','FILE_ADDED','FILE_REMOVED',"
             "'SIGNATURE_REQUESTED','SIGNATURE_SIGNED','SIGNATURE_REJECTED',"
             "'IMPORT_APPLIED','WORKFLOW_MIGRATION')",
             name="deal_events_type_valid",

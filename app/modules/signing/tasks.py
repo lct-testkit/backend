@@ -14,28 +14,31 @@ import datetime as dt
 from typing import Any
 
 import structlog
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.db import session_scope
 from app.core.metrics import track_task
+from app.core.storage import delete_object, list_objects
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
-from app.modules.crm.models import Deal
+from app.modules.crm.models import Deal, HistoryReason
 from app.modules.crm.models import SignatureStatus as DealSignatureStatus
+from app.modules.files.models import File
 from app.modules.notification.service import NotificationPriority, get_notification_service
 from app.modules.signing.models import (
     OPEN_REQUEST_STATUSES,
     EdmAgreement,
     EdmAgreementStatus,
     SignatureDocument,
-    SignatureOtpCode,
     SignatureRequest,
 )
 from app.modules.signing.models import SignatureDocumentStatus as DocStatus
 from app.modules.signing.models import SignatureRequestStatus as ReqStatus
 from app.modules.signing.service import (
     TPL_SIGNATURE_EXPIRED,
+    SignatureDocumentService,
     _apply_deal_signature_outcome,
     _sync_deal_signature_status,
     suspend_requests_of_agreement,
@@ -43,9 +46,10 @@ from app.modules.signing.service import (
 
 logger = structlog.get_logger(__name__)
 
-#: `signature_otp_codes` хранит ретеншен 30 дней (dop.md §10.9) — доказательство
-#: лежит в `signatures.evidence`, сами коды нужны только на срок жизни OTP.
-OTP_RETENTION_DAYS = 30
+# `signature_otp_codes` (dop.md §10.9) чистится категорией `otp_codes` единого
+# `RetentionService` (B6-6, `app/modules/admin/retention.py`, `RETENTION_OTP_DAYS`) — не
+# отдельной задачей здесь: доказательство лежит в `signatures.evidence`, сами коды нужны
+# только на срок жизни OTP.
 
 
 @track_task
@@ -113,6 +117,7 @@ async def sweep_signature_deadlines(ctx: dict[str, Any]) -> dict[str, int]:
                         deal,
                         rule=document.on_expired,
                         note=f"Истёк срок подписания документа «{document.title}»",
+                        reason=HistoryReason.SIGNATURE_EXPIRED.value,
                     )
             expired += 1
 
@@ -123,6 +128,52 @@ async def sweep_signature_deadlines(ctx: dict[str, Any]) -> dict[str, int]:
             "signature_deadlines_swept", expired=expired, agreements_expired=agreements_expired
         )
     return {"expired": expired, "agreements_expired": agreements_expired}
+
+
+@track_task
+async def sweep_signature_reminders(ctx: dict[str, Any]) -> dict[str, int]:
+    """B7-1: напоминания подписантам о приближающемся дедлайне (`SIGNATURE_REMIND_BEFORE_HOURS`,
+    по умолчанию за 48 и 4 часа), не чаще `SIGNATURE_REMIND_MIN_GAP_HOURS`. `FOR UPDATE OF
+    signature_requests SKIP LOCKED` — запрос, который в этот момент подписывают (`sign()`
+    держит замок строки), пропускается до следующего тика, а не ждёт."""
+    now = dt.datetime.now(dt.UTC)
+    settings = get_settings()
+    thresholds = settings.signature_remind_before_hours_list
+    if not thresholds:
+        return {"reminded": 0, "checked": 0}
+    horizon = now + dt.timedelta(hours=max(thresholds))
+
+    reminded = 0
+    checked = 0
+    async with session_scope() as session:
+        stmt = (
+            select(SignatureRequest)
+            .join(SignatureDocument, SignatureDocument.id == SignatureRequest.document_id)
+            .where(
+                SignatureRequest.status.in_([ReqStatus.SENT.value, ReqStatus.VIEWED.value]),
+                SignatureDocument.status.in_(
+                    [DocStatus.PENDING.value, DocStatus.PARTIALLY_SIGNED.value]
+                ),
+                SignatureDocument.deadline_at.is_not(None),
+                SignatureDocument.deadline_at > now,
+                SignatureDocument.deadline_at <= horizon,
+            )
+            .order_by(SignatureRequest.id)
+            .with_for_update(of=SignatureRequest, skip_locked=True)
+        )
+        requests = list((await session.execute(stmt)).scalars().all())
+        checked = len(requests)
+        service = SignatureDocumentService(session)
+        for request in requests:
+            document = await session.get(SignatureDocument, request.document_id)
+            if document is None:
+                continue
+            if await service.maybe_remind(request, document):
+                reminded += 1
+
+    if reminded:
+        logger.info("signature_reminders_swept", reminded=reminded, checked=checked)
+    return {"reminded": reminded, "checked": checked}
 
 
 async def _expire_edm_agreements(session: AsyncSession, *, today: dt.date) -> int:
@@ -151,13 +202,54 @@ async def _expire_edm_agreements(session: AsyncSession, *, today: dt.date) -> in
     return len(agreements)
 
 
+#: Префикс детерминированных ключей штампованного PDF/протокола (B7-6,
+#: `SignatureDocumentService._store_generated_pdf`) — только их проверяет уборщик. Исходные
+#: документы на подпись лежат под случайным ключом `{file_id}/{filename}` и чистятся общей
+#: ретеншен-задачей (B6-6), не здесь.
+SIGNED_OBJECT_PREFIX = "signed/"
+#: Объект младше этого порога не трогаем: запрос может быть между `upload_object_bytes` и
+#: коммитом — не должен попасть под уборку как сирота раньше, чем успеет либо зафиксироваться
+#: (появится строка `files`), либо откатиться (`run_after_rollback` уже его удалит).
+ORPHAN_MIN_AGE_HOURS = 24
+
+
 @track_task
-async def sweep_signature_otp_cleanup(ctx: dict[str, Any]) -> dict[str, int]:
-    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(days=OTP_RETENTION_DAYS)
+async def sweep_signature_orphans(ctx: dict[str, Any]) -> dict[str, int]:
+    """B7-6: объекты бакета `signatures` под `signed/` без строки `files`.
+
+    Обычный путь (успешная загрузка, но провалившийся дальше запрос) уже чистит
+    `run_after_rollback` сразу внутри транзакции запроса — эта задача - вторая линия обороны
+    на случай, если процесс умер между `upload_object_bytes` и откатом/коммитом (хук тогда не
+    выполнился бы)."""
+    settings = get_settings()
+    bucket = settings.s3_bucket_signatures
+    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(hours=ORPHAN_MIN_AGE_HOURS)
+
+    objects = await list_objects(bucket=bucket, prefix=SIGNED_OBJECT_PREFIX)
+    stale_keys = [obj.key for obj in objects if obj.last_modified < cutoff]
+    if not stale_keys:
+        logger.info("signature_orphans_swept", checked=len(objects), removed=0)
+        return {"checked": len(objects), "removed": 0}
+
     async with session_scope() as session:
-        result = await session.execute(
-            delete(SignatureOtpCode).where(SignatureOtpCode.created_at < cutoff)
+        known = set(
+            (
+                await session.execute(
+                    select(File.storage_key).where(
+                        File.bucket == bucket, File.storage_key.in_(stale_keys)
+                    )
+                )
+            )
+            .scalars()
+            .all()
         )
-    removed = result.rowcount or 0
-    logger.info("signature_otp_codes_purged", removed=removed)
-    return {"removed": removed}
+
+    removed = 0
+    for key in stale_keys:
+        if key in known:
+            continue
+        await delete_object(bucket=bucket, key=key)
+        removed += 1
+
+    logger.info("signature_orphans_swept", checked=len(objects), removed=removed)
+    return {"checked": len(objects), "removed": removed}

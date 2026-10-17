@@ -291,6 +291,13 @@ class SignatureDocument(UuidPkMixin, Base):
     # автоматического отката статуса — безопасный вариант по умолчанию.
     on_rejected: Mapped[str | None] = mapped_column(String(64), nullable=True)
     on_expired: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # B7-4: код статуса воронки, в который переходит сделка сама после подписи ВСЕХ сторон
+    # (симметрично `on_rejected`). `requested_in_status_id` — статус сделки в момент запроса
+    # подписи: автопереход срабатывает только если сделка ещё в нём (не ушла вручную).
+    on_signed: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    requested_in_status_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workflow_statuses.id", ondelete="RESTRICT"), nullable=True
+    )
 
 
 class SignatureRequest(UuidPkMixin, Base):
@@ -350,6 +357,13 @@ class SignatureRequest(UuidPkMixin, Base):
     edm_agreement_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("edm_agreements.id", ondelete="RESTRICT"), nullable=True
     )
+    # B7-1: напоминания о приближающемся дедлайне (`sweep_signature_reminders`).
+    reminders_sent: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, server_default=text("0")
+    )
+    last_reminded_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False
     )
@@ -386,6 +400,36 @@ class SignatureOtpCode(UuidPkMixin, Base):
     )
     expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     consumed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), nullable=False
+    )
+
+
+class SignatureDownloadLink(UuidPkMixin, Base):
+    """B7-3: ссылка «только скачать» подписанный файл/протокол — отдельная от токена
+    подписания (`signature_requests.access_token_hash`), который живёт 7 дней и даёт право
+    подписывать. Эта ссылка не даёт прав на подпись, у неё свой TTL и лимит скачиваний, и она
+    отзывается при `void`/компрометации (`mark_disputed_since`). В БД — только sha256."""
+
+    __tablename__ = "signature_download_links"
+    __table_args__ = (
+        Index("ix_signature_download_links_document", "document_id"),
+        Index("uq_signature_download_links_token_hash", "token_hash", unique=True),
+    )
+
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("signature_documents.id", ondelete="CASCADE"), nullable=False
+    )
+    request_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("signature_requests.id", ondelete="CASCADE"), nullable=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    downloads: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default=text("0"))
+    last_downloaded_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False
     )

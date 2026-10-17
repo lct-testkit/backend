@@ -31,6 +31,8 @@ from app.core.db import session_scope
 from app.core.metrics import track_task
 from app.modules.identity.admin_service import AdminUserService
 from app.modules.identity.erasure_service import ErasureExecutionService
+from app.modules.identity.keycloak import keycloak_client
+from app.modules.identity.keycloak_events import KeycloakEventSync
 from app.modules.identity.models import DataErasureRequest, ErasureStatus, User, UserStatus
 
 logger = structlog.get_logger(__name__)
@@ -161,3 +163,26 @@ async def sweep_user_lifecycle(ctx: dict[str, Any]) -> dict[str, int]:
             failed=failed,
         )
     return {"unblocked": unblocked, "invites_expired": invites_expired, "failed": failed}
+
+
+@track_task
+async def sweep_keycloak_events(ctx: dict[str, Any]) -> dict[str, Any]:
+    """B6-3: опрос Admin API Keycloak (`LOGIN_ERROR` -> `LOGIN_FAILED`/`BRUTE_FORCE_LOCK`).
+
+    Нет-опом, пока `KEYCLOAK_EVENTS_POLL_ENABLED=false` (дефолт — до включения событий в realm,
+    спринт D1): `KeycloakEventSync.run` сам проверяет флаг и не делает запросов."""
+    async with session_scope() as session:
+        result = await KeycloakEventSync(session, keycloak_client).run()
+    if result.skipped:
+        return {"skipped": True}
+    if result.errored:
+        logger.warning("keycloak_events_sweep_error")
+        return {"errored": True}
+    if result.fetched:
+        logger.info(
+            "keycloak_events_swept",
+            fetched=result.fetched,
+            batches=result.batches,
+            locked=result.locked,
+        )
+    return {"fetched": result.fetched, "batches": result.batches, "locked": result.locked}

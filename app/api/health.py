@@ -8,10 +8,11 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, Header, HTTPException, Response, status
 from prometheus_client import CONTENT_TYPE_LATEST
 
 from app.core.config import get_settings
@@ -44,32 +45,21 @@ _dependency_metrics = DependencyMetricsRefresher(
 )
 
 
-@router.get(
-    "/health/live",
-    summary="Liveness",
-    description="Проверяет, что процесс жив. Роль: доступно без аутентификации.",
-)
-async def live() -> dict[str, str]:
+def _require_health_token(x_health_token: str | None) -> None:
+    """B6-8: публичный минимум `/health` не должен раскрывать версию, профиль и состав
+    инфраструктуры (ЗИС). Полный список отдаётся только с верным `X-Health-Token`; во всех
+    остальных случаях (токен не настроен, не передан или неверен) — 404, как у несуществующего
+    пути, а не 401/403, чтобы не подсказывать о существовании ручки."""
     settings = get_settings()
-    return {
-        "status": "ok",
-        "app": settings.app_name,
-        "version": settings.app_version,
-        "profile": settings.app_profile,
-    }
+    configured = settings.health_details_token
+    if configured is None or x_health_token is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    if not hmac.compare_digest(x_health_token, configured.get_secret_value()):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
 
 
-@router.get(
-    "/health/ready",
-    summary="Readiness",
-    description=(
-        "Проверяет PostgreSQL, Redis, Keycloak JWKS, SeaweedFS и очередь arq. "
-        "Возвращает 503, если недоступна критичная зависимость. "
-        "Роль: доступно без аутентификации."
-    ),
-)
-async def ready(response: Response) -> dict[str, Any]:
-    checks: list[DependencyStatus] = list(
+async def _dependency_checks() -> list[DependencyStatus]:
+    return list(
         await asyncio.gather(
             check_database(),
             check_redis(),
@@ -79,21 +69,69 @@ async def ready(response: Response) -> dict[str, Any]:
         )
     )
 
+
+def _overall_status(checks: list[DependencyStatus]) -> tuple[str, list[str]]:
+    degraded = [c.name for c in checks if not c.ok]
+    critical_down = [name for name in degraded if name in CRITICAL]
+    if critical_down:
+        return "unavailable", degraded
+    if degraded:
+        # Остальное деградирует предсказуемо, но трафик принимать можно.
+        return "degraded", degraded
+    return "ok", degraded
+
+
+@router.get(
+    "/health/live",
+    summary="Liveness",
+    description=(
+        "Проверяет, что процесс жив. Не раскрывает версию, профиль и состав инфраструктуры "
+        "(B6-8) — за этим на `/health/details` с заголовком `X-Health-Token`. "
+        "Роль: доступно без аутентификации."
+    ),
+)
+async def live() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@router.get(
+    "/health/ready",
+    summary="Readiness",
+    description=(
+        "Возвращает 503, если недоступна критичная зависимость (PostgreSQL, Redis), иначе "
+        "только сводный статус без списка зависимостей (B6-8) — список доступен на "
+        "`/health/details` с заголовком `X-Health-Token`. "
+        "Роль: доступно без аутентификации."
+    ),
+)
+async def ready(response: Response) -> dict[str, Any]:
+    checks = await _dependency_checks()
     for check in checks:
         dependency_up.labels(dependency=check.name).set(1 if check.ok else 0)
 
-    degraded = [c.name for c in checks if not c.ok]
-    critical_down = [name for name in degraded if name in CRITICAL]
-
-    if critical_down:
+    overall, _degraded = _overall_status(checks)
+    if overall == "unavailable":
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-        overall = "unavailable"
-    elif degraded:
-        # Остальное деградирует предсказуемо, но трафик принимать можно.
-        overall = "degraded"
-    else:
-        overall = "ok"
+    return {"status": overall}
 
+
+@router.get(
+    "/health/details",
+    summary="Диагностика (полная)",
+    description=(
+        "Полный список зависимостей с задержками. Требует заголовок `X-Health-Token`, "
+        "равный `HEALTH_DETAILS_TOKEN`; без него или с неверным значением — 404 (B6-8)."
+    ),
+    include_in_schema=False,
+)
+async def details(
+    response: Response, x_health_token: str | None = Header(default=None)
+) -> dict[str, Any]:
+    _require_health_token(x_health_token)
+    checks = await _dependency_checks()
+    overall, _degraded = _overall_status(checks)
+    if overall == "unavailable":
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return {
         "status": overall,
         "dependencies": [
@@ -102,7 +140,6 @@ async def ready(response: Response) -> dict[str, Any]:
                 "ok": c.ok,
                 "latency_ms": c.latency_ms,
                 **({"error": c.error} if c.error else {}),
-                **({"details": c.details} if c.details else {}),
             }
             for c in checks
         ],
@@ -131,10 +168,14 @@ async def metrics() -> Response:
 @router.get(
     "/health/keycloak",
     summary="Диагностика Keycloak",
-    description="Проверяет OIDC discovery Keycloak. Роль: доступно без аутентификации.",
+    description=(
+        "Проверяет OIDC discovery Keycloak. Требует заголовок `X-Health-Token` (B6-8), как "
+        "`/health/details` — без него или с неверным значением 404."
+    ),
     include_in_schema=False,
 )
-async def keycloak_health() -> dict[str, Any]:
+async def keycloak_health(x_health_token: str | None = Header(default=None)) -> dict[str, Any]:
+    _require_health_token(x_health_token)
     check = await keycloak_client.check()
     return {
         "name": check.name,

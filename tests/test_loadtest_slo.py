@@ -66,3 +66,22 @@ def test_missing_aggregated_row_is_an_error(tmp_path: Path) -> None:
     csv_path.write_text("Name,Request Count\nGET /,1\n", encoding="utf-8")
     with pytest.raises(SystemExit):
         assert_slo.read_aggregated(csv_path)
+
+
+def test_loadtest_pair_has_no_guards() -> None:
+    """B2-4: нагрузочный сценарий `transition` (`locustfile_transition.py`,
+    `provision.py`) шлёт переход без комментария и без файлов — пара, на которой он
+    работает, обязана быть без `conditions`, `actions` и `requires_comment`. После
+    B2-1 пара сменилась с `identification → first_contact` воронки v1 на
+    `meeting → documents_exchange` воронки `b2b_university_v2`."""
+    from app.modules.workflow.seed import _b2b_spec
+
+    spec = _b2b_spec()
+    pair = next(
+        t
+        for t in spec.transitions
+        if t.from_code == "meeting" and t.to_code == "documents_exchange"
+    )
+    assert pair.conditions in (None, {})
+    assert pair.actions in (None, [])
+    assert pair.requires_comment is False

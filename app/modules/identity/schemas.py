@@ -402,12 +402,24 @@ class ErasureRequestDetail(BaseModel):
     rejection_reason: str | None = None
     executed_at: dt.datetime | None = None
     act_file_id: uuid.UUID | None = None
+    # B6-9: ПЭП ответственного лица. `act_signed`/`act_signature_status` заполняются роутером
+    # отдельным запросом по `act_document_id` (не хранятся на самой заявке).
+    act_document_id: uuid.UUID | None = None
+    act_signed: bool = False
+    act_signature_status: str | None = None
     # Имя субъекта (сотрудник, контакт, ИП): у обезличенного — стабильный
     # псевдоним, у физически удалённого — `null`.
     subject_display: str | None = None
 
     @classmethod
-    def from_model(cls, request: Any, subject_display: str | None = None) -> ErasureRequestDetail:
+    def from_model(
+        cls,
+        request: Any,
+        subject_display: str | None = None,
+        *,
+        act_signed: bool = False,
+        act_signature_status: str | None = None,
+    ) -> ErasureRequestDetail:
         stored = request.blockers or {}
         return cls(
             id=request.id,
@@ -426,6 +438,9 @@ class ErasureRequestDetail(BaseModel):
             rejection_reason=request.rejection_reason,
             executed_at=request.executed_at,
             act_file_id=request.act_file_id,
+            act_document_id=request.act_document_id,
+            act_signed=act_signed,
+            act_signature_status=act_signature_status,
         )
 
 
