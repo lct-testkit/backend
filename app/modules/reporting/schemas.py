@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
-FormatLiteral = Literal["xlsx", "pdf", "png"]
+FormatLiteral = Literal["xlsx", "xls", "pdf", "png", "json"]
 JobStatusLiteral = Literal["queued", "processing", "completed", "failed"]
 WidgetTypeLiteral = Literal["report_table", "report_chart", "stat_tile"]
 
@@ -94,6 +94,10 @@ class ReportJobOut(BaseModel):
     created_at: dt.datetime
     finished_at: dt.datetime | None
     expires_at: dt.datetime | None
+    # B1-12 (миграция 0029): заголовки колонок/total_rows/truncated/data_as_of/timezone на момент
+    # генерации — снимок, который не восстановить заново по одному `params`, если данные успели
+    # измениться. `None` до завершения задания (`queued`/`processing`/`failed`).
+    result_meta: dict[str, Any] | None = None
 
 
 class ReportJobListResponse(BaseModel):

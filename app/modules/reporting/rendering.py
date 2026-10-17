@@ -26,6 +26,10 @@ from __future__ import annotations
 
 import datetime as dt
 import io
+import json
+import uuid
+import zoneinfo
+from decimal import Decimal
 from typing import Any
 
 import matplotlib
@@ -40,16 +44,45 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 from app.modules.catalog import learner
 from app.modules.imports.parsing import sanitize_formula
-from app.modules.reporting.builders import LMS_USERS_UPLOAD, ReportDataset
+from app.modules.reporting.builders import (
+    DEFAULT_TIMEZONE_NAME,
+    LMS_USERS_UPLOAD,
+    ReportDataset,
+)
 from app.modules.reporting.models import ReportFormat
+from app.modules.reporting.rendering_xls import ReportTooLargeError, render_xls, sheet_title
 from app.modules.reporting.spec import derived_chart_kinds
 from app.modules.signing.rendering import html_to_pdf, render_template_html
 
+__all__ = [
+    "CHART_KINDS",
+    "CONTENT_TYPES",
+    "FILE_EXTENSIONS",
+    "RenderNotSupportedError",
+    "ReportTooLargeError",
+    "render_json",
+    "render_lms_users_xlsx",
+    "render_pdf",
+    "render_png",
+    "render_report",
+    "render_xls",
+    "render_xlsx",
+]
+
 CONTENT_TYPES: dict[str, str] = {
     ReportFormat.XLSX.value: ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    # B1-4: `application/vnd.ms-excel` — тип содержимого классического BIFF8/OLE2, а не xlsx.
+    ReportFormat.XLS.value: "application/vnd.ms-excel",
     ReportFormat.PDF.value: "application/pdf",
     ReportFormat.PNG.value: "image/png",
+    ReportFormat.JSON.value: "application/json",
 }
+
+#: Расширение файла по формату — B1-4/B1-5: раньше имя файла строилось как `f"{title}.{job.format}"`
+#: (`reporting.service.generate`), что совпадало с форматом случайно (xlsx/pdf/png — расширение
+#: и код формата совпадают); xls и json тоже совпадают буквально, но словарь делает это явным и
+#: единообразным местом правки, если когда-нибудь появится формат, где это не так.
+FILE_EXTENSIONS: dict[str, str] = {fmt.value: fmt.value for fmt in ReportFormat}
 
 #: Виды отчёта, для которых определён график. Ключ — `report_templates.code`. B1-2/B1-8:
 #: производный от `ReportSpec.chart` (`reporting.spec`), а не самостоятельный литерал — иначе
@@ -111,7 +144,9 @@ def _xlsx_cell(value: Any) -> Any:
 
 def render_xlsx(dataset: ReportDataset) -> bytes:
     workbook = Workbook(write_only=True)
-    sheet = workbook.create_sheet(title=(dataset.title[:31] or "Отчёт"))
+    # B1-4: `sheet_title` — общая с xls функция (`rendering_xls`), чистит запрещённые Excel
+    # знаки (`[]:*?/\`) из названия отчёта, не только обрезает длину до 31 знака, как было.
+    sheet = workbook.create_sheet(title=sheet_title(dataset.title))
     sheet.append(dataset.columns)
     for row in dataset.rows:
         sheet.append([_xlsx_cell(value) for value in row])
@@ -252,6 +287,84 @@ def render_pdf(dataset: ReportDataset) -> bytes:
         "generated_at": dataset.generated_at.strftime("%d.%m.%Y %H:%M UTC"),
     }
     return html_to_pdf(render_template_html(_TABLE_TEMPLATE, context))
+
+
+#: rtk_requiriments.md §6 п.4: «возможность формирования результирующего json-файла».
+#: Версионировано — пересматривается при несовместимых изменениях структуры файла (B1-5).
+_JSON_SCHEMA = "rtk-crm-report/1"
+
+
+def _json_cell(value: Any, tz: dt.tzinfo) -> Any:
+    """Значение ячейки для json-файла (B1-5): без формул/усечения строк (`/data` и файл отдают
+    данные «как есть», в отличие от xlsx/xls, где `sanitize_formula` защищает от CSV-инъекции —
+    тот риск специфичен открытию в Excel, не парсингу JSON). `Decimal` — числом, aware-`datetime`
+    переводится в пояс пользователя и остаётся со смещением (`2026-01-05T10:30:00+03:00`), дата
+    без времени — `YYYY-MM-DD`."""
+    if value is None or isinstance(value, bool | int | str):
+        return value
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, dt.datetime):
+        local = value.astimezone(tz) if value.tzinfo is not None else value
+        return local.isoformat()
+    if isinstance(value, dt.date):
+        return value.isoformat()
+    if isinstance(value, float):
+        return value
+    return str(value)
+
+
+def render_json(
+    dataset: ReportDataset,
+    *,
+    template_code: str,
+    job_id: uuid.UUID | None,
+    params: dict[str, Any] | None,
+    tz_name: str | None,
+) -> bytes:
+    """Файл для `POST /api/reports` с `format=json` (B1-5). Тот же `ReportDataset`, что рендерится
+    в xlsx/pdf/png, версионированным конвертом: `columns` всегда идут вместе со `rows` (B1-2:
+    `dataset.keys`/`dataset.kinds`, пусто у видов без каталога колонок — тогда `key` у каждой
+    колонки `None`), а не массивами по позиции без заголовков, — так перестановка колонок не
+    ломает интегратора, который уже читает файл по ключам. Кодировка UTF-8 без BOM (`ensure_
+    ascii=False`), `allow_nan=False` — `float('nan')`/`inf` в данных поднимет понятную `ValueError`
+    при сериализации, а не отдаст невалидный JSON наружу."""
+    try:
+        tz = zoneinfo.ZoneInfo(tz_name) if tz_name else zoneinfo.ZoneInfo(DEFAULT_TIMEZONE_NAME)
+    except (zoneinfo.ZoneInfoNotFoundError, ValueError):
+        tz = zoneinfo.ZoneInfo(DEFAULT_TIMEZONE_NAME)
+
+    keys = dataset.keys if dataset.keys is not None else [None] * len(dataset.columns)
+    kinds = dataset.kinds if dataset.kinds is not None else ["text"] * len(dataset.columns)
+    columns = [
+        {"key": key, "title": title, "kind": kind}
+        for key, title, kind in zip(keys, dataset.columns, kinds, strict=True)
+    ]
+    # Служебные ключи (`_seed` и т.п., B1-2) не предназначены для интегратора.
+    visible_params = {k: v for k, v in (params or {}).items() if not str(k).startswith("_")}
+
+    payload = {
+        "schema": _JSON_SCHEMA,
+        "report": {
+            "code": template_code,
+            "title": dataset.title,
+            "job_id": str(job_id) if job_id is not None else None,
+            "generated_at": dataset.generated_at.astimezone(tz).isoformat(),
+            "timezone": tz_name or DEFAULT_TIMEZONE_NAME,
+        },
+        "params": visible_params,
+        "columns": columns,
+        "rows": [[_json_cell(value, tz) for value in row] for row in dataset.rows],
+        "totals": {
+            "row_count": len(dataset.rows),
+            "total_rows": (
+                dataset.total_rows if dataset.total_rows is not None else len(dataset.rows)
+            ),
+            "truncated": dataset.truncated,
+        },
+        "note": dataset.note,
+    }
+    return json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
 
 
 #: Палитра и marks-спеки — из внутренней методики визуализации (skill
@@ -461,13 +574,31 @@ def render_png(dataset: ReportDataset, *, template_code: str) -> bytes:
     raise RenderNotSupportedError(f"Для вида отчёта {template_code!r} график не определён")
 
 
-def render_report(dataset: ReportDataset, *, format: str, template_code: str) -> bytes:
+def render_report(
+    dataset: ReportDataset,
+    *,
+    format: str,
+    template_code: str,
+    job_id: uuid.UUID | None = None,
+    params: dict[str, Any] | None = None,
+    tz_name: str | None = None,
+) -> bytes:
+    """`job_id`/`params`/`tz_name` — только для `format=json` (B1-5): конверт файла несёт, с
+    какими параметрами и для какого задания он построен. Остальные форматы их не используют —
+    они приходят через один и тот же вызов из `reporting.service._render_serialized`, чтобы не
+    заводить отдельную функцию рендера ради трёх новых аргументов одного формата из пяти."""
     if format == ReportFormat.XLSX.value:
         if template_code == LMS_USERS_UPLOAD:
             return render_lms_users_xlsx(dataset)
         return render_xlsx(dataset)
+    if format == ReportFormat.XLS.value:
+        return render_xls(dataset)
     if format == ReportFormat.PDF.value:
         return render_pdf(dataset)
     if format == ReportFormat.PNG.value:
         return render_png(dataset, template_code=template_code)
+    if format == ReportFormat.JSON.value:
+        return render_json(
+            dataset, template_code=template_code, job_id=job_id, params=params, tz_name=tz_name
+        )
     raise RenderNotSupportedError(f"Неизвестный формат отчёта {format!r}")

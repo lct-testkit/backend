@@ -52,15 +52,18 @@ from app.modules.reporting.builders import (
     REPORT_BUILDERS,
     REPORT_ESTIMATORS,
     ReportDataset,
+    resolve_user_timezone_name,
 )
 from app.modules.reporting.models import (
     Dashboard,
     DashboardWidget,
+    ReportFormat,
     ReportJob,
     ReportJobStatus,
     ReportTemplate,
 )
-from app.modules.reporting.rendering import CONTENT_TYPES, render_report
+from app.modules.reporting.rendering import CONTENT_TYPES, FILE_EXTENSIONS, render_report
+from app.modules.reporting.rendering_xls import XLS_MAX_ROWS, ReportTooLargeError
 from app.modules.reporting.schemas import ReportColumnOut, ReportTemplateOut
 from app.modules.reporting.spec import REPORT_SPECS, derived_data_categories, validate_params
 
@@ -102,9 +105,24 @@ def _report_data_categories(template_code: str) -> list[str]:
 _RENDER_LOCK = threading.Lock()
 
 
-def _render_serialized(dataset: ReportDataset, *, format: str, template_code: str) -> bytes:
+def _render_serialized(
+    dataset: ReportDataset,
+    *,
+    format: str,
+    template_code: str,
+    job_id: uuid.UUID | None = None,
+    params: dict[str, Any] | None = None,
+    tz_name: str | None = None,
+) -> bytes:
     with _RENDER_LOCK:
-        return render_report(dataset, format=format, template_code=template_code)
+        return render_report(
+            dataset,
+            format=format,
+            template_code=template_code,
+            job_id=job_id,
+            params=params,
+            tz_name=tz_name,
+        )
 
 
 def report_template_out(template: ReportTemplate) -> ReportTemplateOut:
@@ -278,9 +296,33 @@ class ReportJobService:
         if estimator is not None:
             row_estimate = await estimator(self._session, principal, params)
             is_light = row_estimate <= SYNC_ROW_THRESHOLD
+            # B1-4: лимит xls (65 535 строк, BIFF8) проверяется заранее по оценке — тот же приём,
+            # что уже разделяет sync/async по `SYNC_ROW_THRESHOLD`. Невалидный запрос не доходит
+            # до рендера (который не раньше бы, а глубже внутри `render_xls`, поднял бы то же
+            # исключение — `ReportTooLargeError` ниже перехватывает именно этот случай для
+            # видов без оценщика, у которых фактическое число строк оценке не подвергалось).
+            if payload.format == ReportFormat.XLS.value and row_estimate > XLS_MAX_ROWS:
+                raise ValidationError(
+                    f"Формат xls вмещает не более {XLS_MAX_ROWS} строк: выберите xlsx или "
+                    "сузьте период",
+                    [
+                        FieldError(
+                            field="format",
+                            reason=f"оценка строк ({row_estimate}) превышает лимит xls",
+                        )
+                    ],
+                )
 
         if is_light:
-            await self.generate(job, principal)
+            try:
+                await self.generate(job, principal)
+            except ReportTooLargeError as exc:
+                # Оценка (если она вообще была) могла устареть между `estimator(...)` выше и
+                # самим рендером, либо вид отчёта без оценщика на практике дал больше строк,
+                # чем предполагалось структурно — 422, а не 500 неперехваченного исключения.
+                raise ValidationError(
+                    str(exc), [FieldError(field="format", reason=str(exc))]
+                ) from exc
         # Иначе остаётся `queued` — заберёт `reporting.tasks.sweep_report_jobs`.
         return job
 
@@ -293,17 +335,31 @@ class ReportJobService:
         await self._session.flush()
 
         dataset = await builder(self._session, principal, job.params)
+        # B1-12: пояс нужен не только конверту json (B1-5) — он же идёт в `result_meta.timezone`
+        # для ЛЮБОГО формата (снимок момента генерации), поэтому резолвится всегда, а не только
+        # при `format == json`, как было в черновике B1-4/B1-5.
+        tz_name = await resolve_user_timezone_name(self._session, principal)
         # Рендер (openpyxl, reportlab, matplotlib) — секунды CPU: в потоке, а не в цикле событий,
         # иначе на это время замирали бы все остальные запросы воркера.
         content = await asyncio.to_thread(
-            _render_serialized, dataset, format=job.format, template_code=kind
+            _render_serialized,
+            dataset,
+            format=job.format,
+            template_code=kind,
+            job_id=job.id,
+            params=job.params,
+            tz_name=tz_name,
         )
 
         settings = get_settings()
         bucket = settings.s3_bucket_reports
         await ensure_bucket(bucket)
         file_id = uuid7()
-        storage_key = f"{job.id}/{file_id}.{job.format}"
+        # B1-4: расширение файла через `FILE_EXTENSIONS`, не напрямую `job.format` — у всех
+        # сегодняшних форматов они совпадают буквально, но явный словарь (`reporting.rendering`)
+        # не даёт этому молча разойтись, если когда-нибудь появится формат с другим расширением.
+        extension = FILE_EXTENSIONS[job.format]
+        storage_key = f"{job.id}/{file_id}.{extension}"
         await upload_object_bytes(
             bucket=bucket,
             key=storage_key,
@@ -315,7 +371,7 @@ class ReportJobService:
             id=file_id,
             storage_key=storage_key,
             bucket=bucket,
-            original_filename=f"{dataset.title}.{job.format}",
+            original_filename=f"{dataset.title}.{extension}",
             mime_type=CONTENT_TYPES[job.format],
             size_bytes=len(content),
             sha256=hashlib.sha256(content).hexdigest(),
@@ -347,6 +403,23 @@ class ReportJobService:
         job.row_count = len(dataset.rows)
         job.finished_at = dt.datetime.now(dt.UTC)
         job.expires_at = job.finished_at + dt.timedelta(days=settings.reports_retention_days)
+        # B1-12: снимок момента генерации — то, что не восстановить заново по одному `params`,
+        # если данные успели измениться (заголовки колонок — в порядке файла; `total_rows`/
+        # `truncated` — B1-6/B1-7, `None` у builder'ов без оценки означает «усечения не было»;
+        # `data_as_of` сериализован строкой — JSONB-колонки этой кодовой базы пишутся обычным
+        # `json.dumps` без кастомного энкодера, см. `crm.service._json_safe`).
+        job.result_meta = {
+            "title": dataset.title,
+            "columns": list(dataset.columns),
+            "total_rows": (
+                dataset.total_rows if dataset.total_rows is not None else len(dataset.rows)
+            ),
+            "truncated": dataset.truncated,
+            "data_as_of": (
+                dataset.data_as_of.isoformat() if dataset.data_as_of is not None else None
+            ),
+            "timezone": tz_name,
+        }
         await self._session.flush()
 
         await self._audit.record(
