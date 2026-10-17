@@ -12,31 +12,13 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import unquote, urlsplit
 
+from cryptography.fernet import Fernet
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-AppProfile = Literal["dev", "demo", "prod"]
+from app.core.secret_rules import DEMO_SECRET_VALUES, check_secrets
 
-# Демо-значения из .env.example / docker-compose / realm-crm.json. В prod их
-# наличие означает, что оператор забыл сменить секреты: приложение обязано не
-# стартовать, а не работать с публично известными ключами.
-_DEMO_SECRET_VALUES = frozenset(
-    {
-        "change-me-in-prod",
-        "crm-bff-secret",
-        "crm-admin-secret",
-        "crm_access",
-        "crm_secret_key",
-        "crm_sign_access",
-        "crm_sign_secret_key",
-        "crm_app",
-        "crm",
-        "admin",
-        "secret",
-        "password",
-    }
-)
-_MIN_PROD_SECRET_LENGTH = 16
+AppProfile = Literal["dev", "demo", "prod"]
 
 
 class Settings(BaseSettings):
@@ -213,6 +195,21 @@ class Settings(BaseSettings):
     # Ключ HMAC записей аудита (версия хэша 3): голый SHA-256 может пересчитать тот, у кого есть
     # доступ к БД, ключ лежит вне БД. Пусто — хэш без ключа (версия 2), как раньше.
     audit_hmac_key: SecretStr | None = None
+    # B6-8: тот же Fernet-ключ, что читает `setting_crypto._SecretsConfig` напрямую из
+    # окружения (своя независимая настройка — её тестовый контракт на подмену
+    # переменной и сброс кэша не трогаем). Поле здесь нужно для prod-гварда и
+    # `preflight`: обе проверки должны знать, что ключ задан, не читая внутренний
+    # модуль admin-настроек.
+    settings_encryption_key: SecretStr | None = None
+    # B6-7: шифрование полей СНИЛС/паспорта/адреса учащегося (`field_crypto.py`). Ключ
+    # отдельный от `SETTINGS_ENCRYPTION_KEY` — утечка одного не раскрывает другое.
+    field_encryption_key: SecretStr | None = None
+    # На время ротации: `MultiFernet([Fernet(active), Fernet(prev)])` расшифровывает
+    # токены старым ключом, пока `tools/encrypt_learner_profiles.py rotate` их не переписал.
+    field_encryption_key_prev: SecretStr | None = None
+    # B6-8: токен заголовка `X-Health-Token` для `GET /health/details`. Без него (пусто) —
+    # ручка всегда отдаёт 404, как «несуществующий» путь (не 401/403, чтобы не подсказывать).
+    health_details_token: SecretStr | None = None
     # Сколько секунд транзакция может простаивать «открытой» до принудительного закрытия сервером
     # Postgres (`idle_in_transaction_session_timeout`): зависший клиент не должен держать замки.
     db_idle_in_transaction_timeout_seconds: int = 60
@@ -307,13 +304,35 @@ class Settings(BaseSettings):
     # OpenAPI-схема нужна фронтенду и в prod; закрывается только UI.
     openapi_enabled: bool = True
 
-    @field_validator("signature_expose_debug_otp", "audit_hmac_key", "smtp_password", mode="before")
+    @field_validator(
+        "signature_expose_debug_otp",
+        "audit_hmac_key",
+        "smtp_password",
+        "settings_encryption_key",
+        "field_encryption_key",
+        "field_encryption_key_prev",
+        "health_details_token",
+        mode="before",
+    )
     @classmethod
     def _blank_is_unset(cls, value: object) -> object:
         """docker-compose передаёт незаданную переменную пустой строкой (`${VAR:-}`): для
         необязательных значений это «не задано», а не пустой ключ и не ошибка разбора булева."""
         if isinstance(value, str) and not value.strip():
             return None
+        return value
+
+    @field_validator("field_encryption_key", "field_encryption_key_prev", mode="after")
+    @classmethod
+    def _valid_fernet_key(cls, value: SecretStr | None) -> SecretStr | None:
+        """Невалидный Fernet-ключ должен ронять старт процесса, а не первое шифрование
+        (B6-7: `AppError` на первом использовании прячет проблему до боевого запроса)."""
+        if value is None:
+            return value
+        try:
+            Fernet(value.get_secret_value().encode())
+        except (ValueError, TypeError) as exc:
+            raise ValueError("не является корректным Fernet-ключом") from exc
         return value
 
     @field_validator("database_url", "kc_database_url", mode="after")
@@ -325,7 +344,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _reject_demo_secrets_in_prod(self) -> Settings:
-        """`APP_PROFILE=prod` не стартует с демо-секретами и короткими ключами."""
+        """`APP_PROFILE=prod` не стартует с демо-секретами, короткими ключами, а также без
+        ключей, от которых зависит защита журнала аудита и шифрование (B6-8)."""
         if self.app_profile != "prod":
             return self
         secrets: dict[str, str] = {
@@ -339,13 +359,17 @@ class Settings(BaseSettings):
             secrets["KEYCLOAK_ADMIN_CLIENT_SECRET"] = (
                 self.keycloak_admin_client_secret.get_secret_value()
             )
-        # Пароль роли приложения сидит и в строке подключения: проверялся только отдельный
-        # CRM_APP_PASSWORD, и демо-пароль в DATABASE_URL проходил.
-        db_password = urlsplit(self.database_url).password
-        if db_password:
-            secrets["DATABASE_URL (пароль)"] = unquote(db_password)
-        if self.audit_hmac_key is not None:
-            secrets["AUDIT_HMAC_KEY"] = self.audit_hmac_key.get_secret_value()
+        # Пароль роли приложения сидит и в строках подключения: проверялся только отдельный
+        # CRM_APP_PASSWORD, и демо-пароль в DATABASE_URL проходил. KC_DATABASE_URL и
+        # MIGRATIONS_DATABASE_URL — та же роль суперпользователя в других строках подключения.
+        for url_name, url_value in (
+            ("DATABASE_URL", self.database_url),
+            ("KC_DATABASE_URL", self.kc_database_url),
+            ("MIGRATIONS_DATABASE_URL", self.migrations_database_url),
+        ):
+            password = urlsplit(url_value).password if url_value else None
+            if password:
+                secrets[f"{url_name} (пароль)"] = unquote(password)
         # POSTGRES_PASSWORD и KEYCLOAK_ADMIN_PASSWORD — не поля Settings (их читают контейнеры
         # postgres/keycloak, не это приложение), но раз уж переменная всё равно долетела и до
         # api (не у каждого способа деплоя это так — Helm её сюда не пробрасывает), грех не
@@ -358,13 +382,33 @@ class Settings(BaseSettings):
         webhook_secret = os.environ.get(self.cms_webhook_secret_ref or "CMS_WEBHOOK_SECRET", "")
         if webhook_secret:
             secrets["CMS_WEBHOOK_SECRET"] = webhook_secret
-        problems = [
-            f"{name}: демо-значение"
-            if value in _DEMO_SECRET_VALUES
-            else f"{name}: слишком короткий"
-            for name, value in secrets.items()
-            if value in _DEMO_SECRET_VALUES or len(value) < _MIN_PROD_SECRET_LENGTH
-        ]
+
+        # AUDIT_HMAC_KEY проверяется отдельно (порог 32, а не общие 16 — это ключ HMAC цепочки
+        # аудита) и не попадает в общий словарь, чтобы не получить два разных сообщения об одной
+        # и той же переменной.
+        problems = check_secrets(secrets)
+
+        # Без этих трёх ключей защита, которую они дают (неизменяемость журнала аудита,
+        # шифрование секретных настроек и полей ПДн), в prod молча не работает — отсутствие
+        # ключа не ошибка значения, а отдельная проблема конфигурации.
+        for env_name, value in (
+            ("AUDIT_HMAC_KEY", self.audit_hmac_key),
+            ("SETTINGS_ENCRYPTION_KEY", self.settings_encryption_key),
+            ("FIELD_ENCRYPTION_KEY", self.field_encryption_key),
+        ):
+            if value is None:
+                problems.append(f"{env_name}: обязателен в prod, не задан")
+        if self.audit_hmac_key is not None:
+            key = self.audit_hmac_key.get_secret_value()
+            if key in DEMO_SECRET_VALUES:
+                problems.append("AUDIT_HMAC_KEY: демо-значение")
+            elif len(key) < 32:
+                problems.append("AUDIT_HMAC_KEY: короче 32 символов")
+        if self.health_details_token is not None:
+            token = self.health_details_token.get_secret_value()
+            if len(token) < 24:
+                problems.append("HEALTH_DETAILS_TOKEN: короче 24 символов")
+
         if problems:
             raise ValueError(
                 "APP_PROFILE=prod отвергает небезопасные секреты — "

@@ -67,6 +67,11 @@ x-api-env: &api-env
   # Ключ HMAC записей аудита и Fernet-ключ секретных настроек: пусто — работают без них (см. .env.example).
   AUDIT_HMAC_KEY: ${AUDIT_HMAC_KEY:-}
   SETTINGS_ENCRYPTION_KEY: ${SETTINGS_ENCRYPTION_KEY:-}
+  # B6-7/B6-8: Fernet-ключ полей ПДн учащегося и токен полного /health/details — пусто
+  # работают без них (поля открытым текстом, ручка недостижима).
+  FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY:-}
+  FIELD_ENCRYPTION_KEY_PREV: ${FIELD_ENCRYPTION_KEY_PREV:-}
+  HEALTH_DETAILS_TOKEN: ${HEALTH_DETAILS_TOKEN:-}
   # Почта: пустой SMTP_HOST — письма (ссылки подписантам, email-уведомления) не уходят.
   SMTP_HOST: ${SMTP_HOST:-}
   SMTP_PORT: ${SMTP_PORT:-587}
