@@ -291,6 +291,13 @@ class SignatureDocument(UuidPkMixin, Base):
     # автоматического отката статуса — безопасный вариант по умолчанию.
     on_rejected: Mapped[str | None] = mapped_column(String(64), nullable=True)
     on_expired: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # B7-4: код статуса воронки, в который переходит сделка сама после подписи ВСЕХ сторон
+    # (симметрично `on_rejected`). `requested_in_status_id` — статус сделки в момент запроса
+    # подписи: автопереход срабатывает только если сделка ещё в нём (не ушла вручную).
+    on_signed: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    requested_in_status_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workflow_statuses.id", ondelete="RESTRICT"), nullable=True
+    )
 
 
 class SignatureRequest(UuidPkMixin, Base):
@@ -349,6 +356,13 @@ class SignatureRequest(UuidPkMixin, Base):
     reject_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     edm_agreement_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("edm_agreements.id", ondelete="RESTRICT"), nullable=True
+    )
+    # B7-1: напоминания о приближающемся дедлайне (`sweep_signature_reminders`).
+    reminders_sent: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, server_default=text("0")
+    )
+    last_reminded_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False
