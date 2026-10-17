@@ -145,6 +145,8 @@ REPORT_SPECS: dict[str, ReportSpec] = {
         # B1-10: период по умолчанию — активность учащегося, не заведение сделки (у заглушки
         # было только `created_at`, которого даже не существовало бы в выборе пользователя).
         date_fields=("last_activity_at", "enrolled_at", "completed_at"),
+        # B1-8: корзины прогресса, `reporting.charts.build_progress_figure`.
+        chart="progress",
         data_categories=("ФИО учащихся (инициалы)", "прогресс обучения"),
     ),
     LMS_USERS_UPLOAD: ReportSpec(
@@ -167,8 +169,8 @@ REPORT_SPECS: dict[str, ReportSpec] = {
         # region_summary, …): группировка по каталогу продуктов/направлений структурно мала.
         params=frozenset({"level", "top", "sort_by"}),
         date_fields=("created_at", "closed_at", "updated_at"),
-        # B1-8 (диаграмма "demand") не сделан в этом черновике — `chart` остаётся `None`, отчёт
-        # отдаёт только табличные форматы, пока график не зарегистрирован.
+        # B1-8: три панели (заявки/обучающиеся/потоки), `reporting.charts.build_demand_figure`.
+        chart="demand",
         data_categories=(),
     ),
     "license_register": ReportSpec(
@@ -182,7 +184,8 @@ REPORT_SPECS: dict[str, ReportSpec] = {
         # общего набора). `organization_ids` остаётся, потому что реестр и правда по вузам.
         common_filters=frozenset({"date_from", "date_to", "organization_ids"}),
         date_fields=("license_signed_at", "created_at"),
-        # B1-8 (диаграмма "license_status") не сделан в этом черновике.
+        # B1-8: две панели (статус передачи/год окончания), `build_license_status_figure`.
+        chart="license_status",
         data_categories=(
             "ФИО менеджеров и ответственных от вуза (маскируются без права contact:reveal)",
         ),

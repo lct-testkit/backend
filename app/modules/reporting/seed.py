@@ -122,7 +122,8 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str, str, list[str], dict[str, Any], li
         "learning_progress",
         [],
         {"limit": 1000},
-        ["xlsx", "xls", "pdf", "json"],
+        # B1-8: график корзин прогресса зарегистрирован (`ReportSpec.chart="progress"`).
+        ["xlsx", "xls", "pdf", "png", "json"],
     ),
     (
         "lms_users_upload",
@@ -146,8 +147,8 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str, str, list[str], dict[str, Any], li
         "product_demand",
         [],
         {"level": "product", "top": 20, "sort_by": "index"},
-        # B1-8 (график "demand") не сделан — без png, пока график не зарегистрирован.
-        ["xlsx", "xls", "pdf", "json"],
+        # B1-8: график трёх панелей зарегистрирован (`ReportSpec.chart="demand"`).
+        ["xlsx", "xls", "pdf", "png", "json"],
     ),
     (
         "license_register",
@@ -160,8 +161,8 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str, str, list[str], dict[str, Any], li
         "license_register",
         [],
         {"limit": 1000},
-        # B1-8 (график "license_status") не сделан — без png, пока график не зарегистрирован.
-        ["xlsx", "xls", "pdf", "json"],
+        # B1-8: график двух панелей зарегистрирован (`ReportSpec.chart="license_status"`).
+        ["xlsx", "xls", "pdf", "png", "json"],
     ),
 ]
 

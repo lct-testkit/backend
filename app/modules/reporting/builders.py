@@ -114,6 +114,12 @@ class ReportDataset:
     total_rows: int | None = None
     truncated: bool = False
     data_as_of: dt.datetime | None = None
+    # B1-8/B1-11: данные для графика, которые не идут в табличные `rows` целиком или зависят от
+    # исходного набора, а не от выбранных пользователем `columns` (`learning_progress.
+    # progress_pct` может быть не выбран, но график корзин прогресса всё равно должен его
+    # видеть; `license_register` считает график по статусу/году до применения `columns`).
+    # Builder-специфичный словарь, читает только соответствующая функция `reporting.charts`.
+    extra: dict[str, Any] | None = None
 
 
 ReportBuilder = Callable[[AsyncSession, Principal, dict[str, Any]], Awaitable[ReportDataset]]
@@ -1656,6 +1662,10 @@ async def build_learning_progress(
         kinds=[LEARNING_PROGRESS_COLUMNS_BY_KEY[key].kind for key in columns],
         total_rows=total_rows,
         truncated=truncated,
+        # B1-8: график корзин прогресса (`reporting.charts.build_progress_figure`) должен
+        # видеть `progress_pct` каждой строки независимо от того, выбрана ли эта колонка в
+        # `columns` — иначе ограничение B1-2 на показ колонок молча ограничило бы и график.
+        extra={"progress_values": progress_values},
     )
 
 
@@ -2317,12 +2327,27 @@ async def build_license_register(
     current_year = dt.datetime.now(tz).year
 
     rows: list[list[Any]] = []
+    # B1-8/B1-11: график `license_status` (`reporting.charts.build_license_status_figure`)
+    # считает по статусу передачи и году окончания независимо от `columns` — строится здесь, до
+    # выбора колонок, тем же приёмом, что `learning_progress.extra["progress_values"]`.
+    status_counts: dict[str, int] = {}
+    year_counts: dict[str, int] = {}
     for license_, organization_name, organization_short_name in result:
         manager_name = license_.manager_full_name
         responsible = license_.responsible_contacts
         if not reveal:
             manager_name = mask_name(manager_name)
             responsible = mask_contacts_text(responsible)
+        status_label = (
+            TRANSFER_STATUS_LABELS.get(license_.transfer_status, license_.transfer_status)
+            if license_.transfer_status
+            else "—"
+        )
+        status_counts[status_label] = status_counts.get(status_label, 0) + 1
+        year_label = (
+            str(license_.license_valid_year) if license_.license_valid_year else "Без срока"
+        )
+        year_counts[year_label] = year_counts.get(year_label, 0) + 1
         full_row = {
             # `Organization.name` — то же поле, что показывают остальные отчёты этого модуля
             # (deal_register и т.п.), не `short_name` (B3-6 вводит его только для API списка
@@ -2335,11 +2360,7 @@ async def build_license_register(
                 "—" if license_.is_signed is None else ("Да" if license_.is_signed else "Нет")
             ),
             "license_valid_year": license_.license_valid_year,
-            "transfer_status": (
-                TRANSFER_STATUS_LABELS.get(license_.transfer_status, license_.transfer_status)
-                if license_.transfer_status
-                else "—"
-            ),
+            "transfer_status": status_label,
             "manager_full_name": manager_name or "",
             "responsible_contacts": responsible or "",
             "comment": license_.comment or "",
@@ -2367,6 +2388,7 @@ async def build_license_register(
         kinds=[LICENSE_REGISTER_COLUMNS_BY_KEY[key].kind for key in columns],
         total_rows=total_rows,
         truncated=truncated,
+        extra={"by_status": status_counts, "by_year": year_counts},
     )
 
 
