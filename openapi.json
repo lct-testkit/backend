@@ -947,6 +947,20 @@
         "title": "BackchannelLogoutRequest",
         "type": "object"
       },
+      "Body_public_verify_by_file_public_verify_by_file_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_public_verify_by_file_public_verify_by_file_post",
+        "type": "object"
+      },
       "Body_verify_signature_file_api_signatures_verify_post": {
         "properties": {
           "file": {
@@ -33500,7 +33514,7 @@
     },
     "/health/live": {
       "get": {
-        "description": "Проверяет, что процесс жив. Роль: доступно без аутентификации.",
+        "description": "Проверяет, что процесс жив. Не раскрывает версию, профиль и состав инфраструктуры (B6-8) — за этим на `/health/details` с заголовком `X-Health-Token`. Роль: доступно без аутентификации.",
         "operationId": "live_health_live_get",
         "responses": {
           "200": {
@@ -33533,7 +33547,7 @@
     },
     "/health/ready": {
       "get": {
-        "description": "Проверяет PostgreSQL, Redis, Keycloak JWKS, SeaweedFS и очередь arq. Возвращает 503, если недоступна критичная зависимость. Роль: доступно без аутентификации.",
+        "description": "Возвращает 503, если недоступна критичная зависимость (PostgreSQL, Redis), иначе только сводный статус без списка зависимостей (B6-8) — список доступен на `/health/details` с заголовком `X-Health-Token`. Роль: доступно без аутентификации.",
         "operationId": "ready_health_ready_get",
         "responses": {
           "200": {
@@ -33830,6 +33844,140 @@
         },
         "security": [],
         "summary": "Подписать кодом подтверждения (внешний подписант)",
+        "tags": [
+          "signing-public"
+        ]
+      }
+    },
+    "/public/signed/{token}": {
+      "get": {
+        "description": "Ссылка отдельная от токена подписания: не даёт права подписывать, свой TTL (SIGNATURE_DOWNLOAD_TTL_DAYS, 30 дней по умолчанию) и лимит скачиваний. Неизвестный, просроченный и отозванный токен отвечают одинаково. Откат — SIGNATURE_PUBLIC_DOWNLOAD_ENABLED=false.",
+        "operationId": "get_signed_file_public_signed__token__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "title": "Token",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/pdf": {}
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [],
+        "summary": "Скачать подписанный файл по ссылке",
+        "tags": [
+          "signing-public"
+        ]
+      }
+    },
+    "/public/signed/{token}/protocol": {
+      "get": {
+        "operationId": "get_signed_protocol_public_signed__token__protocol_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "title": "Token",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/pdf": {}
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [],
+        "summary": "Скачать протокол подписания по ссылке",
+        "tags": [
+          "signing-public"
+        ]
+      }
+    },
+    "/public/verify/by-file": {
+      "post": {
+        "description": "multipart-файл сверяется по sha256 с сохранёнными подписями — без учётной записи (B7-3), тот же результат, что `POST /api/signatures/verify` для сотрудника.",
+        "operationId": "public_verify_by_file_public_verify_by_file_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_public_verify_by_file_public_verify_by_file_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerifyResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [],
+        "summary": "Сверить файл по хэшу публично",
         "tags": [
           "signing-public"
         ]

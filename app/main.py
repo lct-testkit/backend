@@ -58,7 +58,11 @@ from app.modules.notification.router import (
 from app.modules.notification.service import RealNotificationService, register_notification_service
 from app.modules.registry.router import org_lookup_router, registry_admin_router
 from app.modules.reporting.router import dashboards_router, report_templates_router, reports_router
-from app.modules.signing.public_router import public_signing_router, public_verify_router
+from app.modules.signing.public_router import (
+    public_download_router,
+    public_signing_router,
+    public_verify_router,
+)
 from app.modules.signing.router import (
     edm_agreements_router,
     signature_documents_router,
@@ -248,6 +252,7 @@ def create_app() -> FastAPI:
     # поэтому отдельный префикс `/public`, а не `/api` (dop.md §10.10).
     app.include_router(public_signing_router, prefix=settings.public_prefix)
     app.include_router(public_verify_router, prefix=settings.public_prefix)
+    app.include_router(public_download_router, prefix=settings.public_prefix)
     # Входящие вебхуки внешних систем — буквальный путь раздела 8
     # (`/api/v1/integrations/...`), не `/api` (BFF-сессия) и не `/public`
     # (токен-в-пути): аутентификация HMAC-подписью тела, см. `integration/

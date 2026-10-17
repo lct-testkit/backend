@@ -200,6 +200,12 @@ class AuditAction(StrEnum):
     EDM_AGREEMENT_EXPIRED = "EDM_AGREEMENT_EXPIRED"
     # Инициатор получил новую ссылку внешнему подписанту; прежняя перестала работать.
     SIGNATURE_LINK_REISSUED = "SIGNATURE_LINK_REISSUED"
+    # B7-3: скачивание подписанного файла/протокола по публичной ссылке (не токену подписания).
+    SIGNATURE_DOWNLOADED = "SIGNATURE_DOWNLOADED"
+    # B7-1: напоминание подписанту о приближающемся дедлайне.
+    SIGNATURE_REMINDED = "SIGNATURE_REMINDED"
+    # B7-4: автопереход воронки после подписания всех сторон.
+    SIGNATURE_AUTO_ADVANCED = "SIGNATURE_AUTO_ADVANCED"
 
     # --- 152-ФЗ ---
     ERASURE_REQUEST_CREATED = "ERASURE_REQUEST_CREATED"
