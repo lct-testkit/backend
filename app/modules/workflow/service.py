@@ -400,6 +400,57 @@ class WorkflowService:
             changes={"code": {"old": code, "new": None}},
         )
 
+    # --- Архивирование воронки целиком (B9-7, OPEN-ISSUES B-4) ---------------
+
+    async def archive_workflow(
+        self, workflow: Workflow, principal: Principal, *, expected_version: int
+    ) -> Workflow:
+        """Переводит воронку в `archived` — терминальное состояние: после него `_ensure_not_
+        archived` блокирует и правку графа, и повторную публикацию, и архивацию статусов.
+
+        Разрешено только у воронки без единой сделки (любого состояния — черновик или
+        опубликована): перенос сделок между воронками — не эта задача (спринт B2, «перенос
+        сделок между воронками», активно меняет этот модуль параллельно). У живой воронки с
+        историей сделок перенос уже есть, но по одному статусу (`archive_status`/
+        `STATUS_ARCHIVED`) — тем же путём, каким `delete_draft` выше не даёт удалить воронку с
+        хотя бы одной сделкой, не предлагая взамен перенос."""
+        self._check_version(workflow, expected_version)
+        self._ensure_not_archived(workflow)
+
+        if workflow.is_default:
+            # `_resolve_workflow` (`crm.service`) ищет воронку по умолчанию только среди
+            # `published` — архивная туда не попадёт, и создание сделки без явного
+            # `workflow_id` для этого `deal_type` перестало бы работать вовсе.
+            raise AppError(
+                ErrorCode.ENTITY_IN_USE,
+                "Воронка по умолчанию для этого типа сделок — сначала назначьте другую "
+                "воронку по умолчанию, затем архивируйте эту",
+            )
+
+        from app.modules.crm.models import Deal
+
+        has_deals = await self._session.scalar(
+            select(Deal.id).where(Deal.workflow_id == workflow.id).limit(1)
+        )
+        if has_deals is not None:
+            raise AppError(
+                ErrorCode.ENTITY_IN_USE,
+                "У воронки есть сделки — архивировать воронку целиком нельзя. "
+                "Выводите статусы из обращения по одному (архивация статуса с переносом).",
+            )
+
+        await self._claim_version(workflow, expected_version)
+        previous_state = workflow.state
+        workflow.state = WorkflowState.ARCHIVED.value
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.WORKFLOW_ARCHIVED,
+            entity_type="workflow",
+            entity_id=workflow.id,
+            changes={"state": {"old": previous_state, "new": WorkflowState.ARCHIVED.value}},
+        )
+        return workflow
+
     # --- Сохранение черновика графа ------------------------------------------
 
     def _check_version(self, workflow: Workflow, expected_version: int) -> None:
@@ -863,6 +914,12 @@ class WorkflowService:
             workflow_id=workflow.id,
             from_status_id=status.id,
             mapping_rules={
+                # B9-7 (OPEN-ISSUES B-7): "rules" — буквально `payload.mapping_rules` запроса,
+                # хранится для аудита/будущего использования. `advance_mapping_job` ниже читает
+                # из этого словаря только "target_status_id"/"fallback_status_id"/"sla_mode"/
+                # "cursor" — "rules" сейчас не читает никто (см. docstring `StatusArchiveRequest.
+                # mapping_rules`). Не домысливать здесь семантику переноса значений полей —
+                # формат правил не согласован (вопрос владельцу, спринт B9 документа).
                 "rules": mapping_rules,
                 "target_status_id": str(target.id),
                 "fallback_status_id": str(fallback.id) if fallback else None,

@@ -254,7 +254,20 @@ class StatusImpactResponse(BaseModel):
 
 
 class StatusArchiveRequest(BaseModel):
-    mapping_rules: dict[str, Any] = Field(default_factory=dict)
+    # B9-7 (OPEN-ISSUES B-7): принимается и сохраняется в `StatusMappingJob.mapping_rules.rules`
+    # (см. `WorkflowService.archive_status`) для последующей сверки/аудита переноса, но
+    # построчный перенос (`crm.service.RealDealStatusService.migrate_batch`) пока решает только
+    # по `target_status_id`/`fallback_status_id`/`sla_mode` — значения полей самой сделки не
+    # преобразует. Резерв под будущее правило вида «при переносе задать/изменить поле X»; не
+    # путать с переносом сделок МЕЖДУ воронками (другая задача, спринт B2).
+    mapping_rules: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Зарезервировано для правил переноса значений полей при архивации статуса; "
+            "сохраняется вместе с заданием переноса, но сейчас не влияет на перенос — он "
+            "решается только по target_status_id/fallback_status_id/sla_mode."
+        ),
+    )
     target_status_id: uuid.UUID
     fallback_status_id: uuid.UUID | None = None
     sla_mode: SlaModeLiteral = "recalculate"

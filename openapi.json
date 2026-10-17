@@ -12708,6 +12708,7 @@
           },
           "mapping_rules": {
             "additionalProperties": true,
+            "description": "Зарезервировано для правил переноса значений полей при архивации статуса; сохраняется вместе с заданием переноса, но сейчас не влияет на перенос — он решается только по target_status_id/fallback_status_id/sla_mode.",
             "title": "Mapping Rules",
             "type": "object"
           },
@@ -33365,7 +33366,7 @@
     },
     "/api/workflows/{workflow_id}": {
       "delete": {
-        "description": "Только для воронки в состоянии draft, которая никогда не публиковалась и на которую не заведено ни одной сделки — иначе 409 CRM-1207. Опубликованную воронку удалить нельзя ни при каких условиях, только архивировать статусы по одному (`POST .../statuses/{status_id}/archive`). Роль: запись воронок.",
+        "description": "Только для воронки в состоянии draft, которая никогда не публиковалась и на которую не заведено ни одной сделки — иначе 409 CRM-1207. Опубликованную воронку удалить нельзя ни при каких условиях: либо вывести из обращения статусы по одному (`POST .../statuses/{status_id}/archive`), либо, если на воронке уже нет ни одной сделки, архивировать воронку целиком (`POST .../archive`). Роль: запись воронок.",
         "operationId": "delete_workflow_api_workflows__workflow_id__delete",
         "parameters": [
           {
@@ -33604,6 +33605,102 @@
           }
         ],
         "summary": "Изменить имя и воронку по умолчанию",
+        "tags": [
+          "workflows"
+        ]
+      }
+    },
+    "/api/workflows/{workflow_id}/archive": {
+      "post": {
+        "description": "Переводит воронку в терминальное состояние `archived`: дальше нельзя ни править граф, ни публиковать, ни архивировать статусы по одной — воронка выведена из обращения насовсем. Разрешено только если на воронке уже нет ни одной сделки (любого состояния — черновик или опубликована) и она не воронка по умолчанию своего типа сделок — иначе 409 CRM-1303. Перенос сделок на другую воронку не делается этим вызовом: выводите статусы из обращения по одному (`POST .../statuses/{status_id}/archive`), пока сделок не останется. Обязателен If-Match. Роль: публикация воронок.",
+        "operationId": "archive_workflow_api_workflows__workflow_id__archive_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Архивировать воронку целиком",
         "tags": [
           "workflows"
         ]

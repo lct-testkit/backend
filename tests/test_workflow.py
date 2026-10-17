@@ -478,6 +478,68 @@ class TestDeleteDraftWorkflow:
         assert client.get(f"/api/workflows/{workflow_id}").status_code == 200
 
 
+class TestArchiveWorkflow:
+    """B9-7 (OPEN-ISSUES B-4): `POST /api/workflows/{id}/archive` — раньше `WorkflowState.
+    ARCHIVED` существовал (и `_ensure_not_archived` блокировал правки архивной воронки), но
+    ничто его не присваивало. Настоящая Postgres обязательна — см. докстринг модуля."""
+
+    pytestmark = pytest.mark.skipif(
+        not TEST_DATABASE_URL, reason="нужен TEST_DATABASE_URL с применёнными миграциями"
+    )
+
+    def _admin(self, client) -> None:
+        admin = run(client, _make_user, "ADMIN")
+        client.headers["X-CSRF-Token"] = authenticate(client, admin)
+
+    def _archive(self, client, workflow: dict, *, version: int | None = None):
+        return client.post(
+            f"/api/workflows/{workflow['id']}/archive",
+            headers={"If-Match": str(version if version is not None else workflow["version"])},
+        )
+
+    def test_archives_a_draft_without_deals(self, client) -> None:
+        self._admin(client)
+        workflow = create_draft_workflow(client)
+
+        response = self._archive(client, workflow)
+        assert response.status_code == 200, response.text
+        assert response.json()["state"] == "archived"
+        assert get_graph(client, workflow["id"])["workflow"]["state"] == "archived"
+
+    def test_archived_workflow_rejects_further_graph_changes(self, client) -> None:
+        self._admin(client)
+        workflow = create_draft_workflow(client)
+        archived = self._archive(client, workflow).json()
+
+        saved = put_graph(client, archived, graph_body())
+        assert saved.status_code == 422, saved.text
+
+    def test_cannot_archive_twice(self, client) -> None:
+        self._admin(client)
+        workflow = create_draft_workflow(client)
+        archived = self._archive(client, workflow).json()
+
+        again = self._archive(client, archived, version=archived["version"])
+        assert again.status_code == 422, again.text
+
+    def test_cannot_archive_a_workflow_with_deals(self, client) -> None:
+        self._admin(client)
+        graph = create_published_workflow(client)
+        create_deal(client, graph["workflow"]["id"])
+
+        response = self._archive(client, graph["workflow"])
+        assert response.status_code == 409, response.text
+        assert response.json()["code"] == "CRM-1303"
+
+    def test_cannot_archive_the_default_workflow(self, client) -> None:
+        self._admin(client)
+        workflow = create_draft_workflow(client, deal_type="b2c", is_default=True)
+
+        response = self._archive(client, workflow)
+        assert response.status_code == 409, response.text
+        assert response.json()["code"] == "CRM-1303"
+
+
 class TestSaveGraphWithDeals:
     """A#27 и B#5 из `frontend/docs/backend-issues.md`: правка графа, когда по
     воронке уже идут сделки. Настоящая Postgres обязательна — см. докстринг
