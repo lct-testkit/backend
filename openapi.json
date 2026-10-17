@@ -4402,6 +4402,36 @@
         "title": "DirectoryResponse",
         "type": "object"
       },
+      "DistributionItem": {
+        "description": "B4-4: сколько получил каждый преемник передачи дел.",
+        "properties": {
+          "deals": {
+            "default": 0,
+            "title": "Deals",
+            "type": "integer"
+          },
+          "organizations": {
+            "default": 0,
+            "title": "Organizations",
+            "type": "integer"
+          },
+          "successor_id": {
+            "format": "uuid",
+            "title": "Successor Id",
+            "type": "string"
+          },
+          "tasks": {
+            "default": 0,
+            "title": "Tasks",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "successor_id"
+        ],
+        "title": "DistributionItem",
+        "type": "object"
+      },
       "DownloadUrlOut": {
         "description": "Презайн-ссылка, а не проксирование байтов через API (раздел 9) —\nта же форма ответа, что `files.schemas.DownloadUrlResponse`.",
         "properties": {
@@ -5619,6 +5649,195 @@
           "sla_rules"
         ],
         "title": "GraphOut",
+        "type": "object"
+      },
+      "HandoverExecuteRequest": {
+        "description": "B4-4: `POST /api/users/{id}/handover` — тот же план, что `OffboardRequest`\nсобирает из своих полей, но без увольнения: статус сотрудника не меняется.",
+        "properties": {
+          "deal_successors": {
+            "additionalProperties": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "propertyNames": {
+              "format": "uuid"
+            },
+            "title": "Deal Successors",
+            "type": "object"
+          },
+          "default_successor_id": {
+            "format": "uuid",
+            "title": "Default Successor Id",
+            "type": "string"
+          },
+          "include_closed_deals": {
+            "default": true,
+            "title": "Include Closed Deals",
+            "type": "boolean"
+          },
+          "include_organizations": {
+            "default": true,
+            "title": "Include Organizations",
+            "type": "boolean"
+          },
+          "organization_successors": {
+            "additionalProperties": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "propertyNames": {
+              "format": "uuid"
+            },
+            "title": "Organization Successors",
+            "type": "object"
+          },
+          "pool_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Pool Ids",
+            "type": "array"
+          },
+          "reason": {
+            "maxLength": 500,
+            "minLength": 3,
+            "title": "Reason",
+            "type": "string"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/HandoverRule"
+            },
+            "maxItems": 200,
+            "title": "Rules",
+            "type": "array"
+          }
+        },
+        "required": [
+          "default_successor_id",
+          "reason"
+        ],
+        "title": "HandoverExecuteRequest",
+        "type": "object"
+      },
+      "HandoverExecuteResponse": {
+        "properties": {
+          "distribution": {
+            "items": {
+              "$ref": "#/components/schemas/DistributionItem"
+            },
+            "title": "Distribution",
+            "type": "array"
+          },
+          "reassigned_deals": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Reassigned Deals",
+            "type": "array"
+          },
+          "reassigned_organizations": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Reassigned Organizations",
+            "type": "array"
+          },
+          "reassigned_tasks": {
+            "default": 0,
+            "title": "Reassigned Tasks",
+            "type": "integer"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id"
+        ],
+        "title": "HandoverExecuteResponse",
+        "type": "object"
+      },
+      "HandoverRule": {
+        "properties": {
+          "match": {
+            "$ref": "#/components/schemas/HandoverRuleMatch"
+          },
+          "successor_id": {
+            "format": "uuid",
+            "title": "Successor Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "match",
+          "successor_id"
+        ],
+        "title": "HandoverRule",
+        "type": "object"
+      },
+      "HandoverRuleMatch": {
+        "description": "Ровно одно поле заполнено — правило понимает один признак за раз (422 иначе).",
+        "properties": {
+          "deal_type": {
+            "anyOf": [
+              {
+                "enum": [
+                  "b2b",
+                  "b2c"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deal Type"
+          },
+          "direction_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Direction Id"
+          },
+          "organization_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Organization Id"
+          },
+          "product_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Id"
+          }
+        },
+        "title": "HandoverRuleMatch",
         "type": "object"
       },
       "HolidayCreateRequest": {
@@ -8904,6 +9123,98 @@
         "title": "NotificationTemplateUpdateRequest",
         "type": "object"
       },
+      "OffboardItemListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/OffboardItemOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "OffboardItemListResponse",
+        "type": "object"
+      },
+      "OffboardItemOut": {
+        "description": "B4-4: строка `GET /admin/users/{id}/offboard/items` — вся сделка/вуз уходящего,\nне только первые 20 из превью.",
+        "properties": {
+          "closed": {
+            "default": false,
+            "title": "Closed",
+            "type": "boolean"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Number"
+          },
+          "organization_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Organization Name"
+          },
+          "status_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Id"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "OffboardItemOut",
+        "type": "object"
+      },
       "OffboardPreviewItem": {
         "properties": {
           "count": {
@@ -8948,6 +9259,16 @@
             "title": "Deal Successors",
             "type": "object"
           },
+          "include_closed_deals": {
+            "default": true,
+            "title": "Include Closed Deals",
+            "type": "boolean"
+          },
+          "include_organizations": {
+            "default": true,
+            "title": "Include Organizations",
+            "type": "boolean"
+          },
           "mode": {
             "default": "preview",
             "enum": [
@@ -8956,6 +9277,26 @@
             ],
             "title": "Mode",
             "type": "string"
+          },
+          "organization_successors": {
+            "additionalProperties": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "propertyNames": {
+              "format": "uuid"
+            },
+            "title": "Organization Successors",
+            "type": "object"
+          },
+          "pool_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Pool Ids",
+            "type": "array"
           },
           "reason": {
             "anyOf": [
@@ -8969,6 +9310,14 @@
               }
             ],
             "title": "Reason"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/HandoverRule"
+            },
+            "maxItems": 200,
+            "title": "Rules",
+            "type": "array"
           },
           "successor_id": {
             "anyOf": [
@@ -8988,6 +9337,13 @@
       },
       "OffboardResponse": {
         "properties": {
+          "distribution": {
+            "items": {
+              "$ref": "#/components/schemas/DistributionItem"
+            },
+            "title": "Distribution",
+            "type": "array"
+          },
           "mode": {
             "enum": [
               "preview",
@@ -9002,6 +9358,14 @@
               "type": "string"
             },
             "title": "Reassigned Deals",
+            "type": "array"
+          },
+          "reassigned_organizations": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Reassigned Organizations",
             "type": "array"
           },
           "sessions_terminated": {
@@ -21356,6 +21720,116 @@
           }
         ],
         "summary": "Мастер передачи дел",
+        "tags": [
+          "admin-users"
+        ]
+      }
+    },
+    "/api/admin/users/{user_id}/offboard/items": {
+      "get": {
+        "description": "Превью `POST .../offboard` ограничено 20 критичными сделками; эта ручка листает все сделки (`kind=deals`) или вузы (`kind=organizations`) уходящего постранично (курсор по `created_at`). Роль: ADMIN.",
+        "operationId": "offboard_items_api_admin_users__user_id__offboard_items_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "default": "deals",
+              "enum": [
+                "deals",
+                "organizations"
+              ],
+              "title": "Kind",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OffboardItemListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "summary": "Все сделки/вузы уходящего (постранично)",
         "tags": [
           "admin-users"
         ]
@@ -34189,6 +34663,99 @@
         "summary": "Справочник сотрудников",
         "tags": [
           "users"
+        ]
+      }
+    },
+    "/api/users/{user_id}/handover": {
+      "post": {
+        "description": "Тот же мастер передачи дел, что `offboard`, но без изменения статуса сотрудника: отпуск, смена региона, временная разгрузка. ADMIN передаёт портфель любого сотрудника; HEAD — только сотрудника своей команды (`head_scope_member_ids`). Права: `deal:reassign_bulk` и `organization:assign_owner`.",
+        "operationId": "handover_user_api_users__user_id__handover_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HandoverExecuteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HandoverExecuteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Передать портфель без увольнения",
+        "tags": [
+          "admin-users"
         ]
       }
     },

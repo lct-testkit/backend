@@ -31,7 +31,7 @@ import zoneinfo
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import structlog
 from sqlalchemy import (
@@ -117,6 +117,13 @@ from app.modules.workflow.models import (
 )
 from app.modules.workflow.service import get_cached_published_graph
 
+if TYPE_CHECKING:
+    # B4-4: `handover.py` импортирует отсюда `_reassign_owner`/`ensure_assignable_user` —
+    # импорт в обратную сторону только для типов (`TYPE_CHECKING`), иначе модули заходят
+    # друг в друга при загрузке. Настоящий импорт в `RealOwnershipService.reassign_plan`
+    # и `NullOwnershipService.reassign_plan` — отложенный, внутри функции.
+    from app.modules.crm.handover import ExecutionResult, HandoverPlan, ResolvedHandover
+
 logger = structlog.get_logger(__name__)
 
 _TERMINAL_TYPE_VALUES = {t.value for t in TERMINAL_TYPES}
@@ -137,11 +144,21 @@ class UserWorkload:
     open_tasks: int = 0
     running_imports: int = 0
     running_reports: int = 0
+    #: B4-4: превью мастера передачи дел считало только открытые сделки, а
+    #: `reassign_all`/`reassign_plan` переносят и закрытые — числа расходились.
+    closed_deals: int = 0
+    #: B4-4: вузы, у которых этот пользователь — ответственный (`Organization.owner_id`).
+    organizations: int = 0
 
     @property
     def is_empty(self) -> bool:
         return not (
-            self.active_deals or self.open_tasks or self.running_imports or self.running_reports
+            self.active_deals
+            or self.open_tasks
+            or self.running_imports
+            or self.running_reports
+            or self.closed_deals
+            or self.organizations
         )
 
 
@@ -164,6 +181,26 @@ class OwnershipService(Protocol):
     ) -> int:
         """Ставит или снимает `owner_unavailable` при блокировке (§4.5)."""
 
+    async def reassign_plan(
+        self,
+        session: AsyncSession,
+        user_id: uuid.UUID,
+        plan: HandoverPlan,
+        *,
+        principal: Principal,
+        reason: str,
+        deal_notification_template: str = "DEAL_REASSIGNED",
+    ) -> ExecutionResult:
+        """B4-4: распределяет сделки, вузы и задачи уходящего между несколькими
+        преемниками по плану (`HandoverService`). `reassign_all` остаётся для
+        одиночного преемника без правил — вызывается через план с пустыми
+        `rules`/`pool_ids` и общим `default_successor_id`."""
+
+    async def preview_plan(
+        self, session: AsyncSession, user_id: uuid.UUID, plan: HandoverPlan, *, principal: Principal
+    ) -> ResolvedHandover:
+        """Как `reassign_plan`, но без записи — для `distribution` в превью мастера."""
+
 
 class NullOwnershipService:
     """Оставлена для тестов и сред, где модуль сделок не подключён."""
@@ -180,6 +217,29 @@ class NullOwnershipService:
         reason: str,
     ) -> list[uuid.UUID]:
         return []
+
+    async def reassign_plan(
+        self,
+        session: AsyncSession,
+        user_id: uuid.UUID,
+        plan: HandoverPlan,
+        *,
+        principal: Principal,
+        reason: str,
+        deal_notification_template: str = "DEAL_REASSIGNED",
+    ) -> ExecutionResult:
+        from app.modules.crm.handover import ExecutionResult as _ExecutionResult
+
+        return _ExecutionResult(
+            reassigned_deals=[], reassigned_organizations=[], reassigned_tasks=0, distribution=[]
+        )
+
+    async def preview_plan(
+        self, session: AsyncSession, user_id: uuid.UUID, plan: HandoverPlan, *, principal: Principal
+    ) -> ResolvedHandover:
+        from app.modules.crm.handover import ResolvedHandover as _ResolvedHandover
+
+        return _ResolvedHandover(user_id=user_id)
 
     async def mark_owner_unavailable(
         self, session: AsyncSession, user_id: uuid.UUID, *, unavailable: bool
@@ -232,6 +292,23 @@ class RealOwnershipService:
             .select_from(Deal)
             .where(Deal.owner_id == user_id, Deal.deleted_at.is_(None), Deal.closed_at.is_(None))
         )
+        # B4-4: превью показывало только открытые сделки, а передача дел (`reassign_all`,
+        # `HandoverService`) переносит и закрытые — число в превью должно совпадать с тем,
+        # что реально случится после подтверждения.
+        closed_count = await session.scalar(
+            select(func.count())
+            .select_from(Deal)
+            .where(
+                Deal.owner_id == user_id,
+                Deal.deleted_at.is_(None),
+                Deal.closed_at.is_not(None),
+            )
+        )
+        organizations_count = await session.scalar(
+            select(func.count())
+            .select_from(Organization)
+            .where(Organization.owner_id == user_id, Organization.deleted_at.is_(None))
+        )
         critical_rows = (
             await session.execute(
                 select(Deal.id, Deal.number, Deal.title, Deal.status_id, Deal.priority)
@@ -273,6 +350,8 @@ class RealOwnershipService:
             open_tasks=int(open_tasks or 0),
             running_imports=0,
             running_reports=0,
+            closed_deals=int(closed_count or 0),
+            organizations=int(organizations_count or 0),
         )
 
     async def reassign_all(
@@ -364,6 +443,34 @@ class RealOwnershipService:
             .values(owner_unavailable=unavailable)
         )
         return result.rowcount or 0
+
+    async def reassign_plan(
+        self,
+        session: AsyncSession,
+        user_id: uuid.UUID,
+        plan: HandoverPlan,
+        *,
+        principal: Principal,
+        reason: str,
+        deal_notification_template: str = "DEAL_REASSIGNED",
+    ) -> ExecutionResult:
+        from app.modules.crm.handover import HandoverService
+
+        service = HandoverService(session)
+        resolved = await service.resolve(user_id, plan, principal)
+        return await service.execute(
+            resolved,
+            principal,
+            reason=reason,
+            deal_notification_template=deal_notification_template,
+        )
+
+    async def preview_plan(
+        self, session: AsyncSession, user_id: uuid.UUID, plan: HandoverPlan, *, principal: Principal
+    ) -> ResolvedHandover:
+        from app.modules.crm.handover import HandoverService
+
+        return await HandoverService(session).resolve(user_id, plan, principal)
 
 
 _ownership_service: OwnershipService = RealOwnershipService()

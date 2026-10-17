@@ -26,6 +26,7 @@ from pydantic import (
 )
 
 from app.core.patch import reject_null
+from app.modules.crm.handover import HandoverPlan, HandoverRule
 from app.modules.identity.models import Role, UserStatus
 
 RoleLiteral = Literal["KAM", "HEAD", "ADMIN", "AUDITOR", "INTEGRATION"]
@@ -327,6 +328,15 @@ class OffboardRequest(BaseModel):
     # «По-сделочно» (new_spec §4.7 шаг 2): `{id сделки: id преемника}`. Эти сделки уходят
     # названным преемникам, все остальные сделки, задачи и запросы подписи — `successor_id`.
     deal_successors: dict[uuid.UUID, uuid.UUID] = Field(default_factory=dict)
+    # B4-4: мастер передачи дел — распределение по вузам и правилам (`HandoverPlan`).
+    organization_successors: dict[uuid.UUID, uuid.UUID] = Field(default_factory=dict)
+    rules: list[HandoverRule] = Field(default_factory=list, max_length=200)
+    #: Равномерное распределение остатка сделок без явного правила.
+    pool_ids: list[uuid.UUID] = Field(default_factory=list, max_length=100)
+    #: Закрытые сделки уходящего тоже передаются по умолчанию (`reassign_all` их всегда
+    #: переносил) — `false` оставляет их на уходящем, если это нужно явно.
+    include_closed_deals: bool = True
+    include_organizations: bool = True
 
     @model_validator(mode="after")
     def _confirm_needs_successor(self) -> OffboardRequest:
@@ -337,16 +347,60 @@ class OffboardRequest(BaseModel):
         return self
 
 
+class DistributionItem(BaseModel):
+    """B4-4: сколько получил каждый преемник передачи дел."""
+
+    successor_id: uuid.UUID
+    deals: int = 0
+    organizations: int = 0
+    tasks: int = 0
+
+
 class OffboardResponse(BaseModel):
     mode: Literal["preview", "confirm"]
     user_id: uuid.UUID
     successor_id: uuid.UUID | None = None
     workload: list[OffboardPreviewItem]
     reassigned_deals: list[uuid.UUID] = Field(default_factory=list)
+    # B4-4: вузы, у которых сменился ответственный, и разбивка по преемникам.
+    reassigned_organizations: list[uuid.UUID] = Field(default_factory=list)
+    distribution: list[DistributionItem] = Field(default_factory=list)
     signature_requests_reassigned: int = 0
     sessions_terminated: int = 0
     status: str | None = None
     warnings: list[str] = Field(default_factory=list)
+
+
+class HandoverExecuteRequest(HandoverPlan):
+    """B4-4: `POST /api/users/{id}/handover` — тот же план, что `OffboardRequest`
+    собирает из своих полей, но без увольнения: статус сотрудника не меняется."""
+
+    reason: ReasonStr
+
+
+class HandoverExecuteResponse(BaseModel):
+    user_id: uuid.UUID
+    reassigned_deals: list[uuid.UUID] = Field(default_factory=list)
+    reassigned_organizations: list[uuid.UUID] = Field(default_factory=list)
+    reassigned_tasks: int = 0
+    distribution: list[DistributionItem] = Field(default_factory=list)
+
+
+class OffboardItemOut(BaseModel):
+    """B4-4: строка `GET /admin/users/{id}/offboard/items` — вся сделка/вуз уходящего,
+    не только первые 20 из превью."""
+
+    id: uuid.UUID
+    number: str | None = None
+    title: str | None = None
+    organization_name: str | None = None
+    status_id: uuid.UUID | None = None
+    closed: bool = False
+
+
+class OffboardItemListResponse(BaseModel):
+    items: list[OffboardItemOut]
+    next_cursor: str | None = None
 
 
 class ErasureRequestBody(BaseModel):

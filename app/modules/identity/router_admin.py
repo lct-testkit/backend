@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Path, Query, status
 from sqlalchemy import select
@@ -22,15 +22,19 @@ from app.core.deps import (
     Pagination,
     require_permission,
 )
-from app.core.errors import AppError, ErrorCode, NotFoundError, VersionConflictError
+from app.core.errors import AppError, ErrorCode, ForbiddenError, NotFoundError, VersionConflictError
 from app.core.optimistic import claim_version
-from app.core.pagination import Page, keyset_before
+from app.core.pagination import Cursor, Page, keyset_after, keyset_before
 from app.core.permissions import Permission
 from app.core.rate_limit import enforce as rate_limit
 from app.core.security import Principal
 from app.modules.admin.models import AdminApproval
 from app.modules.audit.actions import AuditAction
+from app.modules.catalog.models import Organization
 from app.modules.catalog.service import ContactService, OrganizationService
+from app.modules.crm.handover import HandoverPlan
+from app.modules.crm.models import Deal
+from app.modules.crm.service import get_ownership_service
 from app.modules.files.models import File
 from app.modules.files.service import FileService
 from app.modules.identity.admin_service import (
@@ -40,17 +44,22 @@ from app.modules.identity.admin_service import (
     UserFilters,
 )
 from app.modules.identity.erasure_service import ErasureExecutionService
-from app.modules.identity.models import DataErasureRequest, Team, User, UserStatus
+from app.modules.identity.models import DataErasureRequest, Role, Team, User, UserStatus
 from app.modules.identity.schemas import (
     ApprovalDecision,
     ApprovalListResponse,
     ApprovalOut,
+    DistributionItem,
     ErasureBlocker,
     ErasureRejectRequest,
     ErasureRequestBody,
     ErasureRequestDetail,
     ErasureRequestListResponse,
     ErasureRequestOut,
+    HandoverExecuteRequest,
+    HandoverExecuteResponse,
+    OffboardItemListResponse,
+    OffboardItemOut,
     OffboardPreviewItem,
     OffboardRequest,
     OffboardResponse,
@@ -76,6 +85,16 @@ router = APIRouter(prefix="/admin", tags=["admin-users"])
 AdminRead = Annotated[Principal, Depends(require_permission(Permission.USER_READ))]
 AdminWrite = Annotated[Principal, Depends(require_permission(Permission.USER_WRITE))]
 ErasureManager = Annotated[Principal, Depends(require_permission(Permission.ERASURE_MANAGE))]
+# B4-4: мастер передачи дел без увольнения — оба права сразу (раздел спринта).
+HandoverPerm = Annotated[
+    Principal,
+    Depends(require_permission(Permission.DEAL_REASSIGN_BULK, Permission.ORG_OWNER_ASSIGN)),
+]
+
+# B4-4: контракт спринта — `POST /api/users/{id}/handover`, без `/admin`, в отличие от
+# `offboard`. Отдельный роутер (`router` выше объявлен с `prefix="/admin"`), но живёт в
+# этом же файле — рядом с `offboard`, как и просит план задачи.
+handover_router = APIRouter(prefix="/users", tags=["admin-users"])
 
 
 async def _erasure_details(
@@ -389,7 +408,15 @@ async def offboard_user(
             supported=workload.supported,
             details=workload.critical_deals,
         ),
+        # B4-4: закрытые сделки тоже переходят преемнику (`reassign_all`/`HandoverService`
+        # их не пропускают) — без этого числа в превью расходились с результатом.
+        OffboardPreviewItem(
+            kind="closed_deals", count=workload.closed_deals, supported=workload.supported
+        ),
         OffboardPreviewItem(kind="tasks", count=workload.open_tasks, supported=workload.supported),
+        OffboardPreviewItem(
+            kind="organizations", count=workload.organizations, supported=workload.supported
+        ),
         OffboardPreviewItem(
             kind="imports", count=workload.running_imports, supported=workload.supported
         ),
@@ -406,7 +433,38 @@ async def offboard_user(
         )
 
     if payload.mode == "preview":
-        return OffboardResponse(mode="preview", user_id=user.id, workload=items, warnings=warnings)
+        distribution: list[DistributionItem] = []
+        if payload.successor_id is not None:
+            # B4-4: план рассчитывается, но не пишется — админ видит разбивку по
+            # преемникам ДО подтверждения.
+            plan = HandoverPlan(
+                default_successor_id=payload.successor_id,
+                deal_successors=payload.deal_successors,
+                organization_successors=payload.organization_successors,
+                rules=payload.rules,
+                pool_ids=payload.pool_ids,
+                include_closed_deals=payload.include_closed_deals,
+                include_organizations=payload.include_organizations,
+            )
+            resolved = await get_ownership_service().preview_plan(
+                session, user.id, plan, principal=principal
+            )
+            distribution = [
+                DistributionItem(
+                    successor_id=successor_id,
+                    deals=c.deals,
+                    organizations=c.organizations,
+                    tasks=c.tasks,
+                )
+                for successor_id, c in resolved.distribution
+            ]
+        return OffboardResponse(
+            mode="preview",
+            user_id=user.id,
+            workload=items,
+            distribution=distribution,
+            warnings=warnings,
+        )
 
     # Сужение типов: для mode="confirm" схема уже потребовала оба поля.
     assert payload.successor_id is not None and payload.reason is not None  # noqa: S101
@@ -416,17 +474,152 @@ async def offboard_user(
         successor_id=payload.successor_id,
         reason=payload.reason,
         deal_successors=payload.deal_successors,
+        organization_successors=payload.organization_successors,
+        rules=payload.rules,
+        pool_ids=payload.pool_ids,
+        include_closed_deals=payload.include_closed_deals,
+        include_organizations=payload.include_organizations,
     )
+    distribution = [
+        DistributionItem(
+            successor_id=successor_id, deals=c.deals, organizations=c.organizations, tasks=c.tasks
+        )
+        for successor_id, c in result["distribution"]
+    ]
     return OffboardResponse(
         mode="confirm",
         user_id=user.id,
         successor_id=payload.successor_id,
         workload=items,
         reassigned_deals=result["reassigned_deals"],
+        reassigned_organizations=result["reassigned_organizations"],
+        distribution=distribution,
         signature_requests_reassigned=result["signature_requests_reassigned"],
         sessions_terminated=result["sessions_terminated"],
         status=user.status,
         warnings=warnings,
+    )
+
+
+@router.get(
+    "/users/{user_id}/offboard/items",
+    summary="Все сделки/вузы уходящего (постранично)",
+    description=(
+        "Превью `POST .../offboard` ограничено 20 критичными сделками; эта ручка листает "
+        "все сделки (`kind=deals`) или вузы (`kind=organizations`) уходящего постранично "
+        "(курсор по `created_at`). Роль: ADMIN."
+    ),
+    response_model=OffboardItemListResponse,
+)
+async def offboard_items(
+    session: DbSession,
+    principal: AdminWrite,
+    page: Pagination,
+    user_id: Annotated[uuid.UUID, Path()],
+    kind: Annotated[Literal["deals", "organizations"], Query()] = "deals",
+) -> OffboardItemListResponse:
+    service = AdminUserService(session)
+    await service.get_or_404(user_id)
+
+    if kind == "organizations":
+        org_stmt = (
+            select(Organization)
+            .where(Organization.owner_id == user_id, Organization.deleted_at.is_(None))
+            .order_by(Organization.created_at, Organization.id)
+        )
+        if page.decoded_cursor is not None:
+            org_stmt = org_stmt.where(
+                keyset_after(Organization.created_at, Organization.id, page.decoded_cursor)
+            )
+        org_rows = list((await session.execute(org_stmt.limit(page.limit + 1))).scalars().all())
+        org_visible = org_rows[: page.limit]
+        org_next_cursor = (
+            Cursor(value=org_visible[-1].created_at, id=org_visible[-1].id).encode()
+            if len(org_rows) > page.limit
+            else None
+        )
+        org_items = [
+            OffboardItemOut(id=o.id, title=o.name, organization_name=o.name) for o in org_visible
+        ]
+        return OffboardItemListResponse(items=org_items, next_cursor=org_next_cursor)
+
+    deal_stmt = (
+        select(Deal.id, Deal.number, Deal.title, Deal.status_id, Deal.closed_at, Deal.created_at)
+        .where(Deal.owner_id == user_id, Deal.deleted_at.is_(None))
+        .order_by(Deal.created_at, Deal.id)
+    )
+    if page.decoded_cursor is not None:
+        deal_stmt = deal_stmt.where(keyset_after(Deal.created_at, Deal.id, page.decoded_cursor))
+    deal_rows = list((await session.execute(deal_stmt.limit(page.limit + 1))).all())
+    deal_visible = deal_rows[: page.limit]
+    deal_next_cursor = (
+        Cursor(value=deal_visible[-1].created_at, id=deal_visible[-1].id).encode()
+        if len(deal_rows) > page.limit
+        else None
+    )
+    deal_items = [
+        OffboardItemOut(
+            id=row.id,
+            number=row.number,
+            title=row.title,
+            status_id=row.status_id,
+            closed=row.closed_at is not None,
+        )
+        for row in deal_visible
+    ]
+    return OffboardItemListResponse(items=deal_items, next_cursor=deal_next_cursor)
+
+
+@handover_router.post(
+    "/{user_id}/handover",
+    summary="Передать портфель без увольнения",
+    description=(
+        "Тот же мастер передачи дел, что `offboard`, но без изменения статуса "
+        "сотрудника: отпуск, смена региона, временная разгрузка. ADMIN передаёт "
+        "портфель любого сотрудника; HEAD — только сотрудника своей команды "
+        "(`head_scope_member_ids`). Права: `deal:reassign_bulk` и "
+        "`organization:assign_owner`."
+    ),
+    response_model=HandoverExecuteResponse,
+)
+async def handover_user(
+    payload: HandoverExecuteRequest,
+    session: DbSession,
+    principal: HandoverPerm,
+    user_id: Annotated[uuid.UUID, Path()],
+) -> HandoverExecuteResponse:
+    service = AdminUserService(session)
+    user = await service.get_or_404(user_id)
+    if principal.role == Role.HEAD.value:
+        from app.modules.crm.service import head_scope_member_ids
+
+        if user.id not in await head_scope_member_ids(session, principal):
+            raise ForbiddenError("Передать портфель можно только сотруднику своей команды")
+
+    plan = HandoverPlan(
+        default_successor_id=payload.default_successor_id,
+        deal_successors=payload.deal_successors,
+        organization_successors=payload.organization_successors,
+        rules=payload.rules,
+        pool_ids=payload.pool_ids,
+        include_closed_deals=payload.include_closed_deals,
+        include_organizations=payload.include_organizations,
+    )
+    execution = await get_ownership_service().reassign_plan(
+        session, user.id, plan, principal=principal, reason=payload.reason
+    )
+    distribution = [
+        DistributionItem(
+            successor_id=successor_id, deals=c.deals, organizations=c.organizations, tasks=c.tasks
+        )
+        for successor_id, c in execution.distribution
+    ]
+    return HandoverExecuteResponse(
+        user_id=user.id,
+        reassigned_deals=execution.reassigned_deals,
+        reassigned_organizations=execution.reassigned_organizations,
+        reassigned_tasks=execution.reassigned_tasks,
+        distribution=distribution,
     )
 
 
