@@ -30,7 +30,14 @@ from app.core.errors import (
     ValidationError,
     VersionConflictError,
 )
-from app.core.normalize import clean_text, company_key, name_key, normalize_email, normalize_phone
+from app.core.normalize import (
+    clean_text,
+    company_key,
+    escape_like,
+    name_key,
+    normalize_email,
+    normalize_phone,
+)
 from app.core.optimistic import claim_version
 from app.core.security import Principal
 from app.modules.audit.actions import AuditAction
@@ -177,6 +184,30 @@ async def contact_in_scope(session: AsyncSession, principal: Principal, contact:
     return bool(result)
 
 
+async def direction_descendant_ids(
+    session: AsyncSession, root_ids: Iterable[uuid.UUID]
+) -> set[uuid.UUID]:
+    """Корневые id ИТ-направлений и все их потомки по `Direction.parent_id`.
+
+    Фильтр по направлению (B4-8 — список сделок; B4-6 — ограничения видимости)
+    расширяется на дочерние: «направление QA» должно включать «QA-автоматизацию»,
+    если она заведена как его дочернее. Тот же приём, что
+    `identity.service.IdentityService.team_subtree_ids` — обход делает БД через
+    рекурсивный CTE, а не Python циклом запросов."""
+    roots = list(root_ids)
+    if not roots:
+        return set()
+    base = select(Direction.id).where(Direction.id.in_(roots), Direction.deleted_at.is_(None))
+    subtree = base.cte("direction_subtree", recursive=True)
+    subtree = subtree.union_all(
+        select(Direction.id).where(
+            Direction.parent_id == subtree.c.id, Direction.deleted_at.is_(None)
+        )
+    )
+    rows = await session.execute(select(subtree.c.id))
+    return {row[0] for row in rows.all()}
+
+
 # =============================================================================
 # Фильтры списков
 # =============================================================================
@@ -273,11 +304,11 @@ class OrganizationService:
         if filters.source:
             stmt = stmt.where(Organization.source == filters.source)
         if filters.q:
-            pattern = f"%{filters.q.strip()}%"
+            pattern = f"%{escape_like(filters.q.strip())}%"
             stmt = stmt.where(
-                Organization.name.ilike(pattern)
-                | Organization.short_name.ilike(pattern)
-                | Organization.inn.ilike(pattern)
+                Organization.name.ilike(pattern, escape="\\")
+                | Organization.short_name.ilike(pattern, escape="\\")
+                | Organization.inn.ilike(pattern, escape="\\")
             )
         return stmt
 
@@ -1054,8 +1085,10 @@ class ContactService:
             stmt = stmt.where(Contact.source == filters.source)
         if filters.q:
             needle = filters.q.strip()
-            pattern = f"%{needle}%"
-            condition = Contact.first_name.ilike(pattern) | Contact.last_name.ilike(pattern)
+            pattern = f"%{escape_like(needle)}%"
+            condition = Contact.first_name.ilike(pattern, escape="\\") | Contact.last_name.ilike(
+                pattern, escape="\\"
+            )
             # Email в выдаче маскирован, а поиск по подстроке позволял подбирать его по символам
             # (`a%`, `ab%`, …). Полный адрес находится только точным совпадением: подобрать
             # чужой адрес так нельзя, а известный — найти можно.
