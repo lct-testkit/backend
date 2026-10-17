@@ -14761,6 +14761,13 @@
             "title": "Errors",
             "type": "array"
           },
+          "issues": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationIssue"
+            },
+            "title": "Issues",
+            "type": "array"
+          },
           "ok": {
             "title": "Ok",
             "type": "boolean"
@@ -14777,6 +14784,52 @@
           "ok"
         ],
         "title": "ValidateResponse",
+        "type": "object"
+      },
+      "ValidationIssue": {
+        "description": "Один пункт валидации графа (B9-6). `severity` и `refs` добавлены вместе с переходом\nредактора воронок на структурированный `issues[]` (B-2 из OPEN-ISSUES) — раньше поле\nсуществовало, но не использовалось ни одним вызовом (`grep` по коду не находил его, кроме\nсамого объявления класса). `refs` — коды статусов, которых касается проблема (воронка:\nнедостижимый статус, ловушка); пусто у проблем без привязки к конкретному статусу.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "refs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Refs",
+            "type": "array"
+          },
+          "severity": {
+            "enum": [
+              "error",
+              "warning"
+            ],
+            "title": "Severity",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "severity",
+          "message"
+        ],
+        "title": "ValidationIssue",
         "type": "object"
       },
       "VerifyResult": {
@@ -15909,6 +15962,7 @@
     },
     "/api/admin/edm-agreements": {
       "get": {
+        "description": "Соглашения об электронном документообороте с вузами/вендорами (сторона, срок действия, статус отзыва); фильтры `party_type`/`party_id`. Роль: AUDITOR, ADMIN.",
         "operationId": "list_edm_agreements_api_admin_edm_agreements_get",
         "parameters": [
           {
@@ -16077,6 +16131,7 @@
     },
     "/api/admin/edm-agreements/{agreement_id}/revoke": {
       "post": {
+        "description": "Переводит соглашение в `revoked` с указанием причины; открытые документы этой стороны переходят в `blocked_no_agreement`, их запросы — в `pending` (прежние ссылки перестают работать). Уже отозвано — 422 CRM-1001. Роль: ADMIN.",
         "operationId": "revoke_edm_agreement_api_admin_edm_agreements__agreement_id__revoke_post",
         "parameters": [
           {
@@ -16301,6 +16356,7 @@
     },
     "/api/admin/erasure-requests/{request_id}": {
       "get": {
+        "description": "Статус, субъект, дедлайн отсрочки (`grace_until`), блокеры и причина отказа, если он был. Не существует — 404 CRM-9004. Роль: ADMIN.",
         "operationId": "get_erasure_request_api_admin_erasure_requests__request_id__get",
         "parameters": [
           {
@@ -17496,6 +17552,7 @@
     },
     "/api/admin/integrations/sources": {
       "get": {
+        "description": "Настроенные источники (Bitrix24, LMS, оплаты и т.п.): адрес, тип авторизации, признак активности, время последней синхронизации и последняя ошибка. Роль: ADMIN.",
         "operationId": "list_sources_api_admin_integrations_sources_get",
         "parameters": [
           {
@@ -17546,7 +17603,7 @@
             "$ref": "#/components/responses/InternalServerError"
           }
         },
-        "summary": "List Sources",
+        "summary": "Список источников интеграций",
         "tags": [
           "integrations-admin"
         ]
@@ -17554,6 +17611,7 @@
     },
     "/api/admin/integrations/sources/{code}": {
       "patch": {
+        "description": "Правка настроек источника по его коду: адрес, тип авторизации, ссылка на переменную окружения с учётными данными (`credentials_ref`, не само значение секрета), активность, произвольная конфигурация. CRM-9004, если источник с таким кодом не настроен. Роль: ADMIN.",
         "operationId": "update_source_api_admin_integrations_sources__code__patch",
         "parameters": [
           {
@@ -17637,7 +17695,7 @@
             "SessionCookie": []
           }
         ],
-        "summary": "Update Source",
+        "summary": "Изменить источник интеграции",
         "tags": [
           "integrations-admin"
         ]
@@ -17645,6 +17703,7 @@
     },
     "/api/admin/notification-templates": {
       "get": {
+        "description": "Шаблоны тела/темы по коду события и каналу (`email`, `telegram`, `in_app`), включая неактивные; фильтры `code`, `channel`. Роль: ADMIN.",
         "operationId": "list_notification_templates_api_admin_notification_templates_get",
         "parameters": [
           {
@@ -17757,6 +17816,7 @@
         ]
       },
       "post": {
+        "description": "Код события, канал, шаблоны темы/тела (Jinja2) и локаль. Комбинация code+channel уже используется — 422 CRM-1001. Роль: ADMIN.",
         "operationId": "create_notification_template_api_admin_notification_templates_post",
         "parameters": [
           {
@@ -18000,6 +18060,7 @@
         ]
       },
       "patch": {
+        "description": "Правка темы/тела, локали или активности шаблона. Обязателен `If-Match` с текущей версией — расхождение даёт 409 CRM-1002; шаблон не найден — 404 CRM-9004. Роль: ADMIN.",
         "operationId": "update_notification_template_api_admin_notification_templates__template_id__patch",
         "parameters": [
           {
@@ -18284,6 +18345,7 @@
     },
     "/api/admin/registry/versions": {
       "get": {
+        "description": "Загруженные выгрузки ЕГРЮЛ: источник, статус разбора, число обработанных записей, от новых к старым. Роль: ADMIN.",
         "operationId": "list_registry_versions_api_admin_registry_versions_get",
         "parameters": [
           {
@@ -20020,6 +20082,7 @@
     },
     "/api/attachments": {
       "get": {
+        "description": "Файлы, привязанные к сущности (`entity_type`, `entity_id` — обязательны); доступ проверяется по правам на саму сущность (сделку, документ на подпись и т.п.), не только по общему праву на файлы. Роль: KAM, HEAD, ADMIN.",
         "operationId": "list_attachments_api_attachments_get",
         "parameters": [
           {
@@ -20554,6 +20617,7 @@
     },
     "/api/comments/{comment_id}": {
       "delete": {
+        "description": "Мягкое удаление с необязательной причиной. Чужой комментарий удаляет только ADMIN, иначе 403 CRM-1102; системный комментарий — 422 CRM-1001. Роль: KAM, HEAD, ADMIN.",
         "operationId": "delete_comment_api_comments__comment_id__delete",
         "parameters": [
           {
@@ -20644,6 +20708,7 @@
         ]
       },
       "patch": {
+        "description": "Правит текст, старая версия сохраняется в истории правок. Только автор или ADMIN — иначе 403 CRM-1102; системный комментарий — 422 CRM-1001. Роль: KAM, HEAD, ADMIN.",
         "operationId": "update_comment_api_comments__comment_id__patch",
         "parameters": [
           {
@@ -20736,6 +20801,7 @@
     },
     "/api/contacts": {
       "get": {
+        "description": "Фильтры: `organization_id`, `position`, `is_decision_maker`, `is_anonymized`, `source`, `q`. Телефон и email маскированы — полные значения через `POST /api/contacts/{id}/reveal`. Роль: KAM, HEAD, ADMIN.",
         "operationId": "list_contacts_api_contacts_get",
         "parameters": [
           {
@@ -20913,6 +20979,7 @@
         ]
       },
       "post": {
+        "description": "ФИО, должность, телефон/email и признак ЛПР. Поддерживает Idempotency-Key.",
         "operationId": "create_contact_api_contacts_post",
         "parameters": [
           {
@@ -21012,6 +21079,7 @@
     },
     "/api/contacts/{contact_id}": {
       "get": {
+        "description": "Телефон и email маскированы — полные значения через `POST /api/contacts/{id}/reveal`; не существует — 404 CRM-9004. Роль: KAM, HEAD, ADMIN.",
         "operationId": "get_contact_api_contacts__contact_id__get",
         "parameters": [
           {
@@ -21077,6 +21145,7 @@
         ]
       },
       "patch": {
+        "description": "Обязателен `If-Match` с текущей версией — расхождение даёт 409 CRM-1002; не существует — 404 CRM-9004. Роль: KAM, HEAD, ADMIN.",
         "operationId": "update_contact_api_contacts__contact_id__patch",
         "parameters": [
           {
@@ -21572,6 +21641,7 @@
     },
     "/api/custom-field-defs": {
       "get": {
+        "description": "Каталог определений `custom_fields` (тип, обязательность, правила проверки значения) для сделок, организаций и продуктов. Фильтры: `entity_type`, `is_active`. Роль: KAM, HEAD, ADMIN.",
         "operationId": "list_custom_field_defs_api_custom_field_defs_get",
         "parameters": [
           {
@@ -21810,6 +21880,7 @@
         ]
       },
       "patch": {
+        "description": "Правка названия, правил проверки или активности определения; не меняет уже сохранённые значения `custom_fields`. Обязателен `If-Match` с текущей версией — расхождение даёт 409 CRM-1002. Роль: ADMIN.",
         "operationId": "update_custom_field_def_api_custom_field_defs__field_id__patch",
         "parameters": [
           {
@@ -21918,6 +21989,7 @@
     },
     "/api/dashboards": {
       "get": {
+        "description": "Дашборды вызывающего и дашборды с `is_shared=true`; ADMIN видит все. Роль: KAM, HEAD, ADMIN.",
         "operationId": "list_dashboards_api_dashboards_get",
         "parameters": [
           {
@@ -21998,6 +22070,7 @@
         ]
       },
       "post": {
+        "description": "Название, признак общего доступа (`is_shared`) и раскладка виджетов (`layout`); владелец — вызывающий. Роль: KAM, HEAD, ADMIN.",
         "operationId": "create_dashboard_api_dashboards_post",
         "parameters": [
           {
@@ -22080,6 +22153,7 @@
     },
     "/api/dashboards/{dashboard_id}": {
       "delete": {
+        "description": "Удаляет дашборд и его виджеты; доступно только владельцу или ADMIN — иначе 403 CRM-1102. Роль: KAM, HEAD, ADMIN.",
         "operationId": "delete_dashboard_api_dashboards__dashboard_id__delete",
         "parameters": [
           {
@@ -22150,6 +22224,7 @@
         ]
       },
       "get": {
+        "description": "Доступен владельцу, любому при `is_shared=true`, либо ADMIN — иначе 403 CRM-1102; не найден — 404 CRM-9004. Роль: KAM, HEAD, ADMIN.",
         "operationId": "get_dashboard_api_dashboards__dashboard_id__get",
         "parameters": [
           {
@@ -22215,6 +22290,7 @@
         ]
       },
       "patch": {
+        "description": "Правка названия, общего доступа или раскладки; изменять может только владелец или ADMIN — иначе 403 CRM-1102. Обязателен `If-Match` с текущей версией — расхождение даёт 409 CRM-1002. Роль: KAM, HEAD, ADMIN.",
         "operationId": "update_dashboard_api_dashboards__dashboard_id__patch",
         "parameters": [
           {
@@ -22323,6 +22399,7 @@
     },
     "/api/dashboards/{dashboard_id}/widgets": {
       "get": {
+        "description": "Права на чтение — как у `GET /api/dashboards/{dashboard_id}`. Роль: KAM, HEAD, ADMIN.",
         "operationId": "list_widgets_api_dashboards__dashboard_id__widgets_get",
         "parameters": [
           {
@@ -22388,6 +22465,7 @@
         ]
       },
       "post": {
+        "description": "Тип виджета (`widget_type`), его конфигурация (`config`) и позиция на раскладке (`position`); изменять дашборд может только владелец или ADMIN — иначе 403 CRM-1102. Роль: KAM, HEAD, ADMIN.",
         "operationId": "add_widget_api_dashboards__dashboard_id__widgets_post",
         "parameters": [
           {
@@ -22480,6 +22558,7 @@
     },
     "/api/dashboards/{dashboard_id}/widgets/{widget_id}": {
       "delete": {
+        "description": "Виджет с другого дашборда — 404 CRM-9004. Изменять дашборд может только владелец или ADMIN — иначе 403 CRM-1102. Роль: KAM, HEAD, ADMIN.",
         "operationId": "remove_widget_api_dashboards__dashboard_id__widgets__widget_id__delete",
         "parameters": [
           {
@@ -22560,6 +22639,7 @@
         ]
       },
       "patch": {
+        "description": "Правка типа, конфигурации или позиции виджета; виджет с другого дашборда — 404 CRM-9004. Изменять дашборд может только владелец или ADMIN — иначе 403 CRM-1102. Роль: KAM, HEAD, ADMIN.",
         "operationId": "update_widget_api_dashboards__dashboard_id__widgets__widget_id__patch",
         "parameters": [
           {
@@ -23800,6 +23880,7 @@
     },
     "/api/deals/{deal_id}/participants": {
       "get": {
+        "description": "Соисполнители и наблюдатели сделки сверх ответственного — даёт им видимость сделки помимо своего скоупа. Роль: KAM, HEAD, ADMIN.",
         "operationId": "list_participants_api_deals__deal_id__participants_get",
         "parameters": [
           {
@@ -23865,6 +23946,7 @@
         ]
       },
       "post": {
+        "description": "Пользователь и его роль в сделке (например, соисполнитель/наблюдатель); повтор той же пары — не ошибка, отдаёт существующую запись. Неактивный сотрудник — 422 CRM-1001. Менять состав может только ответственный, HEAD или ADMIN — иначе 403 CRM-1102. Роль: KAM, HEAD, ADMIN.",
         "operationId": "add_participant_api_deals__deal_id__participants_post",
         "parameters": [
           {
@@ -23957,6 +24039,7 @@
     },
     "/api/deals/{deal_id}/participants/{participant_id}": {
       "delete": {
+        "description": "Участник другой сделки — 404 CRM-9004. Менять состав может только ответственный, HEAD или ADMIN — иначе 403 CRM-1102. Роль: KAM, HEAD, ADMIN.",
         "operationId": "remove_participant_api_deals__deal_id__participants__participant_id__delete",
         "parameters": [
           {
@@ -25104,6 +25187,7 @@
     },
     "/api/holidays": {
       "get": {
+        "description": "Выходные и перенесённые рабочие дни (`is_working_day`) — основа расчёта SLA в рабочих днях. Фильтр по периоду `date_from`/`date_to`. Роль: KAM, HEAD, ADMIN.",
         "operationId": "list_holidays_api_holidays_get",
         "parameters": [
           {
@@ -25188,6 +25272,7 @@
         ]
       },
       "post": {
+        "description": "Дата, название и признак рабочего дня (перенос выходного). Роль: ADMIN.",
         "operationId": "create_holiday_api_holidays_post",
         "parameters": [
           {
@@ -25341,6 +25426,7 @@
         ]
       },
       "patch": {
+        "description": "Правка даты, названия или признака рабочего дня; обязателен `If-Match` с текущей версией — расхождение даёт 409 CRM-1002. Роль: ADMIN.",
         "operationId": "update_holiday_api_holidays__holiday_id__patch",
         "parameters": [
           {
@@ -25449,6 +25535,7 @@
     },
     "/api/import-presets": {
       "get": {
+        "description": "Сохранённые маппинги колонок для повторного использования (создаются из `PUT /{job_id}/mapping` с `save_as_preset`); фильтр по типу сущности `entity_type`. Роль: HEAD, ADMIN.",
         "operationId": "list_import_presets_api_import_presets_get",
         "parameters": [
           {
@@ -25547,6 +25634,7 @@
     },
     "/api/imports": {
       "get": {
+        "description": "Задания импорта всех типов (организации, продукты, лицензии и т.п.) со статусом и счётчиками строк, от новых к старым. Роль: HEAD, ADMIN.",
         "operationId": "list_import_jobs_api_imports_get",
         "parameters": [
           {
@@ -25765,6 +25853,7 @@
     },
     "/api/imports/{job_id}": {
       "get": {
+        "description": "Статус, тип сущности, режим, маппинг колонок и счётчики строк (`ok`/`warn`/`error`); не существует — 404 CRM-9004. Роль: HEAD, ADMIN.",
         "operationId": "get_import_job_api_imports__job_id__get",
         "parameters": [
           {
@@ -26345,6 +26434,7 @@
     },
     "/api/loss-reasons": {
       "get": {
+        "description": "Причины для перехода сделки в lost (код, название, активность). Фильтр `is_active`. Роль: KAM, HEAD, ADMIN.",
         "operationId": "list_loss_reasons_api_loss_reasons_get",
         "parameters": [
           {
@@ -26413,6 +26503,7 @@
         ]
       },
       "post": {
+        "description": "Код, название, категория и порядок сортировки новой причины отказа. Роль: ADMIN.",
         "operationId": "create_loss_reason_api_loss_reasons_post",
         "parameters": [
           {
@@ -26566,6 +26657,7 @@
         ]
       },
       "patch": {
+        "description": "Правка названия, категории, активности или порядка сортировки; обязателен `If-Match` с текущей версией — расхождение даёт 409 CRM-1002. Роль: ADMIN.",
         "operationId": "update_loss_reason_api_loss_reasons__loss_reason_id__patch",
         "parameters": [
           {
@@ -26893,6 +26985,7 @@
     },
     "/api/me/notification-prefs": {
       "get": {
+        "description": "Явные настройки канала по коду события для текущего пользователя; событие без записи здесь доставляется по умолчанию (см. каналы шаблона в `GET /api/notifications/event-codes`). Роль: любой аутентифицированный.",
         "operationId": "get_notification_prefs_api_me_notification_prefs_get",
         "parameters": [
           {
@@ -26945,6 +27038,7 @@
         ]
       },
       "put": {
+        "description": "Заменяет настройку канала по каждому переданному коду события (создаёт запись, если её не было, иначе правит); коды, не упомянутые в запросе, не трогает. Роль: любой аутентифицированный.",
         "operationId": "update_notification_prefs_api_me_notification_prefs_put",
         "parameters": [
           {
@@ -27426,6 +27520,7 @@
     },
     "/api/me/signature-requests": {
       "get": {
+        "description": "Запросы на подпись, где текущий пользователь — внутренний подписант: статус, дедлайн и карточка документа (название, тип и id сущности). Роль: KAM, HEAD, ADMIN.",
         "operationId": "my_signature_requests_api_me_signature_requests_get",
         "parameters": [
           {
@@ -27513,6 +27608,7 @@
     },
     "/api/notifications": {
       "get": {
+        "description": "Уведомления текущего пользователя с отрисованной темой/телом; фильтры `is_read`, `priority`, `entity_type`, `event_code`. Роль: любой аутентифицированный.",
         "operationId": "list_notifications_api_notifications_get",
         "parameters": [
           {
@@ -27714,6 +27810,7 @@
     },
     "/api/notifications/read": {
       "post": {
+        "description": "Массовая отметка `is_read=true`: по списку `ids` либо по тем же фильтрам, что `GET /api/notifications` (`priority`, `entity_type`, `event_code`); без единого фильтра — все непрочитанные, а пустой список `ids` — явно ничего (не «все»). Отдаёт число затронутых записей. Роль: любой аутентифицированный.",
         "operationId": "mark_notifications_read_api_notifications_read_post",
         "parameters": [
           {
@@ -28477,6 +28574,7 @@
         ]
       },
       "get": {
+        "description": "ФИО менеджера и ответственные от вуза маскированы без права contact:reveal. Организация вне скоупа или запись не существует — 404 CRM-9004. Роль: KAM, HEAD, ADMIN.",
         "operationId": "get_organization_license_api_organization_licenses__license_id__get",
         "parameters": [
           {
@@ -28651,6 +28749,7 @@
     },
     "/api/organizations": {
       "get": {
+        "description": "Фильтры: `name`, `inn`, `ogrn`, `org_type`, `region_id`, `owner_id`, `registry_status`, `is_accredited`, `source`, `q` (поиск по названию, короткому названию или ИНН). Роль: KAM, HEAD, ADMIN.",
         "operationId": "list_organizations_api_organizations_get",
         "parameters": [
           {
@@ -28993,6 +29092,7 @@
     },
     "/api/organizations/check-duplicate": {
       "get": {
+        "description": "Точные совпадения по `inn`/`ogrn` и похожие по названию (`name`). Организация вне скоупа вызывающего — только факт существования без реквизитов (`accessible=false`), иначе КАМ мог бы подобрать ИНН и узнать название чужого вуза. Роль: KAM, HEAD, ADMIN.",
         "operationId": "check_duplicate_organization_api_organizations_check_duplicate_get",
         "parameters": [
           {
@@ -29095,6 +29195,7 @@
     },
     "/api/organizations/{organization_id}": {
       "get": {
+        "description": "Вне скоупа вызывающего или не существует — 404 CRM-9004. Роль: KAM, HEAD, ADMIN.",
         "operationId": "get_organization_api_organizations__organization_id__get",
         "parameters": [
           {
@@ -29160,6 +29261,7 @@
         ]
       },
       "patch": {
+        "description": "Правка реквизитов и атрибутов организации. Обязателен `If-Match` с текущей версией — расхождение даёт 409 CRM-1002; вне скоупа или не существует — 404 CRM-9004. Роль: KAM, HEAD, ADMIN.",
         "operationId": "update_organization_api_organizations__organization_id__patch",
         "parameters": [
           {
@@ -30251,6 +30353,7 @@
     },
     "/api/regions": {
       "get": {
+        "description": "Регионы РФ для поля организации `region_id` (код, название). Роль: KAM, HEAD, ADMIN.",
         "operationId": "list_regions_api_regions_get",
         "parameters": [
           {
@@ -30305,6 +30408,7 @@
     },
     "/api/report-templates": {
       "get": {
+        "description": "Каталог шаблонов отчётов, доступных роли вызывающего (`allowed_roles` шаблона пусто — доступен всем с правом на отчёты), с описанием параметров, выбираемых колонок, полей даты и форматов вывода (`xlsx`/`xls`/`pdf`/`png`/`json`) каждого вида. Роль: KAM, HEAD, ADMIN.",
         "operationId": "list_report_templates_api_report_templates_get",
         "parameters": [
           {
@@ -30539,6 +30643,7 @@
     },
     "/api/reports/{report_id}": {
       "get": {
+        "description": "Статус задачи (`queued`/`processing`/`completed`/`failed`), прогресс и `result_meta` готового результата (строки, усечение, момент снимка данных). Доступен только тому, кто запросил отчёт, либо ADMIN — иначе 403 CRM-1102; не найден — 404 CRM-9004. Роль: KAM, HEAD, ADMIN.",
         "operationId": "get_report_api_reports__report_id__get",
         "parameters": [
           {
@@ -31285,6 +31390,7 @@
     },
     "/api/signature-requests/{request_id}/challenge": {
       "post": {
+        "description": "Отправляет внутреннему подписанту одноразовый код по SMS или email для последующего `/sign`. Не более 5 кодов на один запрос — иначе 422 CRM-1503; не более одной отправки в минуту; канал доставки недоступен — 503 CRM-9503. Роль: подписант (KAM, HEAD, ADMIN).",
         "operationId": "challenge_request_api_signature_requests__request_id__challenge_post",
         "parameters": [
           {
@@ -31508,6 +31614,7 @@
     },
     "/api/signature-requests/{request_id}/reject": {
       "post": {
+        "description": "Отклоняет документ с указанием причины: документ переходит в `rejected`, незавершённые запросы других подписантов аннулируются. Запрос или документ уже завершены — 409 CRM-1505. Роль: подписант (KAM, HEAD, ADMIN).",
         "operationId": "reject_request_api_signature_requests__request_id__reject_post",
         "parameters": [
           {
@@ -31600,6 +31707,7 @@
     },
     "/api/signature-requests/{request_id}/sign": {
       "post": {
+        "description": "Проверяет код, полученный от `/challenge`, и фиксирует подпись. Неверный, просроченный или уже использованный код, либо исчерпанные попытки — 422 CRM-1503; запрос уже подписан — 409 CRM-1505. Роль: подписант (KAM, HEAD, ADMIN).",
         "operationId": "sign_request_api_signature_requests__request_id__sign_post",
         "parameters": [
           {
@@ -31692,6 +31800,7 @@
     },
     "/api/signature-requests/{request_id}/view": {
       "post": {
+        "description": "Первый вызов переводит запрос из `sent` в `viewed` и отдаёт страницу подписания с превью PDF; повторные вызовы только отдают страницу. Чужой запрос или запрос внешнего подписанта — 404 CRM-9004. Роль: подписант (KAM, HEAD, ADMIN).",
         "operationId": "view_request_api_signature_requests__request_id__view_post",
         "parameters": [
           {
@@ -31771,6 +31880,7 @@
     },
     "/api/signature-templates": {
       "get": {
+        "description": "Шаблоны ПЭП, доступные для `POST /api/signature-documents` (`template_code`, название, обязательные подписанты); архивные (`is_active=false`) не отдаются. Роль: KAM, HEAD, ADMIN.",
         "operationId": "list_templates_api_signature_templates_get",
         "parameters": [
           {
@@ -31908,6 +32018,7 @@
     },
     "/api/tasks": {
       "get": {
+        "description": "Задачи в скоупе вызывающего (KAM — свои сделки, HEAD — команда, ADMIN — все). Фильтры: `deal_id`, `assignee_id`, `status`, `priority`, `due_before`, `overdue`. Роль: KAM, HEAD, ADMIN.",
         "operationId": "list_tasks_api_tasks_get",
         "parameters": [
           {
@@ -32181,6 +32292,7 @@
     },
     "/api/tasks/{task_id}": {
       "patch": {
+        "description": "Правка полей задачи; родительская сделка должна быть в скоупе на запись. Роль: KAM, HEAD, ADMIN.",
         "operationId": "update_task_api_tasks__task_id__patch",
         "parameters": [
           {
@@ -32273,6 +32385,7 @@
     },
     "/api/tasks/{task_id}/complete": {
       "post": {
+        "description": "Переводит задачу в `done` и фиксирует момент и исполнителя завершения (повторный вызов — без изменений); родительская сделка должна быть в скоупе на запись. Роль: KAM, HEAD, ADMIN.",
         "operationId": "complete_task_api_tasks__task_id__complete_post",
         "parameters": [
           {
@@ -32474,6 +32587,7 @@
     },
     "/api/v1/integrations/bitrix/webhook": {
       "post": {
+        "description": "Изменение сделки Bitrix24, подписанное HMAC в заголовке X-Signature; применяется только если присланная версия новее сохранённой (last-write-wins), иначе статус ответа — `duplicate`. Повтор того же `external_id` отдаёт результат первой обработки без повторной записи. Неверная подпись — 401 CRM-1701; источник bitrix24 отключён — 503 CRM-1703. Без аутентификации пользователя.",
         "operationId": "bitrix_webhook_api_v1_integrations_bitrix_webhook_post",
         "parameters": [
           {
@@ -32667,6 +32781,7 @@
     },
     "/api/v1/integrations/lms/progress": {
       "post": {
+        "description": "Пакет строк прогресса учащихся (`progress_pct`, оценка, даты), подписанный HMAC в заголовке X-Signature; повтор того же `external_id` отдаёт результат первой обработки без повторной записи. Неверная подпись — 401 CRM-1701; источник lms отключён — 503 CRM-1703. Каждая строка — в своём SAVEPOINT: одна «битая» не откатывает остальные. Без аутентификации пользователя.",
         "operationId": "lms_progress_push_api_v1_integrations_lms_progress_post",
         "parameters": [
           {
@@ -33872,6 +33987,7 @@
     },
     "/public/sign/{token}/challenge": {
       "post": {
+        "description": "Отправляет внешнему подписанту код по SMS или email для последующего `/{token}/sign`. Токен недействителен или ссылка истекла — 404 CRM-1504; не более 5 кодов на запрос — 422 CRM-1503; канал доставки недоступен — 503 CRM-9503. Без аутентификации, лимит запросов по токену и по IP.",
         "operationId": "public_challenge_public_sign__token__challenge_post",
         "parameters": [
           {
@@ -33962,6 +34078,7 @@
     },
     "/public/sign/{token}/reject": {
       "post": {
+        "description": "Отклоняет документ с указанием причины: документ переходит в `rejected`, незавершённые запросы других подписантов аннулируются. Токен недействителен или истёк — 404 CRM-1504; запрос или документ уже завершены — 409 CRM-1505. Без аутентификации, лимит запросов по токену и по IP.",
         "operationId": "public_reject_public_sign__token__reject_post",
         "parameters": [
           {
@@ -34023,6 +34140,7 @@
     },
     "/public/sign/{token}/sign": {
       "post": {
+        "description": "Проверяет код из `/{token}/challenge` и фиксирует подпись. Токен недействителен или истёк — 404 CRM-1504; неверный/просроченный/использованный код либо исчерпанные попытки — 422 CRM-1503; запрос уже подписан — 409 CRM-1505. Без аутентификации, лимит запросов по токену и по IP.",
         "operationId": "public_sign_public_sign__token__sign_post",
         "parameters": [
           {

@@ -100,7 +100,15 @@ async def list_import_entity_types(_: ImportRunPerm) -> ImportEntityTypeListResp
     )
 
 
-@import_jobs_router.get("", summary="Список заданий импорта", response_model=ImportJobListResponse)
+@import_jobs_router.get(
+    "",
+    summary="Список заданий импорта",
+    description=(
+        "Задания импорта всех типов (организации, продукты, лицензии и т.п.) со статусом "
+        "и счётчиками строк, от новых к старым. Роль: HEAD, ADMIN."
+    ),
+    response_model=ImportJobListResponse,
+)
 async def list_import_jobs(
     session: DbSession, page: Pagination, _: ImportRunPerm
 ) -> ImportJobListResponse:
@@ -118,7 +126,13 @@ async def list_import_jobs(
 
 
 @import_jobs_router.get(
-    "/{job_id}", summary="Карточка задания импорта", response_model=ImportJobOut
+    "/{job_id}",
+    summary="Карточка задания импорта",
+    description=(
+        "Статус, тип сущности, режим, маппинг колонок и счётчики строк "
+        "(`ok`/`warn`/`error`); не существует — 404 CRM-9004. Роль: HEAD, ADMIN."
+    ),
+    response_model=ImportJobOut,
 )
 async def get_import_job(
     session: DbSession, _: ImportRunPerm, job_id: Annotated[uuid.UUID, Path()]
@@ -271,7 +285,14 @@ async def rollback_import_job(
 
 
 @import_presets_router.get(
-    "", summary="Список пресетов маппинга", response_model=ImportPresetListResponse
+    "",
+    summary="Список пресетов маппинга",
+    description=(
+        "Сохранённые маппинги колонок для повторного использования (создаются из "
+        "`PUT /{job_id}/mapping` с `save_as_preset`); фильтр по типу сущности "
+        "`entity_type`. Роль: HEAD, ADMIN."
+    ),
+    response_model=ImportPresetListResponse,
 )
 async def list_import_presets(
     session: DbSession,

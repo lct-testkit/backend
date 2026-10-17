@@ -72,7 +72,16 @@ def _page(
     return list(built.items)
 
 
-@integration_admin_router.get("/sources", response_model=list[IntegrationSourceOut])
+@integration_admin_router.get(
+    "/sources",
+    summary="Список источников интеграций",
+    description=(
+        "Настроенные источники (Bitrix24, LMS, оплаты и т.п.): адрес, тип авторизации, "
+        "признак активности, время последней синхронизации и последняя ошибка. "
+        "Роль: ADMIN."
+    ),
+    response_model=list[IntegrationSourceOut],
+)
 async def list_sources(
     session: DbSession, _principal: IntegrationAdminPerm
 ) -> list[IntegrationSourceOut]:
@@ -80,7 +89,17 @@ async def list_sources(
     return [IntegrationSourceOut.model_validate(s) for s in sources]
 
 
-@integration_admin_router.patch("/sources/{code}", response_model=IntegrationSourceOut)
+@integration_admin_router.patch(
+    "/sources/{code}",
+    summary="Изменить источник интеграции",
+    description=(
+        "Правка настроек источника по его коду: адрес, тип авторизации, ссылка на переменную "
+        "окружения с учётными данными (`credentials_ref`, не само значение секрета), "
+        "активность, произвольная конфигурация. CRM-9004, если источник с таким кодом не "
+        "настроен. Роль: ADMIN."
+    ),
+    response_model=IntegrationSourceOut,
+)
 async def update_source(
     session: DbSession,
     _principal: IntegrationAdminPerm,

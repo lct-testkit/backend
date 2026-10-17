@@ -154,7 +154,16 @@ async def delete_file(
 # =============================================================================
 
 
-@attachments_router.get("", summary="Вложения сущности", response_model=AttachmentListResponse)
+@attachments_router.get(
+    "",
+    summary="Вложения сущности",
+    description=(
+        "Файлы, привязанные к сущности (`entity_type`, `entity_id` — обязательны); доступ "
+        "проверяется по правам на саму сущность (сделку, документ на подпись и т.п.), не "
+        "только по общему праву на файлы. Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=AttachmentListResponse,
+)
 async def list_attachments(
     session: DbSession,
     page: Pagination,

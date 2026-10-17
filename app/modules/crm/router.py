@@ -519,7 +519,13 @@ async def reassign_deal(
 
 
 @deals_router.get(
-    "/{deal_id}/participants", summary="Участники сделки", response_model=ParticipantListResponse
+    "/{deal_id}/participants",
+    summary="Участники сделки",
+    description=(
+        "Соисполнители и наблюдатели сделки сверх ответственного — даёт им видимость "
+        "сделки помимо своего скоупа. Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=ParticipantListResponse,
 )
 async def list_participants(
     session: DbSession, principal: DealRead, deal_id: Annotated[uuid.UUID, Path()]
@@ -532,6 +538,12 @@ async def list_participants(
 @deals_router.post(
     "/{deal_id}/participants",
     summary="Добавить участника",
+    description=(
+        "Пользователь и его роль в сделке (например, соисполнитель/наблюдатель); повтор "
+        "той же пары — не ошибка, отдаёт существующую запись. Неактивный сотрудник — 422 "
+        "CRM-1001. Менять состав может только ответственный, HEAD или ADMIN — иначе 403 "
+        "CRM-1102. Роль: KAM, HEAD, ADMIN."
+    ),
     response_model=ParticipantOut,
     status_code=status.HTTP_201_CREATED,
 )
@@ -551,6 +563,10 @@ async def add_participant(
 @deals_router.delete(
     "/{deal_id}/participants/{participant_id}",
     summary="Удалить участника",
+    description=(
+        "Участник другой сделки — 404 CRM-9004. Менять состав может только "
+        "ответственный, HEAD или ADMIN — иначе 403 CRM-1102. Роль: KAM, HEAD, ADMIN."
+    ),
     response_model=OperationResult,
 )
 async def remove_participant(
@@ -647,7 +663,14 @@ async def create_comment(
 
 
 @comments_router.patch(
-    "/{comment_id}", summary="Редактировать комментарий", response_model=CommentOut
+    "/{comment_id}",
+    summary="Редактировать комментарий",
+    description=(
+        "Правит текст, старая версия сохраняется в истории правок. Только автор или "
+        "ADMIN — иначе 403 CRM-1102; системный комментарий — 422 CRM-1001. "
+        "Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=CommentOut,
 )
 async def update_comment(
     payload: CommentUpdateRequest,
@@ -663,7 +686,14 @@ async def update_comment(
 
 
 @comments_router.delete(
-    "/{comment_id}", summary="Удалить комментарий", response_model=OperationResult
+    "/{comment_id}",
+    summary="Удалить комментарий",
+    description=(
+        "Мягкое удаление с необязательной причиной. Чужой комментарий удаляет только "
+        "ADMIN, иначе 403 CRM-1102; системный комментарий — 422 CRM-1001. "
+        "Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=OperationResult,
 )
 async def delete_comment(
     payload: CommentDeleteRequest,
@@ -689,7 +719,16 @@ def _task_out(task: Task, deal_number: str | None, deal_title: str | None) -> Ta
     )
 
 
-@tasks_router.get("", summary="Список задач", response_model=TaskListResponse)
+@tasks_router.get(
+    "",
+    summary="Список задач",
+    description=(
+        "Задачи в скоупе вызывающего (KAM — свои сделки, HEAD — команда, ADMIN — все). "
+        "Фильтры: `deal_id`, `assignee_id`, `status`, `priority`, `due_before`, `overdue`. "
+        "Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=TaskListResponse,
+)
 async def list_tasks(
     session: DbSession,
     page: Pagination,
@@ -773,7 +812,15 @@ async def create_task(
     return result
 
 
-@tasks_router.patch("/{task_id}", summary="Обновить задачу", response_model=TaskOut)
+@tasks_router.patch(
+    "/{task_id}",
+    summary="Обновить задачу",
+    description=(
+        "Правка полей задачи; родительская сделка должна быть в скоупе на запись. "
+        "Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=TaskOut,
+)
 async def update_task(
     payload: TaskUpdateRequest,
     session: DbSession,
@@ -787,7 +834,16 @@ async def update_task(
     return _task_out(task, deal.number, deal.title)
 
 
-@tasks_router.post("/{task_id}/complete", summary="Завершить задачу", response_model=TaskOut)
+@tasks_router.post(
+    "/{task_id}/complete",
+    summary="Завершить задачу",
+    description=(
+        "Переводит задачу в `done` и фиксирует момент и исполнителя завершения (повторный "
+        "вызов — без изменений); родительская сделка должна быть в скоупе на запись. "
+        "Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=TaskOut,
+)
 async def complete_task(
     session: DbSession, principal: DealUpdatePerm, task_id: Annotated[uuid.UUID, Path()]
 ) -> TaskOut:

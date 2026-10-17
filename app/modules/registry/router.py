@@ -122,6 +122,10 @@ async def start_registry_import(
 @registry_admin_router.get(
     "/versions",
     summary="Список версий реестра",
+    description=(
+        "Загруженные выгрузки ЕГРЮЛ: источник, статус разбора, число обработанных "
+        "записей, от новых к старым. Роль: ADMIN."
+    ),
     response_model=RegistryVersionListResponse,
 )
 async def list_registry_versions(

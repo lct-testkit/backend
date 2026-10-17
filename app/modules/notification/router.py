@@ -58,7 +58,15 @@ NotificationTemplateManage = Annotated[
 # =============================================================================
 
 
-@notifications_router.get("", summary="Мои уведомления", response_model=NotificationListResponse)
+@notifications_router.get(
+    "",
+    summary="Мои уведомления",
+    description=(
+        "Уведомления текущего пользователя с отрисованной темой/телом; фильтры "
+        "`is_read`, `priority`, `entity_type`, `event_code`. Роль: любой аутентифицированный."
+    ),
+    response_model=NotificationListResponse,
+)
 async def list_notifications(
     session: DbSession,
     page: Pagination,
@@ -121,7 +129,15 @@ async def event_codes(session: DbSession, principal: ConsentedUser) -> EventCode
 
 
 @notifications_router.post(
-    "/read", summary="Отметить уведомления прочитанными", response_model=NotificationReadResponse
+    "/read",
+    summary="Отметить уведомления прочитанными",
+    description=(
+        "Массовая отметка `is_read=true`: по списку `ids` либо по тем же фильтрам, что "
+        "`GET /api/notifications` (`priority`, `entity_type`, `event_code`); без единого "
+        "фильтра — все непрочитанные, а пустой список `ids` — явно ничего (не «все»). "
+        "Отдаёт число затронутых записей. Роль: любой аутентифицированный."
+    ),
+    response_model=NotificationReadResponse,
 )
 async def mark_notifications_read(
     payload: NotificationReadRequest, session: DbSession, principal: ConsentedUser
@@ -147,6 +163,11 @@ async def mark_notifications_read(
 @me_notification_prefs_router.get(
     "/notification-prefs",
     summary="Мои настройки уведомлений",
+    description=(
+        "Явные настройки канала по коду события для текущего пользователя; событие без "
+        "записи здесь доставляется по умолчанию (см. каналы шаблона в "
+        "`GET /api/notifications/event-codes`). Роль: любой аутентифицированный."
+    ),
     response_model=NotificationPrefListResponse,
 )
 async def get_notification_prefs(
@@ -161,6 +182,11 @@ async def get_notification_prefs(
 @me_notification_prefs_router.put(
     "/notification-prefs",
     summary="Обновить настройки уведомлений",
+    description=(
+        "Заменяет настройку канала по каждому переданному коду события (создаёт запись, "
+        "если её не было, иначе правит); коды, не упомянутые в запросе, не трогает. "
+        "Роль: любой аутентифицированный."
+    ),
     response_model=NotificationPrefListResponse,
 )
 async def update_notification_prefs(
@@ -178,7 +204,13 @@ async def update_notification_prefs(
 
 
 @notification_templates_admin_router.get(
-    "", summary="Список шаблонов уведомлений", response_model=NotificationTemplateListResponse
+    "",
+    summary="Список шаблонов уведомлений",
+    description=(
+        "Шаблоны тела/темы по коду события и каналу (`email`, `telegram`, `in_app`), включая "
+        "неактивные; фильтры `code`, `channel`. Роль: ADMIN."
+    ),
+    response_model=NotificationTemplateListResponse,
 )
 async def list_notification_templates(
     session: DbSession,
@@ -231,6 +263,10 @@ async def preview_notification_template(
 @notification_templates_admin_router.post(
     "",
     summary="Создать шаблон уведомления",
+    description=(
+        "Код события, канал, шаблоны темы/тела (Jinja2) и локаль. Комбинация code+channel "
+        "уже используется — 422 CRM-1001. Роль: ADMIN."
+    ),
     response_model=NotificationTemplateOut,
     status_code=status.HTTP_201_CREATED,
 )
@@ -246,6 +282,11 @@ async def create_notification_template(
 @notification_templates_admin_router.patch(
     "/{template_id}",
     summary="Обновить шаблон уведомления",
+    description=(
+        "Правка темы/тела, локали или активности шаблона. Обязателен `If-Match` с "
+        "текущей версией — расхождение даёт 409 CRM-1002; шаблон не найден — 404 "
+        "CRM-9004. Роль: ADMIN."
+    ),
     response_model=NotificationTemplateOut,
 )
 async def update_notification_template(
