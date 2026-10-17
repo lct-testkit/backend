@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import pytest
+from cryptography.fernet import Fernet
 from pydantic import ValidationError
 
 from app.core.config import Settings
+
+
+def _fernet_key() -> str:
+    return Fernet.generate_key().decode()
+
 
 STRONG = {
     "signature_server_secret": "Zx9-strong-signature-secret-0123456789",
@@ -14,6 +20,10 @@ STRONG = {
     "s3_access_key": "S3-strong-access-key-0123456789",
     "s3_secret_key": "S3-strong-secret-key-0123456789",
     "crm_app_password": "Db-strong-app-password-0123456789",
+    # B6-8: без них prod не стартует вовсе (ключи аудита и шифрования).
+    "audit_hmac_key": "Audit-strong-hmac-key-0123456789abcdef",
+    "settings_encryption_key": _fernet_key(),
+    "field_encryption_key": _fernet_key(),
 }
 
 
@@ -67,15 +77,70 @@ def test_prod_rejects_demo_password_inside_database_url() -> None:
     assert "DATABASE_URL" in str(exc.value)
 
 
+@pytest.mark.parametrize("field", ["kc_database_url", "migrations_database_url"])
+def test_prod_rejects_demo_password_in_other_connection_urls(field: str) -> None:
+    with pytest.raises(ValidationError) as exc:
+        _settings("prod", **{field: "postgresql+asyncpg://crm:crm@db:5432/keycloak"})
+    assert field.upper() in str(exc.value)
+
+
 def test_prod_rejects_short_audit_hmac_key() -> None:
     with pytest.raises(ValidationError) as exc:
         _settings("prod", audit_hmac_key="short")
     assert "AUDIT_HMAC_KEY" in str(exc.value)
 
 
-def test_prod_accepts_strong_audit_hmac_key_and_blank_means_unset() -> None:
+def test_prod_accepts_strong_audit_hmac_key() -> None:
     assert _settings("prod", audit_hmac_key="Audit-strong-hmac-key-0123456789abcdef").audit_hmac_key
-    assert _settings("prod", audit_hmac_key="   ").audit_hmac_key is None
+
+
+def test_blank_audit_hmac_key_means_unset_outside_prod() -> None:
+    """Вне prod ключ необязателен — пустая строка из docker-compose (`${VAR:-}`) не ошибка."""
+    assert _settings("dev", audit_hmac_key="   ").audit_hmac_key is None
+
+
+@pytest.mark.parametrize(
+    "field", ["audit_hmac_key", "settings_encryption_key", "field_encryption_key"]
+)
+def test_prod_requires_audit_and_encryption_keys(field: str) -> None:
+    """B6-8: без этих ключей защита (цепочка аудита, шифрование настроек и полей) в prod
+    молча не работает бы — их отсутствие (пустая строка → unset) должно ронять старт."""
+    with pytest.raises(ValidationError) as exc:
+        _settings("prod", **{field: ""})
+    assert field.upper() in str(exc.value)
+
+
+def test_prod_rejects_invalid_field_encryption_key() -> None:
+    with pytest.raises(ValidationError) as exc:
+        _settings("prod", field_encryption_key="не-fernet-ключ")
+    message = str(exc.value)
+    assert "field_encryption_key" in message
+    assert "Fernet" in message
+
+
+def test_prod_rejects_invalid_field_encryption_key_prev() -> None:
+    with pytest.raises(ValidationError) as exc:
+        _settings("prod", field_encryption_key_prev="не-fernet-ключ")
+    assert "field_encryption_key_prev" in str(exc.value)
+
+
+def test_non_prod_allows_missing_encryption_keys() -> None:
+    settings = _settings(
+        "dev", settings_encryption_key="", field_encryption_key="", audit_hmac_key=""
+    )
+    assert settings.settings_encryption_key is None
+    assert settings.field_encryption_key is None
+
+
+def test_prod_rejects_short_health_details_token() -> None:
+    with pytest.raises(ValidationError) as exc:
+        _settings("prod", health_details_token="short-token")
+    assert "HEALTH_DETAILS_TOKEN" in str(exc.value)
+
+
+def test_prod_accepts_long_health_details_token_and_blank_means_unset() -> None:
+    assert _settings("prod", health_details_token="x" * 24).health_details_token
+    assert _settings("prod", health_details_token="   ").health_details_token is None
 
 
 @pytest.mark.parametrize(
