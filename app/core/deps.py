@@ -38,7 +38,12 @@ from app.core.errors import (
     ValidationError,
 )
 from app.core.pagination import PageParams
-from app.core.permissions import Permission, has_permission, scopes_for
+from app.core.permissions import (
+    RESTRICTED_EXCLUDED_PERMISSIONS,
+    Permission,
+    has_permission,
+    scopes_for,
+)
 from app.core.security import Principal, TokenClaims, decode_access_token
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService, record_denied_and_commit
@@ -159,6 +164,7 @@ async def get_principal(
             perm_epoch=user.perm_epoch,
             consent_version=user.consent_version,
             must_change_password=user.must_change_password,
+            restricted=user.access_restricted,
         )
         principal = _principal_from_cache(entry, claims, sid)
         if principal.status not in _DENIED_STATUSES:
@@ -223,6 +229,7 @@ def _principal_from_cache(
         consent_version=entry.consent_version,
         must_change_password=entry.must_change_password,
         claims=claims,
+        restricted=entry.restricted,
     )
 
 
@@ -264,6 +271,11 @@ def require_permission(*permissions: Permission):
 
     async def dependency(principal: ConsentedUser, session: DbSession) -> Principal:
         missing = [p for p in permissions if not has_permission(principal.role, p)]
+        # B4-6: импорт каталогов не знает об ограничениях видимости (пишет в любой вуз,
+        # минуя скоуп) — ограниченный пользователь не проходит сюда, даже если роль
+        # обычно даёт это право.
+        if principal.restricted:
+            missing.extend(p for p in permissions if p in RESTRICTED_EXCLUDED_PERMISSIONS)
         if missing:
             # Отказ обязан попасть в журнал (раздел 18), но исключение ниже
             # откатит транзакцию запроса вместе с записью. Поэтому запись
@@ -283,7 +295,7 @@ def require_permission(*permissions: Permission):
                 "Недостаточно прав для выполнения операции",
                 extra={
                     "required": [p.value for p in permissions],
-                    "granted": scopes_for(principal.role),
+                    "granted": scopes_for(principal.role, restricted=principal.restricted),
                 },
             )
         return principal

@@ -449,6 +449,50 @@ class ReportJobService:
         )
         return url, expires_at
 
+    async def expire_for_user(self, user_id: uuid.UUID) -> int:
+        """B4-5/B4-6: смена ограничений доступа (`AccessRulesService.replace`) помечает
+        готовые отчёты этого пользователя истёкшими — тот же механизм, что фоновая
+        `reporting.tasks.expire_report_files`, но безусловно (не по `expires_at`) и
+        только для него: отчёт, собранный ДО ограничения, мог включать строки, которые
+        пользователь больше не должен видеть. Очередь `queued` трогать не нужно — воркер
+        читает `access_restricted` из БД в момент запуска (`reporting.tasks`)."""
+        from app.modules.files.service import delete_object_if_unreferenced
+
+        now = dt.datetime.now(dt.UTC)
+        jobs = (
+            (
+                await self._session.execute(
+                    select(ReportJob).where(
+                        ReportJob.requested_by == user_id,
+                        ReportJob.status == ReportJobStatus.COMPLETED.value,
+                        ReportJob.file_id.is_not(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        expired = 0
+        for job in jobs:
+            file = await self._session.get(File, job.file_id)
+            if file is not None and file.status == FileStatus.READY.value:
+                file.status = FileStatus.DELETED.value
+                file.deleted_at = now
+                file.refcount = max(0, file.refcount - 1)
+                await self._session.flush()
+                await delete_object_if_unreferenced(
+                    self._session,
+                    bucket=file.bucket,
+                    key=file.storage_key,
+                    excluding_file_id=file.id,
+                )
+            job.file_id = None
+            job.expires_at = now
+            expired += 1
+        if jobs:
+            await self._session.flush()
+        return expired
+
 
 # =============================================================================
 # Дашборды

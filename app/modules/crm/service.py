@@ -53,6 +53,12 @@ from sqlalchemy import (
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 
+from app.core.access_rules import (
+    AccessRules,
+    deal_restriction,
+    load_access_rules,
+    user_organization_allowed,
+)
 from app.core.db import run_after_commit
 from app.core.errors import (
     AppError,
@@ -1123,6 +1129,7 @@ async def ensure_assignable_user(
     user_id: uuid.UUID,
     *,
     roles: tuple[str, ...] | None = None,
+    organization_id: uuid.UUID | None = None,
 ) -> User:
     """Общая проверка «можно ли назначить этого пользователя ответственным».
 
@@ -1133,6 +1140,10 @@ async def ensure_assignable_user(
     `roles=None`, как было раньше). Для HEAD целевой пользователь обязан
     входить в его команду (`head_scope_member_ids`); остальным ролям, кроме
     ADMIN и INTEGRATION, назначать кого-то другого запрещено.
+
+    B4-6: `organization_id` (только для назначения ответственного за вуз) —
+    отказ, если этот вуз вне `allow`/внутри `deny` ограниченного пользователя:
+    иначе он стал бы «ответственным» за то, чего сам не видит в своих списках.
 
     Тому, кому чужого назначать нельзя, отказ (403) одинаков для любого id —
     так по ответу не узнать, есть ли такой сотрудник."""
@@ -1157,13 +1168,26 @@ async def ensure_assignable_user(
             "Ответственным за вуз можно назначить только КАМа или руководителя",
             [FieldError(field="owner_id", reason="недопустимая роль")],
         )
+    if organization_id is not None and not await user_organization_allowed(
+        session, user, organization_id
+    ):
+        raise ValidationError(
+            "Пользователь не может быть ответственным: вуз вне его ограничений видимости",
+            [FieldError(field="owner_id", reason="вуз вне ограничения доступа")],
+        )
     return user
 
 
-async def deal_scope_clause(
-    session: AsyncSession, principal: Principal
+async def deal_scope_clause_for_rules(
+    session: AsyncSession, principal: Principal, rules: AccessRules | None
 ) -> ColumnElement[bool] | None:
-    """`None` — без ограничения (ADMIN). Иначе — булево выражение на `Deal`."""
+    """Как `deal_scope_clause`, но ограничение передаётся явно, а не читается из БД —
+    для предпросмотра (B4-6, `GET .../access-rules/preview`), где правила из запроса
+    ещё не сохранены и `load_access_rules` ничего не нашёл бы.
+
+    `None` — без ограничения (ADMIN). Иначе — булево выражение на `Deal`. Для KAM/HEAD
+    скоуп роли (владелец/команда) сужается через `AND` — расширить видимость роли
+    ограничение не может."""
     scope = deal_scope_for(principal.role)
     if scope is DealScope.ALL:
         return None
@@ -1172,14 +1196,34 @@ async def deal_scope_clause(
     if scope is DealScope.SOURCE:
         return Deal.created_by == principal.user_id
     if scope is DealScope.TEAM:
-        return Deal.owner_id.in_(await head_scope_member_ids(session, principal))
-    # OWN — KAM: владелец либо участник.
-    participant_exists = (
-        select(DealParticipant.id)
-        .where(DealParticipant.deal_id == Deal.id, DealParticipant.user_id == principal.user_id)
-        .exists()
-    )
-    return or_(Deal.owner_id == principal.user_id, participant_exists)
+        role_clause: ColumnElement[bool] = Deal.owner_id.in_(
+            await head_scope_member_ids(session, principal)
+        )
+    else:
+        # OWN — KAM: владелец либо участник.
+        participant_exists = (
+            select(DealParticipant.id)
+            .where(DealParticipant.deal_id == Deal.id, DealParticipant.user_id == principal.user_id)
+            .exists()
+        )
+        role_clause = or_(Deal.owner_id == principal.user_id, participant_exists)
+
+    if rules is None:
+        return role_clause
+    restriction = deal_restriction(rules)
+    return and_(role_clause, restriction) if restriction is not None else role_clause
+
+
+async def deal_scope_clause(
+    session: AsyncSession, principal: Principal
+) -> ColumnElement[bool] | None:
+    """`None` — без ограничения (ADMIN). Иначе — булево выражение на `Deal`.
+
+    B4-6: AUDITOR/INTEGRATION ограничений не имеют по правилу B4-5 (`access_restricted`
+    для них недостижим) — для них `load_access_rules` возвращает `None` без похода в БД
+    (`not principal.restricted`)."""
+    rules = await load_access_rules(session, principal)
+    return await deal_scope_clause_for_rules(session, principal, rules)
 
 
 async def deal_in_scope(session: AsyncSession, principal: Principal, deal: Deal) -> bool:
@@ -1826,19 +1870,24 @@ class DealService:
 
         Ничейное (организация без ответственного, контакт без организации, создателя и сделок)
         привязать можно: чужого портфеля там нет, а иначе менеджер не смог бы начать работу с
-        вузом из общего реестра, пока руководитель не назначит ему ответственного."""
+        вузом из общего реестра, пока руководитель не назначит ему ответственного.
+
+        B4-6: для `principal.restricted` исключение «ничьё = можно» не работает — вуз
+        должен пройти `organization_in_scope` (а значит, и ограничение по вузам/
+        направлениям) независимо от того, назначен у него ответственный или нет. Иначе
+        ограниченный KAM привязывал бы к своим сделкам любой «ничей» вуз вне `allow`."""
         if principal.role not in (Role.KAM.value, Role.HEAD.value):
             return
         from app.modules.catalog.service import contact_in_scope, organization_in_scope
 
         if organization_id is not None:
             organization = await self._session.get(Organization, organization_id)
-            if (
-                organization is not None
-                and organization.owner_id is not None
-                and not await organization_in_scope(self._session, principal, organization)
-            ):
-                raise NotFoundError("Организация", organization_id)
+            if organization is not None:
+                unowned_exception = organization.owner_id is None and not principal.restricted
+                if not unowned_exception and not await organization_in_scope(
+                    self._session, principal, organization
+                ):
+                    raise NotFoundError("Организация", organization_id)
         if contact_id is not None:
             contact = await self._session.get(Contact, contact_id)
             if (

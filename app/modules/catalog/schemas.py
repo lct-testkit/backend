@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 import uuid
 from decimal import Decimal
 from typing import Annotated, Any, Literal
@@ -13,6 +14,8 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    ValidationInfo,
+    field_validator,
     model_validator,
 )
 from pydantic_core import PydanticCustomError
@@ -288,10 +291,66 @@ class OrganizationDeleteRequest(BaseModel):
 # =============================================================================
 
 
+#: B4-9: `@handle` Telegram — 5-32 латиница/цифры/`_` (та же форма, что Keycloak
+#: `preferred_username`, но отдельная константа: контакт не субъект Keycloak).
+_TELEGRAM_HANDLE = re.compile(r"^[A-Za-z0-9_]{5,32}$")
+#: `https://t.me/name` или `t.me/name` — сводится к `@name`.
+_TELEGRAM_URL = re.compile(r"^(?:https?://)?t\.me/([A-Za-z0-9_]{5,32})/?$", re.IGNORECASE)
+
+
 class ContactChannelIn(BaseModel):
+    """B4-9: значение нормализуется по типу — `phone_extra`/`whatsapp` в E.164,
+    `email_extra` в нижний регистр, `telegram` в `@handle` (ссылка `https://t.me/name`
+    сводится к нему же). Не разобралось — 422 с именем поля `value`."""
+
     type: ContactChannelTypeLiteral
     value: NonEmptyStr = Field(max_length=255)
     is_primary: bool = False
+
+    @field_validator("value", mode="after")
+    @classmethod
+    def _normalize_value(cls, value: str, info: ValidationInfo) -> str:
+        channel_type = info.data.get("type")
+        if channel_type in ("phone_extra", "whatsapp"):
+            normalized = normalize_phone(value)
+            if normalized is None:
+                raise PydanticCustomError("invalid_phone", "некорректный номер телефона")
+            return normalized
+        if channel_type == "email_extra":
+            normalized = normalize_email(value)
+            if normalized is None:
+                raise PydanticCustomError("invalid_email", "некорректный адрес электронной почты")
+            return normalized
+        if channel_type == "telegram":
+            text = value.strip()
+            match = _TELEGRAM_URL.match(text)
+            handle = match.group(1) if match else text.removeprefix("@")
+            if not _TELEGRAM_HANDLE.fullmatch(handle):
+                raise PydanticCustomError(
+                    "invalid_telegram",
+                    "некорректный Telegram: нужен @handle из 5-32 латинских букв/цифр/_",
+                )
+            return f"@{handle}"
+        return value
+
+
+def _at_most_one_primary_per_type(channels: list[ContactChannelIn]) -> list[ContactChannelIn]:
+    seen_primary: set[str] = set()
+    for channel in channels:
+        if channel.is_primary:
+            if channel.type in seen_primary:
+                raise PydanticCustomError(
+                    "duplicate_primary_channel",
+                    f"два первичных канала типа {channel.type!r}",
+                )
+            seen_primary.add(channel.type)
+    return channels
+
+
+#: B4-9: не больше стольких каналов связи на контакт за один запрос.
+ContactChannelsList = Annotated[
+    list[ContactChannelIn], Field(max_length=10), AfterValidator(_at_most_one_primary_per_type)
+]
 
 
 class ContactChannelOut(BaseModel):
@@ -302,6 +361,13 @@ class ContactChannelOut(BaseModel):
     value: str
     is_primary: bool
     is_verified: bool
+
+
+class ContactChannelListResponse(BaseModel):
+    """B4-9: `GET /contacts/{id}/channels` — маскированные значения (`mask_channel_
+    value`); полные — только через `POST /contacts/{id}/reveal`."""
+
+    items: list[ContactChannelOut] = Field(default_factory=list)
 
 
 class ContactCreateRequest(BaseModel):
@@ -317,15 +383,22 @@ class ContactCreateRequest(BaseModel):
     phone: ContactPhone = None
     contact_methods: ContactMethods = Field(default_factory=list)
     is_decision_maker: bool = False
+    # B4-9: при создании контакта согласия на него ещё нет (оно ссылается на
+    # `subject_id` контакта) — только `null`, привязка вторым шагом через PATCH.
     consent_id: uuid.UUID | None = None
     source: str | None = Field(default=None, max_length=32)
     external_ids: dict[str, Any] = Field(default_factory=dict)
-    channels: list[ContactChannelIn] = Field(default_factory=list)
+    channels: ContactChannelsList = Field(default_factory=list)
 
 
 class ContactUpdateRequest(BaseModel):
     """Частичное обновление: передаются только меняемые поля. `email`/`phone` пустой строкой
-    очищаются; `contact_methods` заменяется списком целиком (`null` не допускается)."""
+    очищаются; `contact_methods` заменяется списком целиком (`null` не допускается).
+
+    B4-9: `channels` — `null` (поле не пришло или пришло `null`) не меняет каналы, `[]`
+    удаляет все, непустой список заменяет целиком (сохраняя `id`/`is_verified`
+    совпавших по паре тип+значение). `source` заполненный меняет только ADMIN.
+    `consent_id` должен указывать на принятое неотозванное согласие этого контакта."""
 
     organization_id: uuid.UUID | None = None
     first_name: NonEmptyStr | None = Field(default=None, max_length=128)
@@ -337,6 +410,9 @@ class ContactUpdateRequest(BaseModel):
     # Не `None` по умолчанию: колонка NOT NULL, и явный `null` в PATCH должен быть 422, а не 500.
     contact_methods: ContactMethods = Field(default_factory=list)
     is_decision_maker: bool | None = None
+    channels: ContactChannelsList | None = None
+    source: str | None = Field(default=None, max_length=32)
+    consent_id: uuid.UUID | None = None
 
 
 class ContactOut(BaseModel):

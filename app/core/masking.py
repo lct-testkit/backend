@@ -144,6 +144,27 @@ def mask_contacts_text(value: str | None) -> str | None:
     return _TEXT_NAME.sub(lambda match: mask_name(match.group()) or REDACTED, masked)
 
 
+def mask_channel_value(channel_type: str, value: str | None) -> str | None:
+    """B4-9: `GET /contacts/{id}/channels` — маскированные значения, полные только через
+    `reveal`. `telegram`: голова (до 2 знаков) + хвост (1 знак), остальное звёздами —
+    короче `mask_tail`, потому что хендл сам по себе уже псевдоним, не секрет уровня
+    телефона/почты, но раскрывать целиком всё равно не нужно."""
+    if not value:
+        return value
+    if channel_type in ("phone_extra", "whatsapp"):
+        return mask_phone(value)
+    if channel_type == "email_extra":
+        return mask_email(value)
+    if channel_type == "telegram":
+        handle = value.removeprefix("@")
+        if len(handle) <= 3:
+            return "@" + REDACTED
+        head = handle[:2]
+        tail = handle[-1]
+        return f"@{head}{'*' * (len(handle) - len(head) - len(tail))}{tail}"
+    return REDACTED
+
+
 def mask_tail(value: str | None, keep: int = 3) -> str | None:
     """СНИЛС, паспорт, адрес, диплом: виден только хвост, `11223344595` -> `***595`.
 

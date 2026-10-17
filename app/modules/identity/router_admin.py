@@ -37,6 +37,12 @@ from app.modules.crm.models import Deal
 from app.modules.crm.service import get_ownership_service
 from app.modules.files.models import File
 from app.modules.files.service import FileService
+from app.modules.identity.access_rules import (
+    AccessRulesService,
+    AccessRulesView,
+    DimensionInput,
+    preview_access_rules,
+)
 from app.modules.identity.admin_service import (
     INVITE_EXPIRED_REASON,
     AdminUserService,
@@ -46,6 +52,13 @@ from app.modules.identity.admin_service import (
 from app.modules.identity.erasure_service import ErasureExecutionService
 from app.modules.identity.models import DataErasureRequest, Role, Team, User, UserStatus
 from app.modules.identity.schemas import (
+    AccessRuleDimensionOut,
+    AccessRuleItemOut,
+    AccessRuleModeLiteral,
+    AccessRulesOut,
+    AccessRulesPreviewCounts,
+    AccessRulesPreviewResponse,
+    AccessRulesPutRequest,
     ApprovalDecision,
     ApprovalListResponse,
     ApprovalOut,
@@ -90,6 +103,10 @@ HandoverPerm = Annotated[
     Principal,
     Depends(require_permission(Permission.DEAL_REASSIGN_BULK, Permission.ORG_OWNER_ASSIGN)),
 ]
+# B4-5: ограничения видимости по вузам/направлениям — только ADMIN.
+AccessScopeManage = Annotated[
+    Principal, Depends(require_permission(Permission.ACCESS_SCOPE_MANAGE))
+]
 
 # B4-4: контракт спринта — `POST /api/users/{id}/handover`, без `/admin`, в отличие от
 # `offboard`. Отдельный роутер (`router` выше объявлен с `prefix="/admin"`), но живёт в
@@ -120,7 +137,7 @@ async def _erasure_detail(session: DbSession, request: DataErasureRequest) -> Er
     summary="Список пользователей",
     description=(
         "Курсорная пагинация, фильтры по роли, команде, статусу, руководителю, "
-        "региону и тексту. Роль: ADMIN."
+        "региону, тексту и ограничению видимости (B4-5). Роль: ADMIN."
     ),
     response_model=UserListResponse,
 )
@@ -134,6 +151,9 @@ async def list_users(
     region_id: Annotated[uuid.UUID | None, Query()] = None,
     user_status: Annotated[str | None, Query(alias="status")] = None,
     q: Annotated[str | None, Query(description="Поиск по ФИО и email")] = None,
+    access_restricted: Annotated[
+        bool | None, Query(description="Только пользователи с ограничением видимости (B4-5)")
+    ] = None,
 ) -> UserListResponse:
     service = AdminUserService(session)
     stmt = service.list_query(
@@ -144,6 +164,7 @@ async def list_users(
             manager_id=manager_id,
             region_id=region_id,
             q=q,
+            access_restricted=access_restricted,
         )
     ).order_by(User.created_at.desc(), User.id.desc())
 
@@ -620,6 +641,123 @@ async def handover_user(
         reassigned_organizations=execution.reassigned_organizations,
         reassigned_tasks=execution.reassigned_tasks,
         distribution=distribution,
+    )
+
+
+# --- B4-5/B4-6: ограничения видимости по вузам/направлениям ---------------
+
+
+def _access_rules_out(view: AccessRulesView) -> AccessRulesOut:
+    return AccessRulesOut(
+        user_id=view.user_id,
+        version=view.version,
+        access_restricted=view.access_restricted,
+        organizations=AccessRuleDimensionOut(
+            mode=view.organizations.mode,
+            items=[AccessRuleItemOut(id=i, name=name) for i, name in view.organizations.items],
+        ),
+        directions=AccessRuleDimensionOut(
+            mode=view.directions.mode,
+            items=[AccessRuleItemOut(id=i, name=name) for i, name in view.directions.items],
+        ),
+    )
+
+
+@router.get(
+    "/users/{user_id}/access-rules",
+    summary="Ограничения видимости пользователя",
+    description=(
+        "Текущие правила по вузам и направлениям (B4-5): режим `all`/`allow`/`deny` и "
+        "список для каждой размерности. Роль: ADMIN (`access_scope:manage`)."
+    ),
+    response_model=AccessRulesOut,
+)
+async def get_access_rules(
+    session: DbSession, _: AccessScopeManage, user_id: Annotated[uuid.UUID, Path()]
+) -> AccessRulesOut:
+    service = AdminUserService(session)
+    user = await service.get_or_404(user_id)
+    view = await AccessRulesService(session).view(user)
+    return _access_rules_out(view)
+
+
+@router.put(
+    "/users/{user_id}/access-rules",
+    summary="Задать ограничения видимости пользователя",
+    description=(
+        "Заменяет правила целиком (не патч). Только для KAM/HEAD — 422 для ADMIN/"
+        "AUDITOR/INTEGRATION. `allow` без элементов — 422 (для «не видит ничего» есть "
+        'блокировка). `{"mode": "all", "ids": []}` в обеих размерностях снимает '
+        "ограничение. Требует If-Match. Роль: ADMIN (`access_scope:manage`)."
+    ),
+    response_model=AccessRulesOut,
+)
+async def put_access_rules(
+    payload: AccessRulesPutRequest,
+    session: DbSession,
+    principal: AccessScopeManage,
+    if_match: IfMatch,
+    user_id: Annotated[uuid.UUID, Path()],
+) -> AccessRulesOut:
+    service = AdminUserService(session)
+    user = await service.get_or_404(user_id)
+    view = await AccessRulesService(session).replace(
+        user,
+        principal,
+        organizations=DimensionInput(
+            mode=payload.organizations.mode, ids=payload.organizations.ids
+        ),
+        directions=DimensionInput(mode=payload.directions.mode, ids=payload.directions.ids),
+        reason=payload.reason,
+        expected_version=if_match,
+    )
+    return _access_rules_out(view)
+
+
+@router.get(
+    "/users/{user_id}/access-rules/preview",
+    summary="Предпросмотр последствий ограничения",
+    description=(
+        "Сухой прогон: считает сделки/вузы/контакты, видимые ДО и ПОСЛЕ правил из "
+        "запроса (ещё не сохранённых). Параметры: `organizations.mode`/"
+        "`organizations.ids`, `directions.mode`/`directions.ids`. В БД ничего не "
+        "меняется. Роль: ADMIN (`access_scope:manage`)."
+    ),
+    response_model=AccessRulesPreviewResponse,
+)
+async def preview_access_rules_route(
+    session: DbSession,
+    _: AccessScopeManage,
+    user_id: Annotated[uuid.UUID, Path()],
+    organizations_mode: Annotated[AccessRuleModeLiteral, Query(alias="organizations.mode")] = "all",
+    organizations_ids: Annotated[list[uuid.UUID] | None, Query(alias="organizations.ids")] = None,
+    directions_mode: Annotated[AccessRuleModeLiteral, Query(alias="directions.mode")] = "all",
+    directions_ids: Annotated[list[uuid.UUID] | None, Query(alias="directions.ids")] = None,
+) -> AccessRulesPreviewResponse:
+    service = AdminUserService(session)
+    user = await service.get_or_404(user_id)
+    preview = await preview_access_rules(
+        session,
+        user,
+        organizations=DimensionInput(mode=organizations_mode, ids=organizations_ids or []),
+        directions=DimensionInput(mode=directions_mode, ids=directions_ids or []),
+    )
+    return AccessRulesPreviewResponse(
+        deals=AccessRulesPreviewCounts(
+            visible_before=preview.deals.visible_before,
+            visible_after=preview.deals.visible_after,
+            hidden=preview.deals.hidden,
+        ),
+        organizations=AccessRulesPreviewCounts(
+            visible_before=preview.organizations.visible_before,
+            visible_after=preview.organizations.visible_after,
+            hidden=preview.organizations.hidden,
+        ),
+        contacts=AccessRulesPreviewCounts(
+            visible_before=preview.contacts.visible_before,
+            visible_after=preview.contacts.visible_after,
+            hidden=preview.contacts.hidden,
+        ),
     )
 
 

@@ -120,6 +120,9 @@ class Permission(StrEnum):
     AUDIT_EXPORT = "audit:export"
     SETTINGS_WRITE = "settings:write"
     ERASURE_MANAGE = "erasure:manage"
+    # B4-5: ограничения видимости по вузам/направлениям — только ADMIN (матрица прав);
+    # цель ограничения сама не управляет своими же ограничениями.
+    ACCESS_SCOPE_MANAGE = "access_scope:manage"
 
 
 # KAM — менеджер по вузам: только свои сделки и связанные с ними сущности.
@@ -208,9 +211,22 @@ def permissions_for(role: str) -> frozenset[Permission]:
     return ROLE_PERMISSIONS.get(role, frozenset())
 
 
-def scopes_for(role: str) -> list[str]:
-    """Плоский список прав для GET /api/me — фронтенд рисует по нему интерфейс."""
-    return sorted(p.value for p in permissions_for(role))
+#: B4-6: права, которые не знают об ограничениях видимости (B4-5) — импорт каталогов
+#: пишет в любые вузы, минуя скоуп. Ограниченный пользователь их не получает, даже
+#: если роль (HEAD) обычно их даёт.
+RESTRICTED_EXCLUDED_PERMISSIONS = frozenset({Permission.IMPORT_RUN, Permission.IMPORT_ROLLBACK})
+
+
+def scopes_for(role: str, *, restricted: bool = False) -> list[str]:
+    """Плоский список прав для GET /api/me — фронтенд рисует по нему интерфейс.
+
+    `restricted=True` убирает права, для которых ограничение по вузам/направлениям не
+    имеет смысла (раздел B4-6) — иначе ограниченный HEAD видел бы в интерфейсе кнопку
+    «Импорт», которая `require_permission` всё равно отклонит."""
+    permissions = permissions_for(role)
+    if restricted:
+        permissions = permissions - RESTRICTED_EXCLUDED_PERMISSIONS
+    return sorted(p.value for p in permissions)
 
 
 def has_permission(role: str, permission: Permission) -> bool:

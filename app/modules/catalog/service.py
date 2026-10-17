@@ -18,14 +18,21 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import ColumnElement, Select, delete, exists, false, func, or_, select, text
+from sqlalchemy import ColumnElement, Select, and_, delete, exists, false, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.access_rules import (
+    AccessRules,
+    load_access_rules,
+    organization_restriction,
+    user_organization_allowed,
+)
 from app.core.dependents import restrict_dependents
 from app.core.errors import (
     AppError,
     ErrorCode,
     FieldError,
+    ForbiddenError,
     NotFoundError,
     ValidationError,
     VersionConflictError,
@@ -89,10 +96,14 @@ def _json_safe(value: Any) -> Any:
 # =============================================================================
 
 
-async def organization_scope_clause(
-    session: AsyncSession, principal: Principal
+async def organization_scope_clause_for_rules(
+    session: AsyncSession, principal: Principal, rules: AccessRules | None
 ) -> ColumnElement[bool] | None:
-    """`None` — без ограничения. Раздел 4: KAM/HEAD видят организацию, если
+    """Как `organization_scope_clause`, но ограничение передаётся явно — для
+    предпросмотра (B4-6, `GET .../access-rules/preview`), где `rules` из запроса,
+    а не то, что сохранено в БД.
+
+    `None` — без ограничения. Раздел 4: KAM/HEAD видят организацию, если
     они её ответственный `owner_id`, либо к ней привязана хотя бы одна
     сделка в их скоупе сделок. Организации не являются ПДн (dop.md §11.8),
     поэтому `INTEGRATION` читает без ограничения — иначе входящий лид не
@@ -106,7 +117,7 @@ async def organization_scope_clause(
     Теперь HEAD видит вузы всех участников своей команды по владельцу, KAM —
     только свои."""
     from app.modules.crm.models import Deal
-    from app.modules.crm.service import deal_scope_clause, head_scope_member_ids
+    from app.modules.crm.service import deal_scope_clause_for_rules, head_scope_member_ids
 
     if principal.role in (Role.ADMIN.value, Role.INTEGRATION.value):
         return None
@@ -118,11 +129,27 @@ async def organization_scope_clause(
     else:
         owner_clause = Organization.owner_id == principal.user_id
 
-    deal_clause = await deal_scope_clause(session, principal)
+    deal_clause = await deal_scope_clause_for_rules(session, principal, rules)
     linked_orgs = select(Deal.organization_id).where(Deal.organization_id.is_not(None))
     if deal_clause is not None:
         linked_orgs = linked_orgs.where(deal_clause)
-    return or_(owner_clause, Organization.id.in_(linked_orgs))
+    role_clause = or_(owner_clause, Organization.id.in_(linked_orgs))
+
+    # B4-6: ограничение по вузам (B4-5) сужает и эту ветку — без него `allow` на два
+    # вуза не прятал бы третий, которым ограниченный KAM владеет как `owner_id`.
+    if rules is None:
+        return role_clause
+    restriction = organization_restriction(rules)
+    return and_(role_clause, restriction) if restriction is not None else role_clause
+
+
+async def organization_scope_clause(
+    session: AsyncSession, principal: Principal
+) -> ColumnElement[bool] | None:
+    """`None` — без ограничения (ADMIN/INTEGRATION). Иначе — булево выражение на
+    `Organization` с ограничением по вузам из `user_access_rules` (B4-5), если оно есть."""
+    rules = await load_access_rules(session, principal)
+    return await organization_scope_clause_for_rules(session, principal, rules)
 
 
 async def organization_in_scope(
@@ -137,26 +164,27 @@ async def organization_in_scope(
     return bool(result)
 
 
-async def contact_scope_clause(
-    session: AsyncSession, principal: Principal
+async def contact_scope_clause_for_rules(
+    session: AsyncSession, principal: Principal, rules: AccessRules | None
 ) -> ColumnElement[bool] | None:
-    """Контакты — ПДн (раздел 5.2), скоуп строже: только через организацию
-    или сделку в скоупе пользователя, `INTEGRATION` сюда не заходит (нет
-    `contact:read` в `permissions.py`, см. router-level `require_permission`)."""
+    """Как `contact_scope_clause`, но ограничение передаётся явно — для предпросмотра
+    (B4-6). Своей проверки ограничения не добавляет: ветки «через организацию» и
+    «через сделку» уже строятся из `organization_scope_clause_for_rules`/
+    `deal_scope_clause_for_rules`, которые его несут."""
     from app.modules.crm.models import Deal
-    from app.modules.crm.service import deal_scope_clause
+    from app.modules.crm.service import deal_scope_clause_for_rules
 
     if principal.role == Role.ADMIN.value:
         return None
     if principal.role not in (Role.KAM.value, Role.HEAD.value):
         return false()
 
-    org_clause = await organization_scope_clause(session, principal)
+    org_clause = await organization_scope_clause_for_rules(session, principal, rules)
     org_ids = select(Organization.id)
     if org_clause is not None:
         org_ids = org_ids.where(org_clause)
 
-    deal_clause = await deal_scope_clause(session, principal)
+    deal_clause = await deal_scope_clause_for_rules(session, principal, rules)
     contact_ids_via_deal = select(Deal.contact_id).where(Deal.contact_id.is_not(None))
     if deal_clause is not None:
         contact_ids_via_deal = contact_ids_via_deal.where(deal_clause)
@@ -172,6 +200,16 @@ async def contact_scope_clause(
         # маскируются, раскрытие — только через `reveal` с записью аудита.
         Contact.id.in_(select(ContactProduct.contact_id)),
     )
+
+
+async def contact_scope_clause(
+    session: AsyncSession, principal: Principal
+) -> ColumnElement[bool] | None:
+    """Контакты — ПДн (раздел 5.2), скоуп строже: только через организацию
+    или сделку в скоупе пользователя, `INTEGRATION` сюда не заходит (нет
+    `contact:read` в `permissions.py`, см. router-level `require_permission`)."""
+    rules = await load_access_rules(session, principal)
+    return await contact_scope_clause_for_rules(session, principal, rules)
 
 
 async def contact_in_scope(session: AsyncSession, principal: Principal, contact: Contact) -> bool:
@@ -460,7 +498,11 @@ class OrganizationService:
             from app.modules.crm.service import ensure_assignable_user
 
             new_owner = await ensure_assignable_user(
-                self._session, principal, owner_id, roles=(Role.KAM.value, Role.HEAD.value)
+                self._session,
+                principal,
+                owner_id,
+                roles=(Role.KAM.value, Role.HEAD.value),
+                organization_id=organization.id,
             )
 
         old_owner_id = organization.owner_id
@@ -547,6 +589,16 @@ class OrganizationService:
         for organization in rows:
             if organization.owner_id == owner_id:
                 skipped.append({"organization_id": str(organization.id), "reason": "already_owner"})
+                continue
+            # B4-6: массовая передача — не одна проверка на вызов (организация не известна
+            # заранее), а на строку: ограниченный преемник получает только вузы из своего
+            # `allow` (или не из `deny`), остальные молча пропускаются, не всё переназначение.
+            if new_owner is not None and not await user_organization_allowed(
+                self._session, new_owner, organization.id
+            ):
+                skipped.append(
+                    {"organization_id": str(organization.id), "reason": "owner_access_restricted"}
+                )
                 continue
             old_owner_id = organization.owner_id
             # Массовая операция — без `expected_version` клиента, версия просто растёт
@@ -1284,6 +1336,15 @@ class ContactService:
         return contact
 
     async def create(self, principal: Principal, payload: Any) -> Contact:
+        if payload.consent_id is not None:
+            # B4-9: согласие ссылается на `subject_id` контакта, которого на момент
+            # создания ещё нет — валидным может быть только `null`, привязка вторым
+            # шагом через `PATCH` (когда у согласия есть на что указывать).
+            raise ValidationError(
+                "При создании контакта consent_id должен быть пустым — привяжите "
+                "согласие через PATCH после создания",
+                [FieldError(field="consent_id", reason="контакт ещё не создан")],
+            )
         if payload.organization_id is not None:
             organization = await self._session.get(Organization, payload.organization_id)
             if organization is None or organization.deleted_at is not None:
@@ -1586,6 +1647,37 @@ class ContactService:
             changes[key] = {"old": old_cmp, "new": new_cmp}
             setattr(contact, key, value)
 
+        # B4-9: источник ПДн — часть доказательства законности обработки (dop.md §11):
+        # заполнить может кто угодно, переписать уже заполненное — только ADMIN.
+        if "source" in data:
+            new_source = data["source"]
+            if contact.source and principal.role != Role.ADMIN.value:
+                raise ForbiddenError(
+                    "Источник контакта уже указан: изменить может только администратор"
+                )
+            if new_source != contact.source:
+                changes["source"] = {"old": contact.source, "new": new_source}
+                contact.source = new_source
+
+        if "consent_id" in data:
+            new_consent_id = data["consent_id"]
+            if new_consent_id is not None:
+                await self._validate_consent(new_consent_id, contact.id)
+            if new_consent_id != contact.consent_id:
+                changes["consent_id"] = {
+                    "old": str(contact.consent_id) if contact.consent_id else None,
+                    "new": str(new_consent_id) if new_consent_id else None,
+                }
+                contact.consent_id = new_consent_id
+
+        if data.get("channels") is not None:
+            # `payload.channels`, не `data["channels"]`: `model_dump()` рекурсивно
+            # разворачивает вложенные модели в словари, а `_replace_channels` нужны
+            # объекты `ContactChannelIn` с полями `.type`/`.value`/`.is_primary`.
+            channel_change = await self._replace_channels(contact, payload.channels or [])
+            if channel_change is not None:
+                changes["channels"] = channel_change
+
         if not changes:
             return contact
 
@@ -1598,6 +1690,65 @@ class ContactService:
             changes=changes,
         )
         return contact
+
+    async def _validate_consent(self, consent_id: uuid.UUID, contact_id: uuid.UUID) -> None:
+        """B4-9: согласие должно существовать, принадлежать этому контакту, быть принятым
+        и не отозванным — иначе 422. Чужое или отозванное согласие не привязывается."""
+        from app.modules.identity.models import Consent
+
+        consent = await self._session.get(Consent, consent_id)
+        valid = (
+            consent is not None
+            and consent.subject_type == "contact"
+            and consent.subject_id == contact_id
+            and consent.accepted_at is not None
+            and consent.revoked_at is None
+        )
+        if not valid:
+            raise ValidationError(
+                "Согласие не найдено, принадлежит другому субъекту или отозвано",
+                [FieldError(field="consent_id", reason="недействительное согласие")],
+            )
+
+    async def _replace_channels(self, contact: Contact, items: list[Any]) -> dict[str, Any] | None:
+        """B4-9: совпадающие по паре (тип, нормализованное значение) сохраняют `id` и
+        `is_verified` (обновляется только `is_primary`); новые добавляются; отсутствующие
+        удаляются. `changes` — счётчики и типы, не сырые значения (журнал бессрочен, ПДн в
+        нём хранить нельзя). `None` — список не изменился, аудит не пишется."""
+        existing = await self.channels(contact.id)
+        existing_by_key = {(row.type, row.value): row for row in existing}
+        new_keys = {(item.type, item.value) for item in items}
+
+        changed = False
+        for item in items:
+            key = (item.type, item.value)
+            row = existing_by_key.get(key)
+            if row is None:
+                self._session.add(
+                    ContactChannel(
+                        contact_id=contact.id,
+                        type=item.type,
+                        value=item.value,
+                        is_primary=item.is_primary,
+                    )
+                )
+                changed = True
+            elif row.is_primary != item.is_primary:
+                row.is_primary = item.is_primary
+                changed = True
+
+        for row in existing:
+            if (row.type, row.value) not in new_keys:
+                await self._session.delete(row)
+                changed = True
+
+        if not changed:
+            return None
+
+        await self._session.flush()
+        old_summary = {"count": len(existing), "types": sorted({row.type for row in existing})}
+        new_summary = {"count": len(items), "types": sorted({item.type for item in items})}
+        return {"old": old_summary, "new": new_summary}
 
     async def channels(self, contact_id: uuid.UUID) -> list[ContactChannel]:
         rows = (

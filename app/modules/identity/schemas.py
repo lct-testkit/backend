@@ -67,6 +67,9 @@ class MeResponse(BaseModel):
     policy_version: str
     password_change_required: bool = False
     scopes: list[str]
+    #: B4-6: ограничение видимости по вузам/направлениям — фронтенд показывает баннер и
+    #: скрывает то, что `require_permission` всё равно отклонит (например «Импорт»).
+    access_restricted: bool = False
     teams: list[uuid.UUID] = Field(default_factory=list)
     perm_epoch: int
     last_login_at: dt.datetime | None = None
@@ -214,6 +217,9 @@ class UserOut(BaseModel):
     blocked_at: dt.datetime | None = None
     auto_unblock_at: dt.datetime | None = None
     anonymized_at: dt.datetime | None = None
+    #: B4-5: есть хоть одно правило `user_access_rules` — сужает видимость сделок/
+    #: вузов/контактов этого пользователя (`GET /admin/users/{id}/access-rules`).
+    access_restricted: bool = False
     created_at: dt.datetime
     updated_at: dt.datetime
     version: int
@@ -369,6 +375,56 @@ class OffboardResponse(BaseModel):
     sessions_terminated: int = 0
     status: str | None = None
     warnings: list[str] = Field(default_factory=list)
+
+
+AccessRuleModeLiteral = Literal["all", "allow", "deny"]
+
+
+class AccessRuleDimensionIn(BaseModel):
+    mode: AccessRuleModeLiteral
+    ids: list[uuid.UUID] = Field(default_factory=list, max_length=500)
+
+
+class AccessRulesPutRequest(BaseModel):
+    """B4-5: `PUT /admin/users/{id}/access-rules` — замена целиком, не патч. `{"mode":
+    "all", "ids": []}` в обеих размерностях снимает ограничение."""
+
+    organizations: AccessRuleDimensionIn
+    directions: AccessRuleDimensionIn
+    reason: ReasonStr
+
+
+class AccessRuleItemOut(BaseModel):
+    id: uuid.UUID
+    name: str
+
+
+class AccessRuleDimensionOut(BaseModel):
+    mode: AccessRuleModeLiteral
+    items: list[AccessRuleItemOut] = Field(default_factory=list)
+
+
+class AccessRulesOut(BaseModel):
+    user_id: uuid.UUID
+    version: int
+    access_restricted: bool
+    organizations: AccessRuleDimensionOut
+    directions: AccessRuleDimensionOut
+
+
+class AccessRulesPreviewCounts(BaseModel):
+    visible_before: int
+    visible_after: int
+    hidden: int
+
+
+class AccessRulesPreviewResponse(BaseModel):
+    """B4-6: `GET .../access-rules/preview` — последствия ДО сохранения (сухой прогон,
+    правила берутся из запроса, а не из БД)."""
+
+    deals: AccessRulesPreviewCounts
+    organizations: AccessRulesPreviewCounts
+    contacts: AccessRulesPreviewCounts
 
 
 class HandoverExecuteRequest(HandoverPlan):
