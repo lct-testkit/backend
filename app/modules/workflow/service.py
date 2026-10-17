@@ -35,6 +35,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import structlog
 from sqlalchemy import Select, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -60,7 +61,9 @@ from app.modules.workflow.models import (
     WorkflowStatus,
     WorkflowTransition,
 )
-from app.modules.workflow.schemas import GraphIn, TransitionIn
+from app.modules.workflow.schemas import GraphIn, TransitionIn, ValidationIssue
+
+logger = structlog.get_logger(__name__)
 
 MAPPING_BATCH_SIZE = 100
 
@@ -677,18 +680,25 @@ class WorkflowService:
 
     # --- Валидация -------------------------------------------------------
 
-    async def validate(self, workflow: Workflow) -> tuple[list[str], list[str]]:
+    async def validate(self, workflow: Workflow) -> list[ValidationIssue]:
+        """B9-6 (BUG-25): раньше каждый вызов — в т.ч. пробный, из редактора, который гоняет
+        валидацию на каждое изменение графа — писал `WORKFLOW_VALIDATED` в журнал аудита и
+        засорял его записями без единого реального действия пользователя. Аудит read-only
+        действий — не его назначение (раздел 6.8: журнал — для изменений и доступа к ПДн);
+        взамен структурный лог той же формы (число ошибок/предупреждений), читаемый из
+        observability-стека, не из экрана аудита заказчика."""
         statuses = list((await self._load_statuses(workflow.id)).values())
         transitions = await self._load_transitions(workflow.id)
-        errors, warnings = _validate_graph_data(statuses, transitions)
+        issues = _validate_graph_data(statuses, transitions)
 
-        await self._audit.record(
-            AuditAction.WORKFLOW_VALIDATED,
-            entity_type="workflow",
-            entity_id=workflow.id,
-            changes={"errors": len(errors), "warnings": len(warnings)},
+        error_count = sum(1 for issue in issues if issue.severity == "error")
+        logger.info(
+            "workflow_validated",
+            workflow_id=str(workflow.id),
+            errors=error_count,
+            warnings=len(issues) - error_count,
         )
-        return errors, warnings
+        return issues
 
     # --- Публикация ------------------------------------------------------
 
@@ -702,11 +712,16 @@ class WorkflowService:
         transitions = await self._load_transitions(workflow.id)
         sla_rules = await self._load_sla_rules(workflow.id)
 
-        errors, warnings = _validate_graph_data(statuses, transitions)
+        issues = _validate_graph_data(statuses, transitions)
+        errors = [issue for issue in issues if issue.severity == "error"]
+        warnings = [issue.message for issue in issues if issue.severity == "warning"]
         if errors:
+            # B9-6: поле ошибки — `issue.path`, когда он есть (условие/действие конкретного
+            # перехода), иначе общее `"graph"` (ошибки уровня графа целиком: число initial,
+            # отсутствие терминала, недостижимость, ловушки).
             raise ValidationError(
                 "Граф воронки не прошёл валидацию, публикация отменена",
-                [FieldError(field="graph", reason=item) for item in errors],
+                [FieldError(field=issue.path or "graph", reason=issue.message) for issue in errors],
             )
 
         snapshot = _build_snapshot(workflow, statuses, transitions, sla_rules)
@@ -1108,15 +1123,19 @@ def _has_field_condition(node: Any, field_name: str) -> bool:
 
 def _validate_graph_data(
     statuses: list[WorkflowStatus], transitions: list[WorkflowTransition]
-) -> tuple[list[str], list[str]]:
+) -> list[ValidationIssue]:
     """Раздел 4.11: единственный начальный статус, хотя бы один терминальный,
     достижимость, отсутствие ловушек, корректные условия и действия, путь
     при отклонении подписи. Список ошибок закрыт этим перечнем — деловые
     рекомендации (обязательная причина для lost и т.п.) идут в `warnings` и
     публикацию не блокируют.
+
+    B9-6: возвращает структурированные `ValidationIssue` (код, `severity`, `path`, `refs`), а не
+    голые строки — редактор воронок (B-2 из OPEN-ISSUES) разбирал ответ построчно, что хрупко к
+    любой правке формулировки. `errors`/`warnings` (строки) собираются вызывающим кодом из
+    `issue.message` по `severity`, пока редактор не перейдёт на `issues[]`.
     """
-    errors: list[str] = []
-    warnings: list[str] = []
+    issues: list[ValidationIssue] = []
 
     live = [s for s in statuses if not s.is_archived]
     live_ids = {s.id for s in live}
@@ -1127,13 +1146,27 @@ def _validate_graph_data(
 
     initials = [s for s in live if s.type == StatusType.INITIAL.value]
     if len(initials) != 1:
-        errors.append(
-            f"Воронка должна иметь ровно один статус типа initial, найдено {len(initials)}"
+        issues.append(
+            ValidationIssue(
+                code="INITIAL_COUNT",
+                severity="error",
+                message=(
+                    f"Воронка должна иметь ровно один статус типа initial, "
+                    f"найдено {len(initials)}"
+                ),
+                refs=sorted(s.code for s in initials),
+            )
         )
 
     terminals = [s for s in live if s.type in {t.value for t in TERMINAL_TYPES}]
     if not terminals:
-        errors.append("Воронка должна иметь хотя бы один терминальный статус (won/lost)")
+        issues.append(
+            ValidationIssue(
+                code="NO_TERMINAL",
+                severity="error",
+                message="Воронка должна иметь хотя бы один терминальный статус (won/lost)",
+            )
+        )
 
     forward: dict[uuid.UUID, list[uuid.UUID]] = defaultdict(list)
     backward: dict[uuid.UUID, list[uuid.UUID]] = defaultdict(list)
@@ -1146,7 +1179,14 @@ def _validate_graph_data(
         unreachable = live_ids - reachable
         if unreachable:
             codes = sorted(by_id[i].code for i in unreachable)
-            errors.append(f"Недостижимые из initial статусы: {', '.join(codes)}")
+            issues.append(
+                ValidationIssue(
+                    code="UNREACHABLE_STATUS",
+                    severity="error",
+                    message=f"Недостижимые из initial статусы: {', '.join(codes)}",
+                    refs=codes,
+                )
+            )
 
     if terminals:
         can_reach_terminal = _bfs_multi_source({s.id for s in terminals}, backward)
@@ -1160,29 +1200,65 @@ def _validate_graph_data(
         }
         if traps:
             codes = sorted(by_id[i].code for i in traps)
-            errors.append(f"Статусы без пути в терминальный статус (ловушки): {', '.join(codes)}")
+            issues.append(
+                ValidationIssue(
+                    code="TRAP_STATUS",
+                    severity="error",
+                    message=(
+                        f"Статусы без пути в терминальный статус (ловушки): {', '.join(codes)}"
+                    ),
+                    refs=codes,
+                )
+            )
 
     # `parked` — пауза, а не закрытие: сделка должна уметь из неё выйти. Без исходящих переходов
     # заморозка необратима (раньше она была терминальной и «закрывала» сделку).
     for parked in (s for s in live if s.type == StatusType.PARKED.value):
         if not forward.get(parked.id):
-            warnings.append(
-                f"Статус «{parked.name}» (parked) без исходящих переходов: "
-                "сделку из него нельзя возобновить"
+            issues.append(
+                ValidationIssue(
+                    code="PARKED_WITHOUT_EXIT",
+                    severity="warning",
+                    message=(
+                        f"Статус «{parked.name}» (parked) без исходящих переходов: "
+                        "сделку из него нельзя возобновить"
+                    ),
+                    refs=[parked.code],
+                )
             )
 
     live_codes = {s.code for s in live}
     for t in live_transitions:
         label = t.name or f"{t.from_status_id}->{t.to_status_id}"
-        errors.extend(dsl.validate_condition(t.conditions, path=f"transitions[{label}].conditions"))
-        errors.extend(dsl.validate_actions(t.actions, path=f"transitions[{label}].actions"))
+        condition_path = f"transitions[{label}].conditions"
+        action_path = f"transitions[{label}].actions"
+        for message in dsl.validate_condition(t.conditions, path=condition_path):
+            issues.append(
+                ValidationIssue(
+                    code="CONDITION_INVALID", severity="error", message=message, path=condition_path
+                )
+            )
+        for message in dsl.validate_actions(t.actions, path=action_path):
+            issues.append(
+                ValidationIssue(
+                    code="ACTION_INVALID", severity="error", message=message, path=action_path
+                )
+            )
 
         for action in dsl.signature_actions(t.actions):
             on_rejected = action.get("on_rejected") or "previous_status"
             if on_rejected != "previous_status" and on_rejected not in live_codes:
-                errors.append(
-                    f"transitions[{label}].actions.request_signature.on_rejected: "
-                    f"статус {on_rejected!r} не найден в воронке"
+                issues.append(
+                    ValidationIssue(
+                        code="SIGNATURE_REJECT_TARGET_UNKNOWN",
+                        severity="error",
+                        message=(
+                            f"transitions[{label}].actions.request_signature.on_rejected: "
+                            f"статус {on_rejected!r} не найден в воронке"
+                        ),
+                        path=action_path,
+                        refs=[on_rejected],
+                    )
                 )
 
         to_status = by_id.get(t.to_status_id)
@@ -1191,19 +1267,33 @@ def _validate_graph_data(
         if to_status.type == StatusType.LOST.value and not (
             t.requires_comment and _has_field_condition(t.conditions, "loss_reason_id")
         ):
-            warnings.append(
-                f"Переход «{t.name}» в lost обычно требует комментарий и условие "
-                "по loss_reason_id (new_spec §4.9)"
+            issues.append(
+                ValidationIssue(
+                    code="LOST_WITHOUT_REASON",
+                    severity="warning",
+                    message=(
+                        f"Переход «{t.name}» в lost обычно требует комментарий и условие "
+                        "по loss_reason_id (new_spec §4.9)"
+                    ),
+                    path=f"transitions[{label}]",
+                )
             )
         if to_status.type == StatusType.WON.value and not (
             _has_field_condition(t.conditions, "amount")
             and _has_field_condition(t.conditions, "expected_close_date")
         ):
-            warnings.append(
-                f"Переход «{t.name}» в won обычно требует условие по сумме и дате закрытия"
+            issues.append(
+                ValidationIssue(
+                    code="WON_WITHOUT_AMOUNT_OR_DATE",
+                    severity="warning",
+                    message=(
+                        f"Переход «{t.name}» в won обычно требует условие по сумме и дате закрытия"
+                    ),
+                    path=f"transitions[{label}]",
+                )
             )
 
-    return errors, warnings
+    return issues
 
 
 def _bfs_multi_source(
