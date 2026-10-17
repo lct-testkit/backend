@@ -63,6 +63,7 @@ from app.core.errors import (
     ValidationError,
     VersionConflictError,
 )
+from app.core.normalize import escape_like
 from app.core.optimistic import claim_version
 from app.core.pagination import MAX_LIMIT, Cursor, keyset_after, keyset_before
 from app.core.permissions import DealScope, Permission, deal_scope_for, has_permission
@@ -78,6 +79,7 @@ from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService, defer_denied_audit
 from app.modules.catalog.custom_fields import validate_custom_fields
 from app.modules.catalog.models import Contact, Holiday, LossReason, Organization, Product
+from app.modules.catalog.service import direction_descendant_ids
 from app.modules.crm.models import (
     OPEN_TASK_STATUSES,
     Deal,
@@ -1186,12 +1188,16 @@ class DealFilters:
     is_closed: bool | None = None
     workflow_id: uuid.UUID | None = None
     deal_type: str | None = None
-    organization_id: uuid.UUID | None = None
+    # B4-8: множественные фильтры — внутри одного параметра «ИЛИ», между параметрами «И».
+    # Имя параметра API осталось в единственном числе (`organization_id=a&organization_id=b`)
+    # ради совместимости с фронтендом и отчётами B1 (`reporting/builders.py`); здесь поле
+    # во множественном числе — список значений одного параметра.
+    organization_ids: list[uuid.UUID] | None = None
     contact_id: uuid.UUID | None = None
-    owner_id: uuid.UUID | None = None
-    product_id: uuid.UUID | None = None
-    direction_id: uuid.UUID | None = None
-    region_id: uuid.UUID | None = None
+    owner_ids: list[uuid.UUID] | None = None
+    product_ids: list[uuid.UUID] | None = None
+    direction_ids: list[uuid.UUID] | None = None
+    region_ids: list[uuid.UUID] | None = None
     priority: str | None = None
     sla_state: str | None = None
     created_from: dt.datetime | None = None
@@ -1418,12 +1424,12 @@ class DealService:
             stmt = stmt.where(Deal.workflow_id == filters.workflow_id)
         if filters.deal_type:
             stmt = stmt.where(Deal.deal_type == filters.deal_type)
-        if filters.organization_id:
-            stmt = stmt.where(Deal.organization_id == filters.organization_id)
+        if filters.organization_ids:
+            stmt = stmt.where(Deal.organization_id.in_(filters.organization_ids))
         if filters.contact_id:
             stmt = stmt.where(Deal.contact_id == filters.contact_id)
-        if filters.owner_id:
-            stmt = stmt.where(Deal.owner_id == filters.owner_id)
+        if filters.owner_ids:
+            stmt = stmt.where(Deal.owner_id.in_(filters.owner_ids))
         if filters.priority:
             stmt = stmt.where(Deal.priority == filters.priority)
         if filters.sla_state:
@@ -1436,31 +1442,57 @@ class DealService:
             stmt = stmt.where(Deal.closed_at >= filters.closed_from)
         if filters.closed_to:
             stmt = stmt.where(Deal.closed_at < filters.closed_to)
-        if filters.product_id:
+        if filters.product_ids:
             stmt = stmt.where(
                 select(DealProduct.id)
-                .where(DealProduct.deal_id == Deal.id, DealProduct.product_id == filters.product_id)
+                .where(
+                    DealProduct.deal_id == Deal.id, DealProduct.product_id.in_(filters.product_ids)
+                )
                 .exists()
             )
-        if filters.direction_id:
+        if filters.direction_ids:
+            # B4-8: фильтр по направлению расширяется на дочерние (рекурсивный CTE, как у
+            # ограничений видимости B4-6) — направление-родитель должно находить сделки с
+            # продуктами его дочерних направлений, а не только напрямую отмеченных им.
+            expanded_directions = await direction_descendant_ids(
+                self._session, filters.direction_ids
+            )
             stmt = stmt.where(
                 select(DealProduct.id)
                 .join(Product, Product.id == DealProduct.product_id)
-                .where(DealProduct.deal_id == Deal.id, Product.direction_id == filters.direction_id)
+                .where(
+                    DealProduct.deal_id == Deal.id,
+                    Product.direction_id.in_(expanded_directions),
+                )
                 .exists()
             )
-        if filters.region_id:
+        if filters.region_ids:
             stmt = stmt.where(
                 select(Organization.id)
                 .where(
                     Organization.id == Deal.organization_id,
-                    Organization.region_id == filters.region_id,
+                    Organization.region_id.in_(filters.region_ids),
                 )
                 .exists()
             )
         if filters.q:
-            pattern = f"%{filters.q.strip()}%"
-            stmt = stmt.where(Deal.title.ilike(pattern) | Deal.number.ilike(pattern))
+            needle = filters.q.strip()
+            pattern = f"%{escape_like(needle)}%"
+            # B4-8: совпадение по вузу — через подзапрос id организаций, а не EXISTS на каждую
+            # строку сделки: планировщик сначала находит подходящие вузы (по
+            # `ix_organizations_name_trgm`), потом сделки по `ix_deals_organization`. Поиск по
+            # контакту (ПДн) в `q` сознательно не включён.
+            org_match = select(Organization.id).where(
+                Organization.deleted_at.is_(None),
+                Organization.name.ilike(pattern, escape="\\")
+                | Organization.short_name.ilike(pattern, escape="\\")
+                | Organization.inn.ilike(pattern, escape="\\"),
+            )
+            stmt = stmt.where(
+                Deal.title.ilike(pattern, escape="\\")
+                | Deal.number.ilike(pattern, escape="\\")
+                | Deal.organization_id.in_(org_match)
+            )
         return stmt
 
     async def party_names(

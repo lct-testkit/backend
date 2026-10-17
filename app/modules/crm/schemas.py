@@ -171,8 +171,47 @@ class DealCardOut(BaseModel):
     comments_count: int = 0
 
 
+#: B4-8: не больше стольких продуктов в строке списка сделок — полный список только
+#: в карточке (`GET /deals/{id}`, `DealCardOut.products`).
+DEAL_LIST_PRODUCTS_LIMIT = 5
+
+
+class DealProductBriefOut(BaseModel):
+    """Продукт сделки для списка/доски (B4-8) — короче `DealProductOut`: без цены и
+    скидки, с названием и направлением, которых в `DealProductOut` нет (там достаточно
+    id, карточка сама знает контекст)."""
+
+    product_id: uuid.UUID
+    product_name: str
+    product_code: str
+    direction_id: uuid.UUID | None = None
+    direction_name: str | None = None
+    quantity: int
+    stream_number: int | None = None
+
+
+class DirectionBriefOut(BaseModel):
+    id: uuid.UUID
+    name: str
+
+
+class DealListItemOut(DealOut):
+    """`DealOut` + колонки, которые ТЗ (Функц.4) требует в таблице и реестре сделок:
+    продукты, ИТ-направления и название статуса. Только для `GET /deals` — остальные
+    ответы (`create`, `update`, `transition`, карточка) остаются `DealOut`, чтобы не
+    тащить лишний запрос туда, где эти поля не нужны."""
+
+    status_name: str | None = None
+    status_type: str | None = None
+    products: list[DealProductBriefOut] = Field(default_factory=list)
+    #: Сколько продуктов у сделки всего — `products` обрезан до `DEAL_LIST_PRODUCTS_LIMIT`.
+    products_total: int = 0
+    #: Разные направления продуктов сделки (без повторов).
+    directions: list[DirectionBriefOut] = Field(default_factory=list)
+
+
 class DealListResponse(BaseModel):
-    items: list[DealOut]
+    items: list[DealListItemOut]
     next_cursor: str | None = None
     #: Сколько сделок подходит под фильтры (без учёта курсора и `limit`). `GET /deals`
     #: заполняет его всегда; значение по умолчанию — чтобы поле оставалось необязательным.

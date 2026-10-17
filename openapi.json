@@ -3117,11 +3117,311 @@
         "title": "DealHistoryResponse",
         "type": "object"
       },
+      "DealListItemOut": {
+        "description": "`DealOut` + колонки, которые ТЗ (Функц.4) требует в таблице и реестре сделок:\nпродукты, ИТ-направления и название статуса. Только для `GET /deals` — остальные\nответы (`create`, `update`, `transition`, карточка) остаются `DealOut`, чтобы не\nтащить лишний запрос туда, где эти поля не нужны.",
+        "properties": {
+          "amount": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Amount"
+          },
+          "closed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closed At"
+          },
+          "contact_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Id"
+          },
+          "contact_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Name"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          },
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "custom_fields": {
+            "additionalProperties": true,
+            "title": "Custom Fields",
+            "type": "object"
+          },
+          "deal_type": {
+            "title": "Deal Type",
+            "type": "string"
+          },
+          "directions": {
+            "items": {
+              "$ref": "#/components/schemas/DirectionBriefOut"
+            },
+            "title": "Directions",
+            "type": "array"
+          },
+          "expected_close_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Close Date"
+          },
+          "external_ids": {
+            "additionalProperties": true,
+            "title": "External Ids",
+            "type": "object"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "loss_reason_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Loss Reason Id"
+          },
+          "number": {
+            "title": "Number",
+            "type": "string"
+          },
+          "order_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Order Number"
+          },
+          "organization_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Organization Id"
+          },
+          "organization_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Organization Name"
+          },
+          "owner_id": {
+            "format": "uuid",
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "owner_unavailable": {
+            "title": "Owner Unavailable",
+            "type": "boolean"
+          },
+          "priority": {
+            "title": "Priority",
+            "type": "string"
+          },
+          "products": {
+            "items": {
+              "$ref": "#/components/schemas/DealProductBriefOut"
+            },
+            "title": "Products",
+            "type": "array"
+          },
+          "products_total": {
+            "default": 0,
+            "title": "Products Total",
+            "type": "integer"
+          },
+          "signature_status": {
+            "title": "Signature Status",
+            "type": "string"
+          },
+          "sla_due_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sla Due At"
+          },
+          "sla_state": {
+            "title": "Sla State",
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "status_changed_at": {
+            "format": "date-time",
+            "title": "Status Changed At",
+            "type": "string"
+          },
+          "status_id": {
+            "format": "uuid",
+            "title": "Status Id",
+            "type": "string"
+          },
+          "status_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Name"
+          },
+          "status_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Type"
+          },
+          "students_planned": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Students Planned"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          },
+          "workflow_id": {
+            "format": "uuid",
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "number",
+          "title",
+          "deal_type",
+          "workflow_id",
+          "status_id",
+          "owner_id",
+          "currency",
+          "status_changed_at",
+          "sla_state",
+          "priority",
+          "custom_fields",
+          "external_ids",
+          "owner_unavailable",
+          "signature_status",
+          "version",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "DealListItemOut",
+        "type": "object"
+      },
       "DealListResponse": {
         "properties": {
           "items": {
             "items": {
-              "$ref": "#/components/schemas/DealOut"
+              "$ref": "#/components/schemas/DealListItemOut"
             },
             "title": "Items",
             "type": "array"
@@ -3405,6 +3705,70 @@
           "updated_at"
         ],
         "title": "DealOut",
+        "type": "object"
+      },
+      "DealProductBriefOut": {
+        "description": "Продукт сделки для списка/доски (B4-8) — короче `DealProductOut`: без цены и\nскидки, с названием и направлением, которых в `DealProductOut` нет (там достаточно\nid, карточка сама знает контекст).",
+        "properties": {
+          "direction_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Direction Id"
+          },
+          "direction_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Direction Name"
+          },
+          "product_code": {
+            "title": "Product Code",
+            "type": "string"
+          },
+          "product_id": {
+            "format": "uuid",
+            "title": "Product Id",
+            "type": "string"
+          },
+          "product_name": {
+            "title": "Product Name",
+            "type": "string"
+          },
+          "quantity": {
+            "title": "Quantity",
+            "type": "integer"
+          },
+          "stream_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stream Number"
+          }
+        },
+        "required": [
+          "product_id",
+          "product_name",
+          "product_code",
+          "quantity"
+        ],
+        "title": "DealProductBriefOut",
         "type": "object"
       },
       "DealProductIn": {
@@ -3804,6 +4168,25 @@
           }
         },
         "title": "DealUpdateRequest",
+        "type": "object"
+      },
+      "DirectionBriefOut": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "DirectionBriefOut",
         "type": "object"
       },
       "DirectionCreateRequest": {
@@ -23808,7 +24191,7 @@
     },
     "/api/deals": {
       "get": {
-        "description": "Курсорная пагинация, фильтры по статусу/воронке/типу/владельцу/приоритету/SLA/датам/тексту. `status_id` можно повторять (`?status_id=a&status_id=b`), `is_closed` отделяет закрытые сделки (won/lost/parked) от открытых. `sort` — поле сортировки, минус в начале — по убыванию: created_at (по умолчанию `-created_at`), updated_at, status_changed_at, number, title, amount, expected_close_date, sla_due_at; сделки без значения всегда в конце. `total` — сколько сделок подходит под фильтры, без учёта курсора. Скоуп по роли (раздел 4): KAM — свои сделки, HEAD — команда, ADMIN — все. Роль: чтение сделок.",
+        "description": "Курсорная пагинация, фильтры по статусу/воронке/типу/владельцу/приоритету/SLA/датам/тексту. `status_id`, `organization_id`, `owner_id`, `product_id`, `direction_id` и `region_id` можно повторять (`?product_id=a&product_id=b` — ИЛИ внутри параметра, И между параметрами); единичное значение работает как раньше. Фильтр по направлению включает дочерние направления. `is_closed` отделяет закрытые сделки (won/lost/parked) от открытых. `q` ищет по номеру, названию сделки и по названию/краткому названию/ИНН вуза (B4-8). `sort` — поле сортировки, минус в начале — по убыванию: created_at (по умолчанию `-created_at`), updated_at, status_changed_at, number, title, amount, expected_close_date, sla_due_at; сделки без значения всегда в конце. `total` — сколько сделок подходит под фильтры, без учёта курсора. Каждая строка несёт продукты (не более 5, `products_total` — сколько всего), направления и название статуса. Скоуп по роли (раздел 4): KAM — свои сделки, HEAD — команда, ADMIN — все. Роль: чтение сделок.",
         "operationId": "list_deals_api_deals_get",
         "parameters": [
           {
@@ -23903,8 +24286,11 @@
             "schema": {
               "anyOf": [
                 {
-                  "format": "uuid",
-                  "type": "string"
+                  "items": {
+                    "format": "uuid",
+                    "type": "string"
+                  },
+                  "type": "array"
                 },
                 {
                   "type": "null"
@@ -23937,8 +24323,11 @@
             "schema": {
               "anyOf": [
                 {
-                  "format": "uuid",
-                  "type": "string"
+                  "items": {
+                    "format": "uuid",
+                    "type": "string"
+                  },
+                  "type": "array"
                 },
                 {
                   "type": "null"
@@ -23954,8 +24343,11 @@
             "schema": {
               "anyOf": [
                 {
-                  "format": "uuid",
-                  "type": "string"
+                  "items": {
+                    "format": "uuid",
+                    "type": "string"
+                  },
+                  "type": "array"
                 },
                 {
                   "type": "null"
@@ -23971,8 +24363,11 @@
             "schema": {
               "anyOf": [
                 {
-                  "format": "uuid",
-                  "type": "string"
+                  "items": {
+                    "format": "uuid",
+                    "type": "string"
+                  },
+                  "type": "array"
                 },
                 {
                   "type": "null"
@@ -23988,8 +24383,11 @@
             "schema": {
               "anyOf": [
                 {
-                  "format": "uuid",
-                  "type": "string"
+                  "items": {
+                    "format": "uuid",
+                    "type": "string"
+                  },
+                  "type": "array"
                 },
                 {
                   "type": "null"
