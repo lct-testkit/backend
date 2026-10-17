@@ -337,7 +337,11 @@ async def build_deal_funnel(
         return ReportDataset(title="Воронка по статусам", columns=columns, rows=[])
 
     note: str | None = None
-    if deal_scope_for(principal.role) is DealScope.ALL and not filters.has_any():
+    if (
+        deal_scope_for(principal.role) is DealScope.ALL
+        and not filters.has_any()
+        and not principal.restricted
+    ):
         # Быстрый путь: материализованное представление (раздел 3.4/4.13),
         # обновляется `reporting.tasks.refresh_report_materialized_views`
         # каждые 5 минут. Скоуп ALL — единственный случай, когда это честно:
@@ -345,7 +349,10 @@ async def build_deal_funnel(
         # по той же причине, не знает о фильтрах П1 (период/вуз/направление/
         # продукт/ответственный): снимок агрегирован по всем сделкам сразу.
         # Как только хотя бы один фильтр задан, считаем построчно (ветка
-        # `else`), даже для ADMIN.
+        # `else`), даже для ADMIN. `principal.restricted` в теории недостижим
+        # для ALL-скоупа (B4-5 ограничивает только KAM/HEAD) — проверка здесь
+        # ради защиты от будущего расширения ограничений на другие роли (B4-5,
+        # «Вопрос владельцу»), а не от сценария, возможного сегодня.
         mv_rows = (
             await session.execute(
                 text(

@@ -92,6 +92,8 @@ class UserFilters:
     manager_id: uuid.UUID | None = None
     region_id: uuid.UUID | None = None
     q: str | None = None
+    # B4-5: показать только пользователей с ограничением видимости по вузам/направлениям.
+    access_restricted: bool | None = None
 
 
 class ApprovalService:
@@ -281,6 +283,8 @@ class AdminUserService:
             stmt = stmt.where(User.team_id == filters.team_id)
         if filters.manager_id:
             stmt = stmt.where(User.manager_id == filters.manager_id)
+        if filters.access_restricted is not None:
+            stmt = stmt.where(User.access_restricted == filters.access_restricted)
         if filters.region_id:
             # Регион живёт на команде: фильтр по нему — это фильтр по дереву команд.
             from app.modules.identity.models import Team

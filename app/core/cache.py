@@ -48,6 +48,9 @@ class CachedPrincipal:
     perm_epoch: int
     consent_version: str | None
     must_change_password: bool
+    # B4-6: значение по умолчанию — старая запись кэша без этого поля (до выкладки)
+    # читается как `restricted=False`, а не ломает разбор (см. `get_principal_cache`).
+    restricted: bool = False
 
 
 async def get_principal_cache(keycloak_id: str) -> CachedPrincipal | None:

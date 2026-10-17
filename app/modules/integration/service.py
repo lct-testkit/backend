@@ -476,6 +476,9 @@ async def get_integration_principal(session: AsyncSession) -> Principal:
         consent_version=None,
         must_change_password=False,
         claims=TokenClaims(subject=user.keycloak_id or "system:integration", raw={}),
+        # B4-6: INTEGRATION не входит в ограничиваемые роли (B4-5) — явно False, не
+        # завязано на `user.access_restricted`.
+        restricted=False,
     )
 
 
@@ -496,7 +499,14 @@ async def pick_least_loaded_owner(session: AsyncSession) -> uuid.UUID | None:
     stmt = (
         select(User.id)
         .outerjoin(open_deals, open_deals.c.owner_id == User.id)
-        .where(User.role == Role.KAM.value, User.status == "active", User.deleted_at.is_(None))
+        .where(
+            User.role == Role.KAM.value,
+            User.status == "active",
+            User.deleted_at.is_(None),
+            # B4-6: лид с сайта не должен уйти владельцу, который свою же новую сделку не
+            # увидит (B4-5 ограничения по вузам/направлениям сужают и его собственный скоуп).
+            User.access_restricted.is_(False),
+        )
         .order_by(func.coalesce(open_deals.c.open_count, 0).asc(), User.created_at.asc())
         .limit(1)
     )

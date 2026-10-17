@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, Path, Query, Request, status
 from app.core.deps import DbSession, IdempotencyKeyHeader, IfMatch, Pagination, require_permission
 from app.core.errors import ForbiddenError
 from app.core.idempotency import IdempotencyGuard
+from app.core.masking import mask_channel_value
 from app.core.pagination import Page, keyset_before
 from app.core.permissions import Permission, has_permission
 from app.core.security import Principal
@@ -32,6 +33,8 @@ from app.modules.catalog.schemas import (
     BulkOrganizationOwnerRequest,
     BulkOrganizationOwnerResponse,
     BulkOwnerSkipOut,
+    ContactChannelListResponse,
+    ContactChannelOut,
     ContactCreateRequest,
     ContactListResponse,
     ContactOut,
@@ -577,6 +580,36 @@ async def update_contact(
     contact = await service.get_or_404(contact_id, principal)
     contact = await service.update(contact, payload, principal=principal, expected_version=if_match)
     return ContactOut.from_model(contact)
+
+
+@contacts_router.get(
+    "/{contact_id}/channels",
+    summary="Каналы связи контакта (маскированные)",
+    description=(
+        "Telegram/WhatsApp/доп. телефон/доп. email контакта с маскированными значениями "
+        "(B4-9). Полные значения — только `POST /contacts/{id}/reveal`. Скоуп — как у "
+        "карточки контакта. Роль: чтение контактов."
+    ),
+    response_model=ContactChannelListResponse,
+)
+async def list_contact_channels(
+    session: DbSession, principal: ContactRead, contact_id: Annotated[uuid.UUID, Path()]
+) -> ContactChannelListResponse:
+    service = ContactService(session)
+    contact = await service.get_or_404(contact_id, principal)
+    channels = await service.channels(contact.id)
+    return ContactChannelListResponse(
+        items=[
+            ContactChannelOut(
+                id=row.id,
+                type=row.type,
+                value=mask_channel_value(row.type, row.value) or "",
+                is_primary=row.is_primary,
+                is_verified=row.is_verified,
+            )
+            for row in channels
+        ]
+    )
 
 
 @contacts_router.post(

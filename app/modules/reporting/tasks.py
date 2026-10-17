@@ -81,6 +81,9 @@ def _principal_for_worker(user: User) -> Principal:
         claims=TokenClaims(
             subject=user.keycloak_id or str(user.id), raw={"source": "reporting_worker"}
         ),
+        # B4-6: главная дыра без этого — фоновый отчёт ограниченного пользователя
+        # собирался бы по всем данным, в обход `user_access_rules` (B4-5).
+        restricted=user.access_restricted,
     )
 
 

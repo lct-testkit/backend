@@ -21,6 +21,9 @@ class AuditAction(StrEnum):
     USER_BLOCKED = "USER_BLOCKED"
     USER_UNBLOCKED = "USER_UNBLOCKED"
     USER_ROLE_CHANGED = "USER_ROLE_CHANGED"
+    # B4-5: ограничения видимости по вузам/направлениям (`access_scope:manage`, только
+    # ADMIN) — `changes` несёт конфиги `before`/`after` и причину.
+    ACCESS_RULES_CHANGED = "ACCESS_RULES_CHANGED"
     USER_OFFBOARDED = "USER_OFFBOARDED"
     USER_TERMINATED = "USER_TERMINATED"
     # new_spec §4.1: не вошёл по приглашению за 30 дней — учётка отключена.

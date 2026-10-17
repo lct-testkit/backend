@@ -207,6 +207,10 @@ class User(UuidPkMixin, TimestampMixin, SoftDeleteMixin, VersionMixin, Base):
     anonymized_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # B4-5: есть хоть одна строка в `user_access_rules` — скоуп роли (KAM/HEAD) сужается
+    # SQL-условием по вузам/направлениям (B4-6, `app/core/access_rules.py`). Денормализация
+    # ради 99% пользователей без ограничений: ни одного лишнего запроса на список.
+    access_restricted: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
 
     team: Mapped[Team | None] = relationship(lazy="noload")
 
@@ -217,6 +221,61 @@ class User(UuidPkMixin, TimestampMixin, SoftDeleteMixin, VersionMixin, Base):
     @property
     def effective_name(self) -> str:
         return self.display_name or self.full_name
+
+
+class UserAccessRule(UuidPkMixin, Base):
+    """B4-5: ограничение видимости пользователя по вузу или направлению (ТЗ Функц.11:
+    «разграничение пользователей по доступу к данным»).
+
+    Одна строка — один вуз ИЛИ одно направление (ровно одно поле, CHECK ниже), не обе
+    размерности сразу. `effect`: `allow` — показывать только перечисленное в этой
+    размерности, `deny` — показывать всё, кроме. Смешивать `allow` и `deny` в одной
+    размерности для одного пользователя запрещено на уровне API
+    (`identity.access_rules.AccessRulesService`), не здесь: проверка требует агрегата по
+    пользователю, а не ограничения на строку. FK на `organizations`/`directions` —
+    строкой на имя таблицы (как `Consent.signature_id` выше): модуль `identity` не
+    импортирует модели `catalog`, SQLAlchemy резолвит внешний ключ по `Base.metadata`."""
+
+    __tablename__ = "user_access_rules"
+    __table_args__ = (
+        Index(
+            "uq_user_access_rules_org",
+            "user_id",
+            "organization_id",
+            unique=True,
+            postgresql_where=text("organization_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_user_access_rules_dir",
+            "user_id",
+            "direction_id",
+            unique=True,
+            postgresql_where=text("direction_id IS NOT NULL"),
+        ),
+        Index("ix_user_access_rules_user", "user_id"),
+        CheckConstraint("effect IN ('allow','deny')", name="user_access_rules_effect_valid"),
+        CheckConstraint(
+            "(organization_id IS NOT NULL)::int + (direction_id IS NOT NULL)::int = 1",
+            name="user_access_rules_one_target",
+        ),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    effect: Mapped[str] = mapped_column(String(8), nullable=False)
+    organization_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True
+    )
+    direction_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("directions.id", ondelete="CASCADE"), nullable=True
+    )
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), nullable=False
+    )
 
 
 class UserDelegation(UuidPkMixin, Base):

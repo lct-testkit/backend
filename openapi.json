@@ -234,6 +234,177 @@
       }
     },
     "schemas": {
+      "AccessRuleDimensionIn": {
+        "properties": {
+          "ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 500,
+            "title": "Ids",
+            "type": "array"
+          },
+          "mode": {
+            "enum": [
+              "all",
+              "allow",
+              "deny"
+            ],
+            "title": "Mode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "title": "AccessRuleDimensionIn",
+        "type": "object"
+      },
+      "AccessRuleDimensionOut": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AccessRuleItemOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "mode": {
+            "enum": [
+              "all",
+              "allow",
+              "deny"
+            ],
+            "title": "Mode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "title": "AccessRuleDimensionOut",
+        "type": "object"
+      },
+      "AccessRuleItemOut": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "AccessRuleItemOut",
+        "type": "object"
+      },
+      "AccessRulesOut": {
+        "properties": {
+          "access_restricted": {
+            "title": "Access Restricted",
+            "type": "boolean"
+          },
+          "directions": {
+            "$ref": "#/components/schemas/AccessRuleDimensionOut"
+          },
+          "organizations": {
+            "$ref": "#/components/schemas/AccessRuleDimensionOut"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "user_id",
+          "version",
+          "access_restricted",
+          "organizations",
+          "directions"
+        ],
+        "title": "AccessRulesOut",
+        "type": "object"
+      },
+      "AccessRulesPreviewCounts": {
+        "properties": {
+          "hidden": {
+            "title": "Hidden",
+            "type": "integer"
+          },
+          "visible_after": {
+            "title": "Visible After",
+            "type": "integer"
+          },
+          "visible_before": {
+            "title": "Visible Before",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "visible_before",
+          "visible_after",
+          "hidden"
+        ],
+        "title": "AccessRulesPreviewCounts",
+        "type": "object"
+      },
+      "AccessRulesPreviewResponse": {
+        "description": "B4-6: `GET .../access-rules/preview` — последствия ДО сохранения (сухой прогон,\nправила берутся из запроса, а не из БД).",
+        "properties": {
+          "contacts": {
+            "$ref": "#/components/schemas/AccessRulesPreviewCounts"
+          },
+          "deals": {
+            "$ref": "#/components/schemas/AccessRulesPreviewCounts"
+          },
+          "organizations": {
+            "$ref": "#/components/schemas/AccessRulesPreviewCounts"
+          }
+        },
+        "required": [
+          "deals",
+          "organizations",
+          "contacts"
+        ],
+        "title": "AccessRulesPreviewResponse",
+        "type": "object"
+      },
+      "AccessRulesPutRequest": {
+        "description": "B4-5: `PUT /admin/users/{id}/access-rules` — замена целиком, не патч. `{\"mode\":\n\"all\", \"ids\": []}` в обеих размерностях снимает ограничение.",
+        "properties": {
+          "directions": {
+            "$ref": "#/components/schemas/AccessRuleDimensionIn"
+          },
+          "organizations": {
+            "$ref": "#/components/schemas/AccessRuleDimensionIn"
+          },
+          "reason": {
+            "maxLength": 500,
+            "minLength": 3,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "organizations",
+          "directions",
+          "reason"
+        ],
+        "title": "AccessRulesPutRequest",
+        "type": "object"
+      },
       "ApplyDriftRequest": {
         "properties": {
           "fields": {
@@ -8405,6 +8576,11 @@
       },
       "MeResponse": {
         "properties": {
+          "access_restricted": {
+            "default": false,
+            "title": "Access Restricted",
+            "type": "boolean"
+          },
           "consent_required": {
             "title": "Consent Required",
             "type": "boolean"
@@ -15404,6 +15580,11 @@
       },
       "UserOut": {
         "properties": {
+          "access_restricted": {
+            "default": false,
+            "title": "Access Restricted",
+            "type": "boolean"
+          },
           "activated_at": {
             "anyOf": [
               {
@@ -20926,7 +21107,7 @@
     },
     "/api/admin/users": {
       "get": {
-        "description": "Курсорная пагинация, фильтры по роли, команде, статусу, руководителю, региону и тексту. Роль: ADMIN.",
+        "description": "Курсорная пагинация, фильтры по роли, команде, статусу, руководителю, региону, тексту и ограничению видимости (B4-5). Роль: ADMIN.",
         "operationId": "list_users_api_admin_users_get",
         "parameters": [
           {
@@ -21030,6 +21211,24 @@
               ],
               "description": "Поиск по ФИО и email",
               "title": "Q"
+            }
+          },
+          {
+            "description": "Только пользователи с ограничением видимости (B4-5)",
+            "in": "query",
+            "name": "access_restricted",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Только пользователи с ограничением видимости (B4-5)",
+              "title": "Access Restricted"
             }
           },
           {
@@ -21361,6 +21560,319 @@
           }
         ],
         "summary": "Изменить пользователя",
+        "tags": [
+          "admin-users"
+        ]
+      }
+    },
+    "/api/admin/users/{user_id}/access-rules": {
+      "get": {
+        "description": "Текущие правила по вузам и направлениям (B4-5): режим `all`/`allow`/`deny` и список для каждой размерности. Роль: ADMIN (`access_scope:manage`).",
+        "operationId": "get_access_rules_api_admin_users__user_id__access_rules_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessRulesOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "summary": "Ограничения видимости пользователя",
+        "tags": [
+          "admin-users"
+        ]
+      },
+      "put": {
+        "description": "Заменяет правила целиком (не патч). Только для KAM/HEAD — 422 для ADMIN/AUDITOR/INTEGRATION. `allow` без элементов — 422 (для «не видит ничего» есть блокировка). `{\"mode\": \"all\", \"ids\": []}` в обеих размерностях снимает ограничение. Требует If-Match. Роль: ADMIN (`access_scope:manage`).",
+        "operationId": "put_access_rules_api_admin_users__user_id__access_rules_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccessRulesPutRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessRulesOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Задать ограничения видимости пользователя",
+        "tags": [
+          "admin-users"
+        ]
+      }
+    },
+    "/api/admin/users/{user_id}/access-rules/preview": {
+      "get": {
+        "description": "Сухой прогон: считает сделки/вузы/контакты, видимые ДО и ПОСЛЕ правил из запроса (ещё не сохранённых). Параметры: `organizations.mode`/`organizations.ids`, `directions.mode`/`directions.ids`. В БД ничего не меняется. Роль: ADMIN (`access_scope:manage`).",
+        "operationId": "preview_access_rules_route_api_admin_users__user_id__access_rules_preview_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "organizations.mode",
+            "required": false,
+            "schema": {
+              "default": "all",
+              "enum": [
+                "all",
+                "allow",
+                "deny"
+              ],
+              "title": "Organizations.Mode",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "organizations.ids",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "format": "uuid",
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Organizations.Ids"
+            }
+          },
+          {
+            "in": "query",
+            "name": "directions.mode",
+            "required": false,
+            "schema": {
+              "default": "all",
+              "enum": [
+                "all",
+                "allow",
+                "deny"
+              ],
+              "title": "Directions.Mode",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "directions.ids",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "format": "uuid",
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Directions.Ids"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessRulesPreviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "summary": "Предпросмотр последствий ограничения",
         "tags": [
           "admin-users"
         ]
