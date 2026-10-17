@@ -105,8 +105,92 @@ OPENAPI_DESCRIPTION = """
 
 **Ошибки.** Каждая операция описывает 400/401/403/404/409/422/429/500 как
 `application/problem+json` со схемой `Problem`; 4xx/5xx вне этого списка (413, 503)
-тоже приходят в этом формате.
+тоже приходят в этом формате. Поля (RFC 7807 плюс одно внутреннее):
+`type` (URI вида `https://docs.rtk-crm/errors/CRM-XXYY`), `title` (заголовок кода из
+справочника), `status` (HTTP-код), `detail` (человекочитаемое описание конкретного
+случая), `instance` (путь запроса), `code` (`CRM-XXYY`, `enum` из 51 значения — тот же
+список, что `GET /api/meta/error-codes`); у ошибок валидации (422) — ещё `errors`
+(список `{field, reason}`).
 """
+
+#: B9-3: порядок групп в Swagger UI/`/api/openapi.json` (раздел README «30 групп») — FastAPI
+#: без этого списка сортирует теги по порядку первого появления маршрута (зависит от порядка
+#: `include_router` в `create_app`, легко расползается при рефакторинге); явный список даёт один
+#: источник порядка и короткое описание каждой группы. Порядок — от входа (аутентификация) к
+#: бизнес-сущностям, затем каталоги и справочники, затем административный контур.
+OPENAPI_TAGS: list[dict[str, str]] = [
+    {"name": "auth", "description": "Вход через Keycloak (OIDC), сессия, выход."},
+    {"name": "me", "description": "Профиль текущего пользователя, смена пароля, согласие на ПДн."},
+    {
+        "name": "workflows",
+        "description": "Конструктор воронок: статусы, переходы, публикация, архивация статуса.",
+    },
+    {
+        "name": "deals",
+        "description": "Сделки: карточка, переходы по воронке, участники, комментарии.",
+    },
+    {"name": "comments", "description": "Правка и удаление комментариев сделки (плоские ручки)."},
+    {"name": "tasks", "description": "Задачи по сделкам."},
+    {"name": "organizations", "description": "Вузы и другие организации-клиенты."},
+    {"name": "contacts", "description": "Контактные лица организаций."},
+    {"name": "products", "description": "Каталог ИТ-продуктов (программ обучения)."},
+    {"name": "directions", "description": "Направления обучения, дерево."},
+    {"name": "organization-licenses", "description": "Лицензии/договоры вуз-вендор-ПО."},
+    {"name": "loss-reasons", "description": "Справочник причин отказа."},
+    {
+        "name": "holidays",
+        "description": "Производственный календарь (рабочие/выходные дни для расчёта SLA).",
+    },
+    {
+        "name": "custom-field-defs",
+        "description": "Определения пользовательских полей сделок/организаций/продуктов.",
+    },
+    {"name": "regions", "description": "Справочник регионов РФ."},
+    {"name": "org-lookup", "description": "Автоподстановка реквизитов организации по ИНН (ЕГРЮЛ)."},
+    {"name": "files", "description": "Загрузка файлов (intent/commit), скачивание."},
+    {
+        "name": "attachments",
+        "description": "Привязка файлов к сущностям (сделка, документ на подпись и т.п.).",
+    },
+    {"name": "imports", "description": "Импорт каталогов и организаций из xlsx/xls/csv/json."},
+    {"name": "reporting", "description": "Отчёты и дашборды."},
+    {
+        "name": "signing",
+        "description": (
+            "Простая электронная подпись (ПЭП): документы, запросы, шаблоны, соглашения об ЭДО."
+        ),
+    },
+    {
+        "name": "signing-public",
+        "description": (
+            "ПЭП без сессии: страница подписания и действия внешнего подписанта по токену."
+        ),
+    },
+    {
+        "name": "notifications",
+        "description": "Уведомления пользователя, настройки каналов, шаблоны (администрирование).",
+    },
+    {
+        "name": "integrations-admin",
+        "description": "Администрирование источников интеграций и их событий.",
+    },
+    {
+        "name": "integrations-public",
+        "description": "Входящие вебхуки внешних систем (HMAC-подпись тела).",
+    },
+    {"name": "registry", "description": "Загрузка и версии локального реестра ЕГРЮЛ."},
+    {"name": "admin", "description": "Журнал аудита, системные настройки."},
+    {
+        "name": "admin-users",
+        "description": "Пользователи, роли, команды, запросы на удаление/обезличивание (152-ФЗ).",
+    },
+    {
+        "name": "users",
+        "description": "Справочник сотрудников (имена/роли для выбора в интерфейсе).",
+    },
+    {"name": "meta", "description": "Справочник кодов ошибок (без аутентификации)."},
+    {"name": "health", "description": "Технические проверки живости и готовности (вне /api)."},
+]
 
 
 @asynccontextmanager
@@ -167,6 +251,7 @@ def create_app() -> FastAPI:
         title="CRM ИТ Школы Ростелекома — API",
         version=settings.app_version,
         description=OPENAPI_DESCRIPTION,
+        openapi_tags=OPENAPI_TAGS,
         lifespan=lifespan,
         # Схема нужна фронтенду всегда (DoD раздела 21); в prod закрывается
         # только интерактивный Swagger UI.
