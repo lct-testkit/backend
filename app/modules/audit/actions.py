@@ -222,6 +222,8 @@ class AuditAction(StrEnum):
     PII_ACCESS = "PII_ACCESS"
     PII_REVEALED = "PII_REVEALED"
     MASS_EXPORT = "MASS_EXPORT"
+    # B6-6: срок хранения — категория, порог, число удалённых (без значений удалённых полей).
+    RETENTION_APPLIED = "RETENTION_APPLIED"
 
     # --- Система ---
     LOGIN_SUCCEEDED = "LOGIN_SUCCEEDED"

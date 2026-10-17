@@ -12,6 +12,47 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 SECRET_PLACEHOLDER = "********"
 
 
+class RetentionRunOut(BaseModel):
+    """Запись `retention_runs` (B6-6) — эксплуатационный журнал, без значений удалённых полей."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    category: str
+    started_at: dt.datetime
+    finished_at: dt.datetime
+    dry_run: bool
+    deleted_count: int
+    status: str
+    error: str | None = None
+    triggered_by: uuid.UUID | None = None
+    created_at: dt.datetime
+
+
+class RetentionRunListResponse(BaseModel):
+    items: list[RetentionRunOut]
+    next_cursor: str | None = None
+
+
+class RetentionRunRequest(BaseModel):
+    """`POST /api/admin/retention/run`: `dry_run` по умолчанию `true` — числа без удаления."""
+
+    dry_run: bool = True
+    category: str | None = None
+
+
+class RetentionCategoryResult(BaseModel):
+    category: str
+    dry_run: bool
+    deleted: int
+    status: str
+    error: str | None = None
+
+
+class RetentionRunResponse(BaseModel):
+    results: list[RetentionCategoryResult]
+
+
 class FeatureFlagOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

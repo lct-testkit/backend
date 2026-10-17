@@ -87,6 +87,33 @@ class AdminApproval(UuidPkMixin, TimestampMixin, Base):
     expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class RetentionRun(UuidPkMixin, Base):
+    """B6-6: эксплуатационный журнал запусков очистки по сроку хранения (152-ФЗ ст. 5 ч. 7).
+
+    Неизменяемость не требуется (в отличие от `audit_log`) — это журнал операций, не
+    доказательство; сама очистка пишет и свою запись аудита (`RETENTION_APPLIED`)."""
+
+    __tablename__ = "retention_runs"
+    __table_args__ = (
+        CheckConstraint("status IN ('completed','failed')", name="retention_runs_status_valid"),
+    )
+
+    category: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    started_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    dry_run: Mapped[bool] = mapped_column(nullable=False)
+    deleted_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    details: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    triggered_by: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), nullable=False, index=True
+    )
+
+
 class IdempotencyKey(Base):
     __tablename__ = "idempotency_keys"
 

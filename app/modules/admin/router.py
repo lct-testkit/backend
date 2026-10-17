@@ -18,7 +18,8 @@ from app.core.errors import AppError, ErrorCode, NotFoundError
 from app.core.pagination import Page, keyset_before
 from app.core.permissions import Permission
 from app.core.security import Principal
-from app.modules.admin.models import FeatureFlag, SystemSetting
+from app.modules.admin.models import FeatureFlag, RetentionRun, SystemSetting
+from app.modules.admin.retention import CATEGORIES, RetentionService
 from app.modules.admin.schemas import (
     SECRET_PLACEHOLDER,
     AuditChainReport,
@@ -28,6 +29,11 @@ from app.modules.admin.schemas import (
     FeatureFlagListResponse,
     FeatureFlagOut,
     FeatureFlagPatch,
+    RetentionCategoryResult,
+    RetentionRunListResponse,
+    RetentionRunOut,
+    RetentionRunRequest,
+    RetentionRunResponse,
     SecurityEventListResponse,
     SecurityEventOut,
     SecurityEventSummaryOut,
@@ -611,4 +617,79 @@ async def export_security_events(
         content=body,
         media_type="application/x-ndjson",
         headers={"Content-Disposition": 'attachment; filename="security-events-export.ndjson"'},
+    )
+
+
+# =============================================================================
+# B6-6: сроки хранения (152-ФЗ ст. 5 ч. 7) — журнал запусков и ручной запуск.
+# Право на чтение то же, что у журнала безопасности (ADMIN, AUDITOR); запуск — только ADMIN
+# (SETTINGS_WRITE у остальных ролей не задан).
+# =============================================================================
+
+
+@router.get(
+    "/retention/runs",
+    summary="Журнал запусков очистки по сроку хранения",
+    description=("Курсорная пагинация, до 100 записей на страницу. Роль: ADMIN, AUDITOR."),
+    response_model=RetentionRunListResponse,
+)
+async def list_retention_runs(
+    session: DbSession,
+    page: Pagination,
+    _: Annotated[Principal, Depends(require_permission(Permission.SECURITY_EVENT_READ))],
+    category: Annotated[str | None, Query()] = None,
+) -> RetentionRunListResponse:
+    stmt = select(RetentionRun).order_by(RetentionRun.created_at.desc(), RetentionRun.id.desc())
+    if category:
+        stmt = stmt.where(RetentionRun.category == category)
+    cursor = page.decoded_cursor
+    if cursor:
+        stmt = stmt.where(keyset_before(RetentionRun.created_at, RetentionRun.id, cursor))
+    rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
+    built: Page = Page.build(rows, limit=page.limit)
+    return RetentionRunListResponse(
+        items=[RetentionRunOut.model_validate(r) for r in built.items],
+        next_cursor=built.next_cursor,
+    )
+
+
+@router.post(
+    "/retention/run",
+    summary="Запустить очистку по сроку хранения вручную",
+    description=(
+        "`dry_run=true` (по умолчанию) считает, что было бы удалено, без удаления. "
+        "Без `category` — все категории по очереди. Роль: ADMIN."
+    ),
+    response_model=RetentionRunResponse,
+)
+async def run_retention(
+    payload: RetentionRunRequest,
+    session: DbSession,
+    principal: Annotated[Principal, Depends(require_permission(Permission.SETTINGS_WRITE))],
+) -> RetentionRunResponse:
+    if payload.category is not None and payload.category not in CATEGORIES:
+        raise AppError(
+            ErrorCode.VALIDATION,
+            f"Неизвестная категория {payload.category!r}; допустимы {', '.join(CATEGORIES)}",
+        )
+    service = RetentionService(session)
+    if payload.category:
+        results = [
+            await service.run_category(
+                payload.category, dry_run=payload.dry_run, triggered_by=principal.user_id
+            )
+        ]
+    else:
+        results = await service.run_all(dry_run=payload.dry_run, triggered_by=principal.user_id)
+    return RetentionRunResponse(
+        results=[
+            RetentionCategoryResult(
+                category=r.category,
+                dry_run=r.dry_run,
+                deleted=r.deleted,
+                status=r.status,
+                error=r.error,
+            )
+            for r in results
+        ]
     )
