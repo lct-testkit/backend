@@ -212,8 +212,10 @@ async def validate_workflow(
 ) -> ValidateResponse:
     service = WorkflowService(session)
     workflow = await service.get_or_404(workflow_id)
-    errors, warnings = await service.validate(workflow)
-    return ValidateResponse(ok=not errors, errors=errors, warnings=warnings)
+    issues = await service.validate(workflow)
+    errors = [issue.message for issue in issues if issue.severity == "error"]
+    warnings = [issue.message for issue in issues if issue.severity == "warning"]
+    return ValidateResponse(ok=not errors, issues=issues, errors=errors, warnings=warnings)
 
 
 @router.post(

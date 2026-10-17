@@ -210,13 +210,25 @@ class GraphOut(BaseModel):
 
 
 class ValidationIssue(BaseModel):
+    """Один пункт валидации графа (B9-6). `severity` и `refs` добавлены вместе с переходом
+    редактора воронок на структурированный `issues[]` (B-2 из OPEN-ISSUES) — раньше поле
+    существовало, но не использовалось ни одним вызовом (`grep` по коду не находил его, кроме
+    самого объявления класса). `refs` — коды статусов, которых касается проблема (воронка:
+    недостижимый статус, ловушка); пусто у проблем без привязки к конкретному статусу."""
+
     code: str
+    severity: Literal["error", "warning"]
     message: str
     path: str | None = None
+    refs: list[str] = Field(default_factory=list)
 
 
 class ValidateResponse(BaseModel):
     ok: bool
+    #: Структурированный список (B9-6) — источник правды; `errors`/`warnings` ниже остаются
+    #: только до перехода редактора воронок на `issues` (его собственный фронтенд-спринт), после
+    #: чего убираются (риск задачи B9-6).
+    issues: list[ValidationIssue] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
