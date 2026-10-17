@@ -9,10 +9,12 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Path, Query, status
 from sqlalchemy import select
 
+from app.core.config import get_settings
 from app.core.deps import DbSession, Pagination, require_permission
 from app.core.masking import mask_mapping
 from app.core.pagination import Page, keyset_after, keyset_before
 from app.core.permissions import Permission
+from app.core.queue import enqueue_after_commit
 from app.core.security import Principal
 from app.modules.imports.fields import (
     ENTITY_TYPE_LABELS,
@@ -248,6 +250,11 @@ async def apply_import_job(
     service = ImportService(session)
     job = await service.get_or_404(job_id)
     job = await service.start_apply(job)
+    # B8-11: не ждать минутного тика cron — поставить задание в arq сразу после коммита.
+    if get_settings().reports_enqueue:
+        enqueue_after_commit(
+            session, "run_import_job", str(job.id), "apply", job_id=f"import:{job.id}:apply"
+        )
     return ImportJobOut.model_validate(job)
 
 
@@ -267,6 +274,10 @@ async def rollback_import_job(
     service = ImportService(session)
     job = await service.get_or_404(job_id)
     job = await service.start_rollback(job)
+    if get_settings().reports_enqueue:
+        enqueue_after_commit(
+            session, "run_import_job", str(job.id), "rollback", job_id=f"import:{job.id}:rollback"
+        )
     return ImportJobOut.model_validate(job)
 
 

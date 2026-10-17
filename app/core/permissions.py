@@ -36,6 +36,15 @@ class Permission(StrEnum):
     # не входит в `ORG_WRITE` (которым владеет и KAM), тем же приёмом, что
     # `DEAL_REASSIGN` отделён от обычного `DEAL_UPDATE`.
     ORG_RESTORE = "organization:restore"
+    # B4-1: смена/назначение/снятие ответственного за вуз — ТЗ Функц.11
+    # отдаёт это Руководителю отдельно от обычного редактирования карточки.
+    # Не входит в `ORG_WRITE` (которым владеет и KAM) по той же причине, что
+    # `ORG_RESTORE`: KAM больше не может передать вуз себе или коллеге через
+    # обычный `PATCH`.
+    ORG_OWNER_ASSIGN = "organization:assign_owner"
+    # B4-3: мягкое удаление вуза и сделки — только ADMIN (матрица прав).
+    ORG_DELETE = "organization:delete"
+    DEAL_DELETE = "deal:delete"
     CONTACT_READ = "contact:read"
     CONTACT_WRITE = "contact:write"
     CONTACT_REVEAL = "contact:reveal"
@@ -84,6 +93,12 @@ class Permission(StrEnum):
     SIGNATURE_READ = "signature:read"
     SIGNATURE_SIGN = "signature:sign"
     SIGNATURE_VOID = "signature:void"
+    # B4-7: AUDITOR читает комментарии сделки (dop.md §13 даёт ей это в матрице прав, код не
+    # пускал — несоответствие из ACCOMPANYING-DOCUMENTATION.md). Не `DEAL_READ`: эта роль не
+    # должна получить доступ к самой сделке и связанным с ней сущностям (раздел 4, DealScope.
+    # NONE) — тем же приёмом, что `SIGNATURE_READ` выше даёт доступ к документу на подпись без
+    # доступа к сделке целиком.
+    COMMENT_AUDIT_READ = "comment:audit_read"
     EDM_ADMIN = "edm:admin"
     # dop.md §13 матрица прав: «Управление соглашениями ЭДО» — ADMIN пишет,
     # AUDITOR только читает (KAM/HEAD — ни то, ни другое). Отдельное право,
@@ -107,9 +122,6 @@ class Permission(StrEnum):
     AUDIT_EXPORT = "audit:export"
     SETTINGS_WRITE = "settings:write"
     ERASURE_MANAGE = "erasure:manage"
-    # B6-2: журнал security_events несёт IP и попытки входа — отдельное право, не `audit:read`.
-    # HEAD его не получает: руководитель увидел бы попытки входа и IP чужих команд.
-    SECURITY_EVENT_READ = "security_event:read"
 
 
 # KAM — менеджер по вузам: только свои сделки и связанные с ними сущности.
@@ -140,11 +152,14 @@ _KAM: frozenset[Permission] = frozenset(
 
 # HEAD — руководитель: всё как у KAM, плюс команда, переназначение и импорт
 # каталогов (раздел 5: матрица прав отдаёт «Импорт каталогов» HEAD и ADMIN,
-# не KAM).
+# не KAM). B4-1: назначение/смена ответственного за вуз — тоже здесь (в
+# пределах своей команды проверяется отдельно, в `ensure_assignable_user`).
+# B4-3: удаление сделки/организации у HEAD нет — только восстановление.
 _HEAD: frozenset[Permission] = _KAM | {
     Permission.DEAL_REASSIGN,
     Permission.DEAL_REASSIGN_BULK,
     Permission.ORG_RESTORE,
+    Permission.ORG_OWNER_ASSIGN,
     Permission.AUDIT_READ,
     Permission.SIGNATURE_VOID,
     Permission.FILE_DELETE,
@@ -164,7 +179,6 @@ _AUDITOR: frozenset[Permission] = frozenset(
         Permission.AUDIT_EXPORT,
         Permission.EDM_READ,
         Permission.SIGNATURE_READ,
-        Permission.SECURITY_EVENT_READ,
     }
 )
 
@@ -198,9 +212,22 @@ def permissions_for(role: str) -> frozenset[Permission]:
     return ROLE_PERMISSIONS.get(role, frozenset())
 
 
-def scopes_for(role: str) -> list[str]:
-    """Плоский список прав для GET /api/me — фронтенд рисует по нему интерфейс."""
-    return sorted(p.value for p in permissions_for(role))
+#: B4-6: права, которые не знают об ограничениях видимости (B4-5) — импорт каталогов
+#: пишет в любые вузы, минуя скоуп. Ограниченный пользователь их не получает, даже
+#: если роль (HEAD) обычно их даёт.
+RESTRICTED_EXCLUDED_PERMISSIONS = frozenset({Permission.IMPORT_RUN, Permission.IMPORT_ROLLBACK})
+
+
+def scopes_for(role: str, *, restricted: bool = False) -> list[str]:
+    """Плоский список прав для GET /api/me — фронтенд рисует по нему интерфейс.
+
+    `restricted=True` убирает права, для которых ограничение по вузам/направлениям не
+    имеет смысла (раздел B4-6) — иначе ограниченный HEAD видел бы в интерфейсе кнопку
+    «Импорт», которая `require_permission` всё равно отклонит."""
+    permissions = permissions_for(role)
+    if restricted:
+        permissions = permissions - RESTRICTED_EXCLUDED_PERMISSIONS
+    return sorted(p.value for p in permissions)
 
 
 def has_permission(role: str, permission: Permission) -> bool:

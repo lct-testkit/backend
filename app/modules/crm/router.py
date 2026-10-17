@@ -14,11 +14,11 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from collections import defaultdict
 from collections.abc import Sequence
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Query, Request, status
-from sqlalchemy import select
 
 from app.core.deps import (
     AuditDep,
@@ -28,15 +28,19 @@ from app.core.deps import (
     Pagination,
     require_permission,
 )
-from app.core.errors import AppError, ErrorCode, NotFoundError
+from app.core.errors import AppError, ErrorCode, ForbiddenError, NotFoundError
 from app.core.idempotency import IdempotencyGuard
 from app.core.pagination import MAX_LIMIT, Cursor, Page, keyset_before
-from app.core.permissions import Permission
+from app.core.permissions import Permission, has_permission
 from app.core.redis_client import distributed_lock
 from app.core.security import Principal
 from app.modules.audit.actions import AuditAction
-from app.modules.crm.models import Deal, DealStatusHistory, Task
+from app.modules.crm.models import Deal, Task
 from app.modules.crm.schemas import (
+    DEAL_LIST_PRODUCTS_LIMIT,
+    AuditCommentListResponse,
+    AuditCommentOut,
+    AuditDealRef,
     AvailableTransitionOut,
     AvailableTransitionsResponse,
     BulkReassignRequest,
@@ -48,14 +52,18 @@ from app.modules.crm.schemas import (
     CommentUpdateRequest,
     DealCardOut,
     DealCreateRequest,
+    DealDeleteRequest,
     DealEventOut,
     DealHistoryResponse,
+    DealListItemOut,
     DealListResponse,
     DealOut,
+    DealProductBriefOut,
     DealProductOut,
     DealProductsReplaceRequest,
     DealStatusHistoryOut,
     DealUpdateRequest,
+    DirectionBriefOut,
     ParticipantAddRequest,
     ParticipantListResponse,
     ParticipantOut,
@@ -82,14 +90,15 @@ from app.modules.crm.service import (
     set_cached_deal_card,
     touch_recent,
 )
-from app.modules.files.models import Attachment
-from app.modules.files.schemas import AttachmentListResponse
-from app.modules.files.service import AttachmentService
 from app.modules.identity.schemas import OperationResult
+from app.modules.workflow.models import WorkflowStatus
 
 deals_router = APIRouter(prefix="/deals", tags=["deals"])
 comments_router = APIRouter(prefix="/comments", tags=["comments"])
 tasks_router = APIRouter(prefix="/tasks", tags=["tasks"])
+# B4-7: отдельный маршрут, не вложенный в `deals_router` — он НЕ проходит через
+# `DealService.get_or_404` (сделка для AUDITOR всегда вне скоупа, раздел 4, DealScope.NONE).
+deal_audit_router = APIRouter(prefix="/admin/audit/deals", tags=["audit"])
 
 DealRead = Annotated[Principal, Depends(require_permission(Permission.DEAL_READ))]
 DealCreatePerm = Annotated[Principal, Depends(require_permission(Permission.DEAL_CREATE))]
@@ -99,9 +108,6 @@ DealReassignPerm = Annotated[Principal, Depends(require_permission(Permission.DE
 DealReassignBulkPerm = Annotated[
     Principal, Depends(require_permission(Permission.DEAL_REASSIGN_BULK))
 ]
-# B2-8: вложения записи истории читает тот, у кого file:download, не DEAL_READ — иначе AUDITOR
-# (у которой нет file:download) видел бы файлы сделки через эту ручку обойдя общую проверку.
-FileDownloadPerm = Annotated[Principal, Depends(require_permission(Permission.FILE_DOWNLOAD))]
 
 
 # =============================================================================
@@ -114,13 +120,19 @@ FileDownloadPerm = Annotated[Principal, Depends(require_permission(Permission.FI
     summary="Список сделок",
     description=(
         "Курсорная пагинация, фильтры по статусу/воронке/типу/владельцу/приоритету/"
-        "SLA/датам/тексту. `status_id` можно повторять (`?status_id=a&status_id=b`), "
-        "`is_closed` отделяет закрытые сделки (won/lost/parked) от открытых. "
+        "SLA/датам/тексту. `status_id`, `organization_id`, `owner_id`, `product_id`, "
+        "`direction_id` и `region_id` можно повторять (`?product_id=a&product_id=b` — "
+        "ИЛИ внутри параметра, И между параметрами); единичное значение работает как "
+        "раньше. Фильтр по направлению включает дочерние направления. `is_closed` "
+        "отделяет закрытые сделки (won/lost/parked) от открытых. `q` ищет по номеру, "
+        "названию сделки и по названию/краткому названию/ИНН вуза (B4-8). "
         "`sort` — поле сортировки, минус в начале — по убыванию: created_at "
         "(по умолчанию `-created_at`), updated_at, status_changed_at, number, "
         "title, amount, expected_close_date, sla_due_at; сделки без значения "
         "всегда в конце. `total` — сколько сделок подходит под фильтры, без "
-        "учёта курсора. Скоуп по роли (раздел 4): KAM — свои сделки, HEAD — "
+        "учёта курсора. Каждая строка несёт продукты (не более 5, "
+        "`products_total` — сколько всего), направления и название статуса. "
+        "Скоуп по роли (раздел 4): KAM — свои сделки, HEAD — "
         "команда, ADMIN — все. Роль: чтение сделок."
     ),
     response_model=DealListResponse,
@@ -134,12 +146,12 @@ async def list_deals(
     sort: Annotated[str | None, Query()] = None,
     workflow_id: Annotated[uuid.UUID | None, Query()] = None,
     deal_type: Annotated[str | None, Query()] = None,
-    organization_id: Annotated[uuid.UUID | None, Query()] = None,
+    organization_id: Annotated[list[uuid.UUID] | None, Query()] = None,
     contact_id: Annotated[uuid.UUID | None, Query()] = None,
-    owner_id: Annotated[uuid.UUID | None, Query()] = None,
-    product_id: Annotated[uuid.UUID | None, Query()] = None,
-    direction_id: Annotated[uuid.UUID | None, Query()] = None,
-    region_id: Annotated[uuid.UUID | None, Query()] = None,
+    owner_id: Annotated[list[uuid.UUID] | None, Query()] = None,
+    product_id: Annotated[list[uuid.UUID] | None, Query()] = None,
+    direction_id: Annotated[list[uuid.UUID] | None, Query()] = None,
+    region_id: Annotated[list[uuid.UUID] | None, Query()] = None,
     priority: Annotated[str | None, Query()] = None,
     sla_state: Annotated[str | None, Query()] = None,
     created_from: Annotated[dt.datetime | None, Query()] = None,
@@ -147,18 +159,24 @@ async def list_deals(
     closed_from: Annotated[dt.datetime | None, Query()] = None,
     closed_to: Annotated[dt.datetime | None, Query()] = None,
     q: Annotated[str | None, Query()] = None,
+    deleted: Annotated[bool, Query()] = False,
 ) -> DealListResponse:
+    # B4-3: без списка удалённых сделок восстановить что-то нельзя — id удалённой
+    # сделки нигде больше не виден. Право restore совмещено с delete (матрица: только ADMIN).
+    if deleted and not has_permission(principal.role, Permission.DEAL_DELETE):
+        defer_denied_audit(session, entity_type="deal", reason="deleted_list_forbidden")
+        raise ForbiddenError("Список удалённых сделок доступен только с правом удаления")
     filters = DealFilters(
         status_ids=status_id,
         is_closed=is_closed,
         workflow_id=workflow_id,
         deal_type=deal_type,
-        organization_id=organization_id,
+        organization_ids=organization_id,
         contact_id=contact_id,
-        owner_id=owner_id,
-        product_id=product_id,
-        direction_id=direction_id,
-        region_id=region_id,
+        owner_ids=owner_id,
+        product_ids=product_id,
+        direction_ids=direction_id,
+        region_ids=region_id,
         priority=priority,
         sla_state=sla_state,
         created_from=created_from,
@@ -166,6 +184,7 @@ async def list_deals(
         closed_from=closed_from,
         closed_to=closed_to,
         q=q,
+        deleted=deleted,
     )
     service = DealService(session)
     sort_by = parse_deal_sort(sort)
@@ -180,7 +199,9 @@ async def list_deals(
         else None
     )
     return DealListResponse(
-        items=await _deal_outs(service, principal, visible), next_cursor=next_cursor, total=total
+        items=await _deal_list_items(session, service, principal, visible),
+        next_cursor=next_cursor,
+        total=total,
     )
 
 
@@ -247,6 +268,47 @@ async def bulk_reassign_deals(
         reason=payload.reason,
     )
     return BulkReassignResponse(reassigned_count=count)
+
+
+@deals_router.delete(
+    "/{deal_id}",
+    summary="Удалить сделку",
+    description=(
+        "B4-3 (A-16): мягкое удаление. 409 CRM-1303 с блокером `pending_signature`, если "
+        "у сделки есть незавершённый запрос на подпись — сначала аннулируйте его. "
+        "Роль: ADMIN."
+    ),
+    response_model=OperationResult,
+)
+async def delete_deal(
+    payload: DealDeleteRequest,
+    session: DbSession,
+    principal: DealDeletePerm,
+    if_match: IfMatch,
+    deal_id: Annotated[uuid.UUID, Path()],
+) -> OperationResult:
+    service = DealService(session)
+    deal = await service.get_or_404(deal_id, principal)
+    await service.delete(deal, principal, reason=payload.reason, expected_version=if_match)
+    return OperationResult(ok=True, detail="Сделка удалена")
+
+
+@deals_router.post(
+    "/{deal_id}/restore",
+    summary="Восстановить сделку",
+    description="B4-3: обратно из мягкого удаления. 409 CRM-1305 для не удалённой. Роль: ADMIN.",
+    response_model=DealOut,
+)
+async def restore_deal(
+    session: DbSession,
+    principal: DealDeletePerm,
+    if_match: IfMatch,
+    deal_id: Annotated[uuid.UUID, Path()],
+) -> DealOut:
+    service = DealService(session)
+    deal = await service.get_deleted_or_404(deal_id, principal)
+    deal = await service.restore(deal, expected_version=if_match)
+    return (await _deal_outs(service, principal, [deal]))[0]
 
 
 @deals_router.get(
@@ -316,6 +378,86 @@ async def _deal_outs(
         )
         for deal in deals
     ]
+
+
+async def _deal_list_items(
+    session: AsyncSession, service: DealService, principal: Principal, deals: Sequence[Deal]
+) -> list[DealListItemOut]:
+    """`DealListItemOut` для `GET /deals` (B4-8): продукты (не более
+    `DEAL_LIST_PRODUCTS_LIMIT`), направления и название/тип статуса — поверх `_deal_outs`
+    двумя запросами НА СТРАНИЦУ (продукты+направления, статусы), а не на строку.
+    Тот же подход даёт колонки доске сделок (`DealsBoard`, спринт F3)."""
+    base_outs = await _deal_outs(service, principal, deals)
+    if not deals:
+        return []
+
+    deal_ids = [d.id for d in deals]
+    product_rows = (
+        await session.execute(
+            select(
+                DealProduct.deal_id,
+                DealProduct.product_id,
+                Product.name.label("product_name"),
+                Product.code.label("product_code"),
+                Product.direction_id,
+                Direction.name.label("direction_name"),
+                DealProduct.quantity,
+                DealProduct.stream_number,
+            )
+            .join(Product, Product.id == DealProduct.product_id)
+            .outerjoin(Direction, Direction.id == Product.direction_id)
+            .where(DealProduct.deal_id.in_(deal_ids))
+            .order_by(DealProduct.deal_id, DealProduct.id)
+        )
+    ).all()
+
+    products_by_deal: dict[uuid.UUID, list[DealProductBriefOut]] = defaultdict(list)
+    products_total: dict[uuid.UUID, int] = defaultdict(int)
+    directions_by_deal: dict[uuid.UUID, dict[uuid.UUID, str]] = defaultdict(dict)
+    for row in product_rows:
+        products_total[row.deal_id] += 1
+        if len(products_by_deal[row.deal_id]) < DEAL_LIST_PRODUCTS_LIMIT:
+            products_by_deal[row.deal_id].append(
+                DealProductBriefOut(
+                    product_id=row.product_id,
+                    product_name=row.product_name,
+                    product_code=row.product_code,
+                    direction_id=row.direction_id,
+                    direction_name=row.direction_name,
+                    quantity=row.quantity,
+                    stream_number=row.stream_number,
+                )
+            )
+        if row.direction_id is not None:
+            directions_by_deal[row.deal_id][row.direction_id] = row.direction_name
+
+    status_ids = {deal.status_id for deal in deals}
+    status_rows = (
+        await session.execute(
+            select(WorkflowStatus.id, WorkflowStatus.name, WorkflowStatus.type).where(
+                WorkflowStatus.id.in_(status_ids)
+            )
+        )
+    ).all()
+    statuses = {row.id: (row.name, row.type) for row in status_rows}
+
+    items: list[DealListItemOut] = []
+    for deal, base in zip(deals, base_outs, strict=True):
+        status_name, status_type = statuses.get(deal.status_id, (None, None))
+        items.append(
+            DealListItemOut(
+                **base.model_dump(),
+                status_name=status_name,
+                status_type=status_type,
+                products=products_by_deal.get(deal.id, []),
+                products_total=products_total.get(deal.id, 0),
+                directions=[
+                    DirectionBriefOut(id=direction_id, name=name)
+                    for direction_id, name in directions_by_deal.get(deal.id, {}).items()
+                ],
+            )
+        )
+    return items
 
 
 @deals_router.patch(
@@ -691,6 +833,65 @@ async def create_comment(
             key=idempotency_key, status=status.HTTP_201_CREATED, body=result.model_dump(mode="json")
         )
     return result
+
+
+# =============================================================================
+# B4-7: комментарии сделки для AUDITOR (comment:audit_read)
+# =============================================================================
+
+
+@deal_audit_router.get(
+    "/{deal_id}/comments",
+    summary="Комментарии сделки для аудитора",
+    description=(
+        "Право `comment:audit_read` (AUDITOR), не `deal:read` — сделка целиком вне скоупа этой "
+        "роли (раздел 4, `DealScope.NONE`); доступ только к переписке, найденной через запись "
+        "`COMMENT_CREATED` в журнале аудита. Видит и мягко удалённые сделки (B4-3). Отдаёт все "
+        "комментарии, включая внутренние и системные; текст живых замаскирован (email, "
+        "телефон, ФИО), у удалённых — `body: null`. Каждый вызов пишет `DEAL_COMMENTS_VIEWED`."
+    ),
+    response_model=AuditCommentListResponse,
+)
+async def list_deal_comments_for_audit(
+    session: DbSession,
+    audit: AuditDep,
+    _principal: CommentAuditRead,
+    deal_id: Annotated[uuid.UUID, Path()],
+    limit: Annotated[int | None, Query(ge=1, le=MAX_LIMIT)] = None,
+    cursor: Annotated[str | None, Query()] = None,
+) -> AuditCommentListResponse:
+    deal = await session.get(Deal, deal_id)
+    if deal is None:
+        raise NotFoundError("Сделка", deal_id)
+
+    rows, next_cursor = await CommentService(session).list_for_audit(
+        deal.id, limit=limit, cursor=Cursor.decode(cursor) if cursor else None
+    )
+    author_ids = {comment.author_id for comment in rows if comment.author_id is not None}
+    names: dict[uuid.UUID, str] = {}
+    if author_ids:
+        names = dict(
+            (
+                await session.execute(
+                    select(User.id, User.full_name).where(User.id.in_(author_ids))
+                )
+            ).all()
+        )
+    items = [
+        AuditCommentOut.from_model(comment, author_name=names.get(comment.author_id))
+        for comment in rows
+    ]
+    await audit.record(
+        AuditAction.DEAL_COMMENTS_VIEWED,
+        entity_type="deal",
+        entity_id=deal.id,
+        changes={"count": len(items)},
+    )
+    return AuditCommentListResponse(
+        deal=AuditDealRef(id=deal.id, number=deal.number, deleted=deal.deleted_at is not None),
+        items=items,
+        next_cursor=next_cursor,
+    )
 
 
 # =============================================================================

@@ -25,6 +25,7 @@ from pydantic import (
     model_validator,
 )
 
+from app.core.masking import mask_contacts_text
 from app.core.patch import reject_null
 
 DealTypeLiteral = Literal["b2b", "b2c"]
@@ -170,8 +171,47 @@ class DealCardOut(BaseModel):
     comments_count: int = 0
 
 
+#: B4-8: не больше стольких продуктов в строке списка сделок — полный список только
+#: в карточке (`GET /deals/{id}`, `DealCardOut.products`).
+DEAL_LIST_PRODUCTS_LIMIT = 5
+
+
+class DealProductBriefOut(BaseModel):
+    """Продукт сделки для списка/доски (B4-8) — короче `DealProductOut`: без цены и
+    скидки, с названием и направлением, которых в `DealProductOut` нет (там достаточно
+    id, карточка сама знает контекст)."""
+
+    product_id: uuid.UUID
+    product_name: str
+    product_code: str
+    direction_id: uuid.UUID | None = None
+    direction_name: str | None = None
+    quantity: int
+    stream_number: int | None = None
+
+
+class DirectionBriefOut(BaseModel):
+    id: uuid.UUID
+    name: str
+
+
+class DealListItemOut(DealOut):
+    """`DealOut` + колонки, которые ТЗ (Функц.4) требует в таблице и реестре сделок:
+    продукты, ИТ-направления и название статуса. Только для `GET /deals` — остальные
+    ответы (`create`, `update`, `transition`, карточка) остаются `DealOut`, чтобы не
+    тащить лишний запрос туда, где эти поля не нужны."""
+
+    status_name: str | None = None
+    status_type: str | None = None
+    products: list[DealProductBriefOut] = Field(default_factory=list)
+    #: Сколько продуктов у сделки всего — `products` обрезан до `DEAL_LIST_PRODUCTS_LIMIT`.
+    products_total: int = 0
+    #: Разные направления продуктов сделки (без повторов).
+    directions: list[DirectionBriefOut] = Field(default_factory=list)
+
+
 class DealListResponse(BaseModel):
-    items: list[DealOut]
+    items: list[DealListItemOut]
     next_cursor: str | None = None
     #: Сколько сделок подходит под фильтры (без учёта курсора и `limit`). `GET /deals`
     #: заполняет его всегда; значение по умолчанию — чтобы поле оставалось необязательным.
@@ -326,6 +366,12 @@ class CommentDeleteRequest(BaseModel):
     reason: str | None = None
 
 
+class DealDeleteRequest(BaseModel):
+    """B4-3 (A-16): причина обязательна — в отличие от удаления комментария."""
+
+    reason: str = Field(min_length=1, max_length=500)
+
+
 class CommentOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -345,6 +391,65 @@ class CommentOut(BaseModel):
 
 class CommentListResponse(BaseModel):
     items: list[CommentOut]
+    next_cursor: str | None = None
+
+
+# --- B4-7: комментарии сделки для AUDITOR (comment:audit_read) -----------------------------
+
+
+class AuditCommentOut(BaseModel):
+    """Тот же набор, что `CommentOut`, плюс `author_name` (у AUDITOR нет `user:read`, своей
+    ручки для имён ему не хватило бы) и `is_deleted` явно. Текст живого комментария —
+    замаскированный (`mask_contacts_text`: email/телефон/ФИО внутри свободного текста);
+    удалённого — не отдаётся вовсе (`body=None`), иначе эта ручка была бы обходом
+    `CommentService.delete`, который помечает комментарий удалённым именно ради исключения
+    текста из интерфейса."""
+
+    id: uuid.UUID
+    author_id: uuid.UUID | None = None
+    author_name: str | None = None
+    parent_id: uuid.UUID | None = None
+    body: str | None = None
+    body_format: str
+    is_system: bool
+    is_internal: bool
+    is_deleted: bool
+    edited_at: dt.datetime | None = None
+    created_at: dt.datetime
+    deleted_at: dt.datetime | None = None
+
+    @classmethod
+    def from_model(cls, comment: Any, *, author_name: str | None) -> AuditCommentOut:
+        deleted = comment.deleted_at is not None
+        return cls(
+            id=comment.id,
+            author_id=comment.author_id,
+            author_name=author_name,
+            parent_id=comment.parent_id,
+            body=None if deleted else mask_contacts_text(comment.body),
+            body_format=comment.body_format,
+            is_system=comment.is_system,
+            is_internal=comment.is_internal,
+            is_deleted=deleted,
+            edited_at=comment.edited_at,
+            created_at=comment.created_at,
+            deleted_at=comment.deleted_at,
+        )
+
+
+class AuditDealRef(BaseModel):
+    """Минимум для контекста ответа без открытия самой сделки (она вне скоупа AUDITOR) —
+    `deleted` вместо полной карточки: B4-3 мягко удаляет сделки, и история переписки по ним
+    должна оставаться читаемой аудитору."""
+
+    id: uuid.UUID
+    number: str
+    deleted: bool
+
+
+class AuditCommentListResponse(BaseModel):
+    deal: AuditDealRef
+    items: list[AuditCommentOut]
     next_cursor: str | None = None
 
 

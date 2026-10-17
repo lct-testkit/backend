@@ -73,6 +73,8 @@ class ReportJobOut(BaseModel):
     error: str | None
     requested_by: uuid.UUID
     created_at: dt.datetime
+    # B8-11: когда рендер реально начался — видимость "processing" без ожидания cron.
+    started_at: dt.datetime | None = None
     finished_at: dt.datetime | None
     expires_at: dt.datetime | None
 

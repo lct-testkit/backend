@@ -21,6 +21,9 @@ class AuditAction(StrEnum):
     USER_BLOCKED = "USER_BLOCKED"
     USER_UNBLOCKED = "USER_UNBLOCKED"
     USER_ROLE_CHANGED = "USER_ROLE_CHANGED"
+    # B4-5: ограничения видимости по вузам/направлениям (`access_scope:manage`, только
+    # ADMIN) — `changes` несёт конфиги `before`/`after` и причину.
+    ACCESS_RULES_CHANGED = "ACCESS_RULES_CHANGED"
     USER_OFFBOARDED = "USER_OFFBOARDED"
     USER_TERMINATED = "USER_TERMINATED"
     # new_spec §4.1: не вошёл по приглашению за 30 дней — учётка отключена.
@@ -59,6 +62,10 @@ class AuditAction(StrEnum):
     COMMENT_CREATED = "COMMENT_CREATED"
     COMMENT_UPDATED = "COMMENT_UPDATED"
     COMMENT_DELETED = "COMMENT_DELETED"
+    # B4-7: AUDITOR читает комментарии сделки через comment:audit_read — доступ к свободному
+    # тексту с возможными ПДн, того же класса, что PII_ACCESS, но именованный под конкретную
+    # операцию, чтобы в журнале было видно, что именно смотрели, а не только что «обращались к ПДн».
+    DEAL_COMMENTS_VIEWED = "DEAL_COMMENTS_VIEWED"
     FILE_UPLOAD_INTENT = "FILE_UPLOAD_INTENT"
     FILE_COMMITTED = "FILE_COMMITTED"
     FILE_INFECTED = "FILE_INFECTED"
@@ -90,6 +97,14 @@ class AuditAction(StrEnum):
     INTEGRATION_SOURCE_UPDATED = "INTEGRATION_SOURCE_UPDATED"
     # Ручной возврат события outbox из failed/dead в очередь доставки.
     INTEGRATION_OUTBOX_RETRIED = "INTEGRATION_OUTBOX_RETRIED"
+    # B5-5: «Забрать сейчас» — ручной запрос забора по API вне расписания cron.
+    INTEGRATION_PULL_REQUESTED = "INTEGRATION_PULL_REQUESTED"
+    # B5-3: настраиваемый маппинг «утверждённых полей».
+    INTEGRATION_MAPPING_UPDATED = "INTEGRATION_MAPPING_UPDATED"
+    INTEGRATION_MAPPING_RESET = "INTEGRATION_MAPPING_RESET"
+    # B5-4: маршрутизация (воронка/тип сделки на источник, правила по значению поля).
+    INTEGRATION_ROUTING_UPDATED = "INTEGRATION_ROUTING_UPDATED"
+    INTEGRATION_ROUTING_RESET = "INTEGRATION_ROUTING_RESET"
 
     # --- Отчётность и дашборды (спринт 8, §4.13/§7.9) ---
     DASHBOARD_CREATED = "DASHBOARD_CREATED"
@@ -123,6 +138,13 @@ class AuditAction(StrEnum):
     ORGANIZATION_UPDATED = "ORGANIZATION_UPDATED"
     ORGANIZATION_DUPLICATE_FOUND = "ORGANIZATION_DUPLICATE_FOUND"
     ORGANIZATION_RESTORED = "ORGANIZATION_RESTORED"
+    # B4-1: отдельно от ORGANIZATION_UPDATED — иначе смену ответственного за
+    # вуз (ТЗ Функц.11) не отличить в журнале от правки адреса или сайта.
+    ORGANIZATION_OWNER_CHANGED = "ORGANIZATION_OWNER_CHANGED"
+    # B4-3: мягкое удаление вуза и сделки (A-16).
+    ORGANIZATION_DELETED = "ORGANIZATION_DELETED"
+    DEAL_DELETED = "DEAL_DELETED"
+    DEAL_RESTORED = "DEAL_RESTORED"
     ORG_REGISTRY_IMPORTED = "ORG_REGISTRY_IMPORTED"
     ORG_DRIFT_APPLIED = "ORG_DRIFT_APPLIED"
     ORG_LIQUIDATION_DETECTED = "ORG_LIQUIDATION_DETECTED"

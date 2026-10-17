@@ -307,6 +307,11 @@ class Principal:
     consent_version: str | None
     must_change_password: bool
     claims: TokenClaims
+    # B4-6: `users.access_restricted` — у пользователя есть хоть одно правило
+    # `user_access_rules` (B4-5), которое дальше сужает его скоуп по вузам/направлениям.
+    # В конце датакласса со значением по умолчанию, чтобы не ломать позиционное
+    # создание в уже написанных тестах (`Principal(...)` без этого поля).
+    restricted: bool = False
 
     @property
     def is_admin(self) -> bool:

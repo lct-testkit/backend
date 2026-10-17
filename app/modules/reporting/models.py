@@ -108,6 +108,14 @@ class ReportJob(UuidPkMixin, Base):
             "status",
             postgresql_where=text("status IN ('queued','processing')"),
         ),
+        # B8-11: добор (`sweep_report_jobs`) переставляет в очередь arq `queued`-задания
+        # старше `REPORTS_ENQUEUE_RETRY_AFTER_S` — частичный индекс держит этот запрос
+        # дешёвым независимо от числа завершённых заданий (миграция 0026).
+        Index(
+            "ix_report_jobs_queue",
+            "created_at",
+            postgresql_where=text("status = 'queued'"),
+        ),
         CheckConstraint("format IN ('xlsx','pdf','png')", name="report_jobs_format_valid"),
         CheckConstraint(
             "status IN ('queued','processing','completed','failed')",
@@ -135,6 +143,10 @@ class ReportJob(UuidPkMixin, Base):
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False, index=True
     )
+    # B8-11: когда рендер реально начался (ставится `render_report_job` коротким
+    # UPDATE при захвате задания) — отдельно от `created_at`, чтобы было видно
+    # ожидание в очереди и отличить «рендерится» от «зависло после падения воркера».
+    started_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 

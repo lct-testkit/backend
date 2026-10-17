@@ -6,7 +6,10 @@ import datetime as dt
 import uuid
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.modules.integration.field_mapping import FieldMapping
+from app.modules.integration.routing import Routing
 
 
 class IntegrationSourceOut(BaseModel):
@@ -25,6 +28,11 @@ class IntegrationSourceOut(BaseModel):
     config: dict[str, Any]
     last_sync_at: dt.datetime | None
     last_error: str | None
+    # B5-2/B5-5: забор по API.
+    pull_enabled: bool
+    pull_interval_seconds: int
+    pull_request: dict[str, Any] | None
+    last_run: dict[str, Any] | None
     created_at: dt.datetime
     updated_at: dt.datetime
 
@@ -41,6 +49,9 @@ class IntegrationSourceUpdateRequest(BaseModel):
     )
     is_active: bool | None = None
     config: dict[str, Any] | None = None
+    # B5-2: включатель и период забора по API (60..86400 с — как в CHECK колонки).
+    pull_enabled: bool | None = None
+    pull_interval_seconds: int | None = Field(default=None, ge=60, le=86400)
 
 
 class ExternalRefOut(BaseModel):
@@ -79,6 +90,8 @@ class InboundMessageOut(BaseModel):
     source_code: str
     external_id: str
     message_type: str | None
+    # B5-2: вебхук (как раньше), забор по расписанию или кнопка «Забрать сейчас» (B5-5).
+    channel: str
     status: str
     signature_valid: bool
     error: str | None
@@ -120,3 +133,93 @@ class BitrixWebhookRequest(BaseModel):
     bitrix_id: str
     version: int = Field(ge=1)
     fields: dict[str, Any] = Field(default_factory=dict)
+
+
+# =============================================================================
+# B5-3: настраиваемый маппинг «утверждённых полей»
+# =============================================================================
+
+
+class TargetOut(BaseModel):
+    code: str
+    label: str
+
+
+class MappingGetResponse(BaseModel):
+    """Текущий маппинг (`null` — администратор ничего не настраивал) и каталог целей для
+    экрана настройки, чтобы форма не хардкодила список."""
+
+    mapping: FieldMapping | None
+    targets: list[TargetOut]
+
+
+class RoutingGetResponse(BaseModel):
+    """B5-4: текущая маршрутизация (`null` — не настроена, заявки идут в B2C-воронку по
+    умолчанию, как и раньше)."""
+
+    routing: Routing | None
+
+
+class MappingValidationErrorOut(BaseModel):
+    field: str
+    reason: str
+
+
+class MappingPreviewRequest(BaseModel):
+    """Либо `record` (образец тела), либо `from_remote: true` (первая запись с источника —
+    требует настроенный `CMS_BASE_URL`). `mapping` — черновик для предпросмотра ДО сохранения;
+    без него используется уже сохранённый маппинг источника."""
+
+    record: dict[str, Any] | None = None
+    from_remote: bool = False
+    mapping: FieldMapping | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_sample_source(self) -> MappingPreviewRequest:
+        if (self.record is None) == (not self.from_remote):
+            raise ValueError("нужен либо record, либо from_remote: true")
+        return self
+
+
+class MappingPreviewResponse(BaseModel):
+    record: dict[str, Any]
+    payload: dict[str, Any]
+    ignored_keys: list[str] = Field(default_factory=list)
+    product: dict[str, Any] | None = None
+    errors: list[MappingValidationErrorOut] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+# --- B5-5: ручной запуск «Забрать сейчас» и статус синхронизации ---------------------------
+
+
+class PullRequestBody(BaseModel):
+    """`updated_since=null` — читать с сохранённого курсора (обычный ручной запуск); дата в
+    прошлом — подобрать заявки за период заново (например, упавшие), не откатывая курсор назад
+    (`CmsPullService.run`/`sweep_lms_progress_pull`: итоговый курсор — максимум старого и
+    вычисленного на этом прогоне)."""
+
+    updated_since: str | None = None
+
+
+class PullRequestResponse(BaseModel):
+    status: str = "queued"
+    requested_at: dt.datetime
+
+
+class IntegrationStatusOut(BaseModel):
+    """Сводка для экрана источника: `last_run` — снимок момента завершения последнего прогона
+    (cron или ручного), `inbound_last_24h`/`outbox_last_24h` — живые счётчики по статусам за
+    последние сутки (не из `last_run`)."""
+
+    code: str
+    is_active: bool
+    pull_enabled: bool
+    pull_interval_seconds: int
+    cursors: dict[str, str | None]
+    last_sync_at: dt.datetime | None
+    last_error: str | None
+    last_run: dict[str, Any] | None
+    pull_request: dict[str, Any] | None
+    inbound_last_24h: dict[str, int]
+    outbox_last_24h: dict[str, int]

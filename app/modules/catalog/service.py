@@ -18,19 +18,33 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import ColumnElement, Select, delete, exists, false, func, or_, select, text
+from sqlalchemy import ColumnElement, Select, and_, delete, exists, false, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.access_rules import (
+    AccessRules,
+    load_access_rules,
+    organization_restriction,
+    user_organization_allowed,
+)
 from app.core.dependents import restrict_dependents
 from app.core.errors import (
     AppError,
     ErrorCode,
     FieldError,
+    ForbiddenError,
     NotFoundError,
     ValidationError,
     VersionConflictError,
 )
-from app.core.normalize import clean_text, company_key, name_key, normalize_email, normalize_phone
+from app.core.normalize import (
+    clean_text,
+    company_key,
+    escape_like,
+    name_key,
+    normalize_email,
+    normalize_phone,
+)
 from app.core.optimistic import claim_version
 from app.core.security import Principal
 from app.modules.audit.actions import AuditAction
@@ -53,7 +67,7 @@ from app.modules.catalog.models import (
     Region,
 )
 from app.modules.catalog.validators import validate_inn
-from app.modules.identity.models import Role
+from app.modules.identity.models import Role, User
 from app.modules.notification.service import NotificationPriority, get_notification_service
 
 _SIMILARITY_THRESHOLD = 0.3
@@ -62,6 +76,9 @@ _SIMILARITY_LIMIT = 5
 _SAME_NAME_LIMIT = 5
 # Ответственных за один продукт на практике единицы; предел нужен только как страховка выдачи.
 _PRODUCT_CONTACTS_LIMIT = 500
+# B4-2: каждая вуз-запись аудита берёт глобальный advisory-лок цепочки
+# (`audit/service.py`), поэтому массовая передача ограничена сотней за вызов.
+_BULK_OWNER_LIMIT = 100
 
 
 def _json_safe(value: Any) -> Any:
@@ -79,27 +96,60 @@ def _json_safe(value: Any) -> Any:
 # =============================================================================
 
 
-async def organization_scope_clause(
-    session: AsyncSession, principal: Principal
+async def organization_scope_clause_for_rules(
+    session: AsyncSession, principal: Principal, rules: AccessRules | None
 ) -> ColumnElement[bool] | None:
-    """`None` — без ограничения. Раздел 4: KAM/HEAD видят организацию, если
+    """Как `organization_scope_clause`, но ограничение передаётся явно — для
+    предпросмотра (B4-6, `GET .../access-rules/preview`), где `rules` из запроса,
+    а не то, что сохранено в БД.
+
+    `None` — без ограничения. Раздел 4: KAM/HEAD видят организацию, если
     они её ответственный `owner_id`, либо к ней привязана хотя бы одна
     сделка в их скоупе сделок. Организации не являются ПДн (dop.md §11.8),
     поэтому `INTEGRATION` читает без ограничения — иначе входящий лид не
-    сможет найти существующую организацию для дедупликации."""
+    сможет найти существующую организацию для дедупликации.
+
+    B4-2: ветка «ответственный» для HEAD раньше сравнивала `owner_id` только
+    с самим Руководителем (`== principal.user_id`), а не с его командой — в
+    отличие от `deal_scope_clause`, где TEAM даёт `Deal.owner_id.in_(...)`.
+    Из-за этого вуз, которым владеет КАМ его команды и у которого ещё нет
+    сделки, Руководителю не был виден вообще (ни прочитать, ни передать).
+    Теперь HEAD видит вузы всех участников своей команды по владельцу, KAM —
+    только свои."""
     from app.modules.crm.models import Deal
-    from app.modules.crm.service import deal_scope_clause
+    from app.modules.crm.service import deal_scope_clause_for_rules, head_scope_member_ids
 
     if principal.role in (Role.ADMIN.value, Role.INTEGRATION.value):
         return None
     if principal.role not in (Role.KAM.value, Role.HEAD.value):
         return false()
 
-    deal_clause = await deal_scope_clause(session, principal)
+    if principal.role == Role.HEAD.value:
+        owner_clause = Organization.owner_id.in_(await head_scope_member_ids(session, principal))
+    else:
+        owner_clause = Organization.owner_id == principal.user_id
+
+    deal_clause = await deal_scope_clause_for_rules(session, principal, rules)
     linked_orgs = select(Deal.organization_id).where(Deal.organization_id.is_not(None))
     if deal_clause is not None:
         linked_orgs = linked_orgs.where(deal_clause)
-    return or_(Organization.owner_id == principal.user_id, Organization.id.in_(linked_orgs))
+    role_clause = or_(owner_clause, Organization.id.in_(linked_orgs))
+
+    # B4-6: ограничение по вузам (B4-5) сужает и эту ветку — без него `allow` на два
+    # вуза не прятал бы третий, которым ограниченный KAM владеет как `owner_id`.
+    if rules is None:
+        return role_clause
+    restriction = organization_restriction(rules)
+    return and_(role_clause, restriction) if restriction is not None else role_clause
+
+
+async def organization_scope_clause(
+    session: AsyncSession, principal: Principal
+) -> ColumnElement[bool] | None:
+    """`None` — без ограничения (ADMIN/INTEGRATION). Иначе — булево выражение на
+    `Organization` с ограничением по вузам из `user_access_rules` (B4-5), если оно есть."""
+    rules = await load_access_rules(session, principal)
+    return await organization_scope_clause_for_rules(session, principal, rules)
 
 
 async def organization_in_scope(
@@ -114,26 +164,27 @@ async def organization_in_scope(
     return bool(result)
 
 
-async def contact_scope_clause(
-    session: AsyncSession, principal: Principal
+async def contact_scope_clause_for_rules(
+    session: AsyncSession, principal: Principal, rules: AccessRules | None
 ) -> ColumnElement[bool] | None:
-    """Контакты — ПДн (раздел 5.2), скоуп строже: только через организацию
-    или сделку в скоупе пользователя, `INTEGRATION` сюда не заходит (нет
-    `contact:read` в `permissions.py`, см. router-level `require_permission`)."""
+    """Как `contact_scope_clause`, но ограничение передаётся явно — для предпросмотра
+    (B4-6). Своей проверки ограничения не добавляет: ветки «через организацию» и
+    «через сделку» уже строятся из `organization_scope_clause_for_rules`/
+    `deal_scope_clause_for_rules`, которые его несут."""
     from app.modules.crm.models import Deal
-    from app.modules.crm.service import deal_scope_clause
+    from app.modules.crm.service import deal_scope_clause_for_rules
 
     if principal.role == Role.ADMIN.value:
         return None
     if principal.role not in (Role.KAM.value, Role.HEAD.value):
         return false()
 
-    org_clause = await organization_scope_clause(session, principal)
+    org_clause = await organization_scope_clause_for_rules(session, principal, rules)
     org_ids = select(Organization.id)
     if org_clause is not None:
         org_ids = org_ids.where(org_clause)
 
-    deal_clause = await deal_scope_clause(session, principal)
+    deal_clause = await deal_scope_clause_for_rules(session, principal, rules)
     contact_ids_via_deal = select(Deal.contact_id).where(Deal.contact_id.is_not(None))
     if deal_clause is not None:
         contact_ids_via_deal = contact_ids_via_deal.where(deal_clause)
@@ -151,6 +202,16 @@ async def contact_scope_clause(
     )
 
 
+async def contact_scope_clause(
+    session: AsyncSession, principal: Principal
+) -> ColumnElement[bool] | None:
+    """Контакты — ПДн (раздел 5.2), скоуп строже: только через организацию
+    или сделку в скоупе пользователя, `INTEGRATION` сюда не заходит (нет
+    `contact:read` в `permissions.py`, см. router-level `require_permission`)."""
+    rules = await load_access_rules(session, principal)
+    return await contact_scope_clause_for_rules(session, principal, rules)
+
+
 async def contact_in_scope(session: AsyncSession, principal: Principal, contact: Contact) -> bool:
     clause = await contact_scope_clause(session, principal)
     if clause is None:
@@ -159,6 +220,30 @@ async def contact_in_scope(session: AsyncSession, principal: Principal, contact:
         select(exists(select(Contact.id).where(Contact.id == contact.id, clause)))
     )
     return bool(result)
+
+
+async def direction_descendant_ids(
+    session: AsyncSession, root_ids: Iterable[uuid.UUID]
+) -> set[uuid.UUID]:
+    """Корневые id ИТ-направлений и все их потомки по `Direction.parent_id`.
+
+    Фильтр по направлению (B4-8 — список сделок; B4-6 — ограничения видимости)
+    расширяется на дочерние: «направление QA» должно включать «QA-автоматизацию»,
+    если она заведена как его дочернее. Тот же приём, что
+    `identity.service.IdentityService.team_subtree_ids` — обход делает БД через
+    рекурсивный CTE, а не Python циклом запросов."""
+    roots = list(root_ids)
+    if not roots:
+        return set()
+    base = select(Direction.id).where(Direction.id.in_(roots), Direction.deleted_at.is_(None))
+    subtree = base.cte("direction_subtree", recursive=True)
+    subtree = subtree.union_all(
+        select(Direction.id).where(
+            Direction.parent_id == subtree.c.id, Direction.deleted_at.is_(None)
+        )
+    )
+    rows = await session.execute(select(subtree.c.id))
+    return {row[0] for row in rows.all()}
 
 
 # =============================================================================
@@ -178,6 +263,17 @@ class ContactUpsertResult:
 
 
 @dataclass(slots=True)
+class BulkOwnerResult:
+    """Итог `OrganizationService.bulk_set_owner` (B4-2)."""
+
+    batch_id: uuid.UUID
+    changed: list[uuid.UUID] = field(default_factory=list)
+    skipped: list[dict[str, Any]] = field(default_factory=list)
+    deals_reassigned: int = 0
+    remaining: int = 0
+
+
+@dataclass(slots=True)
 class OrganizationFilters:
     name: str | None = None
     inn: str | None = None
@@ -189,6 +285,8 @@ class OrganizationFilters:
     is_accredited: bool | None = None
     source: str | None = None
     q: str | None = None
+    # B4-3: список мягко удалённых вузов — только для права `ORG_RESTORE`.
+    deleted: bool = False
 
 
 @dataclass(slots=True)
@@ -214,7 +312,13 @@ class OrganizationService:
     async def list_query(
         self, principal: Principal, filters: OrganizationFilters
     ) -> Select[tuple[Organization]]:
-        stmt = select(Organization).where(Organization.deleted_at.is_(None))
+        # B4-3: без списка удалённых восстановить что-то нельзя — id удалённой
+        # организации нигде больше не виден.
+        stmt = select(Organization).where(
+            Organization.deleted_at.is_not(None)
+            if filters.deleted
+            else Organization.deleted_at.is_(None)
+        )
         clause = await organization_scope_clause(self._session, principal)
         if clause is not None:
             stmt = stmt.where(clause)
@@ -238,11 +342,11 @@ class OrganizationService:
         if filters.source:
             stmt = stmt.where(Organization.source == filters.source)
         if filters.q:
-            pattern = f"%{filters.q.strip()}%"
+            pattern = f"%{escape_like(filters.q.strip())}%"
             stmt = stmt.where(
-                Organization.name.ilike(pattern)
-                | Organization.short_name.ilike(pattern)
-                | Organization.inn.ilike(pattern)
+                Organization.name.ilike(pattern, escape="\\")
+                | Organization.short_name.ilike(pattern, escape="\\")
+                | Organization.inn.ilike(pattern, escape="\\")
             )
         return stmt
 
@@ -301,6 +405,282 @@ class OrganizationService:
         )
         await self._session.flush()
         return organization
+
+    async def delete_blockers(self, organization: Organization) -> list[dict[str, Any]]:
+        """B4-3 (A-16): причины, по которым организацию нельзя удалить мягко — живые
+        (не мягко удалённые) сделки, контакты и лицензии. Сознательно не
+        `core.dependents.restrict_dependents`: он считает все строки, включая уже мягко
+        удалённые, и предназначен для жёсткого удаления по 152-ФЗ, а не для этой проверки."""
+        from app.modules.crm.models import Deal
+
+        deals = await self._session.scalar(
+            select(func.count()).where(
+                Deal.organization_id == organization.id, Deal.deleted_at.is_(None)
+            )
+        )
+        contacts = await self._session.scalar(
+            select(func.count()).where(
+                Contact.organization_id == organization.id, Contact.deleted_at.is_(None)
+            )
+        )
+        licenses = await self._session.scalar(
+            select(func.count()).where(
+                OrganizationLicense.organization_id == organization.id,
+                OrganizationLicense.deleted_at.is_(None),
+            )
+        )
+        blockers: list[dict[str, Any]] = []
+        if deals:
+            blockers.append(
+                {"code": "live_deals", "count": int(deals), "detail": "Сделки (включая закрытые)"}
+            )
+        if contacts:
+            blockers.append({"code": "live_contacts", "count": int(contacts), "detail": "Контакты"})
+        if licenses:
+            blockers.append({"code": "live_licenses", "count": int(licenses), "detail": "Лицензии"})
+        return blockers
+
+    async def delete(
+        self, organization: Organization, *, reason: str, expected_version: int
+    ) -> Organization:
+        """B4-3 (A-16): мягкое удаление вуза — только ADMIN (`Permission.ORG_DELETE`).
+        Уведомление владельцу не нужно (доку B4-3): организация пропадает из его же списка."""
+        blockers = await self.delete_blockers(organization)
+        if blockers:
+            raise AppError(
+                ErrorCode.ENTITY_IN_USE,
+                "У организации есть связанные записи — удаление невозможно",
+                extra={"blockers": blockers},
+            )
+        await claim_version(
+            self._session, organization, expected_version, conflicting={"name": organization.name}
+        )
+        organization.deleted_at = dt.datetime.now(dt.UTC)
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.ORGANIZATION_DELETED,
+            entity_type="organization",
+            entity_id=organization.id,
+            changes={
+                "name": {"old": None, "new": organization.name},
+                "inn": {"old": None, "new": organization.inn},
+                "reason": {"old": None, "new": reason},
+            },
+        )
+        return organization
+
+    async def set_owner(
+        self,
+        organization: Organization,
+        principal: Principal,
+        *,
+        owner_id: uuid.UUID | None,
+        reason: str,
+        expected_version: int,
+    ) -> Organization:
+        """B4-1: назначить, сменить или снять ответственного за вуз (ТЗ Функц.11).
+
+        Отдельно от `update()` — обычный `PATCH` больше не может менять `owner_id`
+        (убран из `_PATCHABLE_FIELDS`), только эта ветка и ручки `PUT`/`DELETE
+        .../owner`, которые требуют `Permission.ORG_OWNER_ASSIGN`. `owner_id=None`
+        снимает ответственного (B4-2: вуз становится «ничьим»)."""
+        conflicting = {"owner_id": str(organization.owner_id) if organization.owner_id else None}
+        if organization.owner_id == owner_id:
+            raise ValidationError(
+                "Новый ответственный совпадает с текущим",
+                [FieldError(field="owner_id", reason="совпадает с текущим ответственным")],
+            )
+
+        new_owner: User | None = None
+        if owner_id is not None:
+            # Ленивый импорт — как у `deal_scope_clause` выше: `crm.service` ссылается
+            # только на `catalog.models`, цикл модулей не создаётся.
+            from app.modules.crm.service import ensure_assignable_user
+
+            new_owner = await ensure_assignable_user(
+                self._session,
+                principal,
+                owner_id,
+                roles=(Role.KAM.value, Role.HEAD.value),
+                organization_id=organization.id,
+            )
+
+        old_owner_id = organization.owner_id
+        await claim_version(self._session, organization, expected_version, conflicting=conflicting)
+        organization.owner_id = new_owner.id if new_owner is not None else None
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.ORGANIZATION_OWNER_CHANGED,
+            entity_type="organization",
+            entity_id=organization.id,
+            changes={
+                "owner_id": {
+                    "old": str(old_owner_id) if old_owner_id else None,
+                    "new": str(owner_id) if owner_id else None,
+                },
+                "reason": {"old": None, "new": reason},
+            },
+        )
+        if new_owner is not None:
+            await get_notification_service().notify_user(
+                self._session,
+                recipient_id=new_owner.id,
+                template_code="ORG_OWNER_ASSIGNED",
+                priority=NotificationPriority.NORMAL,
+                entity_type="organization",
+                entity_id=organization.id,
+            )
+        if old_owner_id is not None:
+            await get_notification_service().notify_user(
+                self._session,
+                recipient_id=old_owner_id,
+                template_code="ORG_OWNER_REMOVED",
+                priority=NotificationPriority.NORMAL,
+                entity_type="organization",
+                entity_id=organization.id,
+            )
+        return organization
+
+    async def bulk_set_owner(
+        self,
+        principal: Principal,
+        *,
+        organization_ids: list[uuid.UUID] | None,
+        from_owner_id: uuid.UUID | None,
+        owner_id: uuid.UUID | None,
+        reason: str,
+        carry_open_deals: bool,
+    ) -> BulkOwnerResult:
+        """B4-2: передать все вузы одного менеджера другому (или снять ответственного)
+        одним действием. Ровно один из `organization_ids`/`from_owner_id` — схема запроса
+        (`BulkOrganizationOwnerRequest`) это проверяет до вызова. Выборка ограничена скоупом
+        вызывающего (HEAD видит и передаёт только вузы своей команды) и `_BULK_OWNER_LIMIT`
+        организациями за вызов — остаток в `remaining`."""
+        from app.modules.crm.service import DealService, ensure_assignable_user
+
+        new_owner: User | None = None
+        if owner_id is not None:
+            new_owner = await ensure_assignable_user(
+                self._session, principal, owner_id, roles=(Role.KAM.value, Role.HEAD.value)
+            )
+
+        stmt = select(Organization).where(Organization.deleted_at.is_(None))
+        clause = await organization_scope_clause(self._session, principal)
+        if clause is not None:
+            stmt = stmt.where(clause)
+        if from_owner_id is not None:
+            stmt = stmt.where(Organization.owner_id == from_owner_id)
+        else:
+            stmt = stmt.where(Organization.id.in_(organization_ids or []))
+        stmt = (
+            stmt.order_by(Organization.created_at, Organization.id)
+            .limit(_BULK_OWNER_LIMIT + 1)
+            .with_for_update()
+        )
+        rows = list((await self._session.execute(stmt)).scalars().all())
+        remaining = max(0, len(rows) - _BULK_OWNER_LIMIT)
+        rows = rows[:_BULK_OWNER_LIMIT]
+
+        batch_id = uuid.uuid4()
+        changed_ids: list[uuid.UUID] = []
+        skipped: list[dict[str, Any]] = []
+        old_owner_counts: dict[uuid.UUID, int] = {}
+        changed_org_ids: list[uuid.UUID] = []
+        for organization in rows:
+            if organization.owner_id == owner_id:
+                skipped.append({"organization_id": str(organization.id), "reason": "already_owner"})
+                continue
+            # B4-6: массовая передача — не одна проверка на вызов (организация не известна
+            # заранее), а на строку: ограниченный преемник получает только вузы из своего
+            # `allow` (или не из `deny`), остальные молча пропускаются, не всё переназначение.
+            if new_owner is not None and not await user_organization_allowed(
+                self._session, new_owner, organization.id
+            ):
+                skipped.append(
+                    {"organization_id": str(organization.id), "reason": "owner_access_restricted"}
+                )
+                continue
+            old_owner_id = organization.owner_id
+            # Массовая операция — без `expected_version` клиента, версия просто растёт
+            # (тот же приём, что `DealService.bulk_reassign`).
+            await claim_version(self._session, organization)
+            organization.owner_id = new_owner.id if new_owner is not None else None
+            changed_ids.append(organization.id)
+            changed_org_ids.append(organization.id)
+            if old_owner_id is not None:
+                old_owner_counts[old_owner_id] = old_owner_counts.get(old_owner_id, 0) + 1
+            await self._audit.record(
+                AuditAction.ORGANIZATION_OWNER_CHANGED,
+                entity_type="organization",
+                entity_id=organization.id,
+                changes={
+                    "owner_id": {
+                        "old": str(old_owner_id) if old_owner_id else None,
+                        "new": str(owner_id) if owner_id else None,
+                    },
+                    "reason": {"old": None, "new": reason},
+                    "batch_id": {"old": None, "new": str(batch_id)},
+                },
+            )
+
+        if not changed_ids:
+            return BulkOwnerResult(
+                batch_id=batch_id,
+                changed=[],
+                skipped=skipped,
+                deals_reassigned=0,
+                remaining=remaining,
+            )
+
+        await self._session.flush()
+
+        deals_reassigned = 0
+        if carry_open_deals and new_owner is not None and old_owner_counts:
+            from app.modules.crm.models import Deal
+
+            deal_ids = list(
+                (
+                    await self._session.execute(
+                        select(Deal.id).where(
+                            Deal.organization_id.in_(changed_org_ids),
+                            Deal.owner_id.in_(old_owner_counts.keys()),
+                            Deal.deleted_at.is_(None),
+                            Deal.closed_at.is_(None),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if deal_ids:
+                deals_reassigned = await DealService(self._session).bulk_reassign(
+                    principal, deal_ids=deal_ids, successor_id=new_owner.id, reason=reason
+                )
+
+        if new_owner is not None:
+            await get_notification_service().notify_user(
+                self._session,
+                recipient_id=new_owner.id,
+                template_code="ORG_OWNER_ASSIGNED",
+                priority=NotificationPriority.NORMAL,
+                payload={"count": len(changed_ids)},
+            )
+        for old_owner_id, count in old_owner_counts.items():
+            await get_notification_service().notify_user(
+                self._session,
+                recipient_id=old_owner_id,
+                template_code="ORG_OWNER_REMOVED",
+                priority=NotificationPriority.NORMAL,
+                payload={"count": count},
+            )
+
+        return BulkOwnerResult(
+            batch_id=batch_id,
+            changed=changed_ids,
+            skipped=skipped,
+            deals_reassigned=deals_reassigned,
+            remaining=remaining,
+        )
 
     async def _find_by_inn(self, inn: str) -> Organization | None:
         return await self._session.scalar(select(Organization).where(Organization.inn == inn))
@@ -497,6 +877,8 @@ class OrganizationService:
         )
         return organization
 
+    # B4-1: `owner_id` убран отсюда — смена ответственного за вуз идёт только
+    # через `set_owner()` (отдельное право `ORG_OWNER_ASSIGN`), не обычным PATCH.
     _PATCHABLE_FIELDS = frozenset(
         {
             "name",
@@ -511,7 +893,6 @@ class OrganizationService:
             "main_phone",
             "main_email",
             "students_count",
-            "owner_id",
         }
     )
 
@@ -756,8 +1137,10 @@ class ContactService:
             stmt = stmt.where(Contact.source == filters.source)
         if filters.q:
             needle = filters.q.strip()
-            pattern = f"%{needle}%"
-            condition = Contact.first_name.ilike(pattern) | Contact.last_name.ilike(pattern)
+            pattern = f"%{escape_like(needle)}%"
+            condition = Contact.first_name.ilike(pattern, escape="\\") | Contact.last_name.ilike(
+                pattern, escape="\\"
+            )
             # Email в выдаче маскирован, а поиск по подстроке позволял подбирать его по символам
             # (`a%`, `ab%`, …). Полный адрес находится только точным совпадением: подобрать
             # чужой адрес так нельзя, а известный — найти можно.
@@ -953,6 +1336,15 @@ class ContactService:
         return contact
 
     async def create(self, principal: Principal, payload: Any) -> Contact:
+        if payload.consent_id is not None:
+            # B4-9: согласие ссылается на `subject_id` контакта, которого на момент
+            # создания ещё нет — валидным может быть только `null`, привязка вторым
+            # шагом через `PATCH` (когда у согласия есть на что указывать).
+            raise ValidationError(
+                "При создании контакта consent_id должен быть пустым — привяжите "
+                "согласие через PATCH после создания",
+                [FieldError(field="consent_id", reason="контакт ещё не создан")],
+            )
         if payload.organization_id is not None:
             organization = await self._session.get(Organization, payload.organization_id)
             if organization is None or organization.deleted_at is not None:
@@ -1255,6 +1647,37 @@ class ContactService:
             changes[key] = {"old": old_cmp, "new": new_cmp}
             setattr(contact, key, value)
 
+        # B4-9: источник ПДн — часть доказательства законности обработки (dop.md §11):
+        # заполнить может кто угодно, переписать уже заполненное — только ADMIN.
+        if "source" in data:
+            new_source = data["source"]
+            if contact.source and principal.role != Role.ADMIN.value:
+                raise ForbiddenError(
+                    "Источник контакта уже указан: изменить может только администратор"
+                )
+            if new_source != contact.source:
+                changes["source"] = {"old": contact.source, "new": new_source}
+                contact.source = new_source
+
+        if "consent_id" in data:
+            new_consent_id = data["consent_id"]
+            if new_consent_id is not None:
+                await self._validate_consent(new_consent_id, contact.id)
+            if new_consent_id != contact.consent_id:
+                changes["consent_id"] = {
+                    "old": str(contact.consent_id) if contact.consent_id else None,
+                    "new": str(new_consent_id) if new_consent_id else None,
+                }
+                contact.consent_id = new_consent_id
+
+        if data.get("channels") is not None:
+            # `payload.channels`, не `data["channels"]`: `model_dump()` рекурсивно
+            # разворачивает вложенные модели в словари, а `_replace_channels` нужны
+            # объекты `ContactChannelIn` с полями `.type`/`.value`/`.is_primary`.
+            channel_change = await self._replace_channels(contact, payload.channels or [])
+            if channel_change is not None:
+                changes["channels"] = channel_change
+
         if not changes:
             return contact
 
@@ -1267,6 +1690,65 @@ class ContactService:
             changes=changes,
         )
         return contact
+
+    async def _validate_consent(self, consent_id: uuid.UUID, contact_id: uuid.UUID) -> None:
+        """B4-9: согласие должно существовать, принадлежать этому контакту, быть принятым
+        и не отозванным — иначе 422. Чужое или отозванное согласие не привязывается."""
+        from app.modules.identity.models import Consent
+
+        consent = await self._session.get(Consent, consent_id)
+        valid = (
+            consent is not None
+            and consent.subject_type == "contact"
+            and consent.subject_id == contact_id
+            and consent.accepted_at is not None
+            and consent.revoked_at is None
+        )
+        if not valid:
+            raise ValidationError(
+                "Согласие не найдено, принадлежит другому субъекту или отозвано",
+                [FieldError(field="consent_id", reason="недействительное согласие")],
+            )
+
+    async def _replace_channels(self, contact: Contact, items: list[Any]) -> dict[str, Any] | None:
+        """B4-9: совпадающие по паре (тип, нормализованное значение) сохраняют `id` и
+        `is_verified` (обновляется только `is_primary`); новые добавляются; отсутствующие
+        удаляются. `changes` — счётчики и типы, не сырые значения (журнал бессрочен, ПДн в
+        нём хранить нельзя). `None` — список не изменился, аудит не пишется."""
+        existing = await self.channels(contact.id)
+        existing_by_key = {(row.type, row.value): row for row in existing}
+        new_keys = {(item.type, item.value) for item in items}
+
+        changed = False
+        for item in items:
+            key = (item.type, item.value)
+            row = existing_by_key.get(key)
+            if row is None:
+                self._session.add(
+                    ContactChannel(
+                        contact_id=contact.id,
+                        type=item.type,
+                        value=item.value,
+                        is_primary=item.is_primary,
+                    )
+                )
+                changed = True
+            elif row.is_primary != item.is_primary:
+                row.is_primary = item.is_primary
+                changed = True
+
+        for row in existing:
+            if (row.type, row.value) not in new_keys:
+                await self._session.delete(row)
+                changed = True
+
+        if not changed:
+            return None
+
+        await self._session.flush()
+        old_summary = {"count": len(existing), "types": sorted({row.type for row in existing})}
+        new_summary = {"count": len(items), "types": sorted({item.type for item in items})}
+        return {"old": old_summary, "new": new_summary}
 
     async def channels(self, contact_id: uuid.UUID) -> list[ContactChannel]:
         rows = (

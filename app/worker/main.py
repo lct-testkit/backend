@@ -24,22 +24,21 @@ from app.core.redis_client import close_redis
 from app.modules.admin.models import IdempotencyKey
 from app.modules.admin.tasks import sweep_retention
 from app.modules.crm.tasks import sweep_sla_breaches
-from app.modules.files.antivirus import build_scanner as build_antivirus_scanner
-from app.modules.files.service import register_antivirus_scanner
-from app.modules.identity.tasks import (
-    sweep_erasure_requests,
-    sweep_keycloak_events,
-    sweep_user_lifecycle,
-)
+from app.modules.identity.tasks import sweep_erasure_requests, sweep_user_lifecycle
 from app.modules.imports.tasks import sweep_import_jobs
 from app.modules.integration.service import RealOutboxService, register_outbox_service
-from app.modules.integration.tasks import sweep_lms_progress_pull, sweep_outbox_events
+from app.modules.integration.tasks import (
+    sweep_cms_leads_pull,
+    sweep_lms_progress_pull,
+    sweep_outbox_events,
+)
 from app.modules.notification.service import RealNotificationService, register_notification_service
 from app.modules.notification.tasks import dispatch_pending_notifications
 from app.modules.registry.tasks import sweep_registry_drift, sweep_registry_imports
 from app.modules.reporting.tasks import (
     expire_report_files,
     refresh_report_materialized_views,
+    render_report_job,
     sweep_report_jobs,
 )
 from app.modules.signing.tasks import (
@@ -107,6 +106,22 @@ async def startup(ctx: dict[str, Any]) -> None:
     # Метрики фоновых задач считаются в этом процессе, api их не видит: отдаём сами.
     ctx["metrics_server"] = start_worker_metrics_server(settings.worker_metrics_port)
 
+    # B5-1: `*_AUTH_REF` указывает ИМЯ переменной с токеном, а не сам токен — если
+    # такой переменной нет в окружении (забыли добавить в `x-api-env` compose/Helm,
+    # см. риски B5-1), `resolve_secret` молча вернёт `None`, и запрос к источнику
+    # уйдёт без `Authorization`. Старт не блокируем: без токена моки тоже работают.
+    for base_url, auth_ref, source_code in (
+        (settings.cms_base_url, settings.cms_auth_ref, "cms"),
+        (settings.lms_base_url, settings.lms_auth_ref, "lms"),
+    ):
+        if base_url and auth_ref and not resolve_secret(auth_ref):
+            logger.warning(
+                "integration_auth_token_missing",
+                source=source_code,
+                auth_ref=auth_ref,
+                detail=f"{auth_ref} не задан в окружении — запросы уйдут без Authorization",
+            )
+
 
 async def shutdown(ctx: dict[str, Any]) -> None:
     stop_worker_metrics_server(ctx.get("metrics_server"))
@@ -131,6 +146,9 @@ class WorkerSettings:
         sweep_registry_imports,
         sweep_registry_drift,
         sweep_import_jobs,
+        # B8-11: не cron — ставятся из API сразу после коммита (`enqueue_after_commit`).
+        run_import_job,
+        render_report_job,
         sweep_signature_deadlines,
         sweep_signature_orphans,
         sweep_signature_reminders,
@@ -140,6 +158,7 @@ class WorkerSettings:
         refresh_report_materialized_views,
         sweep_outbox_events,
         sweep_lms_progress_pull,
+        sweep_cms_leads_pull,
         sweep_erasure_requests,
         sweep_user_lifecycle,
         sweep_keycloak_events,
@@ -193,8 +212,13 @@ class WorkerSettings:
         # 1s/5s/30s/5m/30m/2h — минутный тик приближает «доставить как можно
         # быстрее» для первой, самой короткой ступени).
         cron(sweep_outbox_events, minute=set(range(60))),
-        # Раз в 30 минут (раздел 4.14, дословно).
-        cron(sweep_lms_progress_pull, minute={0, 30}),
+        # B5-6: тик раз в минуту, реальный интервал задаёт integration_sources.
+        # pull_interval_seconds источника lms (по умолчанию 1800 с = раз в 30 минут,
+        # раздел 4.14, дословно) — тот же приём, что sweep_cms_leads_pull ниже.
+        cron(sweep_lms_progress_pull, minute=set(range(60))),
+        # Раз в минуту: реальный интервал задаёт integration_sources.pull_interval_seconds
+        # (B5-2), тик, пришедшийся раньше срока, сам себя пропускает.
+        cron(sweep_cms_leads_pull, minute=set(range(60))),
         # Раз в 15 минут: исполнение удаления/обезличивания по истечении
         # отсрочки режима A (new_spec §4.8.4 шаг 4-5, 30 дней по умолчанию) —
         # та же периодичность, что и SLA-скан: отсрочка считается днями, чаще

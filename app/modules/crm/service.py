@@ -31,7 +31,7 @@ import zoneinfo
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import structlog
 from sqlalchemy import (
@@ -53,6 +53,12 @@ from sqlalchemy import (
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 
+from app.core.access_rules import (
+    AccessRules,
+    deal_restriction,
+    load_access_rules,
+    user_organization_allowed,
+)
 from app.core.db import run_after_commit
 from app.core.errors import (
     AppError,
@@ -63,6 +69,7 @@ from app.core.errors import (
     ValidationError,
     VersionConflictError,
 )
+from app.core.normalize import escape_like
 from app.core.optimistic import claim_version
 from app.core.pagination import MAX_LIMIT, Cursor, keyset_after, keyset_before
 from app.core.permissions import DealScope, Permission, deal_scope_for, has_permission
@@ -78,6 +85,7 @@ from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService, defer_denied_audit
 from app.modules.catalog.custom_fields import validate_custom_fields
 from app.modules.catalog.models import Contact, Holiday, LossReason, Organization, Product
+from app.modules.catalog.service import direction_descendant_ids
 from app.modules.crm.models import (
     OPEN_TASK_STATUSES,
     Deal,
@@ -115,6 +123,13 @@ from app.modules.workflow.models import (
 )
 from app.modules.workflow.service import get_cached_published_graph
 
+if TYPE_CHECKING:
+    # B4-4: `handover.py` импортирует отсюда `_reassign_owner`/`ensure_assignable_user` —
+    # импорт в обратную сторону только для типов (`TYPE_CHECKING`), иначе модули заходят
+    # друг в друга при загрузке. Настоящий импорт в `RealOwnershipService.reassign_plan`
+    # и `NullOwnershipService.reassign_plan` — отложенный, внутри функции.
+    from app.modules.crm.handover import ExecutionResult, HandoverPlan, ResolvedHandover
+
 logger = structlog.get_logger(__name__)
 
 _TERMINAL_TYPE_VALUES = {t.value for t in TERMINAL_TYPES}
@@ -135,11 +150,21 @@ class UserWorkload:
     open_tasks: int = 0
     running_imports: int = 0
     running_reports: int = 0
+    #: B4-4: превью мастера передачи дел считало только открытые сделки, а
+    #: `reassign_all`/`reassign_plan` переносят и закрытые — числа расходились.
+    closed_deals: int = 0
+    #: B4-4: вузы, у которых этот пользователь — ответственный (`Organization.owner_id`).
+    organizations: int = 0
 
     @property
     def is_empty(self) -> bool:
         return not (
-            self.active_deals or self.open_tasks or self.running_imports or self.running_reports
+            self.active_deals
+            or self.open_tasks
+            or self.running_imports
+            or self.running_reports
+            or self.closed_deals
+            or self.organizations
         )
 
 
@@ -162,6 +187,26 @@ class OwnershipService(Protocol):
     ) -> int:
         """Ставит или снимает `owner_unavailable` при блокировке (§4.5)."""
 
+    async def reassign_plan(
+        self,
+        session: AsyncSession,
+        user_id: uuid.UUID,
+        plan: HandoverPlan,
+        *,
+        principal: Principal,
+        reason: str,
+        deal_notification_template: str = "DEAL_REASSIGNED",
+    ) -> ExecutionResult:
+        """B4-4: распределяет сделки, вузы и задачи уходящего между несколькими
+        преемниками по плану (`HandoverService`). `reassign_all` остаётся для
+        одиночного преемника без правил — вызывается через план с пустыми
+        `rules`/`pool_ids` и общим `default_successor_id`."""
+
+    async def preview_plan(
+        self, session: AsyncSession, user_id: uuid.UUID, plan: HandoverPlan, *, principal: Principal
+    ) -> ResolvedHandover:
+        """Как `reassign_plan`, но без записи — для `distribution` в превью мастера."""
+
 
 class NullOwnershipService:
     """Оставлена для тестов и сред, где модуль сделок не подключён."""
@@ -178,6 +223,29 @@ class NullOwnershipService:
         reason: str,
     ) -> list[uuid.UUID]:
         return []
+
+    async def reassign_plan(
+        self,
+        session: AsyncSession,
+        user_id: uuid.UUID,
+        plan: HandoverPlan,
+        *,
+        principal: Principal,
+        reason: str,
+        deal_notification_template: str = "DEAL_REASSIGNED",
+    ) -> ExecutionResult:
+        from app.modules.crm.handover import ExecutionResult as _ExecutionResult
+
+        return _ExecutionResult(
+            reassigned_deals=[], reassigned_organizations=[], reassigned_tasks=0, distribution=[]
+        )
+
+    async def preview_plan(
+        self, session: AsyncSession, user_id: uuid.UUID, plan: HandoverPlan, *, principal: Principal
+    ) -> ResolvedHandover:
+        from app.modules.crm.handover import ResolvedHandover as _ResolvedHandover
+
+        return _ResolvedHandover(user_id=user_id)
 
     async def mark_owner_unavailable(
         self, session: AsyncSession, user_id: uuid.UUID, *, unavailable: bool
@@ -230,6 +298,23 @@ class RealOwnershipService:
             .select_from(Deal)
             .where(Deal.owner_id == user_id, Deal.deleted_at.is_(None), Deal.closed_at.is_(None))
         )
+        # B4-4: превью показывало только открытые сделки, а передача дел (`reassign_all`,
+        # `HandoverService`) переносит и закрытые — число в превью должно совпадать с тем,
+        # что реально случится после подтверждения.
+        closed_count = await session.scalar(
+            select(func.count())
+            .select_from(Deal)
+            .where(
+                Deal.owner_id == user_id,
+                Deal.deleted_at.is_(None),
+                Deal.closed_at.is_not(None),
+            )
+        )
+        organizations_count = await session.scalar(
+            select(func.count())
+            .select_from(Organization)
+            .where(Organization.owner_id == user_id, Organization.deleted_at.is_(None))
+        )
         critical_rows = (
             await session.execute(
                 select(Deal.id, Deal.number, Deal.title, Deal.status_id, Deal.priority)
@@ -271,6 +356,8 @@ class RealOwnershipService:
             open_tasks=int(open_tasks or 0),
             running_imports=0,
             running_reports=0,
+            closed_deals=int(closed_count or 0),
+            organizations=int(organizations_count or 0),
         )
 
     async def reassign_all(
@@ -362,6 +449,34 @@ class RealOwnershipService:
             .values(owner_unavailable=unavailable)
         )
         return result.rowcount or 0
+
+    async def reassign_plan(
+        self,
+        session: AsyncSession,
+        user_id: uuid.UUID,
+        plan: HandoverPlan,
+        *,
+        principal: Principal,
+        reason: str,
+        deal_notification_template: str = "DEAL_REASSIGNED",
+    ) -> ExecutionResult:
+        from app.modules.crm.handover import HandoverService
+
+        service = HandoverService(session)
+        resolved = await service.resolve(user_id, plan, principal)
+        return await service.execute(
+            resolved,
+            principal,
+            reason=reason,
+            deal_notification_template=deal_notification_template,
+        )
+
+    async def preview_plan(
+        self, session: AsyncSession, user_id: uuid.UUID, plan: HandoverPlan, *, principal: Principal
+    ) -> ResolvedHandover:
+        from app.modules.crm.handover import HandoverService
+
+        return await HandoverService(session).resolve(user_id, plan, principal)
 
 
 _ownership_service: OwnershipService = RealOwnershipService()
@@ -1019,10 +1134,71 @@ async def head_scope_member_ids(session: AsyncSession, principal: Principal) -> 
     return member_ids
 
 
-async def deal_scope_clause(
-    session: AsyncSession, principal: Principal
+async def ensure_assignable_user(
+    session: AsyncSession,
+    principal: Principal,
+    user_id: uuid.UUID,
+    *,
+    roles: tuple[str, ...] | None = None,
+    organization_id: uuid.UUID | None = None,
+) -> User:
+    """Общая проверка «можно ли назначить этого пользователя ответственным».
+
+    Вынесена из `DealService._resolve_owner` (B4-1), чтобы тем же правилом
+    пользовался `catalog.service.OrganizationService.set_owner` (ответственный
+    за вуз): пользователь существует, активен, и, если задан `roles` —
+    имеет одну из перечисленных ролей (для вуза — KAM или HEAD; для сделки
+    `roles=None`, как было раньше). Для HEAD целевой пользователь обязан
+    входить в его команду (`head_scope_member_ids`); остальным ролям, кроме
+    ADMIN и INTEGRATION, назначать кого-то другого запрещено.
+
+    B4-6: `organization_id` (только для назначения ответственного за вуз) —
+    отказ, если этот вуз вне `allow`/внутри `deny` ограниченного пользователя:
+    иначе он стал бы «ответственным» за то, чего сам не видит в своих списках.
+
+    Тому, кому чужого назначать нельзя, отказ (403) одинаков для любого id —
+    так по ответу не узнать, есть ли такой сотрудник."""
+    if principal.role == Role.HEAD.value:
+        if user_id not in await head_scope_member_ids(session, principal):
+            defer_denied_audit(session, entity_type="user", reason="owner_outside_team")
+            raise ForbiddenError("Назначить ответственным можно только сотрудника своей команды")
+    elif not (principal.is_admin or principal.role == Role.INTEGRATION.value):
+        defer_denied_audit(session, entity_type="user", reason="assign_owner_forbidden")
+        raise ForbiddenError("Назначать ответственным другого сотрудника может только руководитель")
+
+    user = await session.get(User, user_id)
+    if user is None:
+        raise NotFoundError("Пользователь", user_id)
+    if not user.is_active:
+        raise ValidationError(
+            "Ответственным можно назначить только активного сотрудника",
+            [FieldError(field="owner_id", reason="сотрудник неактивен")],
+        )
+    if roles is not None and user.role not in roles:
+        raise ValidationError(
+            "Ответственным за вуз можно назначить только КАМа или руководителя",
+            [FieldError(field="owner_id", reason="недопустимая роль")],
+        )
+    if organization_id is not None and not await user_organization_allowed(
+        session, user, organization_id
+    ):
+        raise ValidationError(
+            "Пользователь не может быть ответственным: вуз вне его ограничений видимости",
+            [FieldError(field="owner_id", reason="вуз вне ограничения доступа")],
+        )
+    return user
+
+
+async def deal_scope_clause_for_rules(
+    session: AsyncSession, principal: Principal, rules: AccessRules | None
 ) -> ColumnElement[bool] | None:
-    """`None` — без ограничения (ADMIN). Иначе — булево выражение на `Deal`."""
+    """Как `deal_scope_clause`, но ограничение передаётся явно, а не читается из БД —
+    для предпросмотра (B4-6, `GET .../access-rules/preview`), где правила из запроса
+    ещё не сохранены и `load_access_rules` ничего не нашёл бы.
+
+    `None` — без ограничения (ADMIN). Иначе — булево выражение на `Deal`. Для KAM/HEAD
+    скоуп роли (владелец/команда) сужается через `AND` — расширить видимость роли
+    ограничение не может."""
     scope = deal_scope_for(principal.role)
     if scope is DealScope.ALL:
         return None
@@ -1031,14 +1207,34 @@ async def deal_scope_clause(
     if scope is DealScope.SOURCE:
         return Deal.created_by == principal.user_id
     if scope is DealScope.TEAM:
-        return Deal.owner_id.in_(await head_scope_member_ids(session, principal))
-    # OWN — KAM: владелец либо участник.
-    participant_exists = (
-        select(DealParticipant.id)
-        .where(DealParticipant.deal_id == Deal.id, DealParticipant.user_id == principal.user_id)
-        .exists()
-    )
-    return or_(Deal.owner_id == principal.user_id, participant_exists)
+        role_clause: ColumnElement[bool] = Deal.owner_id.in_(
+            await head_scope_member_ids(session, principal)
+        )
+    else:
+        # OWN — KAM: владелец либо участник.
+        participant_exists = (
+            select(DealParticipant.id)
+            .where(DealParticipant.deal_id == Deal.id, DealParticipant.user_id == principal.user_id)
+            .exists()
+        )
+        role_clause = or_(Deal.owner_id == principal.user_id, participant_exists)
+
+    if rules is None:
+        return role_clause
+    restriction = deal_restriction(rules)
+    return and_(role_clause, restriction) if restriction is not None else role_clause
+
+
+async def deal_scope_clause(
+    session: AsyncSession, principal: Principal
+) -> ColumnElement[bool] | None:
+    """`None` — без ограничения (ADMIN). Иначе — булево выражение на `Deal`.
+
+    B4-6: AUDITOR/INTEGRATION ограничений не имеют по правилу B4-5 (`access_restricted`
+    для них недостижим) — для них `load_access_rules` возвращает `None` без похода в БД
+    (`not principal.restricted`)."""
+    rules = await load_access_rules(session, principal)
+    return await deal_scope_clause_for_rules(session, principal, rules)
 
 
 async def deal_in_scope(session: AsyncSession, principal: Principal, deal: Deal) -> bool:
@@ -1154,12 +1350,16 @@ class DealFilters:
     is_closed: bool | None = None
     workflow_id: uuid.UUID | None = None
     deal_type: str | None = None
-    organization_id: uuid.UUID | None = None
+    # B4-8: множественные фильтры — внутри одного параметра «ИЛИ», между параметрами «И».
+    # Имя параметра API осталось в единственном числе (`organization_id=a&organization_id=b`)
+    # ради совместимости с фронтендом и отчётами B1 (`reporting/builders.py`); здесь поле
+    # во множественном числе — список значений одного параметра.
+    organization_ids: list[uuid.UUID] | None = None
     contact_id: uuid.UUID | None = None
-    owner_id: uuid.UUID | None = None
-    product_id: uuid.UUID | None = None
-    direction_id: uuid.UUID | None = None
-    region_id: uuid.UUID | None = None
+    owner_ids: list[uuid.UUID] | None = None
+    product_ids: list[uuid.UUID] | None = None
+    direction_ids: list[uuid.UUID] | None = None
+    region_ids: list[uuid.UUID] | None = None
     priority: str | None = None
     sla_state: str | None = None
     created_from: dt.datetime | None = None
@@ -1167,6 +1367,8 @@ class DealFilters:
     closed_from: dt.datetime | None = None
     closed_to: dt.datetime | None = None
     q: str | None = None
+    # B4-3: список мягко удалённых сделок — только для права `DEAL_DELETE`.
+    deleted: bool = False
 
 
 @dataclass(slots=True)
@@ -1370,7 +1572,9 @@ class DealService:
     # --- Скоуп и выборка ---------------------------------------------------
 
     async def list_query(self, principal: Principal, filters: DealFilters) -> Select[tuple[Deal]]:
-        stmt = select(Deal).where(Deal.deleted_at.is_(None))
+        stmt = select(Deal).where(
+            Deal.deleted_at.is_not(None) if filters.deleted else Deal.deleted_at.is_(None)
+        )
         clause = await deal_scope_clause(self._session, principal)
         if clause is not None:
             stmt = stmt.where(clause)
@@ -1385,12 +1589,12 @@ class DealService:
             stmt = stmt.where(Deal.workflow_id == filters.workflow_id)
         if filters.deal_type:
             stmt = stmt.where(Deal.deal_type == filters.deal_type)
-        if filters.organization_id:
-            stmt = stmt.where(Deal.organization_id == filters.organization_id)
+        if filters.organization_ids:
+            stmt = stmt.where(Deal.organization_id.in_(filters.organization_ids))
         if filters.contact_id:
             stmt = stmt.where(Deal.contact_id == filters.contact_id)
-        if filters.owner_id:
-            stmt = stmt.where(Deal.owner_id == filters.owner_id)
+        if filters.owner_ids:
+            stmt = stmt.where(Deal.owner_id.in_(filters.owner_ids))
         if filters.priority:
             stmt = stmt.where(Deal.priority == filters.priority)
         if filters.sla_state:
@@ -1403,31 +1607,57 @@ class DealService:
             stmt = stmt.where(Deal.closed_at >= filters.closed_from)
         if filters.closed_to:
             stmt = stmt.where(Deal.closed_at < filters.closed_to)
-        if filters.product_id:
+        if filters.product_ids:
             stmt = stmt.where(
                 select(DealProduct.id)
-                .where(DealProduct.deal_id == Deal.id, DealProduct.product_id == filters.product_id)
+                .where(
+                    DealProduct.deal_id == Deal.id, DealProduct.product_id.in_(filters.product_ids)
+                )
                 .exists()
             )
-        if filters.direction_id:
+        if filters.direction_ids:
+            # B4-8: фильтр по направлению расширяется на дочерние (рекурсивный CTE, как у
+            # ограничений видимости B4-6) — направление-родитель должно находить сделки с
+            # продуктами его дочерних направлений, а не только напрямую отмеченных им.
+            expanded_directions = await direction_descendant_ids(
+                self._session, filters.direction_ids
+            )
             stmt = stmt.where(
                 select(DealProduct.id)
                 .join(Product, Product.id == DealProduct.product_id)
-                .where(DealProduct.deal_id == Deal.id, Product.direction_id == filters.direction_id)
+                .where(
+                    DealProduct.deal_id == Deal.id,
+                    Product.direction_id.in_(expanded_directions),
+                )
                 .exists()
             )
-        if filters.region_id:
+        if filters.region_ids:
             stmt = stmt.where(
                 select(Organization.id)
                 .where(
                     Organization.id == Deal.organization_id,
-                    Organization.region_id == filters.region_id,
+                    Organization.region_id.in_(filters.region_ids),
                 )
                 .exists()
             )
         if filters.q:
-            pattern = f"%{filters.q.strip()}%"
-            stmt = stmt.where(Deal.title.ilike(pattern) | Deal.number.ilike(pattern))
+            needle = filters.q.strip()
+            pattern = f"%{escape_like(needle)}%"
+            # B4-8: совпадение по вузу — через подзапрос id организаций, а не EXISTS на каждую
+            # строку сделки: планировщик сначала находит подходящие вузы (по
+            # `ix_organizations_name_trgm`), потом сделки по `ix_deals_organization`. Поиск по
+            # контакту (ПДн) в `q` сознательно не включён.
+            org_match = select(Organization.id).where(
+                Organization.deleted_at.is_(None),
+                Organization.name.ilike(pattern, escape="\\")
+                | Organization.short_name.ilike(pattern, escape="\\")
+                | Organization.inn.ilike(pattern, escape="\\"),
+            )
+            stmt = stmt.where(
+                Deal.title.ilike(pattern, escape="\\")
+                | Deal.number.ilike(pattern, escape="\\")
+                | Deal.organization_id.in_(org_match)
+            )
         return stmt
 
     async def party_names(
@@ -1489,6 +1719,100 @@ class DealService:
                 self._session, entity_type="deal", entity_id=deal.id, reason="watcher_read_only"
             )
             raise ForbiddenError("Наблюдатель видит сделку, но не может её менять")
+        return deal
+
+    async def get_deleted_or_404(self, deal_id: uuid.UUID, principal: Principal) -> Deal:
+        """Как `get_or_404`, но для восстановления (B4-3): мягко удалённая сделка — ровно
+        то, что ищет вызывающий, прятать её незачем. Скоуп проверяется как обычно —
+        `deal_in_scope` не смотрит на `deleted_at`."""
+        deal = await self._session.get(Deal, deal_id)
+        if deal is None:
+            raise NotFoundError("Сделка", deal_id)
+        if not await deal_in_scope(self._session, principal, deal):
+            defer_denied_audit(
+                self._session, entity_type="deal", entity_id=deal.id, reason="out_of_scope"
+            )
+            raise NotFoundError("Сделка", deal_id)
+        return deal
+
+    async def delete(
+        self, deal: Deal, principal: Principal, *, reason: str, expected_version: int
+    ) -> Deal:
+        """B4-3 (A-16): мягкое удаление сделки — только ADMIN (`Permission.DEAL_DELETE`).
+        Сделка с незавершённым запросом на подпись не удаляется: сначала `SIGNATURE_VOID`
+        (аннулировать запрос), иначе подписанный документ осиротел бы."""
+        if deal.signature_status in (
+            DealSignatureStatus.PENDING.value,
+            DealSignatureStatus.PARTIALLY_SIGNED.value,
+        ):
+            raise AppError(
+                ErrorCode.ENTITY_IN_USE,
+                "У сделки есть незавершённый запрос на подпись — сначала аннулируйте его",
+                extra={
+                    "blockers": [
+                        {
+                            "code": "pending_signature",
+                            "count": 1,
+                            "detail": "Незавершённый запрос на подпись",
+                        }
+                    ]
+                },
+            )
+        await claim_version(
+            self._session, deal, expected_version, conflicting={"number": deal.number}
+        )
+        deal.deleted_at = dt.datetime.now(dt.UTC)
+        await self._session.flush()
+        await drop_deal_card_after_commit(self._session, deal.id)
+        await self._audit.record(
+            AuditAction.DEAL_DELETED,
+            entity_type="deal",
+            entity_id=deal.id,
+            changes={
+                "number": {"old": None, "new": deal.number},
+                "reason": {"old": None, "new": reason},
+            },
+        )
+        await get_notification_service().notify_user(
+            self._session,
+            recipient_id=deal.owner_id,
+            template_code="DEAL_DELETED",
+            priority=NotificationPriority.NORMAL,
+            entity_type="deal",
+            entity_id=deal.id,
+        )
+        return deal
+
+    async def restore(self, deal: Deal, *, expected_version: int) -> Deal:
+        """B4-3: обратно из мягкого удаления. 409 CRM-1305, если сделка не была удалена
+        (тот же принцип, что `OrganizationService.restore` — не no-op, а конфликт
+        состояния). `order_number` — частичный уникальный индекс `WHERE deleted_at IS
+        NULL`: если его успела занять другая живая сделка, явный 409 вместо 500 на
+        IntegrityError."""
+        if deal.deleted_at is None:
+            raise AppError(
+                ErrorCode.DEAL_NOT_DELETED, "Сделка не удалена", extra={"deal_id": str(deal.id)}
+            )
+        if deal.order_number is not None:
+            taken = await self._session.scalar(
+                select(Deal.id).where(
+                    Deal.order_number == deal.order_number,
+                    Deal.deleted_at.is_(None),
+                    Deal.id != deal.id,
+                )
+            )
+            if taken is not None:
+                raise AppError(
+                    ErrorCode.DUPLICATE,
+                    "Номер заявки уже занят другой активной сделкой",
+                    extra={"reason": "order_number_taken", "order_number": deal.order_number},
+                )
+        await claim_version(
+            self._session, deal, expected_version, conflicting={"number": deal.number}
+        )
+        deal.deleted_at = None
+        await self._session.flush()
+        await self._audit.record(AuditAction.DEAL_RESTORED, entity_type="deal", entity_id=deal.id)
         return deal
 
     # --- Создание ------------------------------------------------------------
@@ -1560,19 +1884,24 @@ class DealService:
 
         Ничейное (организация без ответственного, контакт без организации, создателя и сделок)
         привязать можно: чужого портфеля там нет, а иначе менеджер не смог бы начать работу с
-        вузом из общего реестра, пока руководитель не назначит ему ответственного."""
+        вузом из общего реестра, пока руководитель не назначит ему ответственного.
+
+        B4-6: для `principal.restricted` исключение «ничьё = можно» не работает — вуз
+        должен пройти `organization_in_scope` (а значит, и ограничение по вузам/
+        направлениям) независимо от того, назначен у него ответственный или нет. Иначе
+        ограниченный KAM привязывал бы к своим сделкам любой «ничей» вуз вне `allow`."""
         if principal.role not in (Role.KAM.value, Role.HEAD.value):
             return
         from app.modules.catalog.service import contact_in_scope, organization_in_scope
 
         if organization_id is not None:
             organization = await self._session.get(Organization, organization_id)
-            if (
-                organization is not None
-                and organization.owner_id is not None
-                and not await organization_in_scope(self._session, principal, organization)
-            ):
-                raise NotFoundError("Организация", organization_id)
+            if organization is not None:
+                unowned_exception = organization.owner_id is None and not principal.restricted
+                if not unowned_exception and not await organization_in_scope(
+                    self._session, principal, organization
+                ):
+                    raise NotFoundError("Организация", organization_id)
         if contact_id is not None:
             contact = await self._session.get(Contact, contact_id)
             if (
@@ -1592,28 +1921,11 @@ class DealService:
         команды, KAM не назначает никого. Раньше `owner_id` принимался как есть: КАМ заводил
         сделки «на коллегу», а несуществующий id доходил до FK и давал 500.
 
-        Тому, кому чужого назначать нельзя, отказ (403) одинаков для любого id — так по
-        ответу не узнать, есть ли такой сотрудник."""
+        Проверка самого назначения (B4-1) — в модульной `ensure_assignable_user`, которой
+        пользуется и `catalog.service.OrganizationService.set_owner` (ответственный за вуз)."""
         if owner_id is None or owner_id == principal.user_id:
             return principal.user_id
-        if principal.role == Role.HEAD.value:
-            if owner_id not in await head_scope_member_ids(self._session, principal):
-                defer_denied_audit(self._session, entity_type="user", reason="owner_outside_team")
-                raise ForbiddenError(
-                    "Назначить ответственным можно только сотрудника своей команды"
-                )
-        elif not (principal.is_admin or principal.role == Role.INTEGRATION.value):
-            defer_denied_audit(self._session, entity_type="user", reason="assign_owner_forbidden")
-            raise ForbiddenError("Заводить сделку на другого сотрудника может только руководитель")
-
-        owner = await self._session.get(User, owner_id)
-        if owner is None:
-            raise NotFoundError("Пользователь", owner_id)
-        if not owner.is_active:
-            raise ValidationError(
-                "Ответственным можно назначить только активного сотрудника",
-                [FieldError(field="owner_id", reason="сотрудник неактивен")],
-            )
+        owner = await ensure_assignable_user(self._session, principal, owner_id)
         return owner.id
 
     async def create(
@@ -2779,6 +3091,24 @@ class CommentService:
             raise NotFoundError("Комментарий", comment_id)
         return comment
 
+    async def list_for_audit(
+        self, deal_id: uuid.UUID, *, limit: int | None = None, cursor: Cursor | None = None
+    ) -> tuple[list[DealComment], str | None]:
+        """B4-7: то же, что `list`, но для `comment:audit_read` (AUDITOR) — включает мягко
+        удалённые комментарии (без текста — см. `AuditCommentOut.from_model`: удаление делают
+        именно ради исключения текста, и эта ручка не должна быть обходом того решения, только
+        подтверждением, что запись когда-то была). `is_internal`/`is_system` не фильтруются —
+        тот же набор, что видит обычный читатель сделки в `list`."""
+        limit = min(limit, MAX_LIMIT) if limit is not None else MAX_LIMIT
+        return await _ascending_page(
+            self._session,
+            select(DealComment).where(DealComment.deal_id == deal_id),
+            DealComment.created_at,
+            DealComment.id,
+            limit=limit,
+            cursor=cursor,
+        )
+
     async def create(
         self,
         deal: Deal,
@@ -2948,9 +3278,17 @@ class TaskService:
     def list_query(
         self, filters: TaskFilters, scope_clause: ColumnElement[bool] | None
     ) -> Select[tuple[Task]]:
-        stmt = select(Task).where(Task.deleted_at.is_(None))
+        # B4-3: раньше JOIN со сделкой делался только когда у скоупа было условие (не ADMIN),
+        # поэтому ADMIN видел задачи удалённых сделок — JOIN и фильтр по Deal.deleted_at теперь
+        # всегда, скоуп роли накладывается поверх.
+        stmt = (
+            select(Task)
+            .where(Task.deleted_at.is_(None))
+            .join(Deal, Deal.id == Task.deal_id)
+            .where(Deal.deleted_at.is_(None))
+        )
         if scope_clause is not None:
-            stmt = stmt.join(Deal, Deal.id == Task.deal_id).where(scope_clause)
+            stmt = stmt.where(scope_clause)
         if filters.deal_id:
             stmt = stmt.where(Task.deal_id == filters.deal_id)
         if filters.assignee_id:

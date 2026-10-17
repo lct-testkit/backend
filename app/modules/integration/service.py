@@ -35,7 +35,15 @@ from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService, diff_changes
 from app.modules.crm.models import Deal
 from app.modules.identity.models import Role, User
-from app.modules.integration.models import IntegrationSource, OutboxEvent, OutboxStatus
+from app.modules.integration.field_mapping import FieldMapping, validate_mapping
+from app.modules.integration.models import (
+    InboundMessage,
+    IntegrationSource,
+    OutboxEvent,
+    OutboxStatus,
+    SyncCursor,
+)
+from app.modules.integration.routing import Routing, validate_routing
 from app.modules.integration.security import check_outbound_url_resolved
 
 logger = structlog.get_logger(__name__)
@@ -179,6 +187,189 @@ class IntegrationSourceService:
             )
         return source
 
+    # --- B5-3: настраиваемый маппинг «утверждённых полей» ------------------------------
+
+    async def get_mapping(self, code: str) -> FieldMapping | None:
+        source = await self.get_by_code(code)
+        if not source.field_mapping:
+            return None
+        return FieldMapping.model_validate(source.field_mapping)
+
+    async def set_mapping(
+        self, code: str, mapping: FieldMapping, *, approved_by: uuid.UUID
+    ) -> FieldMapping:
+        """Проверка (`validate_mapping`) бросает 422 с `errors[]` при любой проблеме — цель из
+        реестра, не более 50 правил, `value_map`/`template` в границах, обязательно хоть одна
+        цель `email`/`phone`, `custom_fields.<код>` — активное определение для сделки."""
+        source = await self.get_by_code(code)
+        errors = await validate_mapping(self._session, mapping, code)
+        if errors:
+            raise ValidationError(
+                "Маппинг не принят",
+                [FieldError(field=error.field, reason=error.reason) for error in errors],
+            )
+        stored = mapping.model_copy(
+            update={
+                "version": (source.field_mapping or {}).get("version", 0) + 1,
+                "approved_by": approved_by,
+                "approved_at": dt.datetime.now(dt.UTC),
+            }
+        )
+        before = source.field_mapping
+        source.field_mapping = stored.model_dump(mode="json")
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.INTEGRATION_MAPPING_UPDATED,
+            entity_type="integration_source",
+            entity_id=source.id,
+            changes=diff_changes(before or {}, source.field_mapping),
+        )
+        return stored
+
+    async def reset_mapping(self, code: str) -> None:
+        source = await self.get_by_code(code)
+        if source.field_mapping is None:
+            return
+        before = source.field_mapping
+        source.field_mapping = None
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.INTEGRATION_MAPPING_RESET,
+            entity_type="integration_source",
+            entity_id=source.id,
+            changes=diff_changes(before, {}),
+        )
+
+    # --- B5-4: маршрутизация (воронка/тип сделки на источник) --------------------------
+
+    async def get_routing(self, code: str) -> Routing | None:
+        source = await self.get_by_code(code)
+        if not source.routing:
+            return None
+        return Routing.model_validate(source.routing)
+
+    async def set_routing(self, code: str, routing: Routing) -> Routing:
+        """Проверка (`validate_routing`) бросает 422 с `errors[]`: воронка не найдена/не
+        опубликована/не того `deal_type`, статус не найден в графе, `fixed_owner_id`
+        неактивен или не найден, больше `_MAX_RULES` правил."""
+        source = await self.get_by_code(code)
+        errors = await validate_routing(self._session, routing)
+        if errors:
+            raise ValidationError(
+                "Маршрутизация не принята",
+                [FieldError(field=error.field, reason=error.reason) for error in errors],
+            )
+        before = source.routing
+        source.routing = routing.model_dump(mode="json")
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.INTEGRATION_ROUTING_UPDATED,
+            entity_type="integration_source",
+            entity_id=source.id,
+            changes=diff_changes(before or {}, source.routing),
+        )
+        return routing
+
+    async def reset_routing(self, code: str) -> None:
+        source = await self.get_by_code(code)
+        if source.routing is None:
+            return
+        before = source.routing
+        source.routing = None
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.INTEGRATION_ROUTING_RESET,
+            entity_type="integration_source",
+            entity_id=source.id,
+            changes=diff_changes(before, {}),
+        )
+
+    # --- B5-5: ручной запуск «Забрать сейчас» и статус синхронизации --------------------
+
+    _DEFAULT_BASE_URL_SETTING: dict[str, str] = {"cms": "cms_base_url", "lms": "lms_base_url"}
+
+    async def request_pull(
+        self, code: str, principal: Principal, *, updated_since: str | None
+    ) -> dict[str, Any]:
+        """Сама ничего не забирает: пишет запрос в `pull_request`, его первым делом читает
+        `sweep_cms_leads_pull`/`sweep_lms_progress_pull` на следующем тике (раз в минуту,
+        `worker/main.py`) и запускает забор сразу, независимо от `pull_enabled` и интервала —
+        в течение минуты, а не по расписанию."""
+        source = await self.get_by_code(code)
+        settings = get_settings()
+        default_attr = self._DEFAULT_BASE_URL_SETTING.get(code)
+        default_base_url = getattr(settings, default_attr, None) if default_attr else None
+        if not source.is_active or not (source.base_url or default_base_url):
+            raise AppError(
+                ErrorCode.INTEGRATION_SOURCE_INACTIVE, "Источник выключен или адрес не настроен"
+            )
+        if source.pull_request:
+            raise AppError(
+                ErrorCode.INTEGRATION_PULL_BUSY, "Запрос на забор уже стоит в очереди"
+            )
+        pull_request = {
+            "requested_at": dt.datetime.now(dt.UTC).isoformat(),
+            "requested_by": str(principal.user_id),
+            "updated_since": updated_since,
+        }
+        source.pull_request = pull_request
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.INTEGRATION_PULL_REQUESTED,
+            entity_type="integration_source",
+            entity_id=source.id,
+            changes={"pull_request": {"old": None, "new": pull_request}},
+        )
+        return pull_request
+
+    async def get_status(self, code: str) -> dict[str, Any]:
+        """Сводка для экрана источника: настройки забора, курсоры (по всем `resource`,
+        названия не захардкожены здесь — у CMS и LMS они разные), итог последнего прогона
+        (`last_run` — снимок момента завершения) и живые счётчики за последние 24 часа по
+        журналу входящих и очереди исходящих (у `cms` исходящих нет — источник только
+        принимает, `outbox_last_24h` будет пустым, и это ожидаемо)."""
+        source = await self.get_by_code(code)
+        cursor_rows = (
+            await self._session.execute(
+                select(SyncCursor.resource, SyncCursor.cursor_value).where(
+                    SyncCursor.source_code == code
+                )
+            )
+        ).all()
+        cursors: dict[str, str | None] = {row.resource: row.cursor_value for row in cursor_rows}
+
+        since = dt.datetime.now(dt.UTC) - dt.timedelta(hours=24)
+        inbound_rows = (
+            await self._session.execute(
+                select(InboundMessage.status, func.count())
+                .where(InboundMessage.source_code == code, InboundMessage.received_at >= since)
+                .group_by(InboundMessage.status)
+            )
+        ).all()
+        inbound_counts: dict[str, int] = {row[0]: row[1] for row in inbound_rows}
+
+        outbox_rows = (
+            await self._session.execute(
+                select(OutboxEvent.status, func.count())
+                .where(OutboxEvent.target == code, OutboxEvent.created_at >= since)
+                .group_by(OutboxEvent.status)
+            )
+        ).all()
+        outbox_counts: dict[str, int] = {row[0]: row[1] for row in outbox_rows}
+        return {
+            "code": source.code,
+            "is_active": source.is_active,
+            "pull_enabled": source.pull_enabled,
+            "pull_interval_seconds": source.pull_interval_seconds,
+            "cursors": cursors,
+            "last_sync_at": source.last_sync_at,
+            "last_error": source.last_error,
+            "last_run": source.last_run,
+            "pull_request": source.pull_request,
+            "inbound_last_24h": inbound_counts,
+            "outbox_last_24h": outbox_counts,
+        }
+
 
 class OutboxEventService:
     """Ручное управление очередью доставки — то, что цикл
@@ -285,6 +476,9 @@ async def get_integration_principal(session: AsyncSession) -> Principal:
         consent_version=None,
         must_change_password=False,
         claims=TokenClaims(subject=user.keycloak_id or "system:integration", raw={}),
+        # B4-6: INTEGRATION не входит в ограничиваемые роли (B4-5) — явно False, не
+        # завязано на `user.access_restricted`.
+        restricted=False,
     )
 
 
@@ -305,7 +499,14 @@ async def pick_least_loaded_owner(session: AsyncSession) -> uuid.UUID | None:
     stmt = (
         select(User.id)
         .outerjoin(open_deals, open_deals.c.owner_id == User.id)
-        .where(User.role == Role.KAM.value, User.status == "active", User.deleted_at.is_(None))
+        .where(
+            User.role == Role.KAM.value,
+            User.status == "active",
+            User.deleted_at.is_(None),
+            # B4-6: лид с сайта не должен уйти владельцу, который свою же новую сделку не
+            # увидит (B4-5 ограничения по вузам/направлениям сужают и его собственный скоуп).
+            User.access_restricted.is_(False),
+        )
         .order_by(func.coalesce(open_deals.c.open_count, 0).asc(), User.created_at.asc())
         .limit(1)
     )

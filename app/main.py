@@ -23,6 +23,7 @@ from app.core.db import dispose_engine
 from app.core.logging import configure_logging
 from app.core.metrics import install_gc_metrics
 from app.core.problem import register_exception_handlers
+from app.core.queue import close_arq_pool
 from app.core.redis_client import close_redis
 from app.core.security import jwks_cache
 from app.middleware.request_context import RequestContextMiddleware
@@ -39,9 +40,7 @@ from app.modules.catalog.router import (
     regions_router,
 )
 from app.modules.crm.router import comments_router, deals_router, tasks_router
-from app.modules.files.antivirus import build_scanner as build_antivirus_scanner
 from app.modules.files.router import attachments_router, files_router
-from app.modules.files.service import register_antivirus_scanner
 from app.modules.identity.router_admin import router as admin_users_router
 from app.modules.identity.router_auth import router as auth_router
 from app.modules.identity.router_directory import router as directory_router
@@ -165,6 +164,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         logger.info("api_stopping")
+        await close_arq_pool()
         await dispose_engine()
         await close_redis()
 
@@ -216,7 +216,9 @@ def create_app() -> FastAPI:
     app.include_router(me_router, prefix=settings.api_prefix)
     app.include_router(directory_router, prefix=settings.api_prefix)
     app.include_router(admin_users_router, prefix=settings.api_prefix)
+    app.include_router(handover_router, prefix=settings.api_prefix)
     app.include_router(admin_router, prefix=settings.api_prefix)
+    app.include_router(deal_audit_router, prefix=settings.api_prefix)
     app.include_router(workflow_router, prefix=settings.api_prefix)
     app.include_router(deals_router, prefix=settings.api_prefix)
     app.include_router(comments_router, prefix=settings.api_prefix)

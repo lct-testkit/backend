@@ -29,6 +29,7 @@ inbox»), затем — найти-или-создать `Contact` (`ContactSer
 from __future__ import annotations
 
 import datetime as dt
+import math
 import uuid
 from dataclasses import dataclass
 from typing import Any, NoReturn
@@ -43,19 +44,34 @@ from app.core.errors import AppError, ErrorCode
 from app.core.normalize import company_key
 from app.core.security import Principal
 from app.modules.catalog.lookup import ProductIndex
-from app.modules.catalog.models import Contact, Product
-from app.modules.catalog.service import ContactService
+from app.modules.catalog.models import Contact, Organization, Product
+from app.modules.catalog.schemas import OrganizationCreateRequest
+from app.modules.catalog.service import ContactService, OrganizationService
+from app.modules.catalog.validators import validate_inn
 from app.modules.crm.models import Deal, DealComment, DealProduct
 from app.modules.crm.schemas import DealCreateRequest, DealProductIn
 from app.modules.crm.service import DealService
+from app.modules.identity.models import Role, User
+from app.modules.integration.field_mapping import FieldMapping, apply_mapping
 from app.modules.integration.lead_payload import (
     LeadPayload,
     parse_json_object,
     parse_lead_payload,
     raw_evidence,
 )
-from app.modules.integration.models import InboundMessage, InboundStatus, IntegrationSourceCode
+from app.modules.integration.models import (
+    InboundMessage,
+    InboundStatus,
+    IntegrationSource,
+    IntegrationSourceCode,
+)
 from app.modules.integration.orders import OrderData, OrderIngestService
+from app.modules.integration.routing import (
+    Route,
+    Routing,
+    resolve_route,
+    resolve_workflow_for_route,
+)
 from app.modules.integration.security import record_signature_failure, verify_signature
 from app.modules.integration.service import get_integration_principal, pick_least_loaded_owner
 
@@ -75,6 +91,10 @@ class LeadIngestResult:
     message: InboundMessage
     deal_id: uuid.UUID | None
     contact_id: uuid.UUID | None
+    #: B5-2: эта доставка — повтор уже обработанного ключа (идемпотентность), а не новая
+    #: обработка. `CmsPullService` использует это, чтобы не считать повтор «новой сделкой» в
+    #: счётчиках прогона; вебхук это поле не использует.
+    replayed: bool = False
 
 
 @dataclass(slots=True)
@@ -84,6 +104,24 @@ class _Outcome:
     #: Новая сделка не заводилась: заявка совпала с уже существующей.
     duplicate: bool
     message_type: str
+
+
+def _parse_int(value: Any) -> int | None:
+    """`students_planned` из промапленного поля: мусор (не число, дробное с остатком,
+    отрицательное, переполнение `int4`) не отклоняет B2B-заявку — просто игнорируется, тем же
+    приёмом, что `lead_payload._parse_created_at` для необязательной справочной даты."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value.strip()) if isinstance(value, str) else float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(number) or not number.is_integer():
+        return None
+    result = int(number)
+    if result < 0 or result > 2_147_483_647:
+        return None
+    return result
 
 
 def _describe(exc: AppError) -> str:
@@ -136,13 +174,36 @@ class CmsLeadService:
             await self._session.commit()
             raise
 
-        message, replay = await self._claim(idempotency_key, payload)
+        return await self._ingest_payload(payload, idempotency_key, channel="webhook")
+
+    async def ingest_pulled(
+        self, record: dict[str, Any], key: str, *, channel: str = "pull"
+    ) -> LeadIngestResult:
+        """B5-2: лид, полученный забором по API (`CmsPullService`), минует проверку подписи —
+        доверие даёт сам факт успешного ответа источника по нашему токену (Bearer), как и у
+        вебхука с верной подписью. Ключ идемпотентности — голый `lead_id` с сайта: если сайт
+        ещё и шлёт тот же лид вебхуком, второй вход ловит дедупликация человека и продукта
+        (`_open_duplicate`), а не мёртвый `UNIQUE` — ключи вебхука и pull не обязаны совпадать
+        буквально, но на практике сайт ссылается на один и тот же `lead_id` в обоих путях.
+
+        `channel` (B5-5) — `pull` для планового прогона cron, `manual` для «Забрать сейчас»:
+        администратору видно в журнале входящих, какие записи появились по кнопке."""
+        return await self._ingest_payload(record, key, channel=channel)
+
+    async def _ingest_payload(
+        self, payload: dict[str, Any], key: str, *, channel: str
+    ) -> LeadIngestResult:
+        """Хвост, общий для вебхука (после проверки подписи) и забора по API (B5-2): захват ключа
+        идемпотентности, разбор и запись сделки, итог во входящих."""
+        message, replay = await self._claim(key, payload, channel=channel)
         if replay:
-            return await self._stored_result(message)
+            result = await self._stored_result(message)
+            result.replayed = True
+            return result
 
         try:
             async with self._session.begin_nested():
-                outcome = await self._process(payload, idempotency_key)
+                outcome = await self._process(payload, key)
         except AppError as exc:
             # Ошибка каталога (422 «нет курса», 503 «служебной учётки нет» и т.п.) — текст написан
             # нами, без SQL и чужих данных: он и уходит отправителю, и остаётся во входящих.
@@ -225,15 +286,19 @@ class CmsLeadService:
             )
         ).scalar_one_or_none()
 
-    async def _claim(self, key: str, payload: dict[str, Any]) -> tuple[InboundMessage, bool]:
-        """Место под `Idempotency-Key`: `(сообщение, это_повтор_с_итогом)`."""
+    async def _claim(
+        self, key: str, payload: dict[str, Any], *, channel: str = "webhook"
+    ) -> tuple[InboundMessage, bool]:
+        """Место под `Idempotency-Key`: `(сообщение, это_повтор_с_итогом)`. `channel` — B5-2:
+        как заявка попала в журнал (`webhook`/`pull`/`manual`)."""
         for _attempt in range(_CLAIM_ATTEMPTS):
             existing = await self._find_message(key)
             if existing is not None:
                 if existing.status in _FINAL_STATUSES:
                     return existing, True
                 # `failed` (или недописанное `received`): доставка повторена после неудачи —
-                # обрабатываем заново на той же записи, ключ уникален.
+                # обрабатываем заново на той же записи, ключ уникален. Канал не трогаем: он
+                # описывает, как заявка попала в журнал первым разом.
                 existing.raw_payload = payload
                 existing.signature_valid = True
                 existing.status = InboundStatus.RECEIVED.value
@@ -248,6 +313,7 @@ class CmsLeadService:
                 source_code=_SOURCE,
                 external_id=key,
                 message_type="lead",
+                channel=channel,
                 raw_payload=payload,
                 signature_valid=True,
                 status=InboundStatus.RECEIVED.value,
@@ -293,13 +359,36 @@ class CmsLeadService:
 
     # --- Обработка ---------------------------------------------------------------------
 
+    async def _load_source_config(self) -> IntegrationSource | None:
+        return await self._session.scalar(
+            select(IntegrationSource).where(IntegrationSource.code == _SOURCE)
+        )
+
     async def _process(self, payload: dict[str, Any], key: str) -> _Outcome:
-        lead = parse_lead_payload(payload)
+        source = await self._load_source_config()
+        mapping = (
+            FieldMapping.model_validate(source.field_mapping)
+            if source and source.field_mapping
+            else None
+        )
+        mapped = apply_mapping(payload, mapping, _SOURCE)
+        lead = parse_lead_payload(mapped.payload)
         principal = await get_integration_principal(self._session)
         products = ProductIndex(self._session)
         if lead.is_order:
             return await self._process_order(principal, lead, products)
-        return await self._process_lead(principal, lead, products, key)
+
+        # B5-4 (BUG-15): маршрут решает тип сделки и воронку по значению промапленных полей
+        # (`lead_kind` и т.п.) — раньше deal_type="b2c" был зашит жёстко, заявка вуза не могла
+        # попасть в B2B-воронку. `routing=None` (администратор не настраивал) — `Route()` по
+        # умолчанию: B2C, воронка и начальный статус по умолчанию — поведение не меняется.
+        routing = (
+            Routing.model_validate(source.routing) if source and source.routing else None
+        )
+        route = resolve_route(routing, mapped.payload)
+        if route.deal_type == "b2b":
+            return await self._process_b2b_lead(principal, lead, mapped.payload, route, key)
+        return await self._process_lead(principal, lead, products, key, route)
 
     @staticmethod
     async def _find_product(products: ProductIndex, lead: LeadPayload) -> Product | None:
@@ -343,8 +432,40 @@ class CmsLeadService:
             message_type="order",
         )
 
+    async def _resolve_owner_for_route(
+        self, route: Route, organization: Organization | None
+    ) -> uuid.UUID | None:
+        """B5-4: `organization_owner` — владелец найденной организации (B4: «ответственный за
+        вуз»), если он активный KAM/HEAD; `fixed` — заданный пользователь; иначе (и когда
+        политика не применима, например к новой организации) — наименее загруженный КАМ, как
+        и раньше."""
+        if route.owner_policy == "organization_owner" and organization is not None:
+            if organization.owner_id is not None:
+                owner = await self._session.get(User, organization.owner_id)
+                if (
+                    owner is not None
+                    and owner.is_active
+                    and owner.role in (Role.KAM.value, Role.HEAD.value)
+                ):
+                    return owner.id
+        elif route.owner_policy == "fixed" and route.fixed_owner_id:
+            try:
+                fixed_id = uuid.UUID(route.fixed_owner_id)
+            except ValueError:
+                fixed_id = None
+            if fixed_id is not None:
+                owner = await self._session.get(User, fixed_id)
+                if owner is not None and owner.is_active:
+                    return owner.id
+        return await pick_least_loaded_owner(self._session)
+
     async def _process_lead(
-        self, principal: Principal, lead: LeadPayload, products: ProductIndex, key: str
+        self,
+        principal: Principal,
+        lead: LeadPayload,
+        products: ProductIndex,
+        key: str,
+        route: Route,
     ) -> _Outcome:
         first_name, last_name, middle_name, nameless = lead.lead_names()
         contact_external_ids: dict[str, Any] = {"cms_lead_id": key}
@@ -376,16 +497,23 @@ class CmsLeadService:
         price = (
             lead.amount if lead.amount is not None else (product.base_price if product else None)
         )
+        # B5-4: воронка/статус по маршруту (None — опубликованная по умолчанию, как раньше).
+        resolved = await resolve_workflow_for_route(self._session, route)
+        owner_id = await self._resolve_owner_for_route(route, None)
         deal = await DealService(self._session).create(
             principal,
             DealCreateRequest(
                 title=(lead.course or f"Заявка с сайта {key}")[:_TITLE_MAX],
                 deal_type="b2c",
                 contact_id=contact.id,
-                owner_id=await pick_least_loaded_owner(self._session),
+                owner_id=owner_id,
                 amount=lead.amount,
                 source=_SOURCE,
                 external_ids=deal_external_ids,
+                workflow_id=resolved.workflow.id if resolved else None,
+                # B5-3: собрано настраиваемым маппингом (`custom_fields.<код>`); без мапппинга
+                # сохранённого на источнике — всегда пусто, поведение не меняется.
+                custom_fields=lead.custom_fields,
                 products=(
                     [
                         DealProductIn(
@@ -400,6 +528,7 @@ class CmsLeadService:
                     else []
                 ),
             ),
+            initial_status_code=resolved.initial_status_code if resolved else None,
         )
         await self._add_note(deal, lead, product_line=product is not None)
         return _Outcome(deal=deal, contact=contact, duplicate=False, message_type="lead")
@@ -446,6 +575,176 @@ class CmsLeadService:
             return next((deal for deal in deals if deal.id in with_product), None)
         wanted = company_key(lead.course)
         return next((deal for deal in deals if company_key(deal.title) == wanted), None)
+
+    # --- B5-4: маршрут на B2B (BUG-15) --------------------------------------------------
+
+    async def _open_b2b_duplicate(
+        self, organization_id: uuid.UUID, product: Product | None
+    ) -> Deal | None:
+        """Открытая B2B-сделка той же организации, которую эта заявка повторяет — с продуктом
+        (если он определился) это сделка с тем же продуктом, без — любая открытая сделка
+        организации (тот же приём, что `_open_duplicate` для контактов B2C)."""
+        deals = list(
+            (
+                await self._session.execute(
+                    select(Deal)
+                    .where(
+                        Deal.organization_id == organization_id,
+                        Deal.deal_type == "b2b",
+                        Deal.closed_at.is_(None),
+                        Deal.deleted_at.is_(None),
+                    )
+                    .order_by(Deal.created_at.desc(), Deal.id.desc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not deals or product is None:
+            return deals[0] if deals else None
+        with_product = set(
+            (
+                await self._session.execute(
+                    select(DealProduct.deal_id).where(
+                        DealProduct.deal_id.in_([deal.id for deal in deals]),
+                        DealProduct.product_id == product.id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return next((deal for deal in deals if deal.id in with_product), None)
+
+    async def _resolve_or_create_b2b_organization(
+        self,
+        principal: Principal,
+        *,
+        org_name: str | None,
+        org_inn_raw: str | None,
+        owner_id: uuid.UUID | None,
+        key: str,
+    ) -> tuple[Organization, bool]:
+        """`(организация, создана_ли_новая_сейчас)`. `AppError` (422, бизнес-ошибка каталога,
+        как и у `_process_lead`) — организация с этим ИНН мягко удалена (не воскрешаем) или
+        название неоднозначно (несколько организаций с тем же нормализованным названием)."""
+        org_inn = str(org_inn_raw).strip() if org_inn_raw else None
+        if org_inn:
+            check = validate_inn(org_inn)
+            if not check.ok:
+                org_inn = None  # невалидный ИНН не блокирует заявку — просто не используется
+            else:
+                existing = await self._session.scalar(
+                    select(Organization).where(Organization.inn == org_inn)
+                )
+                if existing is not None:
+                    if existing.deleted_at is not None:
+                        raise AppError(
+                            ErrorCode.VALIDATION,
+                            "Организация с этим ИНН удалена — восстановите карточку вручную",
+                        )
+                    return existing, False
+
+        if org_name:
+            candidates = await OrganizationService(self._session).find_same_name(org_name)
+            if len(candidates) == 1:
+                return candidates[0], False
+            if len(candidates) > 1:
+                raise AppError(ErrorCode.VALIDATION, "Название организации вуза неоднозначно")
+
+        if not org_name and not org_inn:
+            raise AppError(ErrorCode.VALIDATION, "Для заявки вуза нужно название или ИНН")
+
+        organization = await OrganizationService(self._session).create(
+            principal,
+            OrganizationCreateRequest(
+                name=org_name,
+                inn=org_inn,
+                org_type="university",
+                owner_id=owner_id,
+                source=_SOURCE,
+                external_ids={"cms_lead_id": key},
+            ),
+        )
+        return organization, True
+
+    async def _process_b2b_lead(
+        self,
+        principal: Principal,
+        lead: LeadPayload,
+        mapped_payload: dict[str, Any],
+        route: Route,
+        key: str,
+    ) -> _Outcome:
+        """B5-4 (BUG-15): форма вуза с сайта — организация находится по ИНН/названию или
+        заводится, представитель — контакт, привязанный к ней; ответственный — владелец
+        найденной организации (связь с B4 «ответственный за вуз»), если применима политика
+        маршрута, иначе наименее загруженный КАМ, как и для B2C."""
+        org_name_raw = mapped_payload.get("organization_name")
+        org_name = str(org_name_raw).strip() if org_name_raw else None
+        org_inn_raw = mapped_payload.get("organization_inn")
+
+        new_owner_id = await self._resolve_owner_for_route(route, None)
+        organization, created = await self._resolve_or_create_b2b_organization(
+            principal,
+            org_name=org_name,
+            org_inn_raw=org_inn_raw,
+            owner_id=new_owner_id,
+            key=key,
+        )
+
+        first_name, last_name, middle_name, nameless = lead.lead_names()
+        contact_external_ids: dict[str, Any] = {"cms_lead_id": key}
+        if nameless:
+            contact_external_ids["needs_normalization"] = True
+        upsert = await ContactService(self._session).find_or_create(
+            first_name=first_name,
+            last_name=last_name,
+            middle_name=middle_name,
+            email=lead.email,
+            phone=lead.phone,
+            organization_id=organization.id,
+            source=_SOURCE,
+            created_by=principal.user_id,
+            external_ids=contact_external_ids,
+        )
+        contact = upsert.contact
+
+        existing_deal = await self._open_b2b_duplicate(organization.id, None)
+        if existing_deal is not None:
+            await self._add_note(existing_deal, lead, product_line=False, repeated=True)
+            return _Outcome(
+                deal=existing_deal, contact=contact, duplicate=True, message_type="lead"
+            )
+
+        owner_id = (
+            new_owner_id
+            if created
+            else await self._resolve_owner_for_route(route, organization)
+        )
+        resolved = await resolve_workflow_for_route(self._session, route)
+        students_planned = _parse_int(mapped_payload.get("students_planned"))
+        deal_external_ids: dict[str, Any] = {"cms_lead_id": key}
+        if lead.external_id:
+            deal_external_ids["cms_external_id"] = lead.external_id
+        deal = await DealService(self._session).create(
+            principal,
+            DealCreateRequest(
+                title=f"{organization.name} — заявка вуза"[:_TITLE_MAX],
+                deal_type="b2b",
+                organization_id=organization.id,
+                contact_id=contact.id,
+                owner_id=owner_id,
+                students_planned=students_planned,
+                source=_SOURCE,
+                external_ids=deal_external_ids,
+                workflow_id=resolved.workflow.id if resolved else None,
+                custom_fields=lead.custom_fields,
+            ),
+            initial_status_code=resolved.initial_status_code if resolved else None,
+        )
+        await self._add_note(deal, lead, product_line=False)
+        return _Outcome(deal=deal, contact=contact, duplicate=False, message_type="lead")
 
     async def _add_note(
         self,

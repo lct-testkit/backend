@@ -31,6 +31,7 @@ from typing import Any
 from sqlalchemy import Select, any_, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import rate_limit
 from app.core.config import get_settings
 from app.core.errors import (
     AppError,
@@ -42,6 +43,7 @@ from app.core.errors import (
     VersionConflictError,
 )
 from app.core.ids import uuid7
+from app.core.queue import enqueue_after_commit
 from app.core.security import Principal
 from app.core.storage import ensure_bucket, generate_presigned_get, upload_object_bytes
 from app.modules.audit.actions import AuditAction
@@ -207,9 +209,10 @@ class ReportJobService:
         if kind not in REPORT_BUILDERS:
             raise AppError(ErrorCode.VALIDATION, f"Неизвестный вид отчёта: {kind!r}")
 
-        # Лимит личный: `reports_max_concurrent` ограничивает и воркер, но очередь одного
-        # сотрудника не должна вытеснять отчёты остальных.
-        limit = get_settings().reports_max_concurrent
+        # B8-11: личный лимит (`reports_max_per_user`, раньше делил имя с `reports_max_concurrent`
+        # — одновременными рендерами воркера) не должен вытеснять отчёты остальных сотрудников.
+        settings = get_settings()
+        limit = settings.reports_max_per_user
         unfinished = await self._session.scalar(
             select(func.count(ReportJob.id)).where(
                 ReportJob.requested_by == principal.user_id,
@@ -218,11 +221,28 @@ class ReportJobService:
                 ),
             )
         )
-        if (unfinished or 0) >= limit:
+        unfinished = unfinished or 0
+        if unfinished >= limit:
             raise AppError(
                 ErrorCode.REPORTS_LIMIT_EXCEEDED,
                 f"Не завершено отчётов: {unfinished} (лимит {limit}). Дождитесь готовности "
                 "запущенных и повторите",
+                headers={"Retry-After": "10"},
+                extra={"limit": limit, "unfinished": unfinished},
+            )
+
+        # Общая очередь на всех: без потолка один сотрудник не вытесняет остальных лично, но
+        # сто пользователей по десять тяжёлых отчётов разом всё равно забили бы воркер надолго.
+        queued_total = await self._session.scalar(
+            select(func.count(ReportJob.id)).where(ReportJob.status == ReportJobStatus.QUEUED.value)
+        )
+        if (queued_total or 0) >= settings.reports_queue_max:
+            raise AppError(
+                ErrorCode.REPORTS_LIMIT_EXCEEDED,
+                f"Очередь отчётов переполнена: {queued_total} из {settings.reports_queue_max}. "
+                "Повторите позже",
+                headers={"Retry-After": "30"},
+                extra={"limit": settings.reports_queue_max, "queued": queued_total},
             )
 
         params = {**template.default_params, **(payload.params or {})}
@@ -244,8 +264,20 @@ class ReportJobService:
             is_light = row_estimate <= SYNC_ROW_THRESHOLD
 
         if is_light:
+            # Лёгкий отчёт строится прямо в запросе и в лимит выше не попадает: без своего
+            # ограничения один пользователь скриптом (цикл `POST /reports` без параметров)
+            # занимал бы `_RENDER_LOCK` на всех репликах подряд.
+            await rate_limit.enforce(
+                str(principal.user_id), "report:sync", limit=30, window_seconds=60
+            )
             await self.generate(job, principal)
-        # Иначе остаётся `queued` — заберёт `reporting.tasks.sweep_report_jobs`.
+        elif settings.reports_enqueue:
+            # B8-11: не ждать минутного тика `sweep_report_jobs` — поставить задание в arq
+            # сразу после коммита (до коммита воркер не нашёл бы строку `queued` в БД).
+            enqueue_after_commit(
+                self._session, "render_report_job", str(job.id), job_id=f"report:{job.id}"
+            )
+        # Иначе (REPORTS_ENQUEUE=false) остаётся `queued` — заберёт cron-добор как раньше.
         return job
 
     async def generate(self, job: ReportJob, principal: Principal) -> None:
@@ -416,6 +448,50 @@ class ReportJobService:
             },
         )
         return url, expires_at
+
+    async def expire_for_user(self, user_id: uuid.UUID) -> int:
+        """B4-5/B4-6: смена ограничений доступа (`AccessRulesService.replace`) помечает
+        готовые отчёты этого пользователя истёкшими — тот же механизм, что фоновая
+        `reporting.tasks.expire_report_files`, но безусловно (не по `expires_at`) и
+        только для него: отчёт, собранный ДО ограничения, мог включать строки, которые
+        пользователь больше не должен видеть. Очередь `queued` трогать не нужно — воркер
+        читает `access_restricted` из БД в момент запуска (`reporting.tasks`)."""
+        from app.modules.files.service import delete_object_if_unreferenced
+
+        now = dt.datetime.now(dt.UTC)
+        jobs = (
+            (
+                await self._session.execute(
+                    select(ReportJob).where(
+                        ReportJob.requested_by == user_id,
+                        ReportJob.status == ReportJobStatus.COMPLETED.value,
+                        ReportJob.file_id.is_not(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        expired = 0
+        for job in jobs:
+            file = await self._session.get(File, job.file_id)
+            if file is not None and file.status == FileStatus.READY.value:
+                file.status = FileStatus.DELETED.value
+                file.deleted_at = now
+                file.refcount = max(0, file.refcount - 1)
+                await self._session.flush()
+                await delete_object_if_unreferenced(
+                    self._session,
+                    bucket=file.bucket,
+                    key=file.storage_key,
+                    excluding_file_id=file.id,
+                )
+            job.file_id = None
+            job.expires_at = now
+            expired += 1
+        if jobs:
+            await self._session.flush()
+        return expired
 
 
 # =============================================================================

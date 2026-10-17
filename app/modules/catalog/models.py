@@ -273,6 +273,23 @@ class ContactChannel(UuidPkMixin, Base):
             "type IN ('telegram','whatsapp','phone_extra','email_extra')",
             name="contact_channels_type_valid",
         ),
+        # B4-9: один и тот же канал на контакте не завести дважды (нормализованное
+        # значение — `value` уже хранит E.164/нижний регистр/`@handle`, см.
+        # `ContactChannelIn`); и не больше одного первичного канала на тип.
+        Index(
+            "uq_contact_channels_value",
+            "contact_id",
+            "type",
+            "value",
+            unique=True,
+        ),
+        Index(
+            "uq_contact_channels_primary",
+            "contact_id",
+            "type",
+            unique=True,
+            postgresql_where=text("is_primary"),
+        ),
     )
 
     contact_id: Mapped[uuid.UUID] = mapped_column(
