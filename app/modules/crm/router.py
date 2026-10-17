@@ -15,7 +15,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 from collections.abc import Sequence
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Path, Query, Request, status
 
@@ -408,6 +408,54 @@ async def list_available_transitions(
     )
 
 
+#: B9-2: пример ответа — те же значения, что в примере `TransitionRequest` (перешли в `won`
+#: со сделкой из `tests/test_deals.py::TestTransitionFieldValidation`, amount=1000,
+#: custom_fields.contract_number="Д-1"); `number` — формат из докстринга `DealOut.order_number`.
+_TRANSITION_RESPONSE_EXAMPLE: dict[int | str, dict[str, Any]] = {
+    200: {
+        "content": {
+            "application/json": {
+                "example": {
+                    "deal": {
+                        "id": "018f0a3e-7c3e-7c3e-8c3e-3e7c3e7c3e7c",
+                        "number": "D-2026-000431",
+                        "title": "РТ Университет — Python: базовый курс",
+                        "deal_type": "b2b",
+                        "workflow_id": "018f0a3e-1111-7c3e-8c3e-3e7c3e7c3e7c",
+                        "status_id": "018f0a3e-7c3e-7c3e-8c3e-3e7c3e7c3e7c",
+                        "organization_id": "018f0a3e-2222-7c3e-8c3e-3e7c3e7c3e7c",
+                        "organization_name": "РТ Университет",
+                        "contact_id": None,
+                        "contact_name": None,
+                        "owner_id": "018f0a3e-3333-7c3e-8c3e-3e7c3e7c3e7c",
+                        "created_by": "018f0a3e-3333-7c3e-8c3e-3e7c3e7c3e7c",
+                        "amount": "1000.00",
+                        "currency": "RUB",
+                        "students_planned": None,
+                        "expected_close_date": None,
+                        "status_changed_at": "2026-03-15T10:30:00+00:00",
+                        "sla_due_at": None,
+                        "sla_state": "ok",
+                        "priority": "normal",
+                        "loss_reason_id": None,
+                        "closed_at": None,
+                        "custom_fields": {"contract_number": "Д-1"},
+                        "source": None,
+                        "external_ids": {},
+                        "order_number": None,
+                        "owner_unavailable": False,
+                        "signature_status": "none",
+                        "version": 2,
+                        "created_at": "2026-03-10T09:00:00+00:00",
+                        "updated_at": "2026-03-15T10:30:00+00:00",
+                    }
+                }
+            }
+        }
+    }
+}
+
+
 @deals_router.post(
     "/{deal_id}/transition",
     summary="Перейти по статусу",
@@ -422,6 +470,7 @@ async def list_available_transitions(
         "дублем самой записи. Роль: переход по статусу."
     ),
     response_model=TransitionResponse,
+    responses=_TRANSITION_RESPONSE_EXAMPLE,
 )
 async def transition_deal(
     payload: TransitionRequest,

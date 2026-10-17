@@ -207,6 +207,17 @@ class AvailableTransitionsResponse(BaseModel):
 
 
 class TransitionRequest(BaseModel):
+    # B9-2: пример — реальные значения из `tests/test_deals.py::TestTransitionFieldValidation`
+    # (переход в `won` с обязательными `amount`/`custom_fields.contract_number`).
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "to_status_id": "018f0a3e-7c3e-7c3e-8c3e-3e7c3e7c3e7c",
+                "fields": {"amount": "1000", "custom_fields.contract_number": "Д-1"},
+            }
+        }
+    )
+
     to_status_id: uuid.UUID
     comment: str | None = None
     fields: dict[str, Any] = Field(default_factory=dict)

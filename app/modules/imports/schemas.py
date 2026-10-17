@@ -16,6 +16,19 @@ SourceFormatLiteral = Literal["xlsx", "xls", "csv", "json"]
 
 
 class ImportJobCreateRequest(BaseModel):
+    # B9-2: пример — реальное тело из `tests/test_imports.py::TestLicenseImportEndToEnd`
+    # (импорт реестра лицензий вуз-вендор-ПО, B3).
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "file_id": "018f0a3e-4444-7c3e-8c3e-3e7c3e7c3e7c",
+                "entity_type": "license",
+                "mode": "upsert",
+                "source_format": "xlsx",
+            }
+        }
+    )
+
     file_id: uuid.UUID
     entity_type: ImportEntityLiteral
     mode: ImportModeLiteral = "upsert"

@@ -5177,6 +5177,12 @@
         "type": "object"
       },
       "ImportJobCreateRequest": {
+        "example": {
+          "entity_type": "license",
+          "file_id": "018f0a3e-4444-7c3e-8c3e-3e7c3e7c3e7c",
+          "mode": "upsert",
+          "source_format": "xlsx"
+        },
         "properties": {
           "entity_type": {
             "enum": [
@@ -11267,6 +11273,10 @@
         "type": "object"
       },
       "ReportJobCreateRequest": {
+        "example": {
+          "format": "xlsx",
+          "template_code": "sla_compliance"
+        },
         "properties": {
           "format": {
             "enum": [
@@ -11662,6 +11672,9 @@
         "type": "object"
       },
       "SignRequest": {
+        "example": {
+          "otp": "123456"
+        },
         "properties": {
           "otp": {
             "maxLength": 8,
@@ -13970,6 +13983,13 @@
         "type": "object"
       },
       "TransitionRequest": {
+        "example": {
+          "fields": {
+            "amount": "1000",
+            "custom_fields.contract_number": "Д-1"
+          },
+          "to_status_id": "018f0a3e-7c3e-7c3e-8c3e-3e7c3e7c3e7c"
+        },
         "properties": {
           "attachments": {
             "items": {
@@ -24407,6 +24427,34 @@
           "200": {
             "content": {
               "application/json": {
+                "example": {
+                  "deal": {
+                    "amount": "1000.00",
+                    "created_at": "2026-03-10T09:00:00+00:00",
+                    "created_by": "018f0a3e-3333-7c3e-8c3e-3e7c3e7c3e7c",
+                    "currency": "RUB",
+                    "custom_fields": {
+                      "contract_number": "Д-1"
+                    },
+                    "deal_type": "b2b",
+                    "external_ids": {},
+                    "id": "018f0a3e-7c3e-7c3e-8c3e-3e7c3e7c3e7c",
+                    "number": "D-2026-000431",
+                    "organization_id": "018f0a3e-2222-7c3e-8c3e-3e7c3e7c3e7c",
+                    "organization_name": "РТ Университет",
+                    "owner_id": "018f0a3e-3333-7c3e-8c3e-3e7c3e7c3e7c",
+                    "owner_unavailable": false,
+                    "priority": "normal",
+                    "signature_status": "none",
+                    "sla_state": "ok",
+                    "status_changed_at": "2026-03-15T10:30:00+00:00",
+                    "status_id": "018f0a3e-7c3e-7c3e-8c3e-3e7c3e7c3e7c",
+                    "title": "РТ Университет — Python: базовый курс",
+                    "updated_at": "2026-03-15T10:30:00+00:00",
+                    "version": 2,
+                    "workflow_id": "018f0a3e-1111-7c3e-8c3e-3e7c3e7c3e7c"
+                  }
+                },
                 "schema": {
                   "$ref": "#/components/schemas/TransitionResponse"
                 }
@@ -32607,6 +32655,51 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "example": {
+                  "bitrix_id": "42",
+                  "external_id": "bitrix-evt-2026-03-15-001",
+                  "fields": {
+                    "title": "РТ Университет — Python: базовый курс"
+                  },
+                  "version": 2
+                },
+                "properties": {
+                  "bitrix_id": {
+                    "title": "Bitrix Id",
+                    "type": "string"
+                  },
+                  "external_id": {
+                    "description": "Идентификатор доставки для дедупликации",
+                    "title": "External Id",
+                    "type": "string"
+                  },
+                  "fields": {
+                    "additionalProperties": true,
+                    "title": "Fields",
+                    "type": "object"
+                  },
+                  "version": {
+                    "minimum": 1,
+                    "title": "Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "external_id",
+                  "bitrix_id",
+                  "version"
+                ],
+                "title": "BitrixWebhookRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
@@ -32619,6 +32712,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -32801,6 +32897,50 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "Тело `POST /api/v1/integrations/lms/progress` — раздел 8. Формат\nстрок в `items` совпадает с тем, что `LmsClient.pull_progress()` читает\nиз ответа `GET .../students/progress` (раздел 4.14) — один и тот же\n`lms.upsert_progress()` обрабатывает оба направления, см. докстринг\n`integration.lms`.",
+                "example": {
+                  "external_id": "lms-push-2026-03-15-001",
+                  "items": [
+                    {
+                      "completed_at": "2026-09-20T12:00:00Z",
+                      "course_external_id": "c-1",
+                      "deal_id": "018f0a3e-7c3e-7c3e-8c3e-3e7c3e7c3e7c",
+                      "enrolled_at": "2026-09-01T10:00:00Z",
+                      "last_activity_at": "2026-09-21T09:00:00Z",
+                      "progress_pct": 60,
+                      "score": 4.5
+                    }
+                  ]
+                },
+                "properties": {
+                  "external_id": {
+                    "description": "Идентификатор доставки для дедупликации",
+                    "title": "External Id",
+                    "type": "string"
+                  },
+                  "items": {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "title": "Items",
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "external_id"
+                ],
+                "title": "LmsProgressPushRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
@@ -32813,6 +32953,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"

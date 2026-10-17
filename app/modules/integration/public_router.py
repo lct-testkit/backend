@@ -52,6 +52,22 @@ from app.modules.integration.service import IntegrationSourceService
 
 integrations_public_router = APIRouter(prefix="/v1/integrations", tags=["integrations-public"])
 
+
+def _push_request_body(model: type[BaseModel]) -> dict[str, Any]:
+    """B9-2: `openapi_extra` для вебхуков, которые читают тело вручную (`_parse_push`, не через
+    параметр-модель FastAPI — подпись должна проверяться над сырыми байтами ДО разбора JSON,
+    `_authenticate_push`/`_parse_push`), поэтому FastAPI не строит `requestBody` сам, как у ручек
+    с `payload: Model` в сигнатуре — приходится собирать схему явно, тем же приёмом, что уже
+    применяет `/cms/leads` чуть выше (`_LEAD_BODY_DESCRIPTION`), но из настоящей Pydantic-схемы
+    модели, а не руками написанного `{"type": "object", ...}` — пример вложен в неё же, без
+    отдельного `examples`, который OpenAPI 3.0.3 (`app.openapi_version`) не поддерживает."""
+    schema = model.model_json_schema()
+    example = (model.model_config.get("json_schema_extra") or {}).get("example")
+    if example is not None:
+        schema["example"] = example
+    return {"requestBody": {"required": True, "content": {"application/json": {"schema": schema}}}}
+
+
 _IDEMPOTENCY_KEY_MAX = 255  # длина `inbound_messages.external_id`
 # Заявка — маленький объект; крупнее тело — не заявка, а попытка забить память или журнал.
 _CMS_MAX_BODY_BYTES = 256 * 1024
@@ -413,6 +429,7 @@ async def _process_push[R](
         "источник lms отключён — 503 CRM-1703. Каждая строка — в своём SAVEPOINT: "
         "одна «битая» не откатывает остальные. Без аутентификации пользователя."
     ),
+    openapi_extra=_push_request_body(LmsProgressPushRequest),
 )
 async def lms_progress_push(
     request: Request,
@@ -480,6 +497,7 @@ async def lms_progress_push(
         "первой обработки без повторной записи. Неверная подпись — 401 CRM-1701; "
         "источник bitrix24 отключён — 503 CRM-1703. Без аутентификации пользователя."
     ),
+    openapi_extra=_push_request_body(BitrixWebhookRequest),
 )
 async def bitrix_webhook(
     request: Request,
