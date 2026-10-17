@@ -17,7 +17,7 @@ from app.core.config import get_settings
 from app.core.csrf import SAFE_METHODS
 from app.core.errors import ErrorCode, FieldError
 from app.core.problem import PROBLEM_CONTENT_TYPE, build_problem, problem_response
-from app.main import OPENAPI_DESCRIPTION, create_app
+from app.main import OPENAPI_DESCRIPTION, OPENAPI_TAGS, create_app
 
 _METHODS = ("get", "put", "post", "delete", "options", "head", "patch")
 
@@ -272,3 +272,29 @@ class TestIdempotencyKey:
     def test_the_api_description_lists_every_idempotent_route(self, method: str, path: str) -> None:
         # Общее описание раньше обещало ключ «всем создающим ручкам», а принимали его четыре.
         assert path in OPENAPI_DESCRIPTION, f"{method.upper()} {path}"
+
+
+class TestTagOrder:
+    """B9-3: `openapi_tags` задаёт порядок групп в Swagger UI явно — без него FastAPI сортирует
+    по порядку первого появления маршрута (порядок `include_router` в `create_app`), и список
+    расползается при любом рефакторинге `app/main.py`. Новый роутер с новым тегом должен сразу
+    попасть в `OPENAPI_TAGS`, иначе тест ниже падает."""
+
+    def test_every_tag_used_by_an_operation_is_registered(self, schema: dict[str, Any]) -> None:
+        used_tags = {
+            tag for _p, _m, operation in _operations(schema) for tag in operation.get("tags", [])
+        }
+        registered = {entry["name"] for entry in OPENAPI_TAGS}
+        assert used_tags <= registered, used_tags - registered
+
+    def test_no_unused_or_duplicate_tags_registered(self, schema: dict[str, Any]) -> None:
+        used_tags = {
+            tag for _p, _m, operation in _operations(schema) for tag in operation.get("tags", [])
+        }
+        names = [entry["name"] for entry in OPENAPI_TAGS]
+        assert len(names) == len(set(names)), "повтор имени тега в OPENAPI_TAGS"
+        assert set(names) - used_tags == set(), set(names) - used_tags
+
+    def test_every_tag_has_a_non_empty_description(self) -> None:
+        empty = [entry["name"] for entry in OPENAPI_TAGS if not entry.get("description")]
+        assert empty == []
