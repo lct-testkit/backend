@@ -403,7 +403,17 @@ async def _process_push[R](
         raise
 
 
-@integrations_public_router.post("/lms/progress", summary="Приём прогресса от LMS (push)")
+@integrations_public_router.post(
+    "/lms/progress",
+    summary="Приём прогресса от LMS (push)",
+    description=(
+        "Пакет строк прогресса учащихся (`progress_pct`, оценка, даты), подписанный "
+        "HMAC в заголовке X-Signature; повтор того же `external_id` отдаёт результат "
+        "первой обработки без повторной записи. Неверная подпись — 401 CRM-1701; "
+        "источник lms отключён — 503 CRM-1703. Каждая строка — в своём SAVEPOINT: "
+        "одна «битая» не откатывает остальные. Без аутентификации пользователя."
+    ),
+)
 async def lms_progress_push(
     request: Request,
     session: DbSession,
@@ -460,7 +470,17 @@ async def lms_progress_push(
     }
 
 
-@integrations_public_router.post("/bitrix/webhook", summary="Приём изменений из Bitrix24")
+@integrations_public_router.post(
+    "/bitrix/webhook",
+    summary="Приём изменений из Bitrix24",
+    description=(
+        "Изменение сделки Bitrix24, подписанное HMAC в заголовке X-Signature; "
+        "применяется только если присланная версия новее сохранённой (last-write-wins), "
+        "иначе статус ответа — `duplicate`. Повтор того же `external_id` отдаёт результат "
+        "первой обработки без повторной записи. Неверная подпись — 401 CRM-1701; "
+        "источник bitrix24 отключён — 503 CRM-1703. Без аутентификации пользователя."
+    ),
+)
 async def bitrix_webhook(
     request: Request,
     session: DbSession,

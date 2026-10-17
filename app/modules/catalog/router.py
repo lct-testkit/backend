@@ -125,7 +125,16 @@ LicenseDelete = Annotated[Principal, Depends(require_permission(Permission.LICEN
 # =============================================================================
 
 
-@organizations_router.get("", summary="Список организаций", response_model=OrganizationListResponse)
+@organizations_router.get(
+    "",
+    summary="Список организаций",
+    description=(
+        "Фильтры: `name`, `inn`, `ogrn`, `org_type`, `region_id`, `owner_id`, "
+        "`registry_status`, `is_accredited`, `source`, `q` (поиск по названию, короткому "
+        "названию или ИНН). Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=OrganizationListResponse,
+)
 async def list_organizations(
     session: DbSession,
     page: Pagination,
@@ -207,7 +216,14 @@ async def create_organization(
 
 
 @organizations_router.get(
-    "/check-duplicate", summary="Проверить дубль по ИНН/ОГРН", response_model=DuplicateCheckResponse
+    "/check-duplicate",
+    summary="Проверить дубль по ИНН/ОГРН",
+    description=(
+        "Точные совпадения по `inn`/`ogrn` и похожие по названию (`name`). Организация вне "
+        "скоупа вызывающего — только факт существования без реквизитов (`accessible=false`), "
+        "иначе КАМ мог бы подобрать ИНН и узнать название чужого вуза. Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=DuplicateCheckResponse,
 )
 async def check_duplicate_organization(
     session: DbSession,
@@ -245,7 +261,10 @@ async def check_duplicate_organization(
 
 
 @organizations_router.get(
-    "/{organization_id}", summary="Карточка организации", response_model=OrganizationOut
+    "/{organization_id}",
+    summary="Карточка организации",
+    description="Вне скоупа вызывающего или не существует — 404 CRM-9004. Роль: KAM, HEAD, ADMIN.",
+    response_model=OrganizationOut,
 )
 async def get_organization(
     session: DbSession, principal: OrgRead, organization_id: Annotated[uuid.UUID, Path()]
@@ -255,7 +274,14 @@ async def get_organization(
 
 
 @organizations_router.patch(
-    "/{organization_id}", summary="Обновить организацию", response_model=OrganizationOut
+    "/{organization_id}",
+    summary="Обновить организацию",
+    description=(
+        "Правка реквизитов и атрибутов организации. Обязателен `If-Match` с текущей "
+        "версией — расхождение даёт 409 CRM-1002; вне скоупа или не существует — 404 "
+        "CRM-9004. Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=OrganizationOut,
 )
 async def update_organization(
     payload: OrganizationUpdateRequest,
@@ -335,7 +361,16 @@ async def restore_organization(
 # =============================================================================
 
 
-@contacts_router.get("", summary="Список контактов", response_model=ContactListResponse)
+@contacts_router.get(
+    "",
+    summary="Список контактов",
+    description=(
+        "Фильтры: `organization_id`, `position`, `is_decision_maker`, `is_anonymized`, "
+        "`source`, `q`. Телефон и email маскированы — полные значения через "
+        "`POST /api/contacts/{id}/reveal`. Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=ContactListResponse,
+)
 async def list_contacts(
     session: DbSession,
     page: Pagination,
@@ -369,6 +404,7 @@ async def list_contacts(
 @contacts_router.post(
     "",
     summary="Создать контакт",
+    description="ФИО, должность, телефон/email и признак ЛПР. Поддерживает Idempotency-Key.",
     response_model=ContactOut,
     status_code=status.HTTP_201_CREATED,
 )
@@ -401,7 +437,16 @@ async def create_contact(
     return result
 
 
-@contacts_router.get("/{contact_id}", summary="Карточка контакта", response_model=ContactOut)
+@contacts_router.get(
+    "/{contact_id}",
+    summary="Карточка контакта",
+    description=(
+        "Телефон и email маскированы — полные значения через "
+        "`POST /api/contacts/{id}/reveal`; не существует — 404 CRM-9004. "
+        "Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=ContactOut,
+)
 async def get_contact(
     session: DbSession, principal: ContactRead, contact_id: Annotated[uuid.UUID, Path()]
 ) -> ContactOut:
@@ -409,7 +454,15 @@ async def get_contact(
     return ContactOut.from_model(contact)
 
 
-@contacts_router.patch("/{contact_id}", summary="Обновить контакт", response_model=ContactOut)
+@contacts_router.patch(
+    "/{contact_id}",
+    summary="Обновить контакт",
+    description=(
+        "Обязателен `If-Match` с текущей версией — расхождение даёт 409 CRM-1002; "
+        "не существует — 404 CRM-9004. Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=ContactOut,
+)
 async def update_contact(
     payload: ContactUpdateRequest,
     session: DbSession,
@@ -811,7 +864,13 @@ async def delete_direction(
 
 
 @loss_reasons_router.get(
-    "", summary="Справочник причин отказа", response_model=LossReasonListResponse
+    "",
+    summary="Справочник причин отказа",
+    description=(
+        "Причины для перехода сделки в lost (код, название, активность). Фильтр "
+        "`is_active`. Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=LossReasonListResponse,
 )
 async def list_loss_reasons(
     session: DbSession,
@@ -829,6 +888,7 @@ async def list_loss_reasons(
 @loss_reasons_router.post(
     "",
     summary="Создать причину отказа",
+    description="Код, название, категория и порядок сортировки новой причины отказа. Роль: ADMIN.",
     response_model=LossReasonOut,
     status_code=status.HTTP_201_CREATED,
 )
@@ -840,7 +900,13 @@ async def create_loss_reason(
 
 
 @loss_reasons_router.patch(
-    "/{loss_reason_id}", summary="Обновить причину отказа", response_model=LossReasonOut
+    "/{loss_reason_id}",
+    summary="Обновить причину отказа",
+    description=(
+        "Правка названия, категории, активности или порядка сортировки; обязателен "
+        "`If-Match` с текущей версией — расхождение даёт 409 CRM-1002. Роль: ADMIN."
+    ),
+    response_model=LossReasonOut,
 )
 async def update_loss_reason(
     payload: LossReasonUpdateRequest,
@@ -877,7 +943,15 @@ async def delete_loss_reason(
 # =============================================================================
 
 
-@holidays_router.get("", summary="Производственный календарь", response_model=HolidayListResponse)
+@holidays_router.get(
+    "",
+    summary="Производственный календарь",
+    description=(
+        "Выходные и перенесённые рабочие дни (`is_working_day`) — основа расчёта SLA в "
+        "рабочих днях. Фильтр по периоду `date_from`/`date_to`. Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=HolidayListResponse,
+)
 async def list_holidays(
     session: DbSession,
     principal: CatalogRead,
@@ -901,6 +975,7 @@ async def list_holidays(
 @holidays_router.post(
     "",
     summary="Добавить дату в календарь",
+    description="Дата, название и признак рабочего дня (перенос выходного). Роль: ADMIN.",
     response_model=HolidayOut,
     status_code=status.HTTP_201_CREATED,
 )
@@ -912,7 +987,13 @@ async def create_holiday(
 
 
 @holidays_router.patch(
-    "/{holiday_id}", summary="Изменить дату календаря", response_model=HolidayOut
+    "/{holiday_id}",
+    summary="Изменить дату календаря",
+    description=(
+        "Правка даты, названия или признака рабочего дня; обязателен `If-Match` с текущей "
+        "версией — расхождение даёт 409 CRM-1002. Роль: ADMIN."
+    ),
+    response_model=HolidayOut,
 )
 async def update_holiday(
     payload: HolidayUpdateRequest,
@@ -950,7 +1031,14 @@ async def delete_holiday(
 
 
 @custom_field_defs_router.get(
-    "", summary="Определения пользовательских полей", response_model=CustomFieldDefListResponse
+    "",
+    summary="Определения пользовательских полей",
+    description=(
+        "Каталог определений `custom_fields` (тип, обязательность, правила проверки "
+        "значения) для сделок, организаций и продуктов. Фильтры: `entity_type`, "
+        "`is_active`. Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=CustomFieldDefListResponse,
 )
 async def list_custom_field_defs(
     session: DbSession,
@@ -997,7 +1085,14 @@ async def create_custom_field_def(
 
 
 @custom_field_defs_router.patch(
-    "/{field_id}", summary="Обновить пользовательское поле", response_model=CustomFieldDefOut
+    "/{field_id}",
+    summary="Обновить пользовательское поле",
+    description=(
+        "Правка названия, правил проверки или активности определения; не меняет уже "
+        "сохранённые значения `custom_fields`. Обязателен `If-Match` с текущей версией — "
+        "расхождение даёт 409 CRM-1002. Роль: ADMIN."
+    ),
+    response_model=CustomFieldDefOut,
 )
 async def update_custom_field_def(
     payload: CustomFieldDefUpdateRequest,
@@ -1034,7 +1129,14 @@ async def delete_custom_field_def(
 # =============================================================================
 
 
-@regions_router.get("", summary="Справочник регионов", response_model=RegionListResponse)
+@regions_router.get(
+    "",
+    summary="Справочник регионов",
+    description=(
+        "Регионы РФ для поля организации `region_id` (код, название). Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=RegionListResponse,
+)
 async def list_regions(session: DbSession, principal: CatalogRead) -> RegionListResponse:
     rows = (await session.execute(region_list_query())).scalars().all()
     return RegionListResponse(items=[RegionOut.model_validate(r) for r in rows])
@@ -1123,6 +1225,11 @@ async def list_organization_licenses(
 @organization_licenses_router.get(
     "/{license_id}",
     summary="Карточка лицензии/договора",
+    description=(
+        "ФИО менеджера и ответственные от вуза маскированы без права contact:reveal. "
+        "Организация вне скоупа или запись не существует — 404 CRM-9004. "
+        "Роль: KAM, HEAD, ADMIN."
+    ),
     response_model=OrganizationLicenseOut,
 )
 async def get_organization_license(

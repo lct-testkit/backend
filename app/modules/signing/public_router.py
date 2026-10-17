@@ -166,6 +166,12 @@ async def get_sign_file(session: DbSession, token: Annotated[str, Path()]) -> Re
 @public_signing_router.post(
     "/{token}/challenge",
     summary="Запросить одноразовый код (внешний подписант)",
+    description=(
+        "Отправляет внешнему подписанту код по SMS или email для последующего "
+        "`/{token}/sign`. Токен недействителен или ссылка истекла — 404 CRM-1504; не "
+        "более 5 кодов на запрос — 422 CRM-1503; канал доставки недоступен — 503 "
+        "CRM-9503. Без аутентификации, лимит запросов по токену и по IP."
+    ),
     response_model=ChallengeResponse,
     dependencies=[Depends(_rate_limited)],
 )
@@ -193,6 +199,12 @@ async def public_challenge(
 @public_signing_router.post(
     "/{token}/sign",
     summary="Подписать кодом подтверждения (внешний подписант)",
+    description=(
+        "Проверяет код из `/{token}/challenge` и фиксирует подпись. Токен недействителен "
+        "или истёк — 404 CRM-1504; неверный/просроченный/использованный код либо "
+        "исчерпанные попытки — 422 CRM-1503; запрос уже подписан — 409 CRM-1505. Без "
+        "аутентификации, лимит запросов по токену и по IP."
+    ),
     response_model=SignatureOut,
     dependencies=[Depends(_rate_limited)],
 )
@@ -215,6 +227,12 @@ async def public_sign(
 @public_signing_router.post(
     "/{token}/reject",
     summary="Отклонить документ (внешний подписант)",
+    description=(
+        "Отклоняет документ с указанием причины: документ переходит в `rejected`, "
+        "незавершённые запросы других подписантов аннулируются. Токен недействителен или "
+        "истёк — 404 CRM-1504; запрос или документ уже завершены — 409 CRM-1505. Без "
+        "аутентификации, лимит запросов по токену и по IP."
+    ),
     response_model=SignatureRequestOut,
     dependencies=[Depends(_rate_limited)],
 )
