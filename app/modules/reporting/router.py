@@ -75,7 +75,11 @@ async def list_report_templates(
     description=(
         "Лёгкий отчёт формируется сразу (`status=completed`, `progress_pct=100`), "
         "тяжёлый встаёт в очередь. Незавершённых отчётов у одного сотрудника не "
-        "больше REPORTS_MAX_CONCURRENT — иначе 429 CRM-1601. Роль: создание отчётов."
+        "больше REPORTS_MAX_CONCURRENT — иначе 429 CRM-1601. Роль: создание отчётов. "
+        '`"format":"json"` даёт файл-конверт `rtk-crm-report/1` '
+        "(`docs/schemas/rtk-crm-report-1.schema.json`, модель "
+        "`reporting.result_schema.ReportResultV1`) — тот же набор данных, "
+        "что и `GET /{report_id}/data`."
     ),
     response_model=ReportJobOut,
     status_code=status.HTTP_201_CREATED,

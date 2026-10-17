@@ -67,6 +67,13 @@ from app.modules.reporting.rendering_xls import (
     resolve_tz,
     sheet_title,
 )
+from app.modules.reporting.result_schema import (
+    REPORT_RESULT_SCHEMA_VERSION,
+    ReportResultColumn,
+    ReportResultReport,
+    ReportResultTotals,
+    ReportResultV1,
+)
 from app.modules.reporting.spec import derived_chart_kinds
 from app.modules.signing.rendering import html_to_pdf, render_template_html
 
@@ -436,8 +443,9 @@ def render_pdf(dataset: ReportDataset) -> bytes:
 
 
 #: rtk_requiriments.md §6 п.4: «возможность формирования результирующего json-файла».
-#: Версионировано — пересматривается при несовместимых изменениях структуры файла (B1-5).
-_JSON_SCHEMA = "rtk-crm-report/1"
+#: Версия конверта — `reporting.result_schema.REPORT_RESULT_SCHEMA_VERSION` (B9-9), не
+#: самостоятельный литерал: пересматривается при несовместимых изменениях структуры файла
+#: (правило версий — докстринг `result_schema.py`), меняется в одном месте.
 
 
 def _json_cell(value: Any, tz: dt.tzinfo) -> Any:
@@ -482,33 +490,42 @@ def render_json(
     keys = dataset.keys if dataset.keys is not None else [None] * len(dataset.columns)
     kinds = dataset.kinds if dataset.kinds is not None else ["text"] * len(dataset.columns)
     columns = [
-        {"key": key, "title": title, "kind": kind}
+        ReportResultColumn(key=key, title=title, kind=kind)
         for key, title, kind in zip(keys, dataset.columns, kinds, strict=True)
     ]
     # Служебные ключи (`_seed` и т.п., B1-2) не предназначены для интегратора.
     visible_params = {k: v for k, v in (params or {}).items() if not str(k).startswith("_")}
 
-    payload = {
-        "schema": _JSON_SCHEMA,
-        "report": {
-            "code": template_code,
-            "title": dataset.title,
-            "job_id": str(job_id) if job_id is not None else None,
-            "generated_at": dataset.generated_at.astimezone(tz).isoformat(),
-            "timezone": tz_name or DEFAULT_TIMEZONE_NAME,
-        },
-        "params": visible_params,
-        "columns": columns,
-        "rows": [[_json_cell(value, tz) for value in row] for row in dataset.rows],
-        "totals": {
-            "row_count": len(dataset.rows),
-            "total_rows": (
+    # B9-9: конверт собирается через `ReportResultV1` (`reporting.result_schema`), не голым
+    # словарём — форма файла проверяется тем же кодом, что проверяет и документирует её
+    # (`tools/export_report_schema.py`/`docs/schemas/rtk-crm-report-1.schema.json`), а не только
+    # текстом в этом докстринге.
+    result = ReportResultV1(
+        schema=REPORT_RESULT_SCHEMA_VERSION,
+        report=ReportResultReport(
+            code=template_code,
+            title=dataset.title,
+            job_id=str(job_id) if job_id is not None else None,
+            generated_at=dataset.generated_at.astimezone(tz).isoformat(),
+            timezone=tz_name or DEFAULT_TIMEZONE_NAME,
+        ),
+        params=visible_params,
+        columns=columns,
+        rows=[[_json_cell(value, tz) for value in row] for row in dataset.rows],
+        totals=ReportResultTotals(
+            row_count=len(dataset.rows),
+            total_rows=(
                 dataset.total_rows if dataset.total_rows is not None else len(dataset.rows)
             ),
-            "truncated": dataset.truncated,
-        },
-        "note": dataset.note,
-    }
+            truncated=dataset.truncated,
+        ),
+        note=dataset.note,
+    )
+    # `model_dump()` без `mode="json"` — специально: тот режим молча превращает `float('nan')` в
+    # `None` (проверено отдельно), а обычный режим сохраняет исходный `float('nan')`/`inf`, на
+    # котором `json.dumps(..., allow_nan=False)` ниже всё ещё поднимает `ValueError`, как до
+    # перевода конверта на Pydantic-модель.
+    payload = result.model_dump(by_alias=True)
     return json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
 
 

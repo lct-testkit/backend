@@ -191,7 +191,13 @@ curl -s "http://localhost:8080/api/admin/audit/verify-chain?limit=1000" -H "Auth
 curl -s http://localhost:8080/api/openapi.json -o openapi.json
 ```
 
-`openapi.json` — 3.0.3, 165 путей, 210 операций, 243 схемы, схемы безопасности `BearerAuth`, `SessionCookie` (cookie `crm_sid`) и `CsrfToken` (заголовок `X-CSRF-Token`), ошибки — общая схема `Problem` (RFC 7807, `application/problem+json`). Тот же файл — источник для генератора клиента фронтенда (`frontend/tools/gen-api.mjs`).
+`openapi.json` — 3.0.3, 166 путей, 214 операций, 248 схем (числа растут с каждым спринтом — точные см. `python -c "import json;d=json.load(open('openapi.json'));print(len(d['paths']))"`, аналогично для операций и `components.schemas`), схемы безопасности `BearerAuth`, `SessionCookie` (cookie `crm_sid`) и `CsrfToken` (заголовок `X-CSRF-Token`), ошибки — общая схема `Problem` (RFC 7807, `application/problem+json`). Тот же файл — источник для генератора клиента фронтенда (`frontend/tools/gen-api.mjs`).
+
+### Результирующий json-файл отчёта
+
+`rtk_requiriments.md` §6 п.4 требует «возможность формирования результирующего json-файла»: `POST /api/reports` с `"format":"json"` отдаёт тот же набор данных, что и `GET /reports/{id}/data`, конвертом `rtk-crm-report/1` (модель `app/modules/reporting/result_schema.py:ReportResultV1`, рендер — `reporting.rendering.render_json`). Закоммиченная JSON Schema — `docs/schemas/rtk-crm-report-1.schema.json`, перегенерируется `python tools/export_report_schema.py` и проверяется `--check` (вместе с `test_report_result_schema.py`).
+
+Правило версий: добавление необязательных полей не меняет версию конверта (старый клиент их просто не видит, `extra="allow"` в модели — то же самое и для нового клиента на файле без ещё не введённых полей). Удаление поля, переименование или смена типа значения — новая версия (`rtk-crm-report/2`), прежняя версия продолжает отдаваться минимум два релиза после введения следующей.
 
 ### Автоподстановка и проверка ИНН
 
@@ -341,8 +347,10 @@ app/
 │                        integration, notification, registry, reporting, signing, workflow
 ├── assets/fonts/        DejaVu Sans — кириллица в PDF (xhtml2pdf) и графиках (matplotlib)
 └── worker/main.py       arq: воркер и планировщик периодических задач
-migrations/versions/     24 миграции Alembic: 0001_baseline … 0024_audit_chain_head_autovacuum
-tests/                   107 файлов, 2317 тестов (офлайн + сквозные с TEST_DATABASE_URL)
+migrations/versions/     30 миграций Alembic: 0001_baseline … 0030_learning_progress_report
+                         (растёт — точное число: `ls migrations/versions/*.py | wc -l`)
+tests/                   119 файлов, 2667 тестов (офлайн + сквозные с TEST_DATABASE_URL;
+                         точное число — `pytest --collect-only -q | tail -1`, растёт с каждым спринтом)
 loadtest/                Locust: provision.py + 2 locustfile, README со своими результатами
 deploy/                  Caddyfile, entrypoint.sh, keycloak/realm-crm.json, postgres/, seaweedfs/
 ```
@@ -431,7 +439,7 @@ python tools/export_openapi.py --check            # контракт API: openap
 * `openapi.json` в корне — контракт с фронтендом (`frontend/tools/gen-api.mjs` строит из него типы). Изменили API — перегенерируйте: `python tools/export_openapi.py`.
 * Исключения ruff (кириллица, `S105/S106` на константы-коды и т.п.) и их причины — в `[tool.ruff.lint]`.
 
-**Миграции.** Alembic, `migrations/env.py` берёт URL из `Settings().database_url` (или `MIGRATIONS_DATABASE_URL` при локальном запуске вне Docker — та же ограниченная роль `crm_app` не имеет DDL-прав, см. «Аудит»). 24 линейные ревизии, от `0001_baseline` до `0024_audit_chain_head_autovacuum`. В CI проверяются: ровно одна голова, `upgrade head`, **`alembic check`** (модели не разошлись со схемой) и round-trip последней ревизии (`downgrade -1` → `upgrade head`). Все таблицы, включая шесть таблиц интеграций, описаны моделями: `alembic check` не исключает ни одной; в `migrations/env.py` пропускаются только партиции `audit_log_*` и два служебных индекса (`_MIGRATION_ONLY_INDEXES`) — новые таблицы описывайте моделью.
+**Миграции.** Alembic, `migrations/env.py` берёт URL из `Settings().database_url` (или `MIGRATIONS_DATABASE_URL` при локальном запуске вне Docker — та же ограниченная роль `crm_app` не имеет DDL-прав, см. «Аудит»). 30 линейных ревизий, от `0001_baseline` до `0030_learning_progress_report` (точное число растёт — `ls migrations/versions/*.py | wc -l`). В CI проверяются: ровно одна голова, `upgrade head`, **`alembic check`** (модели не разошлись со схемой) и round-trip последней ревизии (`downgrade -1` → `upgrade head`). Все таблицы, включая шесть таблиц интеграций, описаны моделями: `alembic check` не исключает ни одной; в `migrations/env.py` пропускаются только партиции `audit_log_*` и два служебных индекса (`_MIGRATION_ONLY_INDEXES`) — новые таблицы описывайте моделью.
 
 ```bash
 alembic upgrade head
