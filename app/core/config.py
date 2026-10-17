@@ -166,6 +166,23 @@ class Settings(BaseSettings):
     reports_link_ttl_minutes: int = 15
     reports_retention_days: int = 7
 
+    # --- Сроки хранения (B6-6, 152-ФЗ ст. 5 ч. 7) --------------------------
+    # Область этой итерации сужена: архивация audit_log в S3 с DETACH PARTITION и
+    # SECURITY DEFINER функциями (самое рискованное и трудоёмкое — работа с неизменяемым
+    # журналом аудита) не реализована, см. отчёт. Реализованные категории ниже не трогают
+    # неизменяемые/архивные данные.
+    retention_enabled: bool = True
+    # Первый запуск на живом стенде — только с этим true и сверкой чисел вручную (риск
+    # необратимого удаления).
+    retention_dry_run: bool = False
+    retention_batch_size: int = 1000
+    retention_security_events_months: int = 36
+    # Было константой `OTP_RETENTION_DAYS` в `signing/tasks.py`.
+    retention_otp_days: int = 30
+    retention_pending_upload_hours: int = 24
+    retention_deleted_files_days: int = 30
+    retention_notifications_days: int = 180
+
     # --- Импорт ----------------------------------------------------------
     # new_spec §4.12, фаза 2: «лимит 50 МБ / 100 000 строк» — 5 000 строк
     # там же (§0, критерий 4) это только демо-цель для DoD, не потолок.

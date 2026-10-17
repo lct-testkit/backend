@@ -14,7 +14,7 @@ import datetime as dt
 from typing import Any
 
 import structlog
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -32,7 +32,6 @@ from app.modules.signing.models import (
     EdmAgreement,
     EdmAgreementStatus,
     SignatureDocument,
-    SignatureOtpCode,
     SignatureRequest,
 )
 from app.modules.signing.models import SignatureDocumentStatus as DocStatus
@@ -47,9 +46,10 @@ from app.modules.signing.service import (
 
 logger = structlog.get_logger(__name__)
 
-#: `signature_otp_codes` хранит ретеншен 30 дней (dop.md §10.9) — доказательство
-#: лежит в `signatures.evidence`, сами коды нужны только на срок жизни OTP.
-OTP_RETENTION_DAYS = 30
+# `signature_otp_codes` (dop.md §10.9) чистится категорией `otp_codes` единого
+# `RetentionService` (B6-6, `app/modules/admin/retention.py`, `RETENTION_OTP_DAYS`) — не
+# отдельной задачей здесь: доказательство лежит в `signatures.evidence`, сами коды нужны
+# только на срок жизни OTP.
 
 
 @track_task
@@ -200,18 +200,6 @@ async def _expire_edm_agreements(session: AsyncSession, *, today: dt.date) -> in
             },
         )
     return len(agreements)
-
-
-@track_task
-async def sweep_signature_otp_cleanup(ctx: dict[str, Any]) -> dict[str, int]:
-    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(days=OTP_RETENTION_DAYS)
-    async with session_scope() as session:
-        result = await session.execute(
-            delete(SignatureOtpCode).where(SignatureOtpCode.created_at < cutoff)
-        )
-    removed = result.rowcount or 0
-    logger.info("signature_otp_codes_purged", removed=removed)
-    return {"removed": removed}
 
 
 #: Префикс детерминированных ключей штампованного PDF/протокола (B7-6,

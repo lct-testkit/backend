@@ -22,6 +22,7 @@ from app.core.logging import configure_logging
 from app.core.metrics import start_worker_metrics_server, stop_worker_metrics_server, track_task
 from app.core.redis_client import close_redis
 from app.modules.admin.models import IdempotencyKey
+from app.modules.admin.tasks import sweep_retention
 from app.modules.crm.tasks import sweep_sla_breaches
 from app.modules.files.antivirus import build_scanner as build_antivirus_scanner
 from app.modules.files.service import register_antivirus_scanner
@@ -44,7 +45,6 @@ from app.modules.reporting.tasks import (
 from app.modules.signing.tasks import (
     sweep_signature_deadlines,
     sweep_signature_orphans,
-    sweep_signature_otp_cleanup,
     sweep_signature_reminders,
 )
 from app.modules.workflow.tasks import sweep_status_mapping_jobs
@@ -125,13 +125,13 @@ class WorkerSettings:
     functions = [
         ensure_audit_partitions,
         purge_expired_idempotency_keys,
+        sweep_retention,
         sweep_status_mapping_jobs,
         sweep_sla_breaches,
         sweep_registry_imports,
         sweep_registry_drift,
         sweep_import_jobs,
         sweep_signature_deadlines,
-        sweep_signature_otp_cleanup,
         sweep_signature_orphans,
         sweep_signature_reminders,
         dispatch_pending_notifications,
@@ -145,6 +145,8 @@ class WorkerSettings:
         sweep_keycloak_events,
     ]
     cron_jobs = [
+        # Раз в сутки, до партиций аудита: очистка по сроку хранения (B6-6, 152-ФЗ ст. 5 ч. 7).
+        cron(sweep_retention, hour=2, minute=30),
         # Раз в сутки: партиции аудита на будущее.
         cron(ensure_audit_partitions, hour=3, minute=0),
         # Раз в час: чистка просроченных идемпотентных ключей.
@@ -167,8 +169,6 @@ class WorkerSettings:
         # Раз в 15 минут: просроченные запросы на подпись (spec.txt §15
         # `signature.expire_deadlines`).
         cron(sweep_signature_deadlines, minute={0, 15, 30, 45}),
-        # Раз в сутки: чистка OTP-кодов старше 30 дней (`signature.clean_otp`).
-        cron(sweep_signature_otp_cleanup, hour=4, minute=45),
         # Раз в сутки: объекты бакета signatures под signed/ без строки files (B7-6).
         cron(sweep_signature_orphans, hour=4, minute=50),
         # Раз в 30 минут: напоминания подписантам о приближающемся дедлайне (B7-1).
