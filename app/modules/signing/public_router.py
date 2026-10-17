@@ -33,11 +33,23 @@ import hashlib
 import uuid
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Path, Query, Request, Response
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
+from fastapi import status as http_status
 
 from app.core.config import get_settings
 from app.core.context import get_client
 from app.core.deps import DbSession
+from app.core.errors import ValidationError
 from app.core.rate_limit import enforce as rate_limit_enforce
 from app.modules.signing.schemas import (
     ChallengeResponse,
@@ -49,13 +61,22 @@ from app.modules.signing.schemas import (
     VerifyResult,
 )
 from app.modules.signing.service import (
+    SignatureDocumentService,
     SignatureRequestService,
     VerifyService,
+    pdf_download_headers,
     pdf_inline_headers,
 )
 
 public_signing_router = APIRouter(prefix="/sign", tags=["signing-public"])
 public_verify_router = APIRouter(prefix="/verify", tags=["signing-public"])
+# B7-3: ссылка «только скачать» подписанный файл/протокол — отдельный публичный роутер
+# (`/public/signed/*`), не делит пространство путей/токенов с `/public/sign/*`.
+public_download_router = APIRouter(prefix="/signed", tags=["signing-public"])
+
+# B7-3: лимит multipart-загрузки для сверки файла по хэшу — тот же порядок, что у
+# внутренней `POST /api/signatures/verify` (`router.py:_MAX_VERIFY_UPLOAD_BYTES`).
+_MAX_PUBLIC_VERIFY_UPLOAD_BYTES = 52_428_800
 
 
 # Во сколько раз общий лимит по IP мягче лимита на один токен подписи.
@@ -96,6 +117,38 @@ async def _rate_limited(request: Request, token: Annotated[str, Path()]) -> None
         detail="Слишком много запросов по этой ссылке, повторите через минуту",
         fail_closed=True,
     )
+
+
+async def _rate_limited_download(request: Request, token: Annotated[str, Path()]) -> None:
+    """B7-3: тот же приём, что `_rate_limited`, но отдельный бакет — скачивание не должно
+    делить счётчик с подписанием (токены разных назначений, `/public/sign/*` и
+    `/public/signed/*`, не взаимозаменяемы, их лимиты тоже разведены)."""
+    ip = _limit_key(request)
+    settings = get_settings()
+    per_token = settings.public_sign_rate_limit_per_min
+    await rate_limit_enforce(
+        ip,
+        "public:download",
+        limit=per_token * _IP_LIMIT_FACTOR,
+        window_seconds=60,
+        detail="Слишком много запросов на скачивание, повторите позже",
+        fail_closed=True,
+    )
+    await rate_limit_enforce(
+        hashlib.sha256(token.encode()).hexdigest()[:32],
+        "public:download:token",
+        limit=per_token,
+        window_seconds=60,
+        detail="Слишком много запросов по этой ссылке, повторите через минуту",
+        fail_closed=True,
+    )
+
+
+async def _require_public_download_enabled() -> None:
+    """Откат без деплоя (B7-3): `SIGNATURE_PUBLIC_DOWNLOAD_ENABLED=false` прячет ручки как
+    несуществующий путь, не 403 — так же, как неизвестный токен."""
+    if not get_settings().signature_public_download_enabled:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND)
 
 
 async def _rate_limited_verify(request: Request) -> None:
@@ -257,3 +310,67 @@ async def public_verify(
 ) -> VerifyResult:
     result = await VerifyService(session).verify_by_id(signature_id)
     return VerifyResult(**result)
+
+
+@public_verify_router.post(
+    "/by-file",
+    summary="Сверить файл по хэшу публично",
+    description=(
+        "multipart-файл сверяется по sha256 с сохранёнными подписями — без учётной записи "
+        "(B7-3), тот же результат, что `POST /api/signatures/verify` для сотрудника."
+    ),
+    response_model=VerifyResult,
+    dependencies=[Depends(_rate_limited_verify)],
+)
+async def public_verify_by_file(
+    session: DbSession,
+    file: Annotated[UploadFile, File()],
+) -> VerifyResult:
+    body = bytearray()
+    while chunk := await file.read(1024 * 1024):
+        body.extend(chunk)
+        if len(body) > _MAX_PUBLIC_VERIFY_UPLOAD_BYTES:
+            raise ValidationError("Файл слишком большой для проверки")
+    result = await VerifyService(session).verify_by_file(bytes(body))
+    return VerifyResult(**result)
+
+
+# --- B7-3: скачивание подписанного файла/протокола по отдельной ссылке ---------------------
+
+
+@public_download_router.get(
+    "/{token}",
+    summary="Скачать подписанный файл по ссылке",
+    description=(
+        "Ссылка отдельная от токена подписания: не даёт права подписывать, свой TTL "
+        "(SIGNATURE_DOWNLOAD_TTL_DAYS, 30 дней по умолчанию) и лимит скачиваний. Неизвестный, "
+        "просроченный и отозванный токен отвечают одинаково. Откат — "
+        "SIGNATURE_PUBLIC_DOWNLOAD_ENABLED=false."
+    ),
+    response_class=Response,
+    responses={200: {"content": {"application/pdf": {}}}},
+    dependencies=[Depends(_require_public_download_enabled), Depends(_rate_limited_download)],
+)
+async def get_signed_file(session: DbSession, token: Annotated[str, Path()]) -> Response:
+    data, filename = await SignatureDocumentService(session).public_download(
+        token, variant="signed"
+    )
+    return Response(
+        content=data, media_type="application/pdf", headers=pdf_download_headers(filename)
+    )
+
+
+@public_download_router.get(
+    "/{token}/protocol",
+    summary="Скачать протокол подписания по ссылке",
+    response_class=Response,
+    responses={200: {"content": {"application/pdf": {}}}},
+    dependencies=[Depends(_require_public_download_enabled), Depends(_rate_limited_download)],
+)
+async def get_signed_protocol(session: DbSession, token: Annotated[str, Path()]) -> Response:
+    data, filename = await SignatureDocumentService(session).public_download(
+        token, variant="protocol"
+    )
+    return Response(
+        content=data, media_type="application/pdf", headers=pdf_download_headers(filename)
+    )

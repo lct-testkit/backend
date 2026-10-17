@@ -40,7 +40,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol, TypeVar, runtime_checkable
+from typing import Any, Literal, Protocol, TypeVar, runtime_checkable
 from urllib.parse import quote
 
 import bcrypt
@@ -106,6 +106,7 @@ from app.modules.signing.models import (
     Signature,
     SignatureDocument,
     SignatureDocumentStatus,
+    SignatureDownloadLink,
     SignatureMethod,
     SignatureOtpCode,
     SignatureRequest,
@@ -239,6 +240,34 @@ def render_sign_link_email(
     return _SIGN_LINK_SUBJECT, "\n".join(lines)
 
 
+def build_download_url(token: str, *, variant: Literal["signed", "protocol"] = "signed") -> str:
+    """Ссылка «только скачать» (B7-3): `/public/signed/{token}` или `.../protocol`. Отдельная
+    от `build_sign_url` — этот токен не даёт права подписывать."""
+    base = get_settings().base_url.rstrip("/")
+    suffix = "/protocol" if variant == "protocol" else ""
+    return f"{base}{get_settings().public_prefix}/signed/{token}{suffix}"
+
+
+_DOWNLOAD_LINK_SUBJECT = "Документ подписан: скачайте копию"
+
+
+def render_signed_document_email(
+    *, title: str, url: str, expires_at: dt.datetime
+) -> tuple[str, str]:
+    """Тема и текст письма со ссылкой на подписанный файл (B7-3) — после последней подписи."""
+    until = expires_at.astimezone(dt.UTC)
+    lines = [
+        "Здравствуйте!",
+        "",
+        f"Документ «{title}» подписан всеми сторонами.",
+        "",
+        f"Скачать подписанный файл: {url}",
+        "",
+        f"Ссылка действует до {until:%d.%m.%Y %H:%M} UTC и личная: не пересылайте её другим людям.",
+    ]
+    return _DOWNLOAD_LINK_SUBJECT, "\n".join(lines)
+
+
 def _agreement_is_effective(agreement: EdmAgreement | None, today: dt.date | None = None) -> bool:
     """Соглашение об ЭДО действует: не отозвано, не истекло и попадает в срок."""
     if agreement is None or agreement.status != EdmAgreementStatus.ACTIVE.value:
@@ -247,6 +276,29 @@ def _agreement_is_effective(agreement: EdmAgreement | None, today: dt.date | Non
     if agreement.valid_from is not None and agreement.valid_from > today:
         return False
     return agreement.valid_to is None or agreement.valid_to >= today
+
+
+async def _revoke_download_links(
+    session: AsyncSession,
+    document_ids: list[uuid.UUID] | None = None,
+    *,
+    document_id: uuid.UUID | None = None,
+) -> int:
+    """B7-3: гасит активные ссылки «только скачать» — при `void` документа и при
+    компрометации подписанта (`mark_disputed_since`). Отозванная ссылка отвечает так же, как
+    неизвестная или просроченная (один код ошибки, без оракула)."""
+    ids = document_ids if document_ids is not None else ([document_id] if document_id else [])
+    if not ids:
+        return 0
+    result = await session.execute(
+        update(SignatureDownloadLink)
+        .where(
+            SignatureDownloadLink.document_id.in_(ids),
+            SignatureDownloadLink.revoked_at.is_(None),
+        )
+        .values(revoked_at=dt.datetime.now(dt.UTC))
+    )
+    return result.rowcount or 0
 
 
 def _sync_deal_signature_status(deal: Deal, document: SignatureDocument, status: str) -> bool:
@@ -1012,6 +1064,23 @@ class SignatureDocumentService:
         await self._session.flush()
         return file_id
 
+    async def _issue_download_link(
+        self, *, document_id: uuid.UUID, request_id: uuid.UUID | None
+    ) -> tuple[str, SignatureDownloadLink]:
+        """B7-3: новая ссылка «только скачать» подписанный файл/протокол. В БД — только
+        sha256; возвращает исходный токен — положить в письмо/ответ API."""
+        token = secrets.token_urlsafe(32)
+        link = SignatureDownloadLink(
+            document_id=document_id,
+            request_id=request_id,
+            token_hash=hashlib.sha256(token.encode()).hexdigest(),
+            expires_at=dt.datetime.now(dt.UTC)
+            + dt.timedelta(days=self._settings.signature_download_ttl_days),
+        )
+        self._session.add(link)
+        await self._session.flush()
+        return token, link
+
     def _requests_query(self, document_id: uuid.UUID):
         return (
             select(SignatureRequest)
@@ -1220,6 +1289,41 @@ class SignatureDocumentService:
 
         run_after_commit(self._session, _send)
 
+    async def _queue_download_link_email(
+        self,
+        document: SignatureDocument,
+        request: SignatureRequest,
+        token: str,
+        expires_at: dt.datetime,
+    ) -> None:
+        """B7-3: ссылка на подписанный файл внешнему подписанту — тот же приём, что
+        `_queue_link_email`, письмо уходит после коммита. Без SMTP инициатор видит
+        `ERROR_SIGNATURE_REMINDER_MANUAL`-подобную подсказку только в B7-1 (напоминания); здесь
+        отсутствие адреса просто не отправляет письмо — ссылку инициатор может получить через
+        `POST /api/signature-documents/{id}/download-links`."""
+        if not smtp_configured():
+            return
+        contact = (
+            await self._session.get(Contact, request.signer_contact_id)
+            if request.signer_contact_id
+            else None
+        )
+        address = contact.email if contact else None
+        if not address:
+            logger.warning("signature_download_email_no_address", request_id=str(request.id))
+            return
+        subject, body = render_signed_document_email(
+            title=document.title, url=build_download_url(token), expires_at=expires_at
+        )
+
+        async def _send() -> None:
+            try:
+                await send_email(to=address, subject=subject, body=body)
+            except EmailSendError:
+                logger.warning("signature_download_email_failed", request_id=str(request.id))
+
+        run_after_commit(self._session, _send)
+
     def _issue_token(self, request: SignatureRequest, now: dt.datetime) -> str:
         """Новый токен внешнему подписанту. В БД остаётся только его sha256,
         поэтому прежняя ссылка перестаёт работать."""
@@ -1299,6 +1403,8 @@ class SignatureDocumentService:
         for request in requests:
             if request.status in OPEN_REQUEST_STATUSES:
                 request.status = SignatureRequestStatus.VOID.value
+        # B7-3: ссылки на подписанный файл/протокол не должны переживать аннулирование документа.
+        await _revoke_download_links(self._session, document_id=document.id)
         await self._session.flush()
 
         if document.entity_type == "deal":
@@ -1334,6 +1440,63 @@ class SignatureDocumentService:
             filename=file.original_filename,
         )
         return url, dt.datetime.now(dt.UTC) + dt.timedelta(seconds=ttl)
+
+    # --- B7-3: скачивание подписанного файла/протокола по отдельной ссылке ------------------
+
+    async def get_download_link(self, token: str) -> SignatureDownloadLink:
+        """Ссылка по токену. Один код ошибки (`SIGNATURE_TOKEN_INVALID`) для неизвестного,
+        просроченного и отозванного токена — без оракула о причине отказа."""
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        stmt = select(SignatureDownloadLink).where(SignatureDownloadLink.token_hash == token_hash)
+        link = (await self._session.execute(stmt)).scalars().first()
+        now = dt.datetime.now(dt.UTC)
+        if link is None or link.revoked_at is not None or link.expires_at < now:
+            raise AppError(ErrorCode.SIGNATURE_TOKEN_INVALID, "Ссылка недействительна")
+        return link
+
+    async def record_download(self, link: SignatureDownloadLink, *, variant: str) -> None:
+        """Счётчик скачиваний под замком строки ссылки — параллельные скачивания одной
+        ссылки сериализуются, 21-е (по умолчанию) скачивание отказывает до того, как файл
+        читается из S3."""
+        await self._session.refresh(link, with_for_update=True)
+        now = dt.datetime.now(dt.UTC)
+        if link.revoked_at is not None or link.expires_at < now:
+            raise AppError(ErrorCode.SIGNATURE_TOKEN_INVALID, "Ссылка недействительна")
+        if link.downloads >= self._settings.signature_download_max_per_link:
+            raise AppError(ErrorCode.RATE_LIMITED, "Превышен лимит скачиваний по этой ссылке")
+        link.downloads += 1
+        link.last_downloaded_at = now
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.SIGNATURE_DOWNLOADED,
+            entity_type="signature_document",
+            entity_id=link.document_id,
+            changes={"variant": {"old": None, "new": variant}},
+        )
+
+    async def load_pdf_for_download_link(
+        self, link: SignatureDownloadLink, *, variant: Literal["signed", "protocol"]
+    ) -> tuple[bytes, str]:
+        document = await self._session.get(SignatureDocument, link.document_id)
+        if document is None:
+            raise NotFoundError("Документ на подпись", link.document_id)
+        file_id = document.protocol_file_id if variant == "protocol" else document.signed_file_id
+        if file_id is None:
+            raise AppError(ErrorCode.DOCUMENT_NOT_SIGNABLE, "Файл ещё не готов")
+        file = await self._session.get(File, file_id)
+        if file is None:
+            raise NotFoundError("Файл документа", file_id)
+        data = await download_object_bytes(bucket=file.bucket, key=file.storage_key)
+        return data, f"{variant}-{document.id}.pdf"
+
+    async def public_download(
+        self, token: str, *, variant: Literal["signed", "protocol"]
+    ) -> tuple[bytes, str]:
+        """Проверка токена, счётчик, затем файл — в этом порядке: лимит и отзыв проверяются
+        до траты времени на S3."""
+        link = await self.get_download_link(token)
+        await self.record_download(link, variant=variant)
+        return await self.load_pdf_for_download_link(link, variant=variant)
 
 
 # =============================================================================
@@ -2233,6 +2396,18 @@ class SignatureRequestService:
                     entity_type="signature_document",
                     entity_id=document.id,
                 )
+
+        # B7-3: внешний подписант получает отдельную ссылку «только скачать» подписанный файл
+        # и протокол — токен подписания 7 дней даёт право подписывать, эта ссылка только читает.
+        if self._settings.signature_public_download_enabled:
+            for request in requests:
+                if request.signer_type != SignerType.EXTERNAL.value:
+                    continue
+                token, link = await doc_service._issue_download_link(  # noqa: SLF001
+                    document_id=document.id, request_id=request.id
+                )
+                await self._queue_download_link_email(document, request, token, link.expires_at)
+
         if document.created_by:
             await get_notification_service().notify_user(
                 self._session,
@@ -2322,6 +2497,22 @@ def pdf_inline_headers(filename: str) -> dict[str, str]:
         "Content-Disposition": disposition,
         "Cache-Control": "private, no-store",
         "X-Content-Type-Options": "nosniff",
+    }
+
+
+def pdf_download_headers(filename: str) -> dict[str, str]:
+    """B7-3: заголовки ответа ссылки «только скачать» — `attachment`, без кэша нигде по пути
+    (`no-store`, не только `private`: прокси и CDN на пути тоже не должны сохранять файл с
+    ПДн), без реферера на следующий переход и без индексации поисковиками токена в пути."""
+    disposition = (
+        f"attachment; filename=\"document.pdf\"; filename*=UTF-8''{quote(filename, safe='')}"
+    )
+    return {
+        "Content-Disposition": disposition,
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "no-referrer",
+        "X-Robots-Tag": "noindex",
     }
 
 
@@ -2725,8 +2916,12 @@ class RealSigningService:
             update(Signature)
             .where(Signature.request_id.in_(subq), Signature.signed_at >= since)
             .values(is_disputed=True)
+            .returning(Signature.document_id)
         )
-        return result.rowcount or 0
+        touched_document_ids = list(result.scalars().all())
+        # B7-3: компрометация ключа подписанта гасит и ссылки «только скачать» на эти документы.
+        await _revoke_download_links(session, list(set(touched_document_ids)))
+        return len(touched_document_ids)
 
     async def count_signatures(self, session: AsyncSession, user_id: uuid.UUID) -> int:
         subq = select(SignatureRequest.id).where(SignatureRequest.signer_user_id == user_id)

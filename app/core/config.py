@@ -232,6 +232,16 @@ class Settings(BaseSettings):
     # dop.md §10.8: «при рассинхроне > 5 с подписание блокируется».
     signature_max_clock_drift_ms: int = 5000
     sms_gateway_url: str = "http://sms-gateway-mock:8090"
+    # B7-3: ссылка «только скачать» подписанный файл/протокол — не токен подписания.
+    signature_download_ttl_days: int = 30
+    signature_download_max_per_link: int = 20
+    # Откат без деплоя: false отключает выдачу и сами публичные ручки (404).
+    signature_public_download_enabled: bool = True
+    # B7-1: пороги напоминаний (часов до дедлайна) и минимальный зазор между ними.
+    signature_remind_before_hours: str = "48,4"
+    signature_remind_min_gap_hours: int = 6
+    # Мелкая правка B7 (бывшая зашитая константа `service.py:1551`).
+    signature_otp_max_sends: int = 5
 
     # --- Уведомления -------------------------------------------------------
     notification_dispatch_batch_size: int = 200
@@ -452,6 +462,21 @@ class Settings(BaseSettings):
             ext.strip().lower().lstrip(".")
             for ext in self.allowed_file_extensions.split(",")
             if ext.strip()
+        )
+
+    @property
+    def signature_remind_before_hours_list(self) -> tuple[int, ...]:
+        """Пороги напоминаний (часов до дедлайна), по убыванию — `sweep_signature_reminders`
+        (B7-1) идёт по ним по порядку и не напоминает чаще `signature_remind_min_gap_hours`."""
+        return tuple(
+            sorted(
+                (
+                    int(part.strip())
+                    for part in self.signature_remind_before_hours.split(",")
+                    if part.strip()
+                ),
+                reverse=True,
+            )
         )
 
     @property
