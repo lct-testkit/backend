@@ -167,3 +167,53 @@ class TestRunAfterCommit:
 
         async with session_scope() as session:
             run_after_commit(session, broken)
+
+
+class TestPasswordChangeDropsStaleCache:
+    """`POST /api/me/password` снимает `must_change_password` в БД — запись `cache:perm:*`
+    держит прежнее значение и до конца TTL (5 минут) отвечала бы CRM-1106 на бизнес-ручки,
+    хотя пароль уже сменён (описание ручки обещает «сбрасывается кэш прав»)."""
+
+    def test_business_endpoints_open_right_after_a_forced_password_change(
+        self, client, monkeypatch
+    ) -> None:
+        from app.modules.identity import router_me
+        from tests.conftest import _make_user
+
+        user = run(client, _make_user, "KAM")
+
+        async def _require_password_change() -> None:
+            from app.modules.identity.models import User
+
+            async with session_scope() as session:
+                stored = await session.get(User, user.id)
+                assert stored is not None
+                stored.must_change_password = True
+
+        run(client, _require_password_change)
+        client.headers["X-CSRF-Token"] = authenticate(client, user)
+
+        # Первый же запрос кладёт в кэш принципала с must_change_password=True.
+        blocked = client.get("/api/deals")
+        assert blocked.status_code == 403, blocked.text
+        assert blocked.json()["code"] == "CRM-1106"
+
+        async def _ok(*args, **kwargs) -> None:
+            return None
+
+        for name in ("password_grant", "set_password", "update_required_actions"):
+            monkeypatch.setattr(router_me.keycloak_client, name, _ok)
+        monkeypatch.setattr(router_me.keycloak_client, "logout_all_sessions", _ok)
+
+        changed = client.post(
+            "/api/me/password",
+            json={
+                "current_password": "Current-Password-1",
+                "new_password": "New-Password-12345",
+                "new_password_repeat": "New-Password-12345",
+            },
+        )
+        assert changed.status_code == 200, changed.text
+
+        opened = client.get("/api/deals")
+        assert opened.status_code == 200, opened.text

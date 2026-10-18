@@ -16,6 +16,7 @@ import structlog
 from fastapi import APIRouter, Path, Request, Response, status
 from sqlalchemy import select
 
+from app.core.cache import invalidate_principal_after_commit
 from app.core.config import get_settings
 from app.core.csrf import new_csrf_token, set_csrf_cookie
 from app.core.deps import CurrentUser, DbSession
@@ -460,6 +461,9 @@ async def change_password(
     user.must_change_password = False
     user.password_changed_at = dt.datetime.now(dt.UTC)
     await session.flush()
+    # В `cache:perm:*` лежит прежний `must_change_password=True`: без сброса бизнес-ручки отвечали
+    # бы CRM-1106 ещё до пяти минут после успешной смены (описание ручки обещает сброс кэша).
+    invalidate_principal_after_commit(session, user.id, keycloak_id=user.keycloak_id)
     await reset_rate_limit(str(user.id), "password:change")
 
     # Keycloak сам refresh-токены не инвалидирует — делаем это явно.
