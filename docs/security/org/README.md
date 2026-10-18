@@ -43,7 +43,7 @@ cрока хранения).
 
 Сроки в [01-pdn-policy.md](01-pdn-policy.md) и [02-pdn-inventory.md](02-pdn-inventory.md) не
 вписаны числами вручную — они взяты из `app/core/config.py` (B6-6, `retention_*`) и из
-`signing_otp_max_sends`/`SIGNATURE_OTP_MAX_SENDS` (B7). Если число в коде изменится, документ
+`signature_otp_max_sends`/`SIGNATURE_OTP_MAX_SENDS` (B7). Если число в коде изменится, документ
 должен быть обновлён тем же PR (тот же принцип, что у матрицы мер B6-1).
 
 ## Открытые вопросы (требуют решения владельца/юриста до `status: approved`)

@@ -11,8 +11,9 @@ B2-1): переход без условий, действий и обязате�
 4000 — с запасом на 50 RPS × 60 с = 3000 запросов).
 
 Аутентификация — прямой grant Keycloak (`grant_type=password`): реальный JWT в
-`Authorization: Bearer`, в обход BFF/cookie-сессии и CSRF-токена, тем же путём, каким
-`ALLOW_BEARER_AUTH` в .env.example явно это разрешает.
+`Authorization: Bearer`, в обход BFF/cookie-сессии и CSRF-токена, тем же путём, который
+открывает `ALLOW_BEARER_AUTH=true`. Дефолт кода, `.env.example` и `docker-compose.yml` — `false`
+(B6-10): на стенде для прогона его нужно включить явно, иначе сценарий получит 401.
 
 Для стенда с профилем `demo`/`dev` этого достаточно: Bearer там принимается от любой роли
 (`Settings.bearer_auth_mode == "all"`). В `prod` Bearer разрешён только роли INTEGRATION
