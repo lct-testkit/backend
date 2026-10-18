@@ -35,6 +35,10 @@ from app.modules.catalog.schemas import (
     AccessRequestListResponse,
     AccessRequestOut,
     ApplyDriftRequest,
+    BranchCreateRequest,
+    BranchListResponse,
+    BranchOut,
+    BranchUpdateRequest,
     BulkOrganizationOwnerRequest,
     BulkOrganizationOwnerResponse,
     BulkOwnerSkipOut,
@@ -101,6 +105,7 @@ from app.modules.catalog.service import (
     LearnerProfileService,
     LicenseFilters,
     LossReasonService,
+    OrganizationBranchService,
     OrganizationFilters,
     OrganizationLicenseService,
     OrganizationService,
@@ -552,6 +557,89 @@ async def restore_organization(
     organization = await service.get_deleted_or_404(organization_id, principal)
     organization = await service.restore(organization)
     return OrganizationOut.from_model(organization)
+
+
+# --- B4-10 (A-19): филиалы и институты внутри вуза --------------------------
+
+
+@organizations_router.get(
+    "/{organization_id}/branches",
+    summary="Филиалы и институты вуза",
+    description=(
+        "Дерево собирает клиент по parent_id. Скоуп — как у карточки вуза (404, если вуз "
+        "вне скоупа или не существует). Роль: organization:read."
+    ),
+    response_model=BranchListResponse,
+)
+async def list_organization_branches(
+    session: DbSession, principal: OrgRead, organization_id: Annotated[uuid.UUID, Path()]
+) -> BranchListResponse:
+    organization = await OrganizationService(session).get_or_404(organization_id, principal)
+    items = await OrganizationBranchService(session).list(organization)
+    return BranchListResponse(items=[BranchOut.model_validate(b) for b in items])
+
+
+@organizations_router.post(
+    "/{organization_id}/branches",
+    summary="Завести филиал/институт",
+    description=(
+        "`parent_id` — другой филиал ЭТОГО ЖЕ вуза, иначе 422; цикл в иерархии — тоже 422. "
+        "Лимит 200 филиалов на вуз. Роль: organization:write."
+    ),
+    response_model=BranchOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_organization_branch(
+    payload: BranchCreateRequest,
+    session: DbSession,
+    principal: OrgWrite,
+    organization_id: Annotated[uuid.UUID, Path()],
+) -> BranchOut:
+    organization = await OrganizationService(session).get_or_404(organization_id, principal)
+    branch = await OrganizationBranchService(session).create(organization, payload)
+    return BranchOut.model_validate(branch)
+
+
+@organizations_router.patch(
+    "/{organization_id}/branches/{branch_id}",
+    summary="Изменить филиал/институт",
+    description="Поля, которые не присланы, не трогаются. Роль: organization:write.",
+    response_model=BranchOut,
+)
+async def update_organization_branch(
+    payload: BranchUpdateRequest,
+    session: DbSession,
+    principal: OrgWrite,
+    organization_id: Annotated[uuid.UUID, Path()],
+    branch_id: Annotated[uuid.UUID, Path()],
+) -> BranchOut:
+    organization = await OrganizationService(session).get_or_404(organization_id, principal)
+    service = OrganizationBranchService(session)
+    branch = await service.get_or_404(organization, branch_id)
+    branch = await service.update(organization, branch, payload)
+    return BranchOut.model_validate(branch)
+
+
+@organizations_router.delete(
+    "/{organization_id}/branches/{branch_id}",
+    summary="Удалить филиал/институт",
+    description=(
+        "Мягкое удаление. Есть дочерние филиалы — 409 CRM-1303, удалите их первыми. "
+        "Роль: organization:write."
+    ),
+    response_model=OperationResult,
+)
+async def delete_organization_branch(
+    session: DbSession,
+    principal: OrgWrite,
+    organization_id: Annotated[uuid.UUID, Path()],
+    branch_id: Annotated[uuid.UUID, Path()],
+) -> OperationResult:
+    organization = await OrganizationService(session).get_or_404(organization_id, principal)
+    service = OrganizationBranchService(session)
+    branch = await service.get_or_404(organization, branch_id)
+    await service.delete(branch)
+    return OperationResult(ok=True, detail="Филиал удалён")
 
 
 # =============================================================================

@@ -413,6 +413,14 @@ class TestRouteCoverage:
         "/dashboards": "дашборды — отдельная сущность, открытый вопрос B4-6",
         "/dashboards/{dashboard_id}": "дашборды — отдельная сущность, открытый вопрос B4-6",
         "/dashboards/{dashboard_id}/widgets": "дашборды — отдельная сущность, открытый вопрос B4-6",
+        # B4-10: своей проверки видимости у филиала нет — роутер достаёт организацию через
+        # OrganizationService.get_or_404 (тот же organization_scope_clause, что уже покрыт выше
+        # для /organizations/{organization_id}); поведенчески проверено отдельным файлом
+        # (tests/test_organization_branches.py::TestCrudAndScope::
+        # test_someone_elses_organization_is_not_found), не здесь.
+        "/organizations/{organization_id}/branches": (
+            "наследует organization_scope_clause, проверено в test_organization_branches.py"
+        ),
     }
 
     def test_every_get_route_is_covered_or_exempt(self, client) -> None:

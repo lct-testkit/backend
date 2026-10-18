@@ -189,6 +189,10 @@ class AuditAction(StrEnum):
     # версии (раздел 4: «систему нельзя оставить без реестра»). См.
     # `registry.service.RegistryImportService.delete`.
     REGISTRY_VERSION_DELETED = "REGISTRY_VERSION_DELETED"
+    # B4-10 (A-19): филиалы/институты внутри вуза.
+    ORGANIZATION_BRANCH_CREATED = "ORGANIZATION_BRANCH_CREATED"
+    ORGANIZATION_BRANCH_UPDATED = "ORGANIZATION_BRANCH_UPDATED"
+    ORGANIZATION_BRANCH_DELETED = "ORGANIZATION_BRANCH_DELETED"
 
     # --- Контакты и остальной каталог (раздел 5.2/5.3) ---
     # Раздел 18 перечисляет минимум и не называет контакты/справочники

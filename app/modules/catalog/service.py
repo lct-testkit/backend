@@ -16,7 +16,7 @@ import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol, TypeVar
 
 from sqlalchemy import ColumnElement, Select, and_, delete, exists, false, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
@@ -68,6 +68,7 @@ from app.modules.catalog.models import (
     Holiday,
     LossReason,
     Organization,
+    OrganizationBranch,
     OrganizationLicense,
     OrgType,
     Product,
@@ -1870,6 +1871,50 @@ class ContactService:
         return channels
 
 
+class _HierarchicalNode(Protocol):
+    """Минимум, нужный `ensure_no_cycle` ниже: самоссылающаяся модель с мягким
+    удалением. `Direction` и `OrganizationBranch` (B4-10) обе подходят."""
+
+    id: uuid.UUID
+    parent_id: uuid.UUID | None
+    deleted_at: dt.datetime | None
+
+
+_NodeT = TypeVar("_NodeT", bound=_HierarchicalNode)
+
+
+async def ensure_no_cycle(
+    session: AsyncSession,
+    model: type[_NodeT],
+    node: _NodeT | None,
+    parent_id: uuid.UUID,
+    *,
+    entity_name: str,
+) -> _NodeT:
+    """Родитель существует, не удалён и не замыкает цикл: родителем узла не может
+    быть он сам или его потомок. Поднимаемся по предкам нового родителя — встретили
+    сам узел, значит, новый родитель — его потомок. Общая логика для
+    `DirectionService._check_parent` и `OrganizationBranchService` (B4-10)."""
+    parent = await session.get(model, parent_id)
+    if parent is None or parent.deleted_at is not None:
+        raise NotFoundError(entity_name, parent_id)
+    if node is None:
+        return parent
+    visited: set[uuid.UUID] = set()
+    ancestor: _NodeT | None = parent
+    while ancestor is not None and ancestor.id not in visited:
+        if ancestor.id == node.id:
+            raise ValidationError(
+                f"{entity_name} не может быть родителем самого себя или своего потомка",
+                [FieldError(field="parent_id", reason="цикл в иерархии")],
+            )
+        visited.add(ancestor.id)
+        ancestor = (
+            await session.get(model, ancestor.parent_id) if ancestor.parent_id is not None else None
+        )
+    return parent
+
+
 # =============================================================================
 # Направления
 # =============================================================================
@@ -1902,28 +1947,10 @@ class DirectionService:
         return direction
 
     async def _check_parent(self, direction: Direction | None, parent_id: uuid.UUID) -> None:
-        """Родитель существует и не замыкает цикл: родителем направления не может быть оно
-        само или его потомок. Идём вверх по предкам нового родителя — встретили само
-        направление, значит, новый родитель его потомок."""
-        parent = await self._session.get(Direction, parent_id)
-        if parent is None or parent.deleted_at is not None:
-            raise NotFoundError("Направление", parent_id)
-        if direction is None:
-            return
-        visited: set[uuid.UUID] = set()
-        ancestor: Direction | None = parent
-        while ancestor is not None and ancestor.id not in visited:
-            if ancestor.id == direction.id:
-                raise ValidationError(
-                    "Направление не может быть родителем самого себя или своего потомка",
-                    [FieldError(field="parent_id", reason="цикл в иерархии направлений")],
-                )
-            visited.add(ancestor.id)
-            ancestor = (
-                await self._session.get(Direction, ancestor.parent_id)
-                if ancestor.parent_id is not None
-                else None
-            )
+        """Родитель существует и не замыкает цикл — см. `ensure_no_cycle` выше."""
+        await ensure_no_cycle(
+            self._session, Direction, direction, parent_id, entity_name="Направление"
+        )
 
     async def create(self, payload: Any) -> Direction:
         existing = await self._session.scalar(
@@ -2009,6 +2036,155 @@ class DirectionService:
             entity_type="direction",
             entity_id=direction.id,
             changes={"code": {"old": direction.code, "new": None}},
+        )
+
+
+# =============================================================================
+# Филиалы вузов (B4-10, A-19)
+# =============================================================================
+
+#: Страховочный предел — не бизнес-правило, просто разумный потолок дерева института.
+_MAX_BRANCHES_PER_ORG = 200
+
+
+def _branch_parent_changes(old: uuid.UUID | None, new: uuid.UUID | None) -> dict[str, Any]:
+    return {"old": str(old) if old else None, "new": str(new) if new else None}
+
+
+class OrganizationBranchService:
+    """Филиалы/институты внутри вуза — дерево через самоссылающийся `parent_id`.
+
+    Своей проверки видимости у филиала нет: скоуп наследуется от организации
+    (`OrganizationService.get_or_404` в роутере достаёт её раньше, чем эти методы
+    вызываются), в аудите пишем только `name`/`parent_id` — адрес не персональные
+    данные вуза, но и не то, что нужно в истории изменений."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self._audit = AuditService(session)
+
+    async def list(self, organization: Organization) -> list[OrganizationBranch]:
+        rows = (
+            (
+                await self._session.execute(
+                    select(OrganizationBranch)
+                    .where(
+                        OrganizationBranch.organization_id == organization.id,
+                        OrganizationBranch.deleted_at.is_(None),
+                    )
+                    .order_by(OrganizationBranch.name)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return list(rows)
+
+    async def get_or_404(
+        self, organization: Organization, branch_id: uuid.UUID
+    ) -> OrganizationBranch:
+        branch = await self._session.get(OrganizationBranch, branch_id)
+        if (
+            branch is None
+            or branch.deleted_at is not None
+            or branch.organization_id != organization.id
+        ):
+            raise NotFoundError("Филиал", branch_id)
+        return branch
+
+    async def _check_parent(
+        self, organization: Organization, node: OrganizationBranch | None, parent_id: uuid.UUID
+    ) -> None:
+        parent = await ensure_no_cycle(
+            self._session, OrganizationBranch, node, parent_id, entity_name="Филиал"
+        )
+        if parent.organization_id != organization.id:
+            raise ValidationError(
+                "Родительский филиал принадлежит другой организации",
+                [FieldError(field="parent_id", reason="филиал другой организации")],
+            )
+
+    async def create(self, organization: Organization, payload: Any) -> OrganizationBranch:
+        count = await self._session.scalar(
+            select(func.count(OrganizationBranch.id)).where(
+                OrganizationBranch.organization_id == organization.id,
+                OrganizationBranch.deleted_at.is_(None),
+            )
+        )
+        if (count or 0) >= _MAX_BRANCHES_PER_ORG:
+            raise ValidationError(
+                f"У вуза не может быть больше {_MAX_BRANCHES_PER_ORG} филиалов",
+                [FieldError(field="name", reason="превышен лимит филиалов")],
+            )
+        if payload.parent_id is not None:
+            await self._check_parent(organization, None, payload.parent_id)
+        branch = OrganizationBranch(
+            organization_id=organization.id,
+            name=payload.name,
+            address=payload.address,
+            parent_id=payload.parent_id,
+        )
+        self._session.add(branch)
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.ORGANIZATION_BRANCH_CREATED,
+            entity_type="organization_branch",
+            entity_id=branch.id,
+            changes={
+                "name": {"old": None, "new": branch.name},
+                "parent_id": _branch_parent_changes(None, branch.parent_id),
+            },
+        )
+        return branch
+
+    async def update(
+        self, organization: Organization, branch: OrganizationBranch, payload: Any
+    ) -> OrganizationBranch:
+        data = payload.model_dump(exclude_unset=True)
+        if data.get("parent_id") is not None:
+            await self._check_parent(organization, branch, data["parent_id"])
+        changes: dict[str, Any] = {}
+        for key, value in data.items():
+            old = getattr(branch, key)
+            if old == value:
+                continue
+            if key == "parent_id":
+                changes[key] = _branch_parent_changes(old, value)
+            elif key == "name":
+                changes[key] = {"old": old, "new": value}
+            setattr(branch, key, value)
+        if not changes:
+            return branch
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.ORGANIZATION_BRANCH_UPDATED,
+            entity_type="organization_branch",
+            entity_id=branch.id,
+            changes=changes,
+        )
+        return branch
+
+    async def delete(self, branch: OrganizationBranch) -> None:
+        child_exists = await self._session.scalar(
+            select(OrganizationBranch.id)
+            .where(
+                OrganizationBranch.parent_id == branch.id,
+                OrganizationBranch.deleted_at.is_(None),
+            )
+            .limit(1)
+        )
+        if child_exists is not None:
+            raise AppError(
+                ErrorCode.ENTITY_IN_USE,
+                "У филиала есть дочерние филиалы — удаление невозможно",
+            )
+        branch.deleted_at = dt.datetime.now(dt.UTC)
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.ORGANIZATION_BRANCH_DELETED,
+            entity_type="organization_branch",
+            entity_id=branch.id,
+            changes={"name": {"old": branch.name, "new": None}},
         )
 
 

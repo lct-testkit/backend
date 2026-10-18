@@ -292,6 +292,44 @@ class OrganizationDeleteRequest(BaseModel):
     reason: NonEmptyStr = Field(max_length=500)
 
 
+# --- B4-10 (A-19): филиалы и институты внутри вуза --------------------------
+
+
+class BranchCreateRequest(BaseModel):
+    name: NonEmptyStr = Field(max_length=512)
+    address: str | None = Field(default=None, max_length=2000)
+    parent_id: uuid.UUID | None = None
+
+
+class BranchUpdateRequest(BaseModel):
+    name: NonEmptyStr | None = Field(default=None, max_length=512)
+    address: str | None = Field(default=None, max_length=2000)
+    parent_id: uuid.UUID | None = None
+
+    @model_validator(mode="after")
+    def _name_cannot_be_cleared(self) -> BranchUpdateRequest:
+        # name — NOT NULL в БД; явный {"name": null} иначе уходит в setattr(None)
+        # и валит INSERT/UPDATE в 500 вместо внятной 422.
+        if "name" in self.model_fields_set and self.name is None:
+            raise ValueError("Имя филиала не может быть пустым")
+        return self
+
+
+class BranchOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    organization_id: uuid.UUID
+    name: str
+    address: str | None
+    parent_id: uuid.UUID | None
+    created_at: dt.datetime
+
+
+class BranchListResponse(BaseModel):
+    items: list[BranchOut]
+
+
 # =============================================================================
 # Контакты
 # =============================================================================
