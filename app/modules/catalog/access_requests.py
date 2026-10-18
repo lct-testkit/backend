@@ -208,6 +208,10 @@ class AccessRequestService:
             )
         if status:
             stmt = stmt.where(AccessRequest.status == status)
+            if status == AccessRequestStatus.PENDING.value:
+                # Просроченный лениво запрос решить уже нельзя (`_ensure_pending`), а «ожидающими»
+                # он не считается и в лимите — на решение его не предлагаем.
+                stmt = stmt.where(AccessRequest.created_at >= _pending_cutoff())
         return await self._paged(stmt, page)
 
     async def _paged(

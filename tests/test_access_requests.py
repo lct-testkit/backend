@@ -502,6 +502,26 @@ class TestListingAndCancel:
         items = inbox.json()["items"]
         assert {i["entity_id"] for i in items} == {org_a}
 
+    def test_inbox_does_not_offer_a_pending_request_that_already_expired(self, client) -> None:
+        """Ожидающий запрос старше 14 суток лениво считается просроченным: решить его нельзя
+        (`_ensure_pending`), значит, во входящих «на решение» ему не место. В истории (без
+        фильтра по статусу) он остаётся."""
+        owner = create_user(client, "KAM")
+        requester = create_user(client, "KAM")
+        org_id = create_organization(client)
+        run(client, lambda: _set_owner(org_id, owner.id))
+        sign_in(client, requester)
+        request_id = _create(client, org_id).json()["id"]
+        run(client, lambda: _force_old_pending(request_id))
+
+        sign_in(client, owner)
+        pending = client.get("/api/access-requests", params={"box": "inbox", "status": "pending"})
+        history = client.get("/api/access-requests", params={"box": "inbox"})
+
+        assert pending.status_code == 200, pending.text
+        assert pending.json()["items"] == []
+        assert [i["id"] for i in history.json()["items"]] == [request_id]
+
     def test_requester_can_cancel_their_own_pending_request(self, client) -> None:
         owner = create_user(client, "KAM")
         requester = create_user(client, "KAM")
