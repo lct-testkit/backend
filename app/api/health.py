@@ -83,7 +83,7 @@ def _overall_status(checks: list[DependencyStatus]) -> tuple[str, list[str]]:
 
 @router.get(
     "/health/live",
-    summary="Liveness",
+    summary="Проверка живости процесса",
     description=(
         "Проверяет, что процесс жив. Не раскрывает версию, профиль и состав инфраструктуры "
         "(B6-8) — за этим на `/health/details` с заголовком `X-Health-Token`. "
@@ -96,7 +96,7 @@ async def live() -> dict[str, str]:
 
 @router.get(
     "/health/ready",
-    summary="Readiness",
+    summary="Проверка готовности принимать трафик",
     description=(
         "Возвращает 503, если недоступна критичная зависимость (PostgreSQL, Redis), иначе "
         "только сводный статус без списка зависимостей (B6-8) — список доступен на "
