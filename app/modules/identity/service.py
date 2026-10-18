@@ -35,6 +35,7 @@ from app.modules.admin.models import SystemSetting
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService, diff_changes
 from app.modules.identity.models import (
+    SYSTEM_EMAIL_DOMAIN,
     Consent,
     Role,
     SecurityEvent,
@@ -78,16 +79,11 @@ class SecurityEventFilters:
 _SEVERITY_ORDER: dict[str, int] = {"info": 0, "warning": 1, "critical": 2}
 
 
-#: Домен служебных записей (владелец демо-истории отчётов и т.п.): реальному человеку они не
-#: принадлежат, привязывать к ним учётку Keycloak по адресу нельзя ни при каком токене.
-_SYSTEM_EMAIL_DOMAIN = "@system.local"
-
-
 def _email_binding_allowed(local: User, claims: TokenClaims) -> bool:
     """Можно ли привязать вошедшую учётку к локальной записи без `keycloak_id` по email.
 
     Нужны подтверждённый адрес (`email_verified` в токене) и не служебная запись."""
-    if (local.email or "").lower().endswith(_SYSTEM_EMAIL_DOMAIN):
+    if (local.email or "").lower().endswith(SYSTEM_EMAIL_DOMAIN):
         return False
     return claims.raw.get("email_verified") is True
 

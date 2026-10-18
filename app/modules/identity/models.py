@@ -45,6 +45,11 @@ class Role(StrEnum):
     INTEGRATION = "INTEGRATION"
 
 
+#: Домен служебных записей (владелец демо-истории отчётов, учётка интеграций): реальному человеку
+#: они не принадлежат, и привязывать к ним учётку Keycloak по адресу нельзя ни при каком токене.
+SYSTEM_EMAIL_DOMAIN = "@system.local"
+
+
 class UserStatus(StrEnum):
     INVITED = "invited"
     ACTIVE = "active"
@@ -233,12 +238,17 @@ class User(UuidPkMixin, TimestampMixin, SoftDeleteMixin, VersionMixin, Base):
 
     @property
     def is_system(self) -> bool:
-        """B4-13 (I16): служебная учётка без входа (роль INTEGRATION — `integration@
-        system.local` — либо исторический фантом ADMIN на уже развёрнутых стендах,
-        `reporting.seed.remediate_phantom_admin`). Обычный сотрудник заводится только через
-        Keycloak-инвайт, `keycloak_id` у него не бывает NULL, кроме как после обезличивания
-        (туда он уже не попадёт: такой пользователь не активен и не виден в пикерах)."""
-        return self.keycloak_id is None
+        """B4-13 (I16): служебная учётка без входа — роль INTEGRATION либо запись на служебном
+        домене `@system.local` без `keycloak_id` (исторический фантом ADMIN на уже развёрнутых
+        стендах, `reporting.seed.remediate_phantom_admin`).
+
+        Одного `keycloak_id IS NULL` мало: без него остаются и настоящие сотрудники, заведённые
+        локально до первого входа (`IdentityService.provision_from_claims` привязывает Keycloak
+        по email), и все обезличенные записи (B6-13 обнуляет `keycloak_id`). Помеченные
+        «служебными», они пропали бы из выбора ответственного."""
+        if self.role == Role.INTEGRATION.value:
+            return True
+        return self.keycloak_id is None and (self.email or "").lower().endswith(SYSTEM_EMAIL_DOMAIN)
 
 
 class UserAccessRule(UuidPkMixin, Base):

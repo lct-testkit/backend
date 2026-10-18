@@ -242,8 +242,9 @@ class UserOut(BaseModel):
     #: B4-5: есть хоть одно правило `user_access_rules` — сужает видимость сделок/
     #: вузов/контактов этого пользователя (`GET /admin/users/{id}/access-rules`).
     access_restricted: bool = False
-    #: B4-13 (I16): служебная учётка без входа (`User.is_system` — keycloak_id IS NULL) —
-    #: фронтенд показывает её отдельно и не предлагает выбрать ответственным за сделку/вуз.
+    #: B4-13 (I16): служебная учётка без входа (`User.is_system`: роль INTEGRATION либо запись
+    #: на `@system.local` без `keycloak_id`) — фронтенд показывает её отдельно и не предлагает
+    #: выбрать ответственным за сделку/вуз.
     is_system: bool = False
     created_at: dt.datetime
     updated_at: dt.datetime
