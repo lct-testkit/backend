@@ -269,8 +269,15 @@ class TestImportEnqueue:
         admin = run(client, _make_user, "ADMIN")
         client.headers["X-CSRF-Token"] = authenticate(client, admin)
 
+        from app.core.config import get_settings
         from app.core.db import session_scope
         from app.modules.imports.models import ImportJob, ImportJobStatus
+
+        # B3-12: задание не больше `IMPORT_INLINE_MAX_ROWS` строк `start_apply` применяет сразу, в
+        # очередь оно не попадает (статус уже терминальный). В очередь уходит только большое —
+        # поэтому `total_rows` здесь выше лимита (раньше поле оставалось 0, и тест проверял
+        # путь, которым такое задание больше не идёт).
+        total_rows = get_settings().import_inline_max_rows + 1
 
         async def _validated_job() -> str:
             async with session_scope() as session:
@@ -281,7 +288,8 @@ class TestImportEnqueue:
                     initiated_by=admin.id,
                     status=ImportJobStatus.VALIDATED.value,
                     mode="upsert",
-                    ok_rows=1,
+                    total_rows=total_rows,
+                    ok_rows=total_rows,
                     warn_rows=0,
                     error_rows=0,
                 )
@@ -306,3 +314,48 @@ class TestImportEnqueue:
         assert function == "run_import_job"
         assert args == (job_id, "apply")
         assert job_key == f"import:{job_id}:apply"
+        assert response.json()["status"] == "applying"
+
+    def test_small_job_applied_inline_is_not_enqueued(self, client, monkeypatch) -> None:
+        import app.core.queue as queue_module
+
+        admin = run(client, _make_user, "ADMIN")
+        client.headers["X-CSRF-Token"] = authenticate(client, admin)
+
+        from app.core.db import session_scope
+        from app.modules.imports.models import ImportJob, ImportJobStatus
+
+        async def _small_job() -> str:
+            async with session_scope() as session:
+                job = ImportJob(
+                    entity_type="product",
+                    source_format="xlsx",
+                    file_id=uuid.uuid4(),
+                    initiated_by=admin.id,
+                    status=ImportJobStatus.VALIDATED.value,
+                    mode="upsert",
+                    total_rows=1,
+                    ok_rows=1,
+                    warn_rows=0,
+                    error_rows=0,
+                )
+                session.add(job)
+                await session.flush()
+                return str(job.id)
+
+        job_id = run(client, _small_job)
+
+        pool = _FakeArqPool()
+
+        async def fake_get_pool() -> _FakeArqPool:
+            return pool
+
+        monkeypatch.setattr(queue_module, "get_arq_pool", fake_get_pool)
+
+        response = client.post(f"/api/imports/{job_id}/apply")
+        assert response.status_code == 200, response.text
+
+        # Применено в самом запросе (в тесте у задания нет строк результата — нечего обрабатывать,
+        # статус сразу терминальный); фоновая задача не нужна.
+        assert response.json()["status"] in ("completed", "completed_with_errors")
+        assert pool.calls == []
