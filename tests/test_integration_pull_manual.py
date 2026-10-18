@@ -228,9 +228,7 @@ class TestPullManual:
     def test_updated_since_is_sent_to_the_site_and_cursor_does_not_move_back(self) -> None:
         login(self.client, "ADMIN")
         # Курсор уже продвинут обычным прогоном дальше точки ручного запроса.
-        self._serve(
-            [{"items": [_lead(self._id("auto"), updated_at="2026-09-20T00:00:00Z")]}]
-        )
+        self._serve([{"items": [_lead(self._id("auto"), updated_at="2026-09-20T00:00:00Z")]}])
         first = self._sweep()
         assert first["created"] == 1
         assert run(self.client, _cursor) == "2026-09-20T00:00:00Z"

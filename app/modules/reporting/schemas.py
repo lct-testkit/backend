@@ -6,11 +6,11 @@ import datetime as dt
 import uuid
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
-FormatLiteral = Literal["xlsx", "pdf", "png"]
+FormatLiteral = Literal["xlsx", "xls", "pdf", "png", "json"]
 JobStatusLiteral = Literal["queued", "processing", "completed", "failed"]
 WidgetTypeLiteral = Literal["report_table", "report_chart", "stat_tile"]
 
@@ -18,6 +18,14 @@ WidgetTypeLiteral = Literal["report_table", "report_chart", "stat_tile"]
 # =============================================================================
 # Шаблоны отчётов (GET /api/report-templates)
 # =============================================================================
+
+
+class ReportColumnOut(BaseModel):
+    """Элемент каталога колонок вида отчёта (B1-2, `reporting.spec.ReportSpec.columns`)."""
+
+    key: str
+    title: str
+    default: bool
 
 
 class ReportTemplateOut(BaseModel):
@@ -31,6 +39,17 @@ class ReportTemplateOut(BaseModel):
     default_params: dict[str, Any]
     output_formats: list[FormatLiteral]
     is_active: bool
+    # B1-2/B1-3: вычисляются из `reporting.spec.REPORT_SPECS` по `query_def.kind`
+    # (`reporting.service.report_template_out`), не хранятся в БД отдельной миграцией.
+    # `columns` — пусто, если вид отчёта не поддерживает выбор колонок (агрегаты).
+    columns: list[ReportColumnOut] = Field(default_factory=list)
+    #: Все ключи `params`, которые принимает `POST /api/reports` для этого вида отчёта —
+    #: общие фильтры (сужены `common_filters`), `limit`, `columns`/`date_field` (если
+    #: поддержаны), и специфичные для вида (например `months`/`workflow_id`).
+    params: list[str] = Field(default_factory=list)
+    #: Допустимые значения `params.date_field`; пусто — параметр недопустим вовсе.
+    date_fields: list[str] = Field(default_factory=list)
+    default_date_field: str | None = None
 
 
 class ReportTemplateListResponse(BaseModel):
@@ -43,6 +62,12 @@ class ReportTemplateListResponse(BaseModel):
 
 
 class ReportJobCreateRequest(BaseModel):
+    # B9-2: пример — реальное тело из `tests/test_reporting.py` (`TestReportDataEndpoint`),
+    # лёгкий отчёт без параметров сверх шаблона.
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"template_code": "sla_compliance", "format": "xlsx"}}
+    )
+
     template_code: NonEmptyStr = Field(max_length=64)
     format: FormatLiteral
     params: dict[str, Any] = Field(
@@ -66,17 +91,39 @@ class ReportJobOut(BaseModel):
 
     id: uuid.UUID
     template_code: str
+    # B9-8 (OPEN-ISSUES B-18): параметры, с которыми запущено задание (`ReportJob.params` —
+    # слияние `payload.params` с `default_params` шаблона, `ReportJobService.create`) были на
+    # модели, но не в ответе: клиент не мог показать «этот отчёт запущен с такими фильтрами»
+    # без похода в БД.
+    params: dict[str, Any]
     format: FormatLiteral
     status: JobStatusLiteral
     progress_pct: int
     row_count: int | None
     error: str | None
+    # B9-8: готовый файл — `None`, пока задание не завершено (`queued`/`processing`/`failed`)
+    # или если данных для скачивания не осталось (`SET NULL` при ретеншене файла, см. докстринг
+    # `reporting.models.ReportJob`). Ссылка на скачивание — всё равно через
+    # `GET /api/reports/{id}/download` (подписанный URL, не голый `file_id`).
+    file_id: uuid.UUID | None = None
     requested_by: uuid.UUID
     created_at: dt.datetime
     # B8-11: когда рендер реально начался — видимость "processing" без ожидания cron.
     started_at: dt.datetime | None = None
     finished_at: dt.datetime | None
     expires_at: dt.datetime | None
+    # B1-12 (миграция 0029): заголовки колонок/total_rows/truncated/data_as_of/timezone на момент
+    # генерации — снимок, который не восстановить заново по одному `params`, если данные успели
+    # измениться. `None` до завершения задания (`queued`/`processing`/`failed`).
+    result_meta: dict[str, Any] | None = None
+
+    @field_validator("params")
+    @classmethod
+    def _hide_service_keys(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """Служебные ключи с `_` (например `_seed` — демо-история отчётов, B1-14,
+        `reporting.seed.seed_demo_report_history`) не предназначены для интегратора — тот же
+        фильтр, что `reporting.rendering.render_json` уже применяет к конверту json-файла."""
+        return {k: v for k, v in value.items() if not str(k).startswith("_")}
 
 
 class ReportJobListResponse(BaseModel):
@@ -103,6 +150,12 @@ class ReportDataOut(BaseModel):
     note: str | None = None
     generated_at: dt.datetime
     row_count: int
+    # B1-6: то же усечение по `limit`, что и у файла (`ReportDataset.total_rows`/`truncated`,
+    # `reporting.builders`) — `/data` отдаёт тот же датасет, значит, и то же предупреждение о
+    # неполной выдаче. `None`/`False` у builder'ов без оценки (агрегаты, см. докстринг
+    # `ReportDataset`) — усечения не было, оценивать незачем.
+    total_rows: int | None = None
+    truncated: bool = False
 
 
 # =============================================================================

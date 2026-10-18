@@ -927,11 +927,13 @@ async def seed_workflow(
         .all()
     )
 
-    errors, warnings = _validate_graph_data(statuses, transitions)
+    issues = _validate_graph_data(statuses, transitions)
+    errors = [issue.message for issue in issues if issue.severity == "error"]
     if errors:
         raise RuntimeError(f"Сид {spec.code!r} не проходит валидацию графа: {'; '.join(errors)}")
-    for warning in warnings:
-        logger.warning("workflow_seed_warning", code=spec.code, warning=warning)
+    for issue in issues:
+        if issue.severity == "warning":
+            logger.warning("workflow_seed_warning", code=spec.code, warning=issue.message)
 
     snapshot = _build_snapshot(workflow, statuses, transitions, sla_rules)
     digest = snapshot_digest(snapshot)

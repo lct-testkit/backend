@@ -52,6 +52,23 @@ from app.modules.integration.service import IntegrationSourceService
 
 integrations_public_router = APIRouter(prefix="/v1/integrations", tags=["integrations-public"])
 
+
+def _push_request_body(model: type[BaseModel]) -> dict[str, Any]:
+    """B9-2: `openapi_extra` для вебхуков, которые читают тело вручную (`_parse_push`, не через
+    параметр-модель FastAPI — подпись должна проверяться над сырыми байтами ДО разбора JSON,
+    `_authenticate_push`/`_parse_push`), поэтому FastAPI не строит `requestBody` сам, как у ручек
+    с `payload: Model` в сигнатуре — приходится собирать схему явно, тем же приёмом, что уже
+    применяет `/cms/leads` чуть выше (`_LEAD_BODY_DESCRIPTION`), но из настоящей Pydantic-схемы
+    модели, а не руками написанного `{"type": "object", ...}` — пример вложен в неё же, без
+    отдельного `examples`, который OpenAPI 3.0.3 (`app.openapi_version`) не поддерживает."""
+    schema = model.model_json_schema()
+    json_schema_extra = model.model_config.get("json_schema_extra")
+    example = json_schema_extra.get("example") if isinstance(json_schema_extra, dict) else None
+    if example is not None:
+        schema["example"] = example
+    return {"requestBody": {"required": True, "content": {"application/json": {"schema": schema}}}}
+
+
 _IDEMPOTENCY_KEY_MAX = 255  # длина `inbound_messages.external_id`
 # Заявка — маленький объект; крупнее тело — не заявка, а попытка забить память или журнал.
 _CMS_MAX_BODY_BYTES = 256 * 1024
@@ -403,7 +420,18 @@ async def _process_push[R](
         raise
 
 
-@integrations_public_router.post("/lms/progress", summary="Приём прогресса от LMS (push)")
+@integrations_public_router.post(
+    "/lms/progress",
+    summary="Приём прогресса от LMS (push)",
+    description=(
+        "Пакет строк прогресса учащихся (`progress_pct`, оценка, даты), подписанный "
+        "HMAC в заголовке X-Signature; повтор того же `external_id` отдаёт результат "
+        "первой обработки без повторной записи. Неверная подпись — 401 CRM-1701; "
+        "источник lms отключён — 503 CRM-1703. Каждая строка — в своём SAVEPOINT: "
+        "одна «битая» не откатывает остальные. Без аутентификации пользователя."
+    ),
+    openapi_extra=_push_request_body(LmsProgressPushRequest),
+)
 async def lms_progress_push(
     request: Request,
     session: DbSession,
@@ -460,7 +488,18 @@ async def lms_progress_push(
     }
 
 
-@integrations_public_router.post("/bitrix/webhook", summary="Приём изменений из Bitrix24")
+@integrations_public_router.post(
+    "/bitrix/webhook",
+    summary="Приём изменений из Bitrix24",
+    description=(
+        "Изменение сделки Bitrix24, подписанное HMAC в заголовке X-Signature; "
+        "применяется только если присланная версия новее сохранённой (last-write-wins), "
+        "иначе статус ответа — `duplicate`. Повтор того же `external_id` отдаёт результат "
+        "первой обработки без повторной записи. Неверная подпись — 401 CRM-1701; "
+        "источник bitrix24 отключён — 503 CRM-1703. Без аутентификации пользователя."
+    ),
+    openapi_extra=_push_request_body(BitrixWebhookRequest),
+)
 async def bitrix_webhook(
     request: Request,
     session: DbSession,

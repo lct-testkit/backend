@@ -16,9 +16,11 @@ import datetime as dt
 import uuid
 from collections import defaultdict
 from collections.abc import Sequence
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Path, Query, Request, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import (
     AuditDep,
@@ -35,7 +37,9 @@ from app.core.permissions import Permission, has_permission
 from app.core.redis_client import distributed_lock
 from app.core.security import Principal
 from app.modules.audit.actions import AuditAction
-from app.modules.crm.models import Deal, Task
+from app.modules.audit.service import defer_denied_audit
+from app.modules.catalog.models import Direction, Product
+from app.modules.crm.models import Deal, DealProduct, DealStatusHistory, Task
 from app.modules.crm.schemas import (
     DEAL_LIST_PRODUCTS_LIMIT,
     AuditCommentListResponse,
@@ -90,6 +94,10 @@ from app.modules.crm.service import (
     set_cached_deal_card,
     touch_recent,
 )
+from app.modules.files.models import Attachment
+from app.modules.files.schemas import AttachmentListResponse
+from app.modules.files.service import AttachmentService
+from app.modules.identity.models import User
 from app.modules.identity.schemas import OperationResult
 from app.modules.workflow.models import WorkflowStatus
 
@@ -108,6 +116,11 @@ DealReassignPerm = Annotated[Principal, Depends(require_permission(Permission.DE
 DealReassignBulkPerm = Annotated[
     Principal, Depends(require_permission(Permission.DEAL_REASSIGN_BULK))
 ]
+DealDeletePerm = Annotated[Principal, Depends(require_permission(Permission.DEAL_DELETE))]
+FileDownloadPerm = Annotated[Principal, Depends(require_permission(Permission.FILE_DOWNLOAD))]
+# B4-7: отдельное право на чтение комментариев в журнале аудита — не то же самое, что
+# DEAL_READ (у AUDITOR его нет, сделка вне скоупа, раздел 4, DealScope.NONE).
+CommentAuditRead = Annotated[Principal, Depends(require_permission(Permission.COMMENT_AUDIT_READ))]
 
 
 # =============================================================================
@@ -557,6 +570,54 @@ async def list_available_transitions(
     )
 
 
+#: B9-2: пример ответа — те же значения, что в примере `TransitionRequest` (перешли в `won`
+#: со сделкой из `tests/test_deals.py::TestTransitionFieldValidation`, amount=1000,
+#: custom_fields.contract_number="Д-1"); `number` — формат из докстринга `DealOut.order_number`.
+_TRANSITION_RESPONSE_EXAMPLE: dict[int | str, dict[str, Any]] = {
+    200: {
+        "content": {
+            "application/json": {
+                "example": {
+                    "deal": {
+                        "id": "018f0a3e-7c3e-7c3e-8c3e-3e7c3e7c3e7c",
+                        "number": "D-2026-000431",
+                        "title": "РТ Университет — Python: базовый курс",
+                        "deal_type": "b2b",
+                        "workflow_id": "018f0a3e-1111-7c3e-8c3e-3e7c3e7c3e7c",
+                        "status_id": "018f0a3e-7c3e-7c3e-8c3e-3e7c3e7c3e7c",
+                        "organization_id": "018f0a3e-2222-7c3e-8c3e-3e7c3e7c3e7c",
+                        "organization_name": "РТ Университет",
+                        "contact_id": None,
+                        "contact_name": None,
+                        "owner_id": "018f0a3e-3333-7c3e-8c3e-3e7c3e7c3e7c",
+                        "created_by": "018f0a3e-3333-7c3e-8c3e-3e7c3e7c3e7c",
+                        "amount": "1000.00",
+                        "currency": "RUB",
+                        "students_planned": None,
+                        "expected_close_date": None,
+                        "status_changed_at": "2026-03-15T10:30:00+00:00",
+                        "sla_due_at": None,
+                        "sla_state": "ok",
+                        "priority": "normal",
+                        "loss_reason_id": None,
+                        "closed_at": None,
+                        "custom_fields": {"contract_number": "Д-1"},
+                        "source": None,
+                        "external_ids": {},
+                        "order_number": None,
+                        "owner_unavailable": False,
+                        "signature_status": "none",
+                        "version": 2,
+                        "created_at": "2026-03-10T09:00:00+00:00",
+                        "updated_at": "2026-03-15T10:30:00+00:00",
+                    }
+                }
+            }
+        }
+    }
+}
+
+
 @deals_router.post(
     "/{deal_id}/transition",
     summary="Перейти по статусу",
@@ -571,6 +632,7 @@ async def list_available_transitions(
         "дублем самой записи. Роль: переход по статусу."
     ),
     response_model=TransitionResponse,
+    responses=_TRANSITION_RESPONSE_EXAMPLE,
 )
 async def transition_deal(
     payload: TransitionRequest,
@@ -713,7 +775,13 @@ async def reassign_deal(
 
 
 @deals_router.get(
-    "/{deal_id}/participants", summary="Участники сделки", response_model=ParticipantListResponse
+    "/{deal_id}/participants",
+    summary="Участники сделки",
+    description=(
+        "Соисполнители и наблюдатели сделки сверх ответственного — даёт им видимость "
+        "сделки помимо своего скоупа. Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=ParticipantListResponse,
 )
 async def list_participants(
     session: DbSession, principal: DealRead, deal_id: Annotated[uuid.UUID, Path()]
@@ -726,6 +794,12 @@ async def list_participants(
 @deals_router.post(
     "/{deal_id}/participants",
     summary="Добавить участника",
+    description=(
+        "Пользователь и его роль в сделке (например, соисполнитель/наблюдатель); повтор "
+        "той же пары — не ошибка, отдаёт существующую запись. Неактивный сотрудник — 422 "
+        "CRM-1001. Менять состав может только ответственный, HEAD или ADMIN — иначе 403 "
+        "CRM-1102. Роль: KAM, HEAD, ADMIN."
+    ),
     response_model=ParticipantOut,
     status_code=status.HTTP_201_CREATED,
 )
@@ -745,6 +819,10 @@ async def add_participant(
 @deals_router.delete(
     "/{deal_id}/participants/{participant_id}",
     summary="Удалить участника",
+    description=(
+        "Участник другой сделки — 404 CRM-9004. Менять состав может только "
+        "ответственный, HEAD или ADMIN — иначе 403 CRM-1102. Роль: KAM, HEAD, ADMIN."
+    ),
     response_model=OperationResult,
 )
 async def remove_participant(
@@ -900,7 +978,14 @@ async def list_deal_comments_for_audit(
 
 
 @comments_router.patch(
-    "/{comment_id}", summary="Редактировать комментарий", response_model=CommentOut
+    "/{comment_id}",
+    summary="Редактировать комментарий",
+    description=(
+        "Правит текст, старая версия сохраняется в истории правок. Только автор или "
+        "ADMIN — иначе 403 CRM-1102; системный комментарий — 422 CRM-1001. "
+        "Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=CommentOut,
 )
 async def update_comment(
     payload: CommentUpdateRequest,
@@ -916,7 +1001,14 @@ async def update_comment(
 
 
 @comments_router.delete(
-    "/{comment_id}", summary="Удалить комментарий", response_model=OperationResult
+    "/{comment_id}",
+    summary="Удалить комментарий",
+    description=(
+        "Мягкое удаление с необязательной причиной. Чужой комментарий удаляет только "
+        "ADMIN, иначе 403 CRM-1102; системный комментарий — 422 CRM-1001. "
+        "Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=OperationResult,
 )
 async def delete_comment(
     payload: CommentDeleteRequest,
@@ -942,7 +1034,16 @@ def _task_out(task: Task, deal_number: str | None, deal_title: str | None) -> Ta
     )
 
 
-@tasks_router.get("", summary="Список задач", response_model=TaskListResponse)
+@tasks_router.get(
+    "",
+    summary="Список задач",
+    description=(
+        "Задачи в скоупе вызывающего (KAM — свои сделки, HEAD — команда, ADMIN — все). "
+        "Фильтры: `deal_id`, `assignee_id`, `status`, `priority`, `due_before`, `overdue`. "
+        "Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=TaskListResponse,
+)
 async def list_tasks(
     session: DbSession,
     page: Pagination,
@@ -1026,7 +1127,15 @@ async def create_task(
     return result
 
 
-@tasks_router.patch("/{task_id}", summary="Обновить задачу", response_model=TaskOut)
+@tasks_router.patch(
+    "/{task_id}",
+    summary="Обновить задачу",
+    description=(
+        "Правка полей задачи; родительская сделка должна быть в скоупе на запись. "
+        "Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=TaskOut,
+)
 async def update_task(
     payload: TaskUpdateRequest,
     session: DbSession,
@@ -1040,7 +1149,16 @@ async def update_task(
     return _task_out(task, deal.number, deal.title)
 
 
-@tasks_router.post("/{task_id}/complete", summary="Завершить задачу", response_model=TaskOut)
+@tasks_router.post(
+    "/{task_id}/complete",
+    summary="Завершить задачу",
+    description=(
+        "Переводит задачу в `done` и фиксирует момент и исполнителя завершения (повторный "
+        "вызов — без изменений); родительская сделка должна быть в скоупе на запись. "
+        "Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=TaskOut,
+)
 async def complete_task(
     session: DbSession, principal: DealUpdatePerm, task_id: Annotated[uuid.UUID, Path()]
 ) -> TaskOut:

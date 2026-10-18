@@ -217,13 +217,25 @@ class GraphOut(BaseModel):
 
 
 class ValidationIssue(BaseModel):
+    """Один пункт валидации графа (B9-6). `severity` и `refs` добавлены вместе с переходом
+    редактора воронок на структурированный `issues[]` (B-2 из OPEN-ISSUES) — раньше поле
+    существовало, но не использовалось ни одним вызовом (`grep` по коду не находил его, кроме
+    самого объявления класса). `refs` — коды статусов, которых касается проблема (воронка:
+    недостижимый статус, ловушка); пусто у проблем без привязки к конкретному статусу."""
+
     code: str
+    severity: Literal["error", "warning"]
     message: str
     path: str | None = None
+    refs: list[str] = Field(default_factory=list)
 
 
 class ValidateResponse(BaseModel):
     ok: bool
+    #: Структурированный список (B9-6) — источник правды; `errors`/`warnings` ниже остаются
+    #: только до перехода редактора воронок на `issues` (его собственный фронтенд-спринт), после
+    #: чего убираются (риск задачи B9-6).
+    issues: list[ValidationIssue] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
@@ -249,11 +261,19 @@ class StatusImpactResponse(BaseModel):
 
 
 class StatusArchiveRequest(BaseModel):
-    # B2-3/B2-M: соответствие статусов между воронками статичное, по коду к коду; условные
-    # правила (в зависимости от полей сделки) решает B-7 в спринте B9. Поле принимается ради
-    # стабильности контракта и сознательно не обрабатывается.
+    # B9-7 (OPEN-ISSUES B-7): принимается и сохраняется в `StatusMappingJob.mapping_rules.rules`
+    # (см. `WorkflowService.archive_status`) для последующей сверки/аудита переноса, но
+    # построчный перенос (`crm.service.RealDealStatusService.migrate_batch`) пока решает только
+    # по `target_status_id`/`fallback_status_id`/`sla_mode` — значения полей самой сделки не
+    # преобразует. Резерв под будущее правило вида «при переносе задать/изменить поле X»; не
+    # путать с переносом сделок МЕЖДУ воронками (другая задача, спринт B2).
     mapping_rules: dict[str, Any] = Field(
-        default_factory=dict, description="Зарезервировано, пока не используется"
+        default_factory=dict,
+        description=(
+            "Зарезервировано для правил переноса значений полей при архивации статуса; "
+            "сохраняется вместе с заданием переноса, но сейчас не влияет на перенос — он "
+            "решается только по target_status_id/fallback_status_id/sla_mode."
+        ),
     )
     target_status_id: uuid.UUID
     fallback_status_id: uuid.UUID | None = None

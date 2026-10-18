@@ -2415,6 +2415,12 @@ class DealService:
             deal.sla_paused_total = deal.sla_paused_total + duration_in_prev
 
         previous_status_id = deal.status_id
+        # B1-15 (найдено при подготовке спринта B1, отдельного теста/отчёта на это поле пока
+        # нет): запомнить ДО `apply_sla` — та выставляет `deal.sla_state` заново для статуса,
+        # В КОТОРЫЙ сделка переходит (`_apply_sla_for_status` сбрасывает его в `ok`), поэтому
+        # запись истории ниже раньше сохраняла почти всегда `ok` — состояние нового статуса, а
+        # не то, было ли нарушение SLA в статусе, который сделка покидает.
+        sla_before = deal.sla_state
         deal.status_id = uuid.UUID(to_status["id"])
         deal.status_changed_at = now
         await apply_sla(self._session, deal, graph, to_status, now)
@@ -2448,7 +2454,7 @@ class DealService:
             reason=HistoryReason.MANUAL.value,
             comment=comment,
             duration_in_prev=duration_in_prev,
-            sla_state_at_change=deal.sla_state,
+            sla_state_at_change=sla_before,
             changed_at=now,
         )
         self._session.add(history_row)

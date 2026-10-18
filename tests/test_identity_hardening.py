@@ -385,6 +385,70 @@ class TestPrincipalCacheDropsAfterCommit:
         assert survived, "при откате прежние права остаются верными — кэш цел"
 
 
+class TestPasswordChangeBruteForce:
+    """B9-11 (OPEN-ISSUES D-15/D-16, не перепроверены): перебор текущего пароля в
+    `POST /api/me/password` ограничен `rate_limit(..., limit=password_change_max_attempts,
+    window_seconds=password_change_lock_seconds)` — описание ручки это обещает («Пять
+    неудачных попыток блокируют форму на 15 минут»), но поведение никогда не проверялось."""
+
+    def _attempt(self, client):
+        return client.post(
+            "/api/me/password",
+            json={
+                "current_password": "wrong-current-password",
+                "new_password": "New-Password-12345",
+                "new_password_repeat": "New-Password-12345",
+            },
+        )
+
+    def test_limit_blocks_further_attempts_within_the_window(self, client, monkeypatch) -> None:
+        from app.core.config import get_settings
+        from app.core.errors import AppError, ErrorCode
+        from app.modules.identity import router_me
+
+        user = run(client, _make_user, "KAM")
+        sign_in(client, user)
+
+        async def fake_wrong_password(*, username: str, password: str):
+            raise AppError(ErrorCode.VALIDATION, "Текущий пароль неверен")
+
+        monkeypatch.setattr(router_me.keycloak_client, "password_grant", fake_wrong_password)
+
+        limit = get_settings().password_change_max_attempts
+        for attempt in range(limit):
+            response = self._attempt(client)
+            assert response.status_code == 422, (attempt, response.text)
+            assert response.json()["code"] == "CRM-1001", (attempt, response.text)
+
+        # Лимит исчерпан — следующая попытка не доходит даже до проверки пароля.
+        blocked = self._attempt(client)
+        assert blocked.status_code == 429, blocked.text
+        assert blocked.json()["code"] == "CRM-8429"
+        assert "Retry-After" in blocked.headers
+
+    def test_other_users_have_independent_limits(self, client, monkeypatch) -> None:
+        from app.core.config import get_settings
+        from app.core.errors import AppError, ErrorCode
+        from app.modules.identity import router_me
+
+        async def fake_wrong_password(*, username: str, password: str):
+            raise AppError(ErrorCode.VALIDATION, "Текущий пароль неверен")
+
+        monkeypatch.setattr(router_me.keycloak_client, "password_grant", fake_wrong_password)
+        limit = get_settings().password_change_max_attempts
+
+        victim = run(client, _make_user, "KAM")
+        sign_in(client, victim)
+        for _ in range(limit):
+            self._attempt(client)
+        assert self._attempt(client).status_code == 429
+
+        other = run(client, _make_user, "KAM")
+        sign_in(client, other)
+        response = self._attempt(client)
+        assert response.status_code == 422, response.text
+
+
 # --- Скоуп руководителя -----------------------------------------------------------------------
 
 

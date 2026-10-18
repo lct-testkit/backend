@@ -294,6 +294,12 @@ class DealStatusHistory(UuidPkMixin, Base):
     reason: Mapped[str] = mapped_column(String(24), nullable=False, server_default="manual")
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration_in_prev: Mapped[dt.timedelta | None] = mapped_column(Interval, nullable=True)
+    # Состояние SLA статуса, который сделка ПОКИДАЕТ, в момент перехода (`crm.service.
+    # DealService.transition`: `sla_before = deal.sla_state`, записано ДО `apply_sla` для
+    # нового статуса — та сбрасывает `deal.sla_state` на `ok`). Раньше здесь по ошибке писалось
+    # состояние уже НОВОГО статуса (почти всегда `ok` сразу после сброса) — по истории
+    # нарушения SLA было не восстановить (найдено при подготовке спринта B1, не потребляется
+    # ни одним отчётом в этом спринте).
     sla_state_at_change: Mapped[str | None] = mapped_column(String(16), nullable=True)
     changed_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False, index=True

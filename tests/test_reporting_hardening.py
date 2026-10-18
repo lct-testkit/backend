@@ -222,7 +222,10 @@ class TestRenderOffTheLoop:
 
         seen: list[int] = []
 
-        def fake_render(dataset, *, format: str, template_code: str) -> bytes:
+        def fake_render(dataset, *, format: str, template_code: str, **kwargs: object) -> bytes:
+            # B1-4/B1-5: `render_report` принимает `job_id`/`params`/`tz_name` (нужны только
+            # формату json) — стаб должен принимать их же, иначе любой вызов падает `TypeError`
+            # независимо от формата конкретного задания теста.
             seen.append(threading.get_ident())
             return b"rendered"
 

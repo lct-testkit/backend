@@ -59,8 +59,14 @@ from app.db.base import Base, TimestampMixin, UuidPkMixin, VersionMixin
 
 class ReportFormat(StrEnum):
     XLSX = "xlsx"
+    # B1-4: Функц.4/Функц.8 называют xls первым из трёх форматов — xlwt (BIFF8), читает xlrd и
+    # Excel/LibreOffice (`reporting.rendering_xls`).
+    XLS = "xls"
     PDF = "pdf"
     PNG = "png"
+    # B1-5: результирующий json-файл (§6 п.4) — тот же датасет, что и `/data`, но файлом с
+    # записью в аудит и историю (`reporting.rendering.render_json`).
+    JSON = "json"
 
 
 class ReportJobStatus(StrEnum):
@@ -116,7 +122,13 @@ class ReportJob(UuidPkMixin, Base):
             "created_at",
             postgresql_where=text("status = 'queued'"),
         ),
-        CheckConstraint("format IN ('xlsx','pdf','png')", name="report_jobs_format_valid"),
+        # B1-4/B1-5 (миграция 0044_report_formats_meta): добавлены 'xls' и 'json'. Имя CHECK в
+        # реальной БД задвоено naming convention у миграции 0009 (`ck_report_jobs_ck_report_
+        # jobs_format_valid`) — удаляется по найденному имени (`_find_check_constraint`), не по
+        # этому литералу; здесь он только для свежего `create_all()` (тесты без БД-миграций).
+        CheckConstraint(
+            "format IN ('xlsx','xls','pdf','png','json')", name="report_jobs_format_valid"
+        ),
         CheckConstraint(
             "status IN ('queued','processing','completed','failed')",
             name="report_jobs_status_valid",
@@ -139,6 +151,10 @@ class ReportJob(UuidPkMixin, Base):
         ForeignKey("files.id", ondelete="SET NULL"), nullable=True
     )
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # B1-12 (заведена здесь же, в общей миграции 0029 — используется начиная с задачи B1-12):
+    # заголовки колонок, total_rows/truncated/data_as_of/timezone на момент генерации — то, что
+    # не восстановить заново по одному `params`, если данные успели измениться.
+    result_meta: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False, index=True

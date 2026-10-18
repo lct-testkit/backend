@@ -280,6 +280,11 @@ async def get_protocol(
 @signature_templates_router.get(
     "",
     summary="Активные шаблоны документов",
+    description=(
+        "Шаблоны ПЭП, доступные для `POST /api/signature-documents` (`template_code`, "
+        "название, обязательные подписанты); архивные (`is_active=false`) не отдаются. "
+        "Роль: KAM, HEAD, ADMIN."
+    ),
     response_model=SignatureTemplateListResponse,
 )
 async def list_templates(
@@ -298,6 +303,10 @@ async def list_templates(
 @signature_requests_router.get(
     "/me/signature-requests",
     summary="Мои задачи на подпись",
+    description=(
+        "Запросы на подпись, где текущий пользователь — внутренний подписант: статус, "
+        "дедлайн и карточка документа (название, тип и id сущности). Роль: KAM, HEAD, ADMIN."
+    ),
     response_model=list[SignatureRequestOut],
 )
 async def my_signature_requests(
@@ -353,6 +362,11 @@ async def reissue_link(
 @signature_requests_router.post(
     "/signature-requests/{request_id}/view",
     summary="Отметить ознакомление (внутренний подписант)",
+    description=(
+        "Первый вызов переводит запрос из `sent` в `viewed` и отдаёт страницу подписания с "
+        "превью PDF; повторные вызовы только отдают страницу. Чужой запрос или запрос "
+        "внешнего подписанта — 404 CRM-9004. Роль: подписант (KAM, HEAD, ADMIN)."
+    ),
     response_model=SigningPageOut,
 )
 async def view_request(
@@ -400,6 +414,12 @@ async def get_request_file(
 @signature_requests_router.post(
     "/signature-requests/{request_id}/challenge",
     summary="Запросить одноразовый код",
+    description=(
+        "Отправляет внутреннему подписанту одноразовый код по SMS или email для "
+        "последующего `/sign`. Не более 5 кодов на один запрос — иначе 422 CRM-1503; не "
+        "более одной отправки в минуту; канал доставки недоступен — 503 CRM-9503. "
+        "Роль: подписант (KAM, HEAD, ADMIN)."
+    ),
     response_model=ChallengeResponse,
 )
 async def challenge_request(
@@ -425,6 +445,11 @@ async def challenge_request(
 @signature_requests_router.post(
     "/signature-requests/{request_id}/sign",
     summary="Подписать кодом подтверждения",
+    description=(
+        "Проверяет код, полученный от `/challenge`, и фиксирует подпись. Неверный, "
+        "просроченный или уже использованный код, либо исчерпанные попытки — 422 "
+        "CRM-1503; запрос уже подписан — 409 CRM-1505. Роль: подписант (KAM, HEAD, ADMIN)."
+    ),
     response_model=SignatureOut,
 )
 async def sign_request(
@@ -448,6 +473,11 @@ async def sign_request(
 @signature_requests_router.post(
     "/signature-requests/{request_id}/reject",
     summary="Отклонить документ",
+    description=(
+        "Отклоняет документ с указанием причины: документ переходит в `rejected`, "
+        "незавершённые запросы других подписантов аннулируются. Запрос или документ уже "
+        "завершены — 409 CRM-1505. Роль: подписант (KAM, HEAD, ADMIN)."
+    ),
     response_model=SignatureRequestOut,
 )
 async def reject_request(
@@ -497,6 +527,10 @@ async def verify_signature_file(
 @edm_agreements_router.get(
     "",
     summary="Список соглашений об ЭДО",
+    description=(
+        "Соглашения об электронном документообороте с вузами/вендорами (сторона, срок "
+        "действия, статус отзыва); фильтры `party_type`/`party_id`. Роль: AUDITOR, ADMIN."
+    ),
     response_model=EdmAgreementListResponse,
 )
 async def list_edm_agreements(
@@ -529,6 +563,11 @@ async def create_edm_agreement(
 @edm_agreements_router.post(
     "/{agreement_id}/revoke",
     summary="Отозвать соглашение",
+    description=(
+        "Переводит соглашение в `revoked` с указанием причины; открытые документы этой "
+        "стороны переходят в `blocked_no_agreement`, их запросы — в `pending` (прежние "
+        "ссылки перестают работать). Уже отозвано — 422 CRM-1001. Роль: ADMIN."
+    ),
     response_model=EdmAgreementOut,
 )
 async def revoke_edm_agreement(

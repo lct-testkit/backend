@@ -6,8 +6,8 @@
 накопленные дубли: как это сделать безопасно на живом стенде — в риске задачи
 (дамп перед применением).
 
-Revision ID: 0030_contact_channels_unique
-Revises: 0029_user_access_rules
+Revision ID: 0040_contact_channels_unique
+Revises: 0039_user_access_rules
 """
 
 from __future__ import annotations
@@ -17,8 +17,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0030_contact_channels_unique"
-down_revision: str | None = "0029_user_access_rules"
+revision: str = "0040_contact_channels_unique"
+down_revision: str | None = "0039_user_access_rules"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -54,45 +54,38 @@ from app.modules.reporting.builders import (
     REPORT_BUILDERS,
     REPORT_ESTIMATORS,
     ReportDataset,
+    resolve_user_timezone_name,
 )
 from app.modules.reporting.models import (
     Dashboard,
     DashboardWidget,
+    ReportFormat,
     ReportJob,
     ReportJobStatus,
     ReportTemplate,
 )
-from app.modules.reporting.rendering import CONTENT_TYPES, render_report
+from app.modules.reporting.rendering import (
+    CONTENT_TYPES,
+    FILE_EXTENSIONS,
+    render_report,
+    report_file_name,
+)
+from app.modules.reporting.rendering_xls import XLS_MAX_ROWS, ReportTooLargeError
+from app.modules.reporting.schemas import ReportColumnOut, ReportTemplateOut
+from app.modules.reporting.spec import REPORT_SPECS, derived_data_categories, validate_params
 
 #: Раздел 4.13: «< 1 000 строк, < 2 с» — граница между sync- и async-путём.
 SYNC_ROW_THRESHOLD = 1000
 
-# new_spec §4.13: «каждая генерация — событие REPORT_EXPORTED в аудите с
-# указанием количества строк и категорий данных» — `row_count` уже писался,
-# категории — нет. `report_templates` не хранит состав колонок структурно
-# (`query_def` — просто `{"kind": ...}`, см. `reporting.seed`), поэтому
-# источник здесь — то же прочтение восьми шаблонов, что и их описания в
-# `reporting.seed`: пять агрегатных отчётов (воронка/регионы/причины/SLA/
-# динамика) не содержат ФИО ни в одной строке, `kam_summary` — сводка по
-# именованным сотрудникам, `stuck_deals` — «листинг, не агрегат» с
-# ответственным по каждой сделке, `learning_progress` — прогресс именованных
-# учащихся. Код отчёта, которого нет в словаре, трактуется как содержащий
-# ПДн (безопасный отказ, а не молчаливое «пусто»).
-REPORT_DATA_CATEGORIES: dict[str, list[str]] = {
-    "deal_funnel": [],
-    "region_summary": [],
-    "loss_reasons": [],
-    "sla_compliance": [],
-    "monthly_dynamics": [],
-    "kam_summary": ["ФИО сотрудников (КАМ)"],
-    "stuck_deals": ["ФИО сотрудников (владелец сделки)"],
-    "learning_progress": ["ФИО контактов/учащихся", "прогресс обучения"],
-    # Выгрузка для LMS: контакты учащихся и их профиль целиком, без маскирования.
-    "lms_users_upload": [
-        "ФИО, телефон и email учащихся",
-        "ПДн учащихся (СНИЛС, паспорт, дата рождения, адрес регистрации, диплом)",
-    ],
-}
+# new_spec §4.13: «каждая генерация — событие REPORT_EXPORTED в аудите с указанием количества
+# строк и категорий данных». Код отчёта, которого нет в словаре, трактуется как содержащий ПДн
+# (безопасный отказ, а не молчаливое «пусто») — см. `assert` в `reporting.spec`, который не даёт
+# такому случаю произойти молча для зарегистрированных builder'ов.
+#
+# B1-2/B1-12: производный от `ReportSpec.data_categories` (`reporting.spec`) — раньше это был
+# самостоятельный словарь без `deal_register` (он уходил в «не классифицировано»); теперь
+# источник один, расхождения между каталогом вида отчёта и аудитом структурно невозможны.
+REPORT_DATA_CATEGORIES: dict[str, list[str]] = derived_data_categories()
 
 
 def _reject_null_fields(data: dict[str, Any]) -> None:
@@ -119,9 +112,66 @@ def _report_data_categories(template_code: str) -> list[str]:
 _RENDER_LOCK = threading.Lock()
 
 
-def _render_serialized(dataset: ReportDataset, *, format: str, template_code: str) -> bytes:
+def _render_serialized(
+    dataset: ReportDataset,
+    *,
+    format: str,
+    template_code: str,
+    job_id: uuid.UUID | None = None,
+    params: dict[str, Any] | None = None,
+    tz_name: str | None = None,
+) -> bytes:
     with _RENDER_LOCK:
-        return render_report(dataset, format=format, template_code=template_code)
+        return render_report(
+            dataset,
+            format=format,
+            template_code=template_code,
+            job_id=job_id,
+            params=params,
+            tz_name=tz_name,
+        )
+
+
+def report_template_out(template: ReportTemplate) -> ReportTemplateOut:
+    """B1-2/B1-3: `columns`/`params`/`date_fields`/`default_date_field` не хранятся в БД — они
+    вычисляются из `REPORT_SPECS` по `query_def.kind` при каждом ответе, тем же приёмом, что уже
+    используют производные `CHART_KINDS`/`REPORT_DATA_CATEGORIES` этого модуля. Код без описания
+    в `REPORT_SPECS` (не бывает для активного шаблона — см. `assert` в `reporting.spec`, но
+    запись в БД теоретически может опередить код при откате миграции/деплоя) отдаёт пустые
+    списки, а не падает 500."""
+    kind = template.query_def.get("kind", template.code)
+    spec = REPORT_SPECS.get(kind)
+    if spec is None:
+        columns: list[ReportColumnOut] = []
+        params: list[str] = []
+        date_fields: list[str] = []
+        default_date_field = None
+    else:
+        columns = [
+            ReportColumnOut(key=c.key, title=c.title, default=c.default) for c in spec.columns
+        ]
+        allowed = set(spec.common_filters) | set(spec.params) | {"limit"}
+        if spec.columns:
+            allowed.add("columns")
+        if spec.date_fields:
+            allowed.add("date_field")
+        params = sorted(allowed)
+        date_fields = list(spec.date_fields)
+        default_date_field = spec.default_date_field
+    return ReportTemplateOut(
+        id=template.id,
+        code=template.code,
+        name=template.name,
+        description=template.description,
+        allowed_roles=template.allowed_roles,
+        default_params=template.default_params,
+        output_formats=template.output_formats,  # type: ignore[arg-type]
+        is_active=template.is_active,
+        columns=columns,
+        params=params,
+        date_fields=date_fields,
+        default_date_field=default_date_field,
+    )
 
 
 class ReportTemplateService:
@@ -246,6 +296,15 @@ class ReportJobService:
             )
 
         params = {**template.default_params, **(payload.params or {})}
+        # B1-2: строгая проверка ДО создания записи `report_jobs` — так некорректный запрос
+        # (неизвестный параметр, недопустимая колонка, `date_field` вне каталога) не оставляет
+        # осиротевшее задание: вся транзакция откатывается обычным обработчиком ошибок FastAPI.
+        # Код без описания (гипотетический рассинхрон сида и `REPORT_SPECS`) не проверяем — это
+        # уже отловлено выше через `kind not in REPORT_BUILDERS`, а `REPORT_SPECS` описывает
+        # ровно то же множество кодов (`assert` в `reporting.spec`).
+        spec = REPORT_SPECS.get(kind)
+        if spec is not None:
+            validate_params(spec, params)
 
         job = ReportJob(
             template_code=template.code,
@@ -262,6 +321,22 @@ class ReportJobService:
         if estimator is not None:
             row_estimate = await estimator(self._session, principal, params)
             is_light = row_estimate <= SYNC_ROW_THRESHOLD
+            # B1-4: лимит xls (65 535 строк, BIFF8) проверяется заранее по оценке — тот же приём,
+            # что уже разделяет sync/async по `SYNC_ROW_THRESHOLD`. Невалидный запрос не доходит
+            # до рендера (который не раньше бы, а глубже внутри `render_xls`, поднял бы то же
+            # исключение — `ReportTooLargeError` ниже перехватывает именно этот случай для
+            # видов без оценщика, у которых фактическое число строк оценке не подвергалось).
+            if payload.format == ReportFormat.XLS.value and row_estimate > XLS_MAX_ROWS:
+                raise ValidationError(
+                    f"Формат xls вмещает не более {XLS_MAX_ROWS} строк: выберите xlsx или "
+                    "сузьте период",
+                    [
+                        FieldError(
+                            field="format",
+                            reason=f"оценка строк ({row_estimate}) превышает лимит xls",
+                        )
+                    ],
+                )
 
         if is_light:
             # Лёгкий отчёт строится прямо в запросе и в лимит выше не попадает: без своего
@@ -270,7 +345,15 @@ class ReportJobService:
             await rate_limit.enforce(
                 str(principal.user_id), "report:sync", limit=30, window_seconds=60
             )
-            await self.generate(job, principal)
+            try:
+                await self.generate(job, principal)
+            except ReportTooLargeError as exc:
+                # Оценка (если она вообще была) могла устареть между `estimator(...)` выше и
+                # самим рендером, либо вид отчёта без оценщика на практике дал больше строк,
+                # чем предполагалось структурно — 422, а не 500 неперехваченного исключения.
+                raise ValidationError(
+                    str(exc), [FieldError(field="format", reason=str(exc))]
+                ) from exc
         elif settings.reports_enqueue:
             # B8-11: не ждать минутного тика `sweep_report_jobs` — поставить задание в arq
             # сразу после коммита (до коммита воркер не нашёл бы строку `queued` в БД).
@@ -289,17 +372,31 @@ class ReportJobService:
         await self._session.flush()
 
         dataset = await builder(self._session, principal, job.params)
+        # B1-12: пояс нужен не только конверту json (B1-5) — он же идёт в `result_meta.timezone`
+        # для ЛЮБОГО формата (снимок момента генерации), поэтому резолвится всегда, а не только
+        # при `format == json`, как было в черновике B1-4/B1-5.
+        tz_name = await resolve_user_timezone_name(self._session, principal)
         # Рендер (openpyxl, reportlab, matplotlib) — секунды CPU: в потоке, а не в цикле событий,
         # иначе на это время замирали бы все остальные запросы воркера.
         content = await asyncio.to_thread(
-            _render_serialized, dataset, format=job.format, template_code=kind
+            _render_serialized,
+            dataset,
+            format=job.format,
+            template_code=kind,
+            job_id=job.id,
+            params=job.params,
+            tz_name=tz_name,
         )
 
         settings = get_settings()
         bucket = settings.s3_bucket_reports
         await ensure_bucket(bucket)
         file_id = uuid7()
-        storage_key = f"{job.id}/{file_id}.{job.format}"
+        # B1-4: расширение файла через `FILE_EXTENSIONS`, не напрямую `job.format` — у всех
+        # сегодняшних форматов они совпадают буквально, но явный словарь (`reporting.rendering`)
+        # не даёт этому молча разойтись, если когда-нибудь появится формат с другим расширением.
+        extension = FILE_EXTENSIONS[job.format]
+        storage_key = f"{job.id}/{file_id}.{extension}"
         await upload_object_bytes(
             bucket=bucket,
             key=storage_key,
@@ -311,7 +408,10 @@ class ReportJobService:
             id=file_id,
             storage_key=storage_key,
             bucket=bucket,
-            original_filename=f"{dataset.title}.{job.format}",
+            # B1-6: `{название}_{ГГГГ-ММ-ДД}.{расширение}`, не просто `{dataset.title}.{extension}`
+            # — повторная выгрузка одного и того же вида отчёта в другой день давала то же имя
+            # файла, браузер различал копии только припиской `(1)`/`(2)`.
+            original_filename=report_file_name(dataset.title, dataset.generated_at, extension),
             mime_type=CONTENT_TYPES[job.format],
             size_bytes=len(content),
             sha256=hashlib.sha256(content).hexdigest(),
@@ -343,6 +443,23 @@ class ReportJobService:
         job.row_count = len(dataset.rows)
         job.finished_at = dt.datetime.now(dt.UTC)
         job.expires_at = job.finished_at + dt.timedelta(days=settings.reports_retention_days)
+        # B1-12: снимок момента генерации — то, что не восстановить заново по одному `params`,
+        # если данные успели измениться (заголовки колонок — в порядке файла; `total_rows`/
+        # `truncated` — B1-6/B1-7, `None` у builder'ов без оценки означает «усечения не было»;
+        # `data_as_of` сериализован строкой — JSONB-колонки этой кодовой базы пишутся обычным
+        # `json.dumps` без кастомного энкодера, см. `crm.service._json_safe`).
+        job.result_meta = {
+            "title": dataset.title,
+            "columns": list(dataset.columns),
+            "total_rows": (
+                dataset.total_rows if dataset.total_rows is not None else len(dataset.rows)
+            ),
+            "truncated": dataset.truncated,
+            "data_as_of": (
+                dataset.data_as_of.isoformat() if dataset.data_as_of is not None else None
+            ),
+            "timezone": tz_name,
+        }
         await self._session.flush()
 
         await self._audit.record(

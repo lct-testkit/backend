@@ -382,9 +382,7 @@ class CmsLeadService:
         # (`lead_kind` и т.п.) — раньше deal_type="b2c" был зашит жёстко, заявка вуза не могла
         # попасть в B2B-воронку. `routing=None` (администратор не настраивал) — `Route()` по
         # умолчанию: B2C, воронка и начальный статус по умолчанию — поведение не меняется.
-        routing = (
-            Routing.model_validate(source.routing) if source and source.routing else None
-        )
+        routing = Routing.model_validate(source.routing) if source and source.routing else None
         route = resolve_route(routing, mapped.payload)
         if route.deal_type == "b2b":
             return await self._process_b2b_lead(principal, lead, mapped.payload, route, key)
@@ -718,9 +716,7 @@ class CmsLeadService:
             )
 
         owner_id = (
-            new_owner_id
-            if created
-            else await self._resolve_owner_for_route(route, organization)
+            new_owner_id if created else await self._resolve_owner_for_route(route, organization)
         )
         resolved = await resolve_workflow_for_route(self._session, route)
         students_planned = _parse_int(mapped_payload.get("students_planned"))

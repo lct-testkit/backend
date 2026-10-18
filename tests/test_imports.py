@@ -7,7 +7,8 @@ backend-агента про rtk_requiriments.md разд. 4, Треб.1).
 требует сессии Postgres — раньше не было покрыто вообще (та же граница, что
 у остального DB-слоя репозитория), `TestLicenseImportEndToEnd` теперь
 покрывает генерик-пайплайн (dry-run → apply → повторный импорт = upsert по
-`contract_number`) тем же приёмом, что `tests/test_api_smoke.py`/`tests/
+составному ключу вуз-вендор-ПО-договор, B3-1) тем же приёмом, что `tests/
+test_api_smoke.py`/`tests/
 conftest.py`: настоящая Postgres за `TEST_DATABASE_URL`, S3 — заглушка в
 памяти (`imports.service.inspect_object`/`download_object_bytes`/
 `ensure_bucket`/`upload_object_bytes` подменены `monkeypatch`, реальный
@@ -17,6 +18,7 @@ SeaweedFS не нужен). Без `TEST_DATABASE_URL` класс пропуск
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import io
 import uuid
@@ -38,6 +40,8 @@ from app.modules.imports.fields import (
 from app.modules.imports.mapping import _levenshtein, suggest_mapping
 from app.modules.imports.parsing import parse_csv, parse_xlsx, sanitize_formula
 from tests.conftest import TEST_DATABASE_URL, _make_user, authenticate, run
+from tests.crm_helpers import login
+from tests.import_helpers import make_inn, start_import, xlsx_bytes
 
 
 class TestPhoneNormalization:
@@ -293,6 +297,40 @@ class TestLicenseFields:
         assert value is None
         assert err is None
 
+    def test_transfer_status_accepts_russian_synonyms(self) -> None:
+        # B3-3 (BUG-10): прежде только английские коды — русское слово из
+        # файла заказчика давало ошибку строки на каждой лицензии.
+        spec = next(f for f in LICENSE_FIELDS if f.target == "transfer_status")
+        value, err = validate_field(spec, "Передано")
+        assert err is None
+        assert value == "transferred"
+
+    def test_license_signed_kind_returns_dict_with_is_signed(self) -> None:
+        spec = next(f for f in LICENSE_FIELDS if f.target == "license_signed_at")
+        assert spec.kind == "license_signed"
+        value, err = validate_field(spec, "да")
+        assert err is None
+        assert value == {"is_signed": True}
+
+    def test_license_signed_kind_accepts_date_and_sets_both_fields(self) -> None:
+        spec = next(f for f in LICENSE_FIELDS if f.target == "license_signed_at")
+        value, err = validate_field(spec, "15.03.2024")
+        assert err is None
+        assert value == {"is_signed": True, "license_signed_at": dt.date(2024, 3, 15)}
+
+    def test_license_term_kind_accepts_years_and_calendar_year(self) -> None:
+        spec = next(f for f in LICENSE_FIELDS if f.target == "license_valid_year")
+        assert spec.kind == "license_term"
+        value, err = validate_field(spec, "3")
+        assert err is None
+        assert value == {"license_term_years": 3, "license_valid_year": 3}
+
+    def test_license_term_kind_rejects_out_of_range_value(self) -> None:
+        spec = next(f for f in LICENSE_FIELDS if f.target == "license_valid_year")
+        value, err = validate_field(spec, "1999")
+        assert value is None
+        assert err is not None
+
     def test_organization_name_column_maps_by_exact_label(self) -> None:
         mapping = suggest_mapping(["Название ВУЗа", "Вендор"], list(LICENSE_FIELDS))
         assert mapping["Название ВУЗа"] == "organization_name"
@@ -487,9 +525,14 @@ class TestLicenseImportEndToEnd:
                 pass
             await service.finalize_apply_if_done(job)
 
-    def test_apply_creates_rows_then_second_import_upserts_by_contract_number(
+    def test_apply_creates_rows_then_second_import_upserts_by_composite_key(
         self, client, monkeypatch
     ) -> None:
+        """B3-1 (BUG-9): естественный ключ строки — (вуз, вендор, ПО, номер
+        договора), не только номер договора. Повтор с тем же вендором/ПО и
+        другим статусом/комментарием обновляет ту же запись; это НЕ прежнее
+        поведение, где ключом был только `contract_number` — тест обновлён
+        под новую, намеренно иную семантику (см. отчёт по эпику)."""
         from sqlalchemy import select
 
         from app.core.db import session_scope
@@ -558,12 +601,12 @@ class TestLicenseImportEndToEnd:
         assert comment == "исходная запись"
         assert version == 1
 
-        # Второй импорт того же номера договора с другим вендором/комментарием
-        # — должен ОБНОВИТЬ существующую запись (не создать вторую).
+        # Второй импорт — тот же вуз/вендор/ПО/договор (ключ не меняется),
+        # другой статус и комментарий -> ОБНОВЛЯЕТ существующую запись.
         rows_v2 = [
             [
                 org_name,
-                "ВендорБ-обновлённый",
+                "ВендорА",
                 "ПродуктА",
                 contract_number,
                 "2026-01-10",
@@ -600,12 +643,243 @@ class TestLicenseImportEndToEnd:
         run(client, self._apply_synchronously, uuid.UUID(job_id_v2))
 
         second_pass = run(client, _count_and_fetch)
-        assert len(second_pass) == 1, "upsert должен обновить строку, а не размножить её"
+        assert (
+            len(second_pass) == 1
+        ), "upsert с тем же ключом должен обновить строку, а не размножить её"
         second_id, vendor2, comment2, version2 = second_pass[0]
         assert second_id == first_id
-        assert vendor2 == "ВендорБ-обновлённый"
+        assert vendor2 == "ВендорА"
         assert comment2 == "обновлённая запись"
         assert version2 == 2
+
+    def test_apply_resolves_vendor_and_product_from_the_catalog_when_unambiguous(
+        self, client, monkeypatch
+    ) -> None:
+        """B3-2: `LicenseMatcher` (B3-4) теперь подключён к импорту — раньше `vendor_id`/
+        `product_id` оставались `NULL` для каждой лицензии, заведённой импортом, независимо от
+        точности совпадения текста с каталогом. Вендор и ПО совпадают однозначно с каталогом —
+        `vendor_id`/`product_id` заполняются; текст (`vendor`/`product_name`) не трогается."""
+        from sqlalchemy import select
+
+        from app.core.db import session_scope
+        from app.modules.catalog.models import Organization, OrganizationLicense, Product
+
+        org_name = f"Тестовый университет П3 {uuid.uuid4().hex[:8]}"
+        vendor_name = f"Вендор каталога {uuid.uuid4().hex[:8]}"
+        product_name = f"ПО каталога {uuid.uuid4().hex[:8]}"
+        contract_number = f"TU-{uuid.uuid4().hex[:10]}"
+
+        async def _seed_catalog() -> tuple[uuid.UUID, uuid.UUID]:
+            async with session_scope() as session:
+                vendor = Organization(name=vendor_name, org_type="company")
+                session.add(vendor)
+                await session.flush()
+                product = Product(
+                    code=f"prod-{uuid.uuid4().hex[:8]}",
+                    name=product_name,
+                    kind="software",
+                    vendor_id=vendor.id,
+                )
+                session.add(product)
+                await session.flush()
+                return vendor.id, product.id
+
+        vendor_id, product_id = run(client, _seed_catalog)
+
+        rows = [
+            [
+                org_name,
+                vendor_name,
+                product_name,
+                contract_number,
+                "2026-01-10",
+                "3",
+                "not_started",
+                "Иванов И.И.",
+                "Петров П.П.",
+                "сопоставление с каталогом",
+            ],
+        ]
+        content = self._xlsx_bytes(rows)
+        self._stub_storage(monkeypatch, content)
+        head = run(client, _make_user, "HEAD")
+        _org_id, file_id = run(client, self._seed_organization_and_file, org_name, content, head.id)
+        csrf = authenticate(client, head)
+        client.headers["X-CSRF-Token"] = csrf
+
+        job_id = client.post(
+            "/api/imports",
+            json={
+                "file_id": str(file_id),
+                "entity_type": "license",
+                "mode": "upsert",
+                "source_format": "xlsx",
+            },
+        ).json()["id"]
+        client.put(f"/api/imports/{job_id}/mapping", json={"mapping": self._MAPPING})
+        dry = client.post(f"/api/imports/{job_id}/dry-run").json()
+        assert dry["ok_rows"] == 1, dry
+        run(client, self._apply_synchronously, uuid.UUID(job_id))
+
+        async def _fetch():
+            async with session_scope() as session:
+                return (
+                    await session.execute(
+                        select(OrganizationLicense).where(
+                            OrganizationLicense.contract_number == contract_number
+                        )
+                    )
+                ).scalar_one()
+
+        license_ = run(client, _fetch)
+        assert license_.vendor == vendor_name
+        assert license_.vendor_id == vendor_id
+        assert license_.product_name == product_name
+        assert license_.product_id == product_id
+
+    def test_apply_leaves_vendor_and_product_ids_empty_when_not_found_in_the_catalog(
+        self, client, monkeypatch
+    ) -> None:
+        """Без совпадения в каталоге — не ошибка строки: текст сохраняется, `vendor_id`/
+        `product_id` остаются `NULL` (так же, как ручной ввод текстом без выбора из каталога в
+        API лицензий, B3-6)."""
+        from sqlalchemy import select
+
+        from app.core.db import session_scope
+        from app.modules.catalog.models import OrganizationLicense
+
+        org_name = f"Тестовый университет П3 {uuid.uuid4().hex[:8]}"
+        contract_number = f"TU-{uuid.uuid4().hex[:10]}"
+        rows = [
+            [
+                org_name,
+                "Вендор без каталога",
+                "ПО без каталога",
+                contract_number,
+                "2026-01-10",
+                "3",
+                "not_started",
+                "Иванов И.И.",
+                "Петров П.П.",
+                "без совпадения в каталоге",
+            ],
+        ]
+        content = self._xlsx_bytes(rows)
+        self._stub_storage(monkeypatch, content)
+        head = run(client, _make_user, "HEAD")
+        _org_id, file_id = run(client, self._seed_organization_and_file, org_name, content, head.id)
+        csrf = authenticate(client, head)
+        client.headers["X-CSRF-Token"] = csrf
+
+        job_id = client.post(
+            "/api/imports",
+            json={
+                "file_id": str(file_id),
+                "entity_type": "license",
+                "mode": "upsert",
+                "source_format": "xlsx",
+            },
+        ).json()["id"]
+        client.put(f"/api/imports/{job_id}/mapping", json={"mapping": self._MAPPING})
+        dry = client.post(f"/api/imports/{job_id}/dry-run").json()
+        assert dry["ok_rows"] == 1, dry
+        run(client, self._apply_synchronously, uuid.UUID(job_id))
+
+        async def _fetch():
+            async with session_scope() as session:
+                return (
+                    await session.execute(
+                        select(OrganizationLicense).where(
+                            OrganizationLicense.contract_number == contract_number
+                        )
+                    )
+                ).scalar_one()
+
+        license_ = run(client, _fetch)
+        assert license_.vendor == "Вендор без каталога"
+        assert license_.vendor_id is None
+        assert license_.product_name == "ПО без каталога"
+        assert license_.product_id is None
+
+    def test_same_contract_number_different_product_creates_two_rows(
+        self, client, monkeypatch
+    ) -> None:
+        """BUG-9: один номер договора на несколько ПО — раньше вторая строка
+        молча перезаписывала первую (ключ был только `contract_number`).
+        После B3-1 ключ составной (вуз, вендор, ПО, договор): обе строки
+        одного договора с разным ПО дают ДВЕ отдельные записи."""
+        from sqlalchemy import select
+
+        from app.core.db import session_scope
+        from app.modules.catalog.models import OrganizationLicense
+
+        org_name = f"Тестовый университет П3 {uuid.uuid4().hex[:8]}"
+        contract_number = f"TU-{uuid.uuid4().hex[:10]}"
+
+        rows = [
+            [
+                org_name,
+                "ВендорА",
+                "ПО Один",
+                contract_number,
+                "2026-01-10",
+                "3",
+                "not_started",
+                "Иванов И.И.",
+                "Петров П.П.",
+                "первое ПО по тому же договору",
+            ],
+            [
+                org_name,
+                "ВендорА",
+                "ПО Два",
+                contract_number,
+                "2026-01-10",
+                "3",
+                "not_started",
+                "Иванов И.И.",
+                "Петров П.П.",
+                "второе ПО по тому же договору",
+            ],
+        ]
+        content = self._xlsx_bytes(rows)
+        self._stub_storage(monkeypatch, content)
+        head = run(client, _make_user, "HEAD")
+        _org_id, file_id = run(client, self._seed_organization_and_file, org_name, content, head.id)
+        csrf = authenticate(client, head)
+        client.headers["X-CSRF-Token"] = csrf
+
+        job_id = client.post(
+            "/api/imports",
+            json={
+                "file_id": str(file_id),
+                "entity_type": "license",
+                "mode": "upsert",
+                "source_format": "xlsx",
+            },
+        ).json()["id"]
+        client.put(f"/api/imports/{job_id}/mapping", json={"mapping": self._MAPPING})
+        dry = client.post(f"/api/imports/{job_id}/dry-run").json()
+        assert dry["ok_rows"] == 2, dry
+        run(client, self._apply_synchronously, uuid.UUID(job_id))
+
+        async def _fetch() -> list[str]:
+            async with session_scope() as session:
+                rows = (
+                    (
+                        await session.execute(
+                            select(OrganizationLicense).where(
+                                OrganizationLicense.contract_number == contract_number
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                return sorted(r.product_name for r in rows)
+
+        products = run(client, _fetch)
+        assert products == ["ПО Два", "ПО Один"], "один договор на два ПО должен дать две записи"
 
     def test_only_head_and_admin_rollback(self) -> None:
         assert not has_permission("KAM", Permission.IMPORT_ROLLBACK)
@@ -688,3 +962,64 @@ class TestLicenseImportEndToEnd:
         assert job.status == ImportJobStatus.FAILED.value
         assert job.last_error
         assert job.finished_at is not None
+
+        # B9-8 (OPEN-ISSUES B-14): миграция 0025 и запись причины в `imports.tasks` были с
+        # прошлого спринта, но `ImportJobOut` не отдавал поле — пользователь видел только
+        # статус `failed` без объяснения.
+        api_job = client.get(f"/api/imports/{job_id}").json()
+        assert api_job["last_error"] == job.last_error
+
+
+class TestImportPresets:
+    """B9-8 (OPEN-ISSUES B-15): `DELETE /api/import-presets/{id}` не было вовсе. Настоящая
+    Postgres обязательна — см. докстринг модуля."""
+
+    pytestmark = pytest.mark.skipif(
+        not TEST_DATABASE_URL, reason="нужен TEST_DATABASE_URL с применёнными миграциями"
+    )
+
+    def _org_rows(self) -> tuple[bytes, dict[str, str]]:
+        content = xlsx_bytes(["Наименование", "ИНН"], [[f"Университет {make_inn()}", make_inn()]])
+        return content, {"Наименование": "name", "ИНН": "inn"}
+
+    def test_save_as_preset_then_list_and_delete(self, client, monkeypatch) -> None:
+        head = login(client, "HEAD")
+        content, mapping = self._org_rows()
+        preset_name = f"Пресет {uuid.uuid4().hex[:8]}"
+
+        started = start_import(
+            client,
+            monkeypatch,
+            head,
+            entity_type="organization",
+            content=content,
+            source_format="xlsx",
+            mapping=mapping,
+            dry_run=False,
+        )
+        # `start_import` уже сохранил маппинг без пресета; второй вызов — с `save_as_preset`
+        # (B9-8 проверяет жизненный цикл пресета, не форму самого маппинга).
+        saved = client.put(
+            f"/api/imports/{started['id']}/mapping",
+            json={"mapping": mapping, "save_as_preset": preset_name},
+        )
+        assert saved.status_code == 200, saved.text
+
+        listed = client.get("/api/import-presets", params={"entity_type": "organization"})
+        assert listed.status_code == 200, listed.text
+        items = {item["name"]: item for item in listed.json()["items"]}
+        assert preset_name in items
+        preset_id = items[preset_name]["id"]
+        assert items[preset_name]["mapping"] == mapping
+
+        delete_resp = client.delete(f"/api/import-presets/{preset_id}")
+        assert delete_resp.status_code == 204, delete_resp.text
+
+        after = client.get("/api/import-presets", params={"entity_type": "organization"})
+        assert preset_name not in {item["name"] for item in after.json()["items"]}
+
+    def test_deleting_an_unknown_preset_is_404(self, client) -> None:
+        login(client, "HEAD")
+        response = client.delete(f"/api/import-presets/{uuid.uuid4()}")
+        assert response.status_code == 404, response.text
+        assert response.json()["code"] == "CRM-9004"

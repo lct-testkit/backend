@@ -11,8 +11,8 @@
 затрагивает (`IntegrationSourceUpdateRequest` их не содержит) — значит обычный
 `PATCH` не может случайно стереть маппинг/маршрут, только выделенные ручки.
 
-Revision ID: 0028_b5_mapping_routing
-Revises: 0027_b5_integration_pull_cursor
+Revision ID: 0038_b5_mapping_routing
+Revises: 0037_b5_integration_pull_cursor
 """
 
 from __future__ import annotations
@@ -23,8 +23,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0028_b5_mapping_routing"
-down_revision: str | None = "0027_b5_integration_pull_cursor"
+revision: str = "0038_b5_mapping_routing"
+down_revision: str | None = "0037_b5_integration_pull_cursor"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

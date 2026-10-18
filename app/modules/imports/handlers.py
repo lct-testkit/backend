@@ -120,14 +120,19 @@ class Batch:
     def __init__(self, session: AsyncSession, job: ImportJob) -> None:
         self.session = session
         self.job = job
-        self.products = ProductIndex(session)
+        # B3-7: курсы (оплаты, `PaymentHandler`) и ПО (вендорский файл,
+        # `VendorContactHandler`) — разные индексы по `kind`, иначе курс и
+        # ПО с одним названием перехватывали бы поиск друг друга.
+        self.products = ProductIndex(session, kind="course")
+        self.software = ProductIndex(session, kind="software")
         self.organizations = OrganizationIndex(session)
         self.contacts = ContactService(session)
 
     def invalidate(self) -> None:
         """После отката SAVEPOINT'а строки объекты, изменённые внутри неё, «протухли»: индексы
         читаются заново, а не отдают их из кэша."""
-        self.products = ProductIndex(self.session)
+        self.products = ProductIndex(self.session, kind="course")
+        self.software = ProductIndex(self.session, kind="software")
         self.organizations = OrganizationIndex(self.session)
 
 
@@ -245,10 +250,10 @@ class VendorContactHandler(EntityHandler):
 
         products: list[Product] = []
         for name in data.get("product_names") or []:
-            product = await batch.products.get(name)
+            product = await batch.software.get(name)
             if product is None:
-                product = await batch.products.create(
-                    name, vendor_id=organization.id, import_job_id=job.id
+                product = await batch.software.create(
+                    name, vendor_id=organization.id, import_job_id=job.id, kind="software"
                 )
                 outcome.effects.append({"kind": "product", "op": "create", "id": str(product.id)})
             elif product.vendor_id is None:
@@ -337,7 +342,9 @@ class PaymentHandler(EntityHandler):
                 )
             )
             orders.update(number for (number,) in found.all() if number)
-        index = ProductIndex(session)
+        # B3-7: оплаты заводят курсы, а не ИТ-продукты (ПО) — те приходят
+        # только вендорским файлом (`VendorContactHandler`/`batch.software`).
+        index = ProductIndex(session, kind="course")
         known: dict[str, Product] = {}
         for name in {r["product_name"] for r in rows if r.get("product_name")}:
             product = await index.get(name)

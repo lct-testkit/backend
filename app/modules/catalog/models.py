@@ -315,8 +315,21 @@ class Direction(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteMixin, Base
     )
 
 
+class ProductKind(StrEnum):
+    """B3-7: различает ИТ-программу (курс/трек Школы) от ИТ-продукта — ПО
+    вендора, лицензируемого вузу (`OrganizationLicense`). Один каталог
+    `products` для обоих, а не отдельная таблица `it_products` (вариант C из
+    задачи B3-7: вендорский импорт и лицензии уже пишут сюда же через
+    `ContactProduct`/`vendor_id`, дублировать это было бы дороже и
+    рискованнее новой таблицы-дубликата)."""
+
+    COURSE = "course"
+    SOFTWARE = "software"
+
+
 class Product(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteMixin, Base):
-    """Образовательный продукт: курс, программа, трек (раздел 5.3, 19)."""
+    """Образовательный продукт: курс, программа, трек — или ИТ-продукт (ПО)
+    вендора при `kind='software'` (раздел 5.3, 19; B3-7)."""
 
     __tablename__ = "products"
     __table_args__ = (
@@ -326,6 +339,10 @@ class Product(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteMixin, Base):
         CheckConstraint(
             "format IS NULL OR format IN ('online','offline','blended')",
             name="products_format_valid",
+        ),
+        CheckConstraint(
+            "kind IN ('course','software')",
+            name="products_kind_valid",
         ),
     )
 
@@ -353,8 +370,10 @@ class Product(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteMixin, Base):
     vendor_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True
     )
-    # Раздел 19: «ПО», признак программы (`product_kind`) — сюда, без отдельной таблицы
-    # `it_programs`.
+    # B3-7: `course` — ИТ-программа/курс Школы, `software` — ИТ-продукт (ПО) вендора,
+    # лицензируемый вузу (см. `ProductKind`, `OrganizationLicense.product_id`). Бэкфилл
+    # миграции 0026 — `software` там, где уже стоит `vendor_id`.
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, server_default="course")
     custom_fields: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
@@ -530,32 +549,58 @@ class OrganizationLicense(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteM
     (год), Статус по передаче, ФИО Менеджера, Ответственные от ВУЗа,
     Комментарий).
 
-    `product_name` — сознательно текстовое поле, не FK на `products.id`:
-    кейс говорит про внешнее лицензируемое ПО вендора (конкретный продукт по
-    договору), которое не обязано совпадать с каталогом образовательных
-    программ Школы (`Product` — курс/трек обучения, другая сущность по
-    смыслу, раздел 5.3). По той же причине `manager_full_name` и
-    `responsible_contacts` — свободный текст из исходного xls, а не ссылка
-    на `users`/`contacts`: «ФИО Менеджера» в кейсе не обязан быть нашим
-    пользователем, «Ответственные от ВУЗа» — не обязаны быть контактами с
-    согласием на обработку ПДн в этой системе (см. отчёт по П3 — решение
-    сознательно упрощено, не изобретаем связи, которых кейс не просит).
+    B3-1 вводит составной естественный ключ строки — ``(organization_id,
+    vendor_key, product_key, contract_key)`` (`catalog.license_keys.
+    LicenseKey`, уникальный частичный индекс `uq_org_licenses_key`). Один
+    номер договора на несколько единиц ПО больше не теряет строки (BUG-9):
+    ключ различает их по `product_key`, а не только по номеру. Номер
+    договора необязателен (`contract_number` — nullable): пустой номер
+    даёт пустую строку `''` в `contract_key`, а не `NULL` — частичный
+    уникальный индекс Postgres не ловит дубли по `NULL`.
 
-    Естественный ключ импорта — `contract_number` (`imports.fields.
-    natural_key_for`): общий импортёр (`imports.service`) структурно
-    поддерживает один natural key на тип сущности — тот же приём, что
-    `Organization.inn`/`Product.code` уже используют. Настоящий составной
-    ключ (вуз, вендор, ПО), предложенный в задаче как альтернатива, здесь не
-    применяется — сознательное упрощение (подробности — отчёт по П3), поэтому
-    уникальность на уровне БД тоже не заведена: единственный путь записи —
-    ревьюируемый импорт (dry-run → apply), отдельных create/update-ручек
-    нет вообще (только чтение, см. `catalog.router.organization_licenses_
-    router`)."""
+    `vendor_id`/`product_id` — необязательные ссылки на каталог
+    (`Organization.org_type='company'`/`Product.kind='software'`,
+    `catalog.license_matching.LicenseMatcher`, задача B3-4): заполняются
+    при импорте/создании через API (B3-6), когда вендор или ПО однозначно
+    находится в каталоге. `vendor`/`product_name` остаются текстовыми
+    копиями значения из файла/формы — так название, под которым вуз
+    подписал договор, не теряется, даже если каталожная запись потом
+    переименуется.
+
+    `manager_full_name` и `responsible_contacts` — свободный текст из
+    исходного xls, а не ссылка на `users`/`contacts`: «ФИО Менеджера» в
+    кейсе не обязан быть нашим пользователем, «Ответственные от ВУЗа» — не
+    обязаны быть контактами с согласием на обработку ПДн в этой системе
+    (сознательное упрощение, не изобретаем связи, которых кейс не просит).
+
+    `is_signed`/`license_term_years`/`license_valid_until`/`is_perpetual` —
+    разобранные значения колонок «Подписание лицензии» и «Срок действия
+    лицензии (год)» (B3-3, `catalog.license_values`): реальный файл пишет
+    туда «да»/«нет», дату, «3 года» или календарный год, а не канонические
+    ISO-значения. `license_valid_year` остаётся как есть («что было в
+    файле») для обратной совместимости старых потребителей API.
+
+    Запись возможна и через импорт (dry-run → apply, `imports.service`,
+    `entity_type='license'`, обработчик `LicenseHandler`), и через
+    `POST/PATCH/DELETE /api/organization-licenses` (B3-6) — оба пути идут
+    через один и тот же разбор значений и подбор ключей, чтобы вести себя
+    одинаково."""
 
     __tablename__ = "organization_licenses"
     __table_args__ = (
         Index("ix_organization_licenses_organization", "organization_id"),
         Index("ix_organization_licenses_contract_number", "contract_number"),
+        Index("ix_org_licenses_vendor", "vendor_id"),
+        Index("ix_org_licenses_product", "product_id"),
+        Index(
+            "uq_org_licenses_key",
+            "organization_id",
+            "vendor_key",
+            "product_key",
+            "contract_key",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
         CheckConstraint(
             "transfer_status IS NULL OR transfer_status IN "
             "('not_started','in_progress','transferred','declined')",
@@ -568,7 +613,7 @@ class OrganizationLicense(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteM
     )
     vendor: Mapped[str] = mapped_column(String(255), nullable=False)
     product_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    contract_number: Mapped[str] = mapped_column(String(128), nullable=False)
+    contract_number: Mapped[str | None] = mapped_column(String(128), nullable=True)
     license_signed_at: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
     license_valid_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
     transfer_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
@@ -578,3 +623,23 @@ class OrganizationLicense(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteM
     import_job_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("import_jobs.id", ondelete="SET NULL"), nullable=True
     )
+    # --- B3-1: составной ключ и связь с каталогом ---
+    vendor_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=True
+    )
+    product_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("products.id", ondelete="RESTRICT"), nullable=True
+    )
+    vendor_key: Mapped[str] = mapped_column(String(255), nullable=False, server_default="")
+    product_key: Mapped[str] = mapped_column(String(255), nullable=False, server_default="")
+    contract_key: Mapped[str] = mapped_column(String(128), nullable=False, server_default="")
+    # --- B3-3: разобранные значения «Подписание лицензии» / «Срок действия» ---
+    is_signed: Mapped[bool | None] = mapped_column(nullable=True)
+    # B1-7 (между делом, при прогоне `alembic check` для своей миграции 0027): `int` без явного
+    # типа резолвится в `BigInteger` через `Base.type_annotation_map` (`app/db/base.py`), а
+    # миграция 0026 создала колонку как `SMALLINT` — `alembic check` падал на этом рассинхроне
+    # для любой следующей миграции, не только нашей. Явный `Integer` — как у соседнего
+    # `license_valid_year` чуть выше; миграция 0028 приводит колонку к тому же типу.
+    license_term_years: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    license_valid_until: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    is_perpetual: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))

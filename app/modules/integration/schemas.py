@@ -124,11 +124,45 @@ class LmsProgressPushRequest(BaseModel):
     `lms.upsert_progress()` обрабатывает оба направления, см. докстринг
     `integration.lms`."""
 
+    # B9-2: пример строки — `tests/test_lms_progress.py::TestIncompleteRowsDoNotEraseData`
+    # (`_FULL`/`_row`): полный набор полей одной строки прогресса.
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "external_id": "lms-push-2026-03-15-001",
+                "items": [
+                    {
+                        "deal_id": "018f0a3e-7c3e-7c3e-8c3e-3e7c3e7c3e7c",
+                        "course_external_id": "c-1",
+                        "enrolled_at": "2026-09-01T10:00:00Z",
+                        "progress_pct": 60,
+                        "score": 4.5,
+                        "completed_at": "2026-09-20T12:00:00Z",
+                        "last_activity_at": "2026-09-21T09:00:00Z",
+                    }
+                ],
+            }
+        }
+    )
+
     external_id: str = Field(description="Идентификатор доставки для дедупликации")
     items: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class BitrixWebhookRequest(BaseModel):
+    # B9-2: пример — реальные значения из `tests/test_integration.py`
+    # (`fields={"title": "x"}` на реальном сценарии переименования).
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "external_id": "bitrix-evt-2026-03-15-001",
+                "bitrix_id": "42",
+                "version": 2,
+                "fields": {"title": "РТ Университет — Python: базовый курс"},
+            }
+        }
+    )
+
     external_id: str = Field(description="Идентификатор доставки для дедупликации")
     bitrix_id: str
     version: int = Field(ge=1)

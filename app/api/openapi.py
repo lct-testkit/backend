@@ -76,7 +76,11 @@ class Problem(BaseModel):
     code: str = Field(
         pattern=r"^CRM-[0-9]{4}$",
         description="Внутренний код из каталога ошибок, `CRM-XXYY`: по нему, а не по "
-        "тексту, клиент выбирает поведение.",
+        "тексту, клиент выбирает поведение. Полный справочник — "
+        "`GET /api/meta/error-codes` (B9-4).",
+        # B9-4: все 51 значение из `core.errors.ErrorCode`, а не только то, что встретилось в
+        # примерах ответов — новый код эпика честно "покраснеет" здесь, если забыт в каталоге.
+        json_schema_extra={"enum": [code.value for code in ErrorCode]},
     )
     errors: list[ProblemFieldError] | None = Field(
         default=None, description="Ошибки по полям; есть у 422 и у части 409."
@@ -246,12 +250,17 @@ def _security_schemes(settings: Settings) -> dict[str, Any]:
 
 
 def _public_prefixes(settings: Settings) -> tuple[str, ...]:
-    """Ручки без сессии и токена; остальные принимают Bearer или сессию."""
+    """Ручки без сессии и токена; остальные принимают Bearer или сессию.
+
+    `{api_prefix}/meta/` — справочник кодов ошибок (B9-4, `app/api/meta.py`): статичен, без
+    данных пользователей, тот же приём, что `/health/*`.
+    """
     return (
         "/health/",
         "/metrics",
         f"{settings.public_prefix}/",
         f"{settings.api_prefix}/auth/",
+        f"{settings.api_prefix}/meta/",
         _WEBHOOK_PREFIX,
     )
 

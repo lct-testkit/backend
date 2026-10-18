@@ -90,6 +90,9 @@ class AuditAction(StrEnum):
     IMPORT_APPLIED = "IMPORT_APPLIED"
     IMPORT_ROLLBACK = "IMPORT_ROLLBACK"
     IMPORT_PRESET_CREATED = "IMPORT_PRESET_CREATED"
+    # B9-8 (OPEN-ISSUES B-15): `DELETE /api/import-presets/{id}` не было вовсе — созданный
+    # пресет маппинга нельзя было убрать из списка иначе, чем прямым SQL.
+    IMPORT_PRESET_DELETED = "IMPORT_PRESET_DELETED"
     REPORT_EXPORTED = "REPORT_EXPORTED"
     REPORT_FAILED = "REPORT_FAILED"
 
@@ -124,8 +127,9 @@ class AuditAction(StrEnum):
     WORKFLOW_UPDATED = "WORKFLOW_UPDATED"
     WORKFLOW_PUBLISHED = "WORKFLOW_PUBLISHED"
     WORKFLOW_VALIDATED = "WORKFLOW_VALIDATED"
-    # B2-5: переименование статуса Руководителем или администратором — только подпись, код,
-    # переходы и SLA не меняются.
+    # B9-7: архивация воронки целиком (B-4), в отличие от STATUS_ARCHIVED ниже (один статус).
+    WORKFLOW_ARCHIVED = "WORKFLOW_ARCHIVED"
+    # B2-5: HEAD переименовывает статус (workflow:rename_status) без публикации новой версии.
     WORKFLOW_STATUS_RENAMED = "WORKFLOW_STATUS_RENAMED"
     STATUS_ARCHIVED = "STATUS_ARCHIVED"
     STATUS_MAPPING_STARTED = "STATUS_MAPPING_STARTED"
@@ -178,6 +182,14 @@ class AuditAction(StrEnum):
     # направлений и ничего на него не ссылается (продукты/сделки), иначе
     # 409 `ENTITY_IN_USE`. См. `catalog.service.DirectionService.delete`.
     DIRECTION_DELETED = "DIRECTION_DELETED"
+    # B3-6: CRUD лицензий вуз-вендор-ПО (до этой задачи — только импорт).
+    # `manager_full_name`/`responsible_contacts` в `changes` идут через
+    # `mask_name`/`mask_contacts_text` — журнал аудита не должен стать
+    # хранилищем ПДн, которые на выдаче и так маскируются без
+    # `contact:reveal` (см. `OrganizationLicenseService`).
+    LICENSE_CREATED = "LICENSE_CREATED"
+    LICENSE_UPDATED = "LICENSE_UPDATED"
+    LICENSE_DELETED = "LICENSE_DELETED"
     LOSS_REASON_CREATED = "LOSS_REASON_CREATED"
     LOSS_REASON_UPDATED = "LOSS_REASON_UPDATED"
     # П4: жёсткое удаление (таблица без `deleted_at` — «деактивируется, не

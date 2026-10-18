@@ -1,0 +1,160 @@
+{
+  "$defs": {
+    "ReportResultColumn": {
+      "additionalProperties": true,
+      "description": "Один элемент `columns` — заголовок колонки, её ключ каталога (B1-2, `None` у видов без\nкаталога колонок) и тип значения для форматирования на стороне клиента.",
+      "properties": {
+        "key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Key"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "kind"
+      ],
+      "title": "ReportResultColumn",
+      "type": "object"
+    },
+    "ReportResultReport": {
+      "additionalProperties": true,
+      "description": "`report` — метаданные самого файла: какой вид отчёта, для какого задания, когда и в\nкаком поясе построен.",
+      "properties": {
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "generated_at": {
+          "title": "Generated At",
+          "type": "string"
+        },
+        "job_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Job Id"
+        },
+        "timezone": {
+          "title": "Timezone",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "title",
+        "generated_at",
+        "timezone"
+      ],
+      "title": "ReportResultReport",
+      "type": "object"
+    },
+    "ReportResultTotals": {
+      "additionalProperties": true,
+      "description": "`totals` — то же усечение, что несёт файл (B1-6): `row_count` — сколько строк реально в\n`rows`, `total_rows` — сколько их всего по выборке (может быть больше `row_count`, если\nотчёт усечён по `limit`), `truncated` — признак усечения.",
+      "properties": {
+        "row_count": {
+          "title": "Row Count",
+          "type": "integer"
+        },
+        "total_rows": {
+          "title": "Total Rows",
+          "type": "integer"
+        },
+        "truncated": {
+          "title": "Truncated",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "row_count",
+        "total_rows",
+        "truncated"
+      ],
+      "title": "ReportResultTotals",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "description": "Форма файла `format=json` (`POST /api/reports`, B1-5) — тот же датасет, что отдаёт\n`GET /reports/{id}/data` (`reporting.schemas.ReportDataOut`), версионированным конвертом.\nПоле `schema` — зарезервированное имя в части прежних версий Pydantic/JSON Schema\nинструментов, поэтому в Python-коде оно `schema_` с `alias=\"schema\"` — на проводе и в файле\nключ остаётся `schema`, как документирует контракт (`populate_by_name=True` позволяет\nсобирать модель и по имени атрибута, и по алиасу).",
+  "properties": {
+    "columns": {
+      "items": {
+        "$ref": "#/$defs/ReportResultColumn"
+      },
+      "title": "Columns",
+      "type": "array"
+    },
+    "note": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Note"
+    },
+    "params": {
+      "additionalProperties": true,
+      "title": "Params",
+      "type": "object"
+    },
+    "report": {
+      "$ref": "#/$defs/ReportResultReport"
+    },
+    "rows": {
+      "items": {
+        "items": {},
+        "type": "array"
+      },
+      "title": "Rows",
+      "type": "array"
+    },
+    "schema": {
+      "const": "rtk-crm-report/1",
+      "title": "Schema",
+      "type": "string"
+    },
+    "totals": {
+      "$ref": "#/$defs/ReportResultTotals"
+    }
+  },
+  "required": [
+    "schema",
+    "report",
+    "params",
+    "columns",
+    "rows",
+    "totals"
+  ],
+  "title": "ReportResultV1",
+  "type": "object"
+}

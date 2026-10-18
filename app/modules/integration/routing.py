@@ -161,9 +161,7 @@ async def resolve_workflow_for_route(
     )
 
 
-async def validate_routing(
-    session: AsyncSession, routing: Routing
-) -> list[RoutingValidationError]:
+async def validate_routing(session: AsyncSession, routing: Routing) -> list[RoutingValidationError]:
     errors: list[RoutingValidationError] = []
 
     async def _check_route(route: Route, prefix: str) -> None:
