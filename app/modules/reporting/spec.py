@@ -190,6 +190,19 @@ REPORT_SPECS: dict[str, ReportSpec] = {
             "ФИО менеджеров и ответственных от вуза (маскируются без права contact:reveal)",
         ),
     ),
+    "signing_periods": ReportSpec(
+        code="signing_periods",
+        builder=REPORT_BUILDERS["signing_periods"],
+        # Нет оценщика — помесячный агрегат, число строк ограничено окном в месяцах, не данными.
+        params=frozenset({"months", "doc_type"}),
+        # Документ на подпись не привязан к вузу/направлению/продукту/ответственному напрямую
+        # (полиморфный `entity_type`/`entity_id`) — только период.
+        common_filters=frozenset({"date_from", "date_to"}),
+        # Месяц считается по дате создания документа внутри builder'а (та же причина, что у
+        # `monthly_dynamics`), выбор колонки периода не предусмотрен.
+        date_fields=(),
+        data_categories=(),
+    ),
 }
 
 assert set(REPORT_SPECS) == set(  # noqa: S101 — инвариант модуля, не runtime-проверка ввода

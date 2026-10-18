@@ -1,13 +1,13 @@
 """Шаблоны отчётов: `_DEFAULT_TEMPLATES` — восемь видов из раздела 4.13, выгрузка учащихся для
-LMS, `deal_register`, и три вида спринта B1 (`product_demand`, B1-9; `learning_progress`,
-B1-10 — настоящая реализация вместо честной заглушки; `license_register`, B1-11)
-(`python -m app.modules.reporting.seed`).
+LMS, `deal_register`, три вида спринта B1 (`product_demand`, B1-9; `learning_progress`,
+B1-10 — настоящая реализация вместо честной заглушки; `license_register`, B1-11) и
+`signing_periods` (B7-9) (`python -m app.modules.reporting.seed`).
 
 Идемпотентно по `code` — тот же приём, что `notification.seed`/`workflow.seed`.
 `query_def.kind` — ключ в `reporting.builders.REPORT_BUILDERS`; без строки в
 этой таблице соответствующий builder не имеет шаблона и недостижим через API
 (`ReportJobService.create` резолвит `template_code`, не `kind` напрямую). Число видов —
-`len(_DEFAULT_TEMPLATES)` (тест `TestSeedTemplates.test_ten_templates_seeded`,
+`len(_DEFAULT_TEMPLATES)` (тест `TestSeedTemplates.test_one_template_per_builder`,
 `tests/test_reporting.py`), не повторяется здесь как отдельная цифра, чтобы не расходиться.
 """
 
@@ -163,6 +163,19 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str, str, list[str], dict[str, Any], li
         {"limit": 1000},
         # B1-8: график двух панелей зарегистрирован (`ReportSpec.chart="license_status"`).
         ["xlsx", "xls", "pdf", "png", "json"],
+    ),
+    (
+        "signing_periods",
+        "Подписание по периодам",
+        "Документы на подпись (signature_documents) помесячно: число документов, доля "
+        "подписанных, истекшие и отклонённые, медиана часов от первой отправки подписанту до "
+        "завершения (только у подписанных). Без ПДн — только счётчики и доли. Операционный "
+        "отчёт по всей подсистеме подписания, не по чьим-то личным сделкам. "
+        "Параметры: months (по умолчанию 12), doc_type, date_from/date_to.",
+        "signing_periods",
+        ["HEAD", "ADMIN", "AUDITOR"],
+        {"months": 12},
+        ["xlsx", "xls", "pdf", "json"],
     ),
 ]
 

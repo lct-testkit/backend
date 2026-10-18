@@ -93,6 +93,7 @@ from app.modules.crm.models import Deal, DealProduct, DealStatusHistory
 from app.modules.crm.service import deal_scope_clause
 from app.modules.identity.models import User
 from app.modules.integration.models import LearningProgress
+from app.modules.signing.models import SignatureDocument, SignatureDocumentStatus, SignatureRequest
 from app.modules.workflow.models import StatusType, Workflow, WorkflowStatus
 
 
@@ -2400,6 +2401,124 @@ async def build_license_register(
 
 
 # =============================================================================
+# 12. Подписание по периодам (B7-9)
+# =============================================================================
+
+
+async def build_signing_periods(
+    session: AsyncSession, principal: Principal, params: dict[str, Any]
+) -> ReportDataset:
+    """B7-9: сводка по электронной подписи (`signature_documents`) помесячно — сколько
+    документов создано, какая доля подписана, сколько истекло и отклонено, медиана времени
+    от первой отправки подписанту (`MIN(signature_requests.sent_at)`) до завершения документа
+    (`completed_at`), только у подписанных. Месяц — по дате СОЗДАНИЯ документа (как `created`-
+    серия `build_monthly_dynamics`, не по дате завершения: читается «что запущено в этом
+    месяце»). Без `deal_scope_clause` — документы на подпись бывают не только по сделкам
+    (`entity_type` `erasure_request`/`report_job`), отчёт операционный по всей подсистеме
+    подписания, не по чьим-то личным сделкам (шаблон ограничен ролями HEAD/ADMIN/AUDITOR,
+    см. `reporting/seed.py`)."""
+    filters = await _load_filters(session, principal, params)
+    tz = filters.tz
+    tz_name = getattr(tz, "key", DEFAULT_TIMEZONE_NAME)
+    months = _parse_int(params, "months", default=12, minimum=1, maximum=36)
+    doc_type = params.get("doc_type")
+
+    now_local = _now().astimezone(tz).date()
+    window_start = (
+        filters.date_from
+        if filters.date_from is not None
+        else _add_months(_month_floor(now_local), -(months - 1))
+    )
+    window_end = filters.date_to if filters.date_to is not None else now_local
+    since = _day_start(window_start, tz)
+    until = (
+        _day_start(filters.date_to, tz) + dt.timedelta(days=1)
+        if filters.date_to is not None
+        else None
+    )
+
+    created_month = _month_trunc_local(SignatureDocument.created_at, tz_name)
+    # Первая отправка подписанту на документ — старт отсчёта срока подписания; документ без ни
+    # одной отправленной заявки (например, остался в `draft`) просто не попадает в медиану ниже
+    # (`outerjoin` даёт NULL, `percentile_cont` его игнорирует).
+    first_sent = (
+        select(SignatureRequest.document_id, func.min(SignatureRequest.sent_at).label("sent_at"))
+        .where(SignatureRequest.sent_at.is_not(None))
+        .group_by(SignatureRequest.document_id)
+        .subquery()
+    )
+    hours_to_sign = (
+        func.extract("epoch", SignatureDocument.completed_at - first_sent.c.sent_at) / 3600.0
+    )
+    stmt = (
+        select(
+            created_month,
+            func.count(SignatureDocument.id),
+            func.count(SignatureDocument.id).filter(
+                SignatureDocument.status == SignatureDocumentStatus.SIGNED.value
+            ),
+            func.count(SignatureDocument.id).filter(
+                SignatureDocument.status == SignatureDocumentStatus.EXPIRED.value
+            ),
+            func.count(SignatureDocument.id).filter(
+                SignatureDocument.status == SignatureDocumentStatus.REJECTED.value
+            ),
+            func.percentile_cont(0.5)
+            .within_group(hours_to_sign)
+            .filter(SignatureDocument.status == SignatureDocumentStatus.SIGNED.value),
+        )
+        .select_from(SignatureDocument)
+        .outerjoin(first_sent, first_sent.c.document_id == SignatureDocument.id)
+        .where(SignatureDocument.created_at >= since)
+        .group_by(created_month)
+    )
+    if until is not None:
+        stmt = stmt.where(SignatureDocument.created_at < until)
+    if doc_type:
+        stmt = stmt.where(SignatureDocument.doc_type == doc_type)
+
+    by_month = {
+        row[0].date(): (row[1], row[2], row[3], row[4], row[5])
+        for row in (await session.execute(stmt)).all()
+    }
+
+    rows = []
+    for month in _month_range(window_start, window_end):
+        total, signed, expired, rejected, median_hours = by_month.get(month, (0, 0, 0, 0, None))
+        pct_signed = round(signed / total * 100, 1) if total else 0.0
+        rows.append(
+            [
+                month.isoformat()[:7],
+                total,
+                signed,
+                pct_signed,
+                expired,
+                rejected,
+                round(float(median_hours), 1) if median_hours is not None else None,
+            ]
+        )
+
+    return ReportDataset(
+        title="Подписание по периодам",
+        columns=[
+            "Месяц",
+            "Документов",
+            "Подписано",
+            "Доля подписанных, %",
+            "Истекло",
+            "Отклонено",
+            "Медиана часов до подписания",
+        ],
+        rows=rows,
+        note=(
+            f"Месяц — по дате создания документа на подпись, в поясе {tz_name}. Медиана — от "
+            "первой отправки подписанту до завершения документа, только у подписанных; "
+            "документ без отправленной заявки в медиану не попадает."
+        ),
+    )
+
+
+# =============================================================================
 # Реестр
 # =============================================================================
 
@@ -2416,6 +2535,7 @@ REPORT_BUILDERS: dict[str, ReportBuilder] = {
     LMS_USERS_UPLOAD: build_lms_users_upload,
     "product_demand": build_product_demand,
     "license_register": build_license_register,
+    "signing_periods": build_signing_periods,
 }
 
 #: Отсутствие ключа = отчёт всегда лёгкий (см. докстринг модуля).
