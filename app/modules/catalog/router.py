@@ -1733,6 +1733,11 @@ async def decide_access_request(
 @access_requests_router.post(
     "/{request_id}/cancel",
     summary="Отменить свой ожидающий запрос",
+    description=(
+        "Только сам инициатор запроса и только пока он ещё `pending` — объектная проверка, не "
+        "право роли. Решённый (одобренный/отклонённый) или уже просроченный запрос отменить "
+        "нельзя. Роль: organization:read (сама проверка — объектная)."
+    ),
     response_model=AccessRequestOut,
 )
 async def cancel_access_request(
