@@ -235,8 +235,10 @@ class TestProblemDetails:
 
 
 class TestErrorCodeCatalogInSchema:
-    """B9-4 (НФР3): все 51 кода из `ErrorCode` упомянуты в схеме — через `enum` поля
-    `Problem.code`, а не вручную написанную таблицу, которая отстаёт от кода."""
+    """B9-4 (НФР3): все коды из `ErrorCode` упомянуты в схеме — через `enum` поля
+    `Problem.code`, а не вручную написанную таблицу, которая отстаёт от кода. Число кодов не
+    повторяется здесь как отдельная цифра (было 51, после слияния эпиков растёт дальше) —
+    тесты ниже сверяют множества, не счётчик; актуальное число — `len(list(ErrorCode))`."""
 
     def test_problem_code_enum_lists_every_error_code(self, schema: dict[str, Any]) -> None:
         problem = schema["components"]["schemas"]["Problem"]
