@@ -15,8 +15,14 @@
 это решает `B-7`/`mapping_rules` (спринт B9, отдельная задача, здесь не реализуется).
 
 Безопасно запускать повторно: партия берёт только сделки, у которых `workflow_id` ещё равен
-исходной воронке — уже перенесённые не попадут в выборку снова. Сам скрипт не проверяет адрес
-базы — ответственность за то, что `--apply` запускается на нужной базе, на том, кто его запускает.
+исходной воронке — уже перенесённые не попадут в выборку снова. Строки, занятые параллельной
+транзакцией, партия пропускает (`SKIP LOCKED`) — после `--apply` скрипт сверяет остаток и, если
+часть сделок осталась на исходной воронке не из-за открытой подписи, завершается кодом 3: запуск
+нужно повторить. Сам скрипт не проверяет адрес базы — ответственность за то, что `--apply`
+запускается на нужной базе, на том, кто его запускает.
+
+Кэш карточки сделки (`cache:deal:{id}:v{version}`) вручную не сбрасывается: ключ версионный, а
+`claim_version` в партии поднимает `version` каждой перенесённой сделки.
 """
 
 from __future__ import annotations
@@ -30,7 +36,7 @@ import uuid
 from collections import Counter
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_session_factory
@@ -46,7 +52,7 @@ from app.modules.crm.models import (
     DealStatusHistory,
     HistoryReason,
 )
-from app.modules.crm.service import apply_sla, drop_deal_card_after_commit
+from app.modules.crm.service import apply_sla
 from app.modules.workflow.models import Workflow, WorkflowStatus
 from app.modules.workflow.service import get_cached_published_graph
 
@@ -161,10 +167,10 @@ async def _migrate_one_batch(
     cursor: uuid.UUID | None,
     apply: bool,
 ) -> tuple[list[uuid.UUID], Counter[tuple[str, str]], list[uuid.UUID], uuid.UUID | None, int]:
-    """Одна партия. Возвращает (id мигрированных сделок — для `drop_deal_card_after_commit`
-    после коммита; счётчик «из статуса -> в статус» -> число сделок; id сделок с открытой
-    подписью, пропущенных в этой партии — для отчёта; курсор следующей партии; число сделок,
-    фактически прочитанных в этой партии). `None` в качестве курсора — начало выборки."""
+    """Одна партия. Возвращает (id мигрированных сделок; счётчик «из статуса -> в статус» ->
+    число сделок; id сделок с открытой подписью, пропущенных в этой партии — для отчёта; курсор
+    следующей партии; число сделок, фактически прочитанных в этой партии). `None` в качестве
+    курсора — начало выборки."""
     stmt = (
         select(Deal)
         .where(Deal.workflow_id == from_workflow.id, Deal.deleted_at.is_(None))
@@ -280,7 +286,9 @@ async def run_migration(
     batch_size: int,
     sla_mode: str,
 ) -> int:
-    """Возвращает код выхода (0 — успех/сухой прогон, 2 — есть статус без пары)."""
+    """Возвращает код выхода (0 — успех/сухой прогон, 2 — есть статус без пары, 3 — после
+    `--apply` часть сделок осталась на исходной воронке не из-за открытой подписи: их держала
+    параллельная транзакция, запуск нужно повторить)."""
     factory = get_session_factory()
 
     async with factory() as probe_session:
@@ -305,7 +313,6 @@ async def run_migration(
 
     total_counts: Counter[tuple[str, str]] = Counter()
     total_skipped_signature_ids: list[uuid.UUID] = []
-    total_rows = 0
     cursor: uuid.UUID | None = None
 
     while True:
@@ -313,7 +320,7 @@ async def run_migration(
             # Транзакция открывается неявно первым запросом (autobegin) — `with_for_update`
             # держит замок строк до явного commit/rollback ниже, без отдельного `session.begin()`.
             (
-                migrated_ids,
+                _migrated_ids,
                 counts,
                 skipped_signature_ids,
                 next_cursor,
@@ -332,8 +339,6 @@ async def run_migration(
             )
             if apply:
                 await session.commit()
-                for deal_id in migrated_ids:
-                    await drop_deal_card_after_commit(session, deal_id)
             else:
                 # Сухой прогон: партия обрабатывается и считается как при настоящем переносе
                 # (включая проверку статуса/подписи), но транзакция откатывается — ничего не
@@ -342,12 +347,29 @@ async def run_migration(
 
         total_counts.update(counts)
         total_skipped_signature_ids.extend(skipped_signature_ids)
-        total_rows += rows_seen
+        # `LIMIT` считает уже после `SKIP LOCKED`: неполная партия — это конец выборки, а не
+        # «часть строк занята». Занятые строки остаются позади курсора — их найдёт сверка ниже.
         if rows_seen < batch_size or next_cursor is None:
             break
         cursor = next_cursor
 
     _print_report(total_counts, total_skipped_signature_ids, apply=apply)
+    if apply:
+        async with factory() as session:
+            left = await session.scalar(
+                select(func.count())
+                .select_from(Deal)
+                .where(Deal.workflow_id == from_workflow.id, Deal.deleted_at.is_(None))
+            )
+        not_moved = int(left or 0) - len(total_skipped_signature_ids)
+        if not_moved > 0:
+            print(
+                f"Внимание: на исходной воронке осталось {not_moved} сделок, не перенесённых "
+                "не из-за открытой подписи (их держала параллельная транзакция или статус "
+                "изменился после проверки) — повторите запуск.",
+                file=sys.stderr,
+            )
+            return 3
     return 0
 
 

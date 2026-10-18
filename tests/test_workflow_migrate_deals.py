@@ -262,6 +262,46 @@ class TestBatchingDoesNotLoseRows:
             assert row.status_id == communication_v2
 
 
+async def _migrate_while_locked(deal_id: uuid.UUID, params: dict[str, object]) -> int:
+    """Запускает перенос, пока строку сделки держит другая транзакция (`FOR UPDATE`)."""
+    from app.core.db import get_session_factory
+    from app.modules.crm.models import Deal
+
+    async with get_session_factory()() as holder:
+        await holder.execute(select(Deal.id).where(Deal.id == deal_id).with_for_update())
+        try:
+            return await _migrate(params)
+        finally:
+            await holder.rollback()
+
+
+class TestDealHeldByAnotherTransaction:
+    """`SKIP LOCKED` пропускает занятую строку молча — без сверки остатка скрипт отчитывался бы
+    «итого N» и выходил с кодом 0, оставляя часть сделок на старой воронке."""
+
+    def test_a_locked_deal_is_reported_and_the_rerun_moves_it(self, client) -> None:
+        login(client, "ADMIN")
+        v1 = run(client, _v1_id)
+        v2 = run(client, _v2_id)
+        qualification_v1 = run(client, _status_id, v1, "qualification")
+        deal_ids = []
+        for _ in range(3):
+            deal = create_deal(client, str(v1))
+            run(client, _set_deal, uuid.UUID(deal["id"]), {"status_id": qualification_v1})
+            deal_ids.append(uuid.UUID(deal["id"]))
+        locked_id = deal_ids[1]
+
+        code = run(client, _migrate_while_locked, locked_id, _migrate_params(apply=True))
+
+        assert code == 3
+        assert run(client, _deal_row, locked_id).workflow_id == v1
+        for deal_id in (deal_ids[0], deal_ids[2]):
+            assert run(client, _deal_row, deal_id).workflow_id == v2
+
+        assert run(client, _migrate, _migrate_params(apply=True)) == 0
+        assert run(client, _deal_row, locked_id).workflow_id == v2
+
+
 class TestOpenSignatureDealsAreSkipped:
     def test_a_deal_pending_signature_is_not_moved(self, client) -> None:
         login(client, "ADMIN")
