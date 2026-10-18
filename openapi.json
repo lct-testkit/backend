@@ -41885,7 +41885,7 @@
           }
         },
         "security": [],
-        "summary": "Liveness",
+        "summary": "Проверка живости процесса",
         "tags": [
           "health"
         ]
@@ -41916,7 +41916,7 @@
           }
         },
         "security": [],
-        "summary": "Readiness",
+        "summary": "Проверка готовности принимать трафик",
         "tags": [
           "health"
         ]
