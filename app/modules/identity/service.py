@@ -414,53 +414,80 @@ class IdentityService:
 
     # --- Приглашения ------------------------------------------------------
 
-    async def issue_invite(self, user: User, *, created_by: uuid.UUID | None) -> str:
-        """Создаёт одноразовое приглашение и возвращает сам токен.
+    async def issue_invite(
+        self,
+        user: User,
+        *,
+        created_by: uuid.UUID | None,
+        purpose: str = "invite",
+        ttl: dt.timedelta | None = None,
+    ) -> str:
+        """Создаёт одноразовую ссылку (приглашение или сброс пароля, B6-10 —
+        `purpose`) и возвращает сам токен.
 
         Токен возвращается ровно один раз — в ответе администратору. В базе
         остаётся только sha256, поэтому восстановить ссылку из дампа нельзя.
         """
         settings = get_settings()
+        if ttl is None:
+            ttl = (
+                dt.timedelta(hours=settings.invite_ttl_hours)
+                if purpose == "invite"
+                else dt.timedelta(minutes=settings.reset_link_ttl_minutes)
+            )
         token = secrets.token_urlsafe(32)
         invite = UserInvite(
             user_id=user.id,
             token_hash=hash_token(token),
-            expires_at=dt.datetime.now(dt.UTC) + dt.timedelta(hours=settings.invite_ttl_hours),
+            purpose=purpose,
+            expires_at=dt.datetime.now(dt.UTC) + ttl,
             created_by=created_by,
         )
         self._session.add(invite)
-        user.invited_at = dt.datetime.now(dt.UTC)
+        if purpose == "invite":
+            user.invited_at = dt.datetime.now(dt.UTC)
         await self._session.flush()
+        action = (
+            AuditAction.USER_INVITED
+            if purpose == "invite"
+            else AuditAction.PASSWORD_RESET_LINK_ISSUED
+        )
         await self._audit.record(
-            AuditAction.USER_INVITED,
+            action,
             entity_type="user",
             entity_id=user.id,
             changes={"expires_at": {"old": None, "new": invite.expires_at.isoformat()}},
         )
         return token
 
-    async def mark_invites_used(self, user_id: uuid.UUID) -> int:
-        """Гасит приглашения после первого входа."""
-        return await self._close_invites(user_id, used=True)
+    async def mark_invites_used(self, user_id: uuid.UUID, *, purpose: str | None = None) -> int:
+        """Гасит ссылки после первого входа (по умолчанию — все назначения)."""
+        return await self._close_invites(user_id, used=True, purpose=purpose)
 
-    async def revoke_invites(self, user_id: uuid.UUID) -> int:
-        """Отзывает неиспользованные приглашения — например, при перевыпуске."""
-        return await self._close_invites(user_id, used=False)
+    async def revoke_invites(self, user_id: uuid.UUID, *, purpose: str | None = None) -> int:
+        """Отзывает неиспользованные ссылки — например, при перевыпуске.
 
-    async def _close_invites(self, user_id: uuid.UUID, *, used: bool) -> int:
+        `purpose=None` (по умолчанию) отзывает ссылки обоих назначений — так
+        блокировка/увольнение (`expire_invite`, увольнение) гасит и
+        приглашение, и неиспользованный сброс пароля. Перевыпуск ссылки
+        одного назначения (`resend_invite`, повторный сброс) передаёт
+        конкретный `purpose`, чтобы не задеть ссылку другого назначения.
+        """
+        return await self._close_invites(user_id, used=False, purpose=purpose)
+
+    async def _close_invites(
+        self, user_id: uuid.UUID, *, used: bool, purpose: str | None = None
+    ) -> int:
         now = dt.datetime.now(dt.UTC)
+        conditions = [
+            UserInvite.user_id == user_id,
+            UserInvite.used_at.is_(None),
+            UserInvite.revoked_at.is_(None),
+        ]
+        if purpose is not None:
+            conditions.append(UserInvite.purpose == purpose)
         invites = (
-            (
-                await self._session.execute(
-                    select(UserInvite).where(
-                        UserInvite.user_id == user_id,
-                        UserInvite.used_at.is_(None),
-                        UserInvite.revoked_at.is_(None),
-                    )
-                )
-            )
-            .scalars()
-            .all()
+            (await self._session.execute(select(UserInvite).where(*conditions))).scalars().all()
         )
         for invite in invites:
             if used:

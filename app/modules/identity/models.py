@@ -325,12 +325,17 @@ class UserInvite(UuidPkMixin, Base):
     __table_args__ = (
         Index("ix_user_invites_user_active", "user_id", "expires_at"),
         Index("uq_user_invites_token_hash", "token_hash", unique=True),
+        CheckConstraint("purpose IN ('invite','reset')", name="user_invites_purpose_valid"),
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
     )
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    # B6-10: одна таблица обслуживает и приглашение нового сотрудника ('invite'), и
+    # самостоятельную установку пароля по ссылке сброса ('reset') — тот же токен-одноразовость,
+    # та же проверка `is_active`, но `revoke_invites`/`issue_invite` различают назначение.
+    purpose: Mapped[str] = mapped_column(String(16), nullable=False, server_default="invite")
     expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     used_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

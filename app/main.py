@@ -217,6 +217,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         profile=settings.app_profile,
         version=settings.app_version,
     )
+    if settings.is_prod and settings.allow_bearer_auth:
+        # B6-10: Bearer в prod ограничен роли INTEGRATION (`core/deps.get_principal`), но сам
+        # факт, что путь включён, стоит видеть на старте, а не только читать в `.env`.
+        logger.warning("bearer_auth_enabled_in_prod", bearer_auth_mode=settings.bearer_auth_mode)
 
     # До этого спринта здесь ничего не было, и весь `notify_user` в 7 модулях
     # тихо уходил в логирующую заглушку (см. `notification/service.py`).

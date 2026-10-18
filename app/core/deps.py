@@ -146,6 +146,18 @@ async def get_principal(
 
     claims = await decode_access_token(token)
 
+    # B6-10: проверено по claims (JWT из токена, до обращения к БД) — чужой валидный токен
+    # не роли INTEGRATION в prod отклоняется, не успев потратить запрос на JIT-provisioning
+    # (раньше эта же проверка стояла ниже, после `provision_from_claims`).
+    if (
+        settings.bearer_auth_mode == "integration_only"
+        and sid is None
+        and claims.crm_role != Role.INTEGRATION.value
+    ):
+        raise UnauthenticatedError(
+            "В этом профиле Bearer-доступ разрешён только сервисной роли INTEGRATION"
+        )
+
     cached = await _resolve_from_cache(claims)
     if cached is not None:
         principal = _principal_from_cache(cached, claims, sid)
@@ -192,15 +204,6 @@ async def get_principal(
             ErrorCode.TOKEN_STALE,
             "Права пользователя изменились, обновите токен и повторите запрос",
             extra={"token_epoch": int(token_epoch), "current_epoch": principal.perm_epoch},
-        )
-
-    if (
-        settings.bearer_auth_mode == "integration_only"
-        and sid is None
-        and principal.role != Role.INTEGRATION.value
-    ):
-        raise UnauthenticatedError(
-            "В этом профиле Bearer-доступ разрешён только сервисной роли INTEGRATION"
         )
 
     set_actor(ActorContext(user_id=principal.user_id, role=principal.role, session_id=sid))

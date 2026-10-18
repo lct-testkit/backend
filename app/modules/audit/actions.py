@@ -30,6 +30,9 @@ class AuditAction(StrEnum):
     USER_INVITE_EXPIRED = "USER_INVITE_EXPIRED"
     PASSWORD_CHANGED = "PASSWORD_CHANGED"
     PASSWORD_RESET = "PASSWORD_RESET"
+    # B6-10: ссылка на самостоятельную установку пароля (приглашение — покрыто `USER_INVITED`;
+    # сброс — отдельное действие, т.к. `PASSWORD_RESET` уже означает «сброс запущен»).
+    PASSWORD_RESET_LINK_ISSUED = "PASSWORD_RESET_LINK_ISSUED"
     CONSENT_ACCEPTED = "CONSENT_ACCEPTED"
     SESSIONS_TERMINATED = "SESSIONS_TERMINATED"
 

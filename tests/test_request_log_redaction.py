@@ -15,6 +15,8 @@ from tests.conftest import TEST_DATABASE_URL
         ("/public/sign/abc123/file", "/public/sign/***/file"),
         ("/public/sign/abc123/sign", "/public/sign/***/sign"),
         ("/api/auth/invite/tok-en_9", "/api/auth/invite/***"),
+        # B6-10: POST .../invite/{token}/password — токен скрыт, суффикс остаётся читаемым.
+        ("/api/auth/invite/tok-en_9/password", "/api/auth/invite/***/password"),
         ("/api/deals/0193", "/api/deals/0193"),
         ("/public/verify/0193", "/public/verify/0193"),
     ],

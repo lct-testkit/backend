@@ -45,11 +45,13 @@ from app.modules.identity.access_rules import (
 )
 from app.modules.identity.admin_service import (
     INVITE_EXPIRED_REASON,
+    INVITE_REQUIRED_ACTIONS,
     AdminUserService,
     ApprovalService,
     UserFilters,
 )
 from app.modules.identity.erasure_service import ErasureExecutionService
+from app.modules.identity.keycloak import keycloak_client
 from app.modules.identity.models import DataErasureRequest, Role, Team, User, UserStatus
 from app.modules.identity.schemas import (
     AccessRuleDimensionOut,
@@ -78,6 +80,7 @@ from app.modules.identity.schemas import (
     OffboardResponse,
     OperationResult,
     PasswordResetRequest,
+    PasswordResetResponse,
     TeamCreateRequest,
     TeamListResponse,
     TeamOut,
@@ -340,27 +343,41 @@ async def unblock_user(
     description=(
         "Инициирует принудительный сброс: обязательное действие в Keycloak, "
         "завершение всех сессий, аннулирование незавершённых запросов подписи. "
-        "Ответ одинаков независимо от существования учётной записи. Роль: ADMIN."
+        "Письмо Keycloak не ушло (или SMTP в контуре нет) — ответ содержит "
+        "одноразовую ссылку `reset_url` на самостоятельную установку пароля "
+        "(B6-10, `POST /api/auth/invite/{token}/password`), которую администратор "
+        "передаёт сотруднику сам; это не меняет единый ответ для несуществующей "
+        "учётки. Роль: ADMIN."
     ),
-    response_model=OperationResult,
+    response_model=PasswordResetResponse,
 )
 async def reset_password(
     payload: PasswordResetRequest,
     session: DbSession,
     principal: AdminWrite,
     user_id: Annotated[uuid.UUID, Path()],
-) -> OperationResult:
+) -> PasswordResetResponse:
+    detail = "Если учётная запись существует, сброс запущен"
     service = AdminUserService(session)
     try:
         user = await service.get_or_404(user_id)
     except NotFoundError:
         # Единый ответ: ручка не должна раскрывать существование учётки.
-        return OperationResult(ok=True, detail="Если учётная запись существует, сброс запущен")
+        return PasswordResetResponse(ok=True, detail=detail)
 
-    await service.reset_password(
-        user=user, reason=payload.reason, suspect_compromise=payload.suspect_compromise
+    result = await service.reset_password(
+        user=user,
+        reason=payload.reason,
+        suspect_compromise=payload.suspect_compromise,
+        base_url=get_settings().base_url,
     )
-    return OperationResult(ok=True, detail="Если учётная запись существует, сброс запущен")
+    return PasswordResetResponse(
+        ok=True,
+        detail=detail,
+        email_sent=result["email_sent"],
+        reset_url=result["reset_url"],
+        reset_expires_at=result["reset_expires_at"],
+    )
 
 
 @router.post(
@@ -409,14 +426,23 @@ async def resend_invite(
     if expired:
         await service.reopen_expired_invite(user)
     identity = IdentityService(session)
-    await identity.revoke_invites(user.id)
-    token = await identity.issue_invite(user, created_by=principal.user_id)
+    await identity.revoke_invites(user.id, purpose="invite")
+    token = await identity.issue_invite(user, created_by=principal.user_id, purpose="invite")
     expires_at = dt.datetime.now(dt.UTC) + dt.timedelta(hours=settings.invite_ttl_hours)
+    # B6-10: раньше письмо не отправлялось вовсе (`invite_email_sent` было захардкожено в
+    # `False`) — те же действия, что при создании пользователя (`create_user`).
+    email_sent = False
+    if user.keycloak_id:
+        email_sent = await keycloak_client.execute_actions_email(
+            user.keycloak_id,
+            INVITE_REQUIRED_ACTIONS,
+            lifespan_seconds=settings.invite_ttl_hours * 3600,
+        )
     return UserCreateResponse(
         user=UserOut.model_validate(user),
-        invite_url=f"{settings.base_url.rstrip('/')}/invite/{token}",
+        invite_url=None if email_sent else f"{settings.base_url.rstrip('/')}/invite/{token}",
         invite_expires_at=expires_at,
-        invite_email_sent=False,
+        invite_email_sent=email_sent,
     )
 
 

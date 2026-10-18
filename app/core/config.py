@@ -131,7 +131,10 @@ class Settings(BaseSettings):
     # Прямая аутентификация по `Authorization: Bearer` в обход серверной
     # сессии. Нужна Swagger UI и сервисным учёткам; в prod по умолчанию
     # разрешена только роли INTEGRATION (см. `bearer_auth_mode`).
-    allow_bearer_auth: bool = True
+    # B6-10: дефолт был `True` — в dev без явного `ALLOW_BEARER_AUTH=true` в .env Bearer
+    # (в т.ч. вход через Swagger UI) теперь выключен; явный выбор, а не «забыли
+    # прописать в compose» (там `false` уже стоял явно).
+    allow_bearer_auth: bool = False
 
     # --- Файлы -----------------------------------------------------------
     files_max_size_bytes: int = 52428800
@@ -325,6 +328,10 @@ class Settings(BaseSettings):
     invite_ttl_hours: int = 72
     invite_resend_interval_seconds: int = 300
     invite_resend_per_day: int = 5
+    # B6-10: ссылка на самостоятельную установку пароля (та же таблица `user_invites`,
+    # `purpose='reset'`) — короче приглашения: выдаётся администратором уже существующему
+    # сотруднику, а не ждёт его первого входа.
+    reset_link_ttl_minutes: int = 60
     # Добровольная смена пароля: 5 неудачных попыток → блокировка формы.
     password_change_max_attempts: int = 5
     password_change_lock_seconds: int = 900

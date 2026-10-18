@@ -749,16 +749,22 @@ class AdminUserService:
     # --- Сброс пароля ----------------------------------------------------
 
     async def reset_password(
-        self, *, user: User, reason: str, suspect_compromise: bool
-    ) -> dict[str, int]:
-        """Принудительный сброс: все сессии завершаются без исключений."""
+        self, *, user: User, reason: str, suspect_compromise: bool, base_url: str
+    ) -> dict[str, Any]:
+        """Принудительный сброс: все сессии завершаются без исключений.
+
+        B6-10: раньше результат письма Keycloak (`execute_actions_email`) игнорировался —
+        без SMTP пользователь оставался без способа войти. Письмо не ушло (или SMTP нет) —
+        выпускается одноразовая ссылка `purpose="reset"` (та же таблица `user_invites`, что
+        приглашение), которую администратор передаёт сотруднику сам."""
+        email_sent = False
         if user.keycloak_id:
             # Добавляем `UPDATE_PASSWORD`, не заменяя список: иначе пропадало бы, например,
             # требование настроить TOTP.
             await keycloak_client.update_required_actions(
                 user.keycloak_id, add=INVITE_REQUIRED_ACTIONS[:1]
             )
-            await keycloak_client.execute_actions_email(
+            email_sent = await keycloak_client.execute_actions_email(
                 user.keycloak_id,
                 INVITE_REQUIRED_ACTIONS[:1],
                 lifespan_seconds=900,
@@ -812,10 +818,28 @@ class AdminUserService:
                 "signatures_disputed": {"old": None, "new": disputed},
             },
         )
+
+        reset_url: str | None = None
+        reset_expires_at: dt.datetime | None = None
+        if not email_sent:
+            # Письмо не ушло (или SMTP в контуре нет): та же ссылка, что у приглашения,
+            # только `purpose="reset"` и короче сроком — её передаёт сотруднику сам
+            # администратор (канал вне почты, тот же приём, что `create_user`).
+            await self._identity.revoke_invites(user.id, purpose="reset")
+            settings = get_settings()
+            token = await self._identity.issue_invite(user, created_by=None, purpose="reset")
+            reset_expires_at = dt.datetime.now(dt.UTC) + dt.timedelta(
+                minutes=settings.reset_link_ttl_minutes
+            )
+            reset_url = f"{base_url.rstrip('/')}/invite/{token}"
+
         return {
             "sessions_terminated": terminated,
             "signature_requests_voided": voided,
             "signatures_disputed": disputed,
+            "email_sent": email_sent,
+            "reset_url": reset_url,
+            "reset_expires_at": reset_expires_at,
         }
 
     # --- Увольнение ------------------------------------------------------

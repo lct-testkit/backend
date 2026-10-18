@@ -43,6 +43,8 @@ from app.modules.identity.schemas import (
     InviteCheckResponse,
     LogoutRequest,
     OperationResult,
+    SetInvitePasswordRequest,
+    SetInvitePasswordResponse,
 )
 from app.modules.identity.service import IdentityService, hash_token
 from app.modules.identity.session_store import session_store
@@ -369,6 +371,93 @@ async def check_invite(
         full_name=user.full_name,
         expires_at=invite.expires_at,
         login_url=f"{get_settings().base_url.rstrip('/')}/api/auth/login",
+    )
+
+
+@router.post(
+    "/invite/{token}/password",
+    summary="Задать пароль по ссылке",
+    description=(
+        "Задаёт пароль по одноразовой ссылке приглашения или сброса (B6-10, C-18): "
+        "работает без письма Keycloak, если в контуре нет SMTP. Неверный, истёкший и "
+        "уже использованный токен дают одинаковый ответ (404) — ссылка не подсказывает, "
+        "существовала ли она вообще. Ограничение частоты по IP и по хэшу токена — защита "
+        "от перебора. Вход после этого всё равно идёт через Keycloak (OIDC). Роль: "
+        "доступно без аутентификации."
+    ),
+    response_model=SetInvitePasswordResponse,
+)
+async def set_invite_password(
+    payload: SetInvitePasswordRequest,
+    session: DbSession,
+    response: Response,
+    token: Annotated[str, Path(min_length=16, max_length=128)],
+) -> SetInvitePasswordResponse:
+    # Ответ никогда не кэшируется промежуточным звеном — в теле уходит факт "пароль задан".
+    response.headers["Cache-Control"] = "no-store"
+    client = get_client()
+    await rate_limit(
+        client.ip or "unknown",
+        "invite:password:ip",
+        limit=20,
+        window_seconds=3600,
+        detail="Слишком много попыток, повторите позже",
+        fail_closed=True,
+    )
+    token_hash = hash_token(token)
+    await rate_limit(
+        token_hash,
+        "invite:password:token",
+        limit=5,
+        window_seconds=3600,
+        detail="Слишком много попыток для этой ссылки, повторите позже",
+        fail_closed=True,
+    )
+
+    # `FOR UPDATE`: два параллельных запроса на один токен должны сериализоваться — иначе
+    # оба могли бы пройти проверку `is_active` до того, как первый погасит `used_at`.
+    invite = (
+        await session.execute(
+            select(UserInvite).where(UserInvite.token_hash == token_hash).with_for_update()
+        )
+    ).scalar_one_or_none()
+    if invite is None or not invite.is_active:
+        # Тот же ответ, что у неверного и уже использованного токена: не подсказываем.
+        raise AppError(ErrorCode.NOT_FOUND, "Приглашение не найдено или срок его действия истёк")
+
+    user = (
+        await session.execute(select(User).where(User.id == invite.user_id))
+    ).scalar_one_or_none()
+    if user is None or user.deleted_at is not None or not user.keycloak_id:
+        raise AppError(ErrorCode.NOT_FOUND, "Приглашение недействительно")
+
+    # Keycloak — источник истины по паролю: при нарушении его политики (длина, классы
+    # символов, история) `set_password` сама поднимает 422 без текста пароля в ответе.
+    await keycloak_client.set_password(
+        user.keycloak_id, password=payload.new_password, temporary=False
+    )
+    await keycloak_client.update_required_actions(
+        user.keycloak_id, remove=["UPDATE_PASSWORD", "VERIFY_EMAIL"]
+    )
+    # Ссылку выдал администратор каналом вне почты (ответ на создание/сброс пароля) — это
+    # решение о доверии, не автоматическая выдумка; оно видно в аудите (`source=invite_link`).
+    await keycloak_client.update_user(user.keycloak_id, {"emailVerified": True})
+
+    invite.used_at = dt.datetime.now(dt.UTC)
+    user.must_change_password = False
+    user.password_changed_at = dt.datetime.now(dt.UTC)
+    await session.flush()
+    invalidate_principal_after_commit(session, user.id, keycloak_id=user.keycloak_id)
+
+    await AuditService(session).record(
+        AuditAction.PASSWORD_CHANGED,
+        entity_type="user",
+        entity_id=user.id,
+        changes={"source": {"old": None, "new": "invite_link"}},
+    )
+
+    return SetInvitePasswordResponse(
+        ok=True, login_url=f"{get_settings().base_url.rstrip('/')}/api/auth/login"
     )
 
 

@@ -383,7 +383,7 @@ deploy/                  Caddyfile, entrypoint.sh, keycloak/realm-crm.json, post
 | `BITRIX_SOURCE_ID` | `OTHER` | код источника сделки при передаче в Битрикс24 |
 | `FNS_LOOKUP_BASE_URL` / `FNS_LOOKUP_TIMEOUT_SECONDS` | `https://egrul.nalog.ru` / 8 | внешний источник автоподстановки по ИНН (публичный поиск ФНС); включается флагом `external_org_lookup` в админке |
 | `CRM_TLS_HOST` | `localhost` | имя TLS-сайта в Caddyfile (SNI сертификата `tls internal`); смените, если стенд открывается не по `localhost` |
-| `ALLOW_BEARER_AUTH` | `true` | разрешить вход по `Authorization: Bearer` в обход серверной сессии (нужен Swagger UI и сервисным учёткам); `false` выключает его полностью, иначе в `prod` доступен только роли `INTEGRATION` |
+| `ALLOW_BEARER_AUTH` | `false` (B6-10) | разрешить вход по `Authorization: Bearer` в обход серверной сессии (нужен Swagger UI и сервисным учёткам); `false` выключает его полностью, иначе в `prod` доступен только роли `INTEGRATION`. Дефолт изменён с `true`: локальный вход через Swagger UI без явного `ALLOW_BEARER_AUTH=true` в `.env` теперь не работает — это осознанный выбор безопасности, не забытая настройка |
 | `SESSION_TTL`, `SESSION_IDLE_TIMEOUT`, `CSRF_*`, лимиты файлов, `PASSWORD_CHANGE_*`, `ERASURE_*`, `INVITE_*` и другие | см. `.env.example` | объявлены в `Settings` и документированы в `.env.example`, но **не входят в `x-api-env`** — в контейнерах всегда действует дефолт `config.py`, значение из `.env` игнорируется |
 | `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_ECHO`, `SESSION_COOKIE_NAME`, `PAGINATION_MAX_LIMIT`, `APP_NAME`, `APP_VERSION`, `API_PREFIX`, `PUBLIC_PREFIX`, `LLM_*` | см. `config.py` | есть в `Settings`, но ❌ отсутствуют в `.env.example`; `LLM_*` дополнительно не используется ни в одном модуле кода |
 

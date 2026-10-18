@@ -65,6 +65,11 @@ def client(monkeypatch):
     os.environ.setdefault("S3_ACCESS_KEY", "a")
     os.environ.setdefault("S3_SECRET_KEY", "b")
     os.environ.setdefault("SIGNATURE_SERVER_SECRET", "test-secret")
+    # B6-10: дефолт кода стал `false` (безопасность по умолчанию в dev/prod); тестам, которые
+    # сознательно проверяют путь Bearer (`tests/test_sessions_keycloak.py`, нагрузочные
+    # сценарии), он всё ещё нужен — тест, которому нужно выключить его явно, задаёт
+    # `ALLOW_BEARER_AUTH=false` сам (`os.environ[...] =`, не `setdefault`).
+    os.environ.setdefault("ALLOW_BEARER_AUTH", "true")
     # B6-7: фиксированный тестовый Fernet-ключ — тесты не должны требовать настоящего ключа,
     # но должны проходить именно зашифрованный путь (TEST_FIELD_ENCRYPTION_KEY), а не только
     # ветку "ключа нет" в `field_crypto`. Тесты, которым нужно явно отсутствие ключа, сами

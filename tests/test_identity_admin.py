@@ -326,8 +326,14 @@ def _keycloak(monkeypatch, *, fail_disable: bool = False) -> list[tuple[str, boo
     async def noop(*_args: object, **_kwargs: object) -> None:
         return None
 
+    async def no_email(*_args: object, **_kwargs: object) -> bool:
+        # B6-10: без мокнутого Keycloak `resend_invite` ходил бы в сеть за письмом —
+        # «нет SMTP» (`False`) — тот же путь, что ссылка в ответе API.
+        return False
+
     monkeypatch.setattr(keycloak_client, "set_enabled", set_enabled)
     monkeypatch.setattr(keycloak_client, "logout_all_sessions", noop)
+    monkeypatch.setattr(keycloak_client, "execute_actions_email", no_email)
     return calls
 
 

@@ -189,6 +189,25 @@ class InviteCheckResponse(BaseModel):
     login_url: str
 
 
+class SetInvitePasswordRequest(BaseModel):
+    """B6-10: `POST /api/auth/invite/{token}/password` — пароль по ссылке приглашения или
+    сброса (C-18). Пароль не логируется и не попадает в аудит (раздел 6.1)."""
+
+    new_password: str = Field(min_length=12, max_length=256)
+    new_password_repeat: str = Field(min_length=12, max_length=256)
+
+    @model_validator(mode="after")
+    def _check_match(self) -> SetInvitePasswordRequest:
+        if self.new_password != self.new_password_repeat:
+            raise ValueError("Новый пароль и его повтор не совпадают")
+        return self
+
+
+class SetInvitePasswordResponse(BaseModel):
+    ok: bool = True
+    login_url: str
+
+
 # --- Администрирование пользователей (раздел 6.2) -------------------------
 
 
@@ -318,6 +337,18 @@ class PasswordResetRequest(BaseModel):
     # Подозрение на компрометацию: подписи за последние 24 часа помечаются
     # как оспоренные (dop §10.7).
     suspect_compromise: bool = False
+
+
+class PasswordResetResponse(BaseModel):
+    """B6-10: раньше результат письма Keycloak не доходил до ответа — учётка без SMTP
+    оставалась без способа сброса. `reset_url` — та же одноразовая ссылка, что у
+    приглашения (`purpose="reset"`), отдаётся администратору один раз."""
+
+    ok: bool = True
+    detail: str
+    email_sent: bool = False
+    reset_url: str | None = None
+    reset_expires_at: dt.datetime | None = None
 
 
 class OffboardPreviewItem(BaseModel):
