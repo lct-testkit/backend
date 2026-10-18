@@ -159,6 +159,155 @@ class TestSeededSources:
         assert _SECRET_VALUE not in repr(recorder.calls)
 
 
+async def _configure_demo(
+    *, profile: str, cms_base_url: str | None, lms_base_url: str | None, pre: dict[str, Any] | None
+) -> dict[str, Any]:
+    from sqlalchemy import delete, select
+
+    from app.core.config import get_settings
+    from app.core.db import session_scope
+    from app.modules.integration.models import IntegrationSource
+    from app.modules.integration.seed import (
+        _configure_demo_sources,
+        seed_integration_sources,
+    )
+
+    settings = get_settings()
+    old_profile, old_cms, old_lms = (
+        settings.app_profile,
+        settings.cms_base_url,
+        settings.lms_base_url,
+    )
+    settings.app_profile = profile  # type: ignore[assignment]
+    settings.cms_base_url = cms_base_url
+    settings.lms_base_url = lms_base_url
+    try:
+        async with session_scope() as session:
+            await session.execute(delete(IntegrationSource))
+            await seed_integration_sources(session)
+            for code, values in (pre or {}).items():
+                source = (
+                    await session.execute(
+                        select(IntegrationSource).where(IntegrationSource.code == code)
+                    )
+                ).scalar_one()
+                for key, value in values.items():
+                    setattr(source, key, value)
+            await session.flush()
+
+            configured = await _configure_demo_sources(session)
+            second = await _configure_demo_sources(session)
+            rows = {
+                source.code: {
+                    "is_active": source.is_active,
+                    "pull_enabled": source.pull_enabled,
+                    "pull_interval_seconds": source.pull_interval_seconds,
+                    "base_url": source.base_url,
+                    "field_mapping": source.field_mapping,
+                    "routing": source.routing,
+                    "config": source.config,
+                }
+                for source in (await session.execute(select(IntegrationSource))).scalars()
+            }
+            await session.rollback()
+            return {"configured": configured, "second": second, "rows": rows}
+    finally:
+        settings.app_profile, settings.cms_base_url, settings.lms_base_url = (
+            old_profile,
+            old_cms,
+            old_lms,
+        )
+
+
+class TestConfigureDemoSources:
+    """B5-7: `_configure_demo_sources` — только `APP_PROFILE=demo` с заданными адресами моков."""
+
+    def test_dev_profile_leaves_sources_untouched(self, client) -> None:
+        result = run(
+            client,
+            functools.partial(
+                _configure_demo,
+                profile="dev",
+                cms_base_url="http://cms",
+                lms_base_url="http://lms",
+                pre=None,
+            ),
+        )
+
+        assert result["configured"] == 0
+        assert result["rows"]["cms"]["is_active"] is False
+        assert result["rows"]["lms"]["is_active"] is False
+
+    def test_demo_without_mock_urls_does_nothing(self, client) -> None:
+        result = run(
+            client,
+            functools.partial(
+                _configure_demo, profile="demo", cms_base_url=None, lms_base_url=None, pre=None
+            ),
+        )
+
+        assert result["configured"] == 0
+
+    def test_demo_with_mock_urls_activates_both_sources_with_mapping_and_routing(
+        self, client
+    ) -> None:
+        result = run(
+            client,
+            functools.partial(
+                _configure_demo,
+                profile="demo",
+                cms_base_url="http://cms.invalid",
+                lms_base_url="http://lms.invalid",
+                pre=None,
+            ),
+        )
+
+        assert result["configured"] == 2
+        cms = result["rows"]["cms"]
+        lms = result["rows"]["lms"]
+        assert cms["is_active"] is True
+        assert cms["pull_enabled"] is True
+        assert cms["pull_interval_seconds"] == 60
+        assert cms["field_mapping"]["rules"]
+        assert cms["config"]["demo_seeded"] is True
+        assert lms["is_active"] is True
+        assert lms["pull_enabled"] is True
+        assert lms["config"]["course_code_map"] == {
+            "crs-python-basics": "py-base",
+            "crs-data-analysis": "ds-pro",
+        }
+
+    def test_second_run_does_not_reconfigure(self, client) -> None:
+        result = run(
+            client,
+            functools.partial(
+                _configure_demo,
+                profile="demo",
+                cms_base_url="http://cms.invalid",
+                lms_base_url="http://lms.invalid",
+                pre=None,
+            ),
+        )
+
+        assert (result["configured"], result["second"]) == (2, 0)
+
+    def test_manually_disabled_source_stays_disabled_after_reseed(self, client) -> None:
+        result = run(
+            client,
+            functools.partial(
+                _configure_demo,
+                profile="demo",
+                cms_base_url="http://cms.invalid",
+                lms_base_url="http://lms.invalid",
+                pre={"cms": {"config": {"demo_seeded": True}, "is_active": False}},
+            ),
+        )
+
+        assert result["rows"]["cms"]["is_active"] is False
+        # lms не был отмечен — настраивается как обычно.
+        assert result["rows"]["lms"]["is_active"] is True
+
+
 class TestSeedIsIdempotent:
     def test_second_run_creates_nothing_and_changes_nothing(self, seed) -> None:
         seed.configure(ref=_REF, value=_SECRET_VALUE)

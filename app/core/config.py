@@ -339,6 +339,10 @@ class Settings(BaseSettings):
     # dop.md §10.11 для /public/sign/*), но это единственные пути без
     # сессионной аутентификации — тот же принцип защиты по умолчанию.
     integration_webhook_rate_limit_per_min: int = 60
+    # B5-10: API-ключи для систем без OAuth2 (`X-API-Key`, только роль INTEGRATION). Откат без
+    # деплоя: `false` — заголовок `X-API-Key` не проверяется вовсе (как будто фичи нет).
+    api_keys_enabled: bool = True
+    api_key_default_ttl_days: int = 90
 
     # --- LLM -------------------------------------------------------------
     llm_enabled: bool = False

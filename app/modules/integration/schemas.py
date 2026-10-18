@@ -241,6 +241,101 @@ class PullRequestResponse(BaseModel):
     requested_at: dt.datetime
 
 
+# =============================================================================
+# B5-9: webhook-подписки
+# =============================================================================
+
+
+class WebhookSubscriptionCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    url: str = Field(min_length=1, max_length=1024)
+    event_types: list[str] = Field(min_length=1, max_length=16)
+    filters: dict[str, Any] = Field(default_factory=dict)
+
+
+class WebhookSubscriptionUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    url: str | None = Field(default=None, min_length=1, max_length=1024)
+    event_types: list[str] | None = Field(default=None, min_length=1, max_length=16)
+    filters: dict[str, Any] | None = None
+    is_active: bool | None = None
+
+
+class WebhookSubscriptionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    url: str
+    event_types: list[str]
+    filters: dict[str, Any]
+    is_active: bool
+    consecutive_failures: int
+    disabled_reason: str | None
+    created_at: dt.datetime
+    updated_at: dt.datetime
+
+
+class WebhookSubscriptionCreatedOut(WebhookSubscriptionOut):
+    """Ответ на создание/ротацию секрета: `secret` показывается РОВНО ОДИН РАЗ."""
+
+    secret: str
+
+
+class WebhookDeliveryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    subscription_id: uuid.UUID
+    event_type: str
+    aggregate_type: str
+    aggregate_id: uuid.UUID
+    status: str
+    attempts: int
+    next_retry_at: dt.datetime | None
+    last_error: str | None
+    last_status_code: int | None
+    created_at: dt.datetime
+    sent_at: dt.datetime | None
+
+
+class WebhookTestResultOut(BaseModel):
+    status_code: int | None
+    elapsed_ms: float
+    error: str | None = None
+
+
+# =============================================================================
+# B5-10: API-ключи
+# =============================================================================
+
+
+class ApiKeyCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    user_id: uuid.UUID
+    #: Пусто — `settings.api_key_default_ttl_days` (90 по умолчанию).
+    expires_in_days: int | None = Field(default=None, ge=1, le=365)
+
+
+class ApiKeyOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    key_prefix: str
+    user_id: uuid.UUID
+    expires_at: dt.datetime
+    last_used_at: dt.datetime | None
+    revoked_at: dt.datetime | None
+    created_at: dt.datetime
+
+
+class ApiKeyCreatedOut(ApiKeyOut):
+    """Ответ на создание: `key` показывается РОВНО ОДИН РАЗ."""
+
+    key: str
+
+
 class IntegrationStatusOut(BaseModel):
     """Сводка для экрана источника: `last_run` — снимок момента завершения последнего прогона
     (cron или ручного), `inbound_last_24h`/`outbox_last_24h` — живые счётчики по статусам за

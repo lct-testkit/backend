@@ -72,6 +72,12 @@ def key_security_posture() -> str:
     return "cache:security_posture"
 
 
+def key_webhook_subs() -> str:
+    """B5-9: активные webhook-подписки, прогреваемые раз в `TTL_WEBHOOK_SUBS` — `fan_out`
+    (`integration.webhooks`) не должен делать SELECT на каждую публикацию исходящего события."""
+    return "cache:webhook_subs"
+
+
 # --- TTL по разделу 16 ---------------------------------------------------
 
 TTL_DEAL_CARD = 600
@@ -80,6 +86,10 @@ TTL_WORKFLOW_GRAPH = 3600
 TTL_PERMISSIONS = 300
 TTL_IDEMPOTENCY = 86400
 RECENT_MAX_ITEMS = 20
+# B5-9: достаточно долго, чтобы прогретый кэш держал бюджет перехода сделки (300 мс) без
+# лишнего SELECT, и достаточно коротко, чтобы новая/изменённая подписка подхватилась быстро
+# даже если `run_after_commit` не успел сбросить кэш (сбой Redis между вызовами).
+TTL_WEBHOOK_SUBS = 30
 
 
 def create_client() -> redis.Redis:

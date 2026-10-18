@@ -39,6 +39,7 @@ from app.modules.integration.tasks import (
     sweep_cms_leads_pull,
     sweep_lms_progress_pull,
     sweep_outbox_events,
+    sweep_webhook_deliveries,
 )
 from app.modules.notification.service import RealNotificationService, register_notification_service
 from app.modules.notification.tasks import dispatch_pending_notifications
@@ -167,6 +168,7 @@ class WorkerSettings:
         sweep_outbox_events,
         sweep_lms_progress_pull,
         sweep_cms_leads_pull,
+        sweep_webhook_deliveries,
         sweep_erasure_requests,
         sweep_user_lifecycle,
         sweep_keycloak_events,
@@ -228,6 +230,9 @@ class WorkerSettings:
         # Раз в минуту: реальный интервал задаёт integration_sources.pull_interval_seconds
         # (B5-2), тик, пришедшийся раньше срока, сам себя пропускает.
         cron(sweep_cms_leads_pull, minute=set(range(60))),
+        # Раз в минуту: доставка webhook-подписок (B5-9), тот же приём, что sweep_outbox_events
+        # выше — backoff 1с/5с/30с/5м/30м/2ч, dead-letter после 8 попыток.
+        cron(sweep_webhook_deliveries, minute=set(range(60))),
         # Раз в 15 минут: исполнение удаления/обезличивания по истечении
         # отсрочки режима A (new_spec §4.8.4 шаг 4-5, 30 дней по умолчанию) —
         # та же периодичность, что и SLA-скан: отсрочка считается днями, чаще

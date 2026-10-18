@@ -36,6 +36,7 @@ from app.modules.integration.json_safe import scrub_json
 from app.modules.integration.lead_payload import raw_evidence
 from app.modules.integration.lms import apply_progress_rows
 from app.modules.integration.models import InboundMessage, InboundStatus, IntegrationSourceCode
+from app.modules.integration.routing import Routing
 from app.modules.integration.schemas import (
     BitrixWebhookRequest,
     CmsLeadResponse,
@@ -440,7 +441,7 @@ async def lms_progress_push(
     # Порядок: лимит → тело → источник → подпись → разбор → повтор по ключу → обработка. Подпись
     # раньше повтора: иначе чужой запрос с угаданным ключом занимал бы его до настоящего.
     source_code = IntegrationSourceCode.LMS.value
-    raw_body, _ = await _authenticate_push(
+    raw_body, source = await _authenticate_push(
         request,
         session,
         x_signature,
@@ -468,9 +469,20 @@ async def lms_progress_push(
         return {"status": message.status, "inbound_message_id": str(message.id)}
 
     # Каждая строка — в своём SAVEPOINT: одна «битая» строка пропускается (и попадает в `skipped`),
-    # а не откатывает остальные вместе со всей пачкой.
+    # а не откатывает остальные вместе со всей пачкой. B5-8: правила движения сделки по
+    # прогрессу — из той же маршрутизации источника, что и у забора по расписанию.
+    routing = Routing.model_validate(source.routing) if source.routing else None
+    progress_rules = routing.progress_rules if routing is not None else []
+    course_code_map = (source.config or {}).get("course_code_map")
     batch = await _process_push(
-        session, message, lambda: apply_progress_rows(session, payload.items)
+        session,
+        message,
+        lambda: apply_progress_rows(
+            session,
+            payload.items,
+            progress_rules=progress_rules,
+            course_code_map=course_code_map,
+        ),
     )
     message.status = InboundStatus.PROCESSED.value
     message.processed_at = dt.datetime.now(dt.UTC)

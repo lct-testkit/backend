@@ -28,25 +28,39 @@ integrations/outbox-events?status=dead`, вернуть событие в оче
 from __future__ import annotations
 
 import datetime as dt
+import json
 import uuid
 from typing import Any
 
+import httpx
 import structlog
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.db import session_scope
-from app.core.metrics import track_task
+from app.core.metrics import track_task, webhook_deliveries_total
 from app.modules.admin.models import FeatureFlag
+from app.modules.admin.setting_crypto import decrypt_value
 from app.modules.integration import bitrix, lms
 from app.modules.integration.cms_pull import CmsPullService
-from app.modules.integration.models import IntegrationSource, OutboxEvent, OutboxStatus
+from app.modules.integration.http import TIMEOUT as _HTTP_TIMEOUT
+from app.modules.integration.models import (
+    IntegrationSource,
+    OutboxEvent,
+    OutboxStatus,
+    WebhookDelivery,
+    WebhookDeliveryStatus,
+    WebhookSubscription,
+)
+from app.modules.integration.routing import Routing
 from app.modules.integration.security import (
     check_outbound_url_resolved,
+    compute_signature,
     resolve_secret,
     same_host,
 )
+from app.modules.integration.webhooks import invalidate_cache_after_commit
 
 logger = structlog.get_logger(__name__)
 
@@ -341,7 +355,14 @@ async def sweep_lms_progress_pull(ctx: dict[str, Any]) -> dict[str, int]:
         # Каждая строка — в своём SAVEPOINT: одна битая строка не откатывает остальные, а курсор не
         # уходит дальше строк, которые применить не удалось (их следующий тик получит снова).
         rows = rows if isinstance(rows, list) else []
-        batch = await lms.apply_progress_rows(session, rows)
+        # B5-8: правила движения сделки по прогрессу — из маршрутизации источника lms (B5-4).
+        routing = Routing.model_validate(source.routing) if source.routing else None
+        progress_rules = routing.progress_rules if routing is not None else []
+        # B5-7: сопоставление кода курса мока с кодом продукта каталога (демо-профиль).
+        course_code_map = (source.config or {}).get("course_code_map")
+        batch = await lms.apply_progress_rows(
+            session, rows, progress_rules=progress_rules, course_code_map=course_code_map
+        )
         latest_cursor = lms.advance_cursor(cursor, rows, batch)
         if batch.failed:
             logger.warning(
@@ -371,6 +392,9 @@ async def sweep_lms_progress_pull(ctx: dict[str, Any]) -> dict[str, int]:
             "applied": batch.applied,
             "skipped": batch.skipped,
             "failed": batch.failed,
+            # B5-8: сколько строк прогресса подвинули сделку по правилам routing.progress_rules.
+            "moved": batch.moved,
+            "move_failed": batch.move_failed,
         }
 
     return {"pulled": batch.applied, "skipped": batch.skipped, "failed": batch.failed}
@@ -414,3 +438,218 @@ async def sweep_cms_leads_pull(ctx: dict[str, Any]) -> dict[str, int]:
         "duplicates": result.duplicates,
         "failed": result.failed,
     }
+
+
+# =============================================================================
+# B5-9: доставка webhook-подписок
+#
+# Та же форма, что `sweep_outbox_events` выше: захват (короткая транзакция, `FOR UPDATE SKIP
+# LOCKED`, аренда) → доставка (своя транзакция на строку, сеть без общих блокировок) → запись
+# backoff/dead-letter отдельной транзакцией. `410` выключает подписку немедленно; 20 `dead`
+# подряд (`WebhookSubscription.consecutive_failures`, сбрасывается любой успешной доставкой)
+# выключают её тоже — нерабочий адрес не должен копить доставки вечно. Очистка старых записей —
+# в конце того же тика, не отдельным cron: `webhook_deliveries` растёт пропорционально числу
+# подписок и событий, а не стоит заводить для этого ещё одну задачу.
+# =============================================================================
+
+_WEBHOOK_BACKOFF_SECONDS = [1, 5, 30, 300, 1800, 7200]
+_WEBHOOK_MAX_ATTEMPTS = 8
+_WEBHOOK_LEASE_SECONDS = 600
+_WEBHOOK_BATCH_SIZE = 100
+_WEBHOOK_DISABLE_AFTER_DEAD = 20
+_WEBHOOK_SENT_RETENTION_DAYS = 7
+_WEBHOOK_DEAD_RETENTION_DAYS = 30
+
+
+def _disable_webhook_subscription(subscription: WebhookSubscription, *, reason: str) -> None:
+    subscription.is_active = False
+    subscription.disabled_reason = reason
+    logger.error(
+        "webhook_subscription_disabled", subscription_id=str(subscription.id), reason=reason
+    )
+
+
+async def _send_webhook(subscription: WebhookSubscription, delivery: WebhookDelivery) -> int:
+    """Отправляет доставку и возвращает код ответа; сетевые ошибки уходят исключением
+    `httpx.HTTPError` — вызывающий решает backoff/dead-letter. Адрес никогда не попадает в
+    исключение наружу этой функции (см. `_deliver_webhook`: используется только тип ошибки)."""
+    settings = get_settings()
+    url = await check_outbound_url_resolved(subscription.url, strict=settings.is_prod)
+    secret = decrypt_value(subscription.secret_encrypted)
+    body = json.dumps(
+        {
+            "id": str(delivery.id),
+            "event": delivery.event_type,
+            "occurred_at": delivery.created_at.isoformat(),
+            "data": delivery.payload or {},
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    timestamp = str(int(dt.datetime.now(dt.UTC).timestamp()))
+    signature = compute_signature(secret, timestamp.encode("ascii") + b"." + body)
+    headers = {
+        "Content-Type": "application/json",
+        "X-Signature": f"sha256={signature}",
+        "X-Timestamp": timestamp,
+        "X-CRM-Event": delivery.event_type,
+        "X-CRM-Delivery": str(delivery.id),
+    }
+    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+        response = await client.post(url, content=body, headers=headers, follow_redirects=False)
+    return response.status_code
+
+
+@track_task
+async def sweep_webhook_deliveries(ctx: dict[str, Any]) -> dict[str, int]:
+    counters = {"sent": 0, "failed": 0, "dead": 0}
+    claimed = await _claim_webhook_deliveries()
+    for delivery_id, lease in claimed:
+        await _deliver_webhook(delivery_id, lease, counters)
+    await _cleanup_webhook_deliveries()
+    return counters
+
+
+async def _claim_webhook_deliveries() -> list[tuple[uuid.UUID, dt.datetime]]:
+    async with session_scope() as session:
+        now = dt.datetime.now(dt.UTC)
+        lease = now + dt.timedelta(seconds=_WEBHOOK_LEASE_SECONDS)
+        rows = (
+            (
+                await session.execute(
+                    select(WebhookDelivery)
+                    .where(
+                        WebhookDelivery.status.in_(
+                            [
+                                WebhookDeliveryStatus.PENDING.value,
+                                WebhookDeliveryStatus.FAILED.value,
+                            ]
+                        ),
+                        (WebhookDelivery.next_retry_at.is_(None))
+                        | (WebhookDelivery.next_retry_at <= now),
+                    )
+                    .order_by(WebhookDelivery.created_at)
+                    .limit(_WEBHOOK_BATCH_SIZE)
+                    .with_for_update(skip_locked=True)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        claimed: list[tuple[uuid.UUID, dt.datetime]] = []
+        for delivery in rows:
+            delivery.attempts += 1
+            delivery.next_retry_at = lease
+            claimed.append((delivery.id, lease))
+        return claimed
+
+
+async def _deliver_webhook(
+    delivery_id: uuid.UUID, lease: dt.datetime, counters: dict[str, int]
+) -> None:
+    failure: str | None = None
+    async with session_scope() as session:
+        delivery = (
+            await session.execute(
+                select(WebhookDelivery).where(WebhookDelivery.id == delivery_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if (
+            delivery is None
+            or delivery.status
+            not in (WebhookDeliveryStatus.PENDING.value, WebhookDeliveryStatus.FAILED.value)
+            or delivery.next_retry_at != lease
+        ):
+            return
+        subscription = await session.get(WebhookSubscription, delivery.subscription_id)
+        if subscription is None or not subscription.is_active:
+            # Подписку сняли/выключили между постановкой доставки и её разбором: не копим
+            # попытки на мёртвый адрес, но это не провал подписки — просто нечего доставлять.
+            delivery.status = WebhookDeliveryStatus.DEAD.value
+            delivery.last_error = "subscription_inactive"
+            delivery.next_retry_at = None
+            counters["dead"] += 1
+            webhook_deliveries_total.labels(result="dead").inc()
+            return
+        try:
+            status_code = await _send_webhook(subscription, delivery)
+        except Exception as exc:  # noqa: BLE001 — доставка не должна ронять цикл
+            await session.rollback()
+            failure = f"request_failed:{type(exc).__name__}"
+        else:
+            delivery.last_status_code = status_code
+            if 200 <= status_code < 300:
+                delivery.status = WebhookDeliveryStatus.SENT.value
+                delivery.sent_at = dt.datetime.now(dt.UTC)
+                delivery.next_retry_at = None
+                delivery.last_error = None
+                subscription.consecutive_failures = 0
+                counters["sent"] += 1
+                webhook_deliveries_total.labels(result="sent").inc()
+                return
+            if status_code == 410:
+                delivery.status = WebhookDeliveryStatus.DEAD.value
+                delivery.next_retry_at = None
+                delivery.last_error = "http_410"
+                _disable_webhook_subscription(subscription, reason="gone_410")
+                invalidate_cache_after_commit(session)
+                counters["dead"] += 1
+                webhook_deliveries_total.labels(result="dead").inc()
+                return
+            failure = f"http_{status_code}"
+
+    async with session_scope() as session:
+        delivery = (
+            await session.execute(
+                select(WebhookDelivery).where(WebhookDelivery.id == delivery_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if delivery is None or delivery.next_retry_at != lease:
+            return
+        # Попытка уже посчитана при захвате.
+        delivery.last_error = failure
+        if delivery.attempts >= _WEBHOOK_MAX_ATTEMPTS:
+            delivery.status = WebhookDeliveryStatus.DEAD.value
+            delivery.next_retry_at = None
+            counters["dead"] += 1
+            webhook_deliveries_total.labels(result="dead").inc()
+            logger.error(
+                "webhook_delivery_dead_letter",
+                delivery_id=str(delivery.id),
+                subscription_id=str(delivery.subscription_id),
+                event_type=delivery.event_type,
+                attempts=delivery.attempts,
+            )
+            subscription = await session.get(WebhookSubscription, delivery.subscription_id)
+            if subscription is not None and subscription.is_active:
+                subscription.consecutive_failures += 1
+                if subscription.consecutive_failures >= _WEBHOOK_DISABLE_AFTER_DEAD:
+                    _disable_webhook_subscription(subscription, reason="too_many_failures")
+                    invalidate_cache_after_commit(session)
+        else:
+            delivery.status = WebhookDeliveryStatus.FAILED.value
+            delay = _WEBHOOK_BACKOFF_SECONDS[
+                min(delivery.attempts - 1, len(_WEBHOOK_BACKOFF_SECONDS) - 1)
+            ]
+            delivery.next_retry_at = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=delay)
+            counters["failed"] += 1
+            webhook_deliveries_total.labels(result="failed").inc()
+
+
+async def _cleanup_webhook_deliveries() -> None:
+    """Раздел «очистка»: `sent` старше 7 дней и `dead` старше 30 дней — тот же порядок величин,
+    что ретеншн других очередей доставки (`reports_retention_days`, `retention_otp_days`)."""
+    now = dt.datetime.now(dt.UTC)
+    async with session_scope() as session:
+        await session.execute(
+            delete(WebhookDelivery).where(
+                WebhookDelivery.status == WebhookDeliveryStatus.SENT.value,
+                WebhookDelivery.sent_at.is_not(None),
+                WebhookDelivery.sent_at < now - dt.timedelta(days=_WEBHOOK_SENT_RETENTION_DAYS),
+            )
+        )
+        await session.execute(
+            delete(WebhookDelivery).where(
+                WebhookDelivery.status == WebhookDeliveryStatus.DEAD.value,
+                WebhookDelivery.created_at < now - dt.timedelta(days=_WEBHOOK_DEAD_RETENTION_DAYS),
+            )
+        )

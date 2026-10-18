@@ -45,6 +45,7 @@ from app.modules.integration.models import (
 )
 from app.modules.integration.routing import Routing, validate_routing
 from app.modules.integration.security import check_outbound_url_resolved
+from app.modules.integration.webhooks import fan_out
 
 logger = structlog.get_logger(__name__)
 
@@ -112,6 +113,16 @@ class RealOutboxService:
             )
         )
         await session.flush()
+        # B5-9: раздача той же транзакцией — универсальные webhook-подписки, независимо от
+        # `target` (который остаётся только для lms/bitrix24). См. докстринг `integration.
+        # webhooks` про бюджет запросов: с прогретым кэшем ни одного лишнего SELECT.
+        await fan_out(
+            session,
+            aggregate_type=aggregate_type,
+            aggregate_id=aggregate_id,
+            event_type=event_type,
+            payload=payload,
+        )
 
 
 _service: OutboxService = LoggingOutboxService()

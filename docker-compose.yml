@@ -111,6 +111,9 @@ x-api-env: &api-env
   BITRIX_WEBHOOK_URL_REF: ${BITRIX_WEBHOOK_URL_REF:-}
   BITRIX_SOURCE_ID: ${BITRIX_SOURCE_ID:-OTHER}
   INTEGRATION_WEBHOOK_RATE_LIMIT_PER_MIN: ${INTEGRATION_WEBHOOK_RATE_LIMIT_PER_MIN:-60}
+  # B5-10: API-ключи для систем без OAuth2 (X-API-Key, только роль INTEGRATION).
+  API_KEYS_ENABLED: ${API_KEYS_ENABLED:-true}
+  API_KEY_DEFAULT_TTL_DAYS: ${API_KEY_DEFAULT_TTL_DAYS:-90}
   # Значения секретов, на которые ссылаются `credentials_ref`/`*_REF` выше
   # (раздел 7.8: в БД — только имя переменной, значение — здесь). Набор
   # фиксированный и пополняется по мере подключения реальных источников —

@@ -2,21 +2,25 @@
 
 Два независимых потока делят один HTTP-клиент (`LmsClient`) и одну функцию
 апсерта (`upsert_progress`): раздел 8 перечисляет и pull (наш `GET
-{lms_base_url}/students/progress`, инициируется нами по cron —
-`integration.tasks.sweep_lms_progress_pull`), и push-приём (`POST
-/api/v1/integrations/lms/progress`, для LMS, которые сами шлют обновления,
-не дожидаясь опроса) под одним контуром — обе ветки в итоге приводят к
-одной и той же строке `learning_progress`.
+{lms_base_url}/students/progress`, где `lms_base_url` сам уже несёт префикс
+`/api` — итоговый абсолютный путь на сервере `/api/students/progress`,
+инициируется нами по cron — `integration.tasks.sweep_lms_progress_pull`), и
+push-приём (`POST /api/v1/integrations/lms/progress`, для LMS, которые сами
+шлют обновления, не дожидаясь опроса) под одним контуром — обе ветки в
+итоге приводят к одной и той же строке `learning_progress`.
 
-**Контракт сопоставления (решение этого спринта, не продиктовано ни одной
-из спек — реального LMS-API нет ни у кого):** прогресс сопоставляется со
+**Контракт сопоставления.** Предпочтительно: прогресс сопоставляется со
 сделкой по `deal_id` — **нашему собственному** UUID, а не отдельному
 LMS-идентификатору. При отправке зачисления (`push_enrollment`) мы сообщаем
 LMS `deal_id` сделки; вернувшиеся строки прогресса обязаны содержать то же
-значение. Это устраняет нужду в дополнительной таблице сопоставления
+значение — тогда дополнительная таблица сопоставления не нужна
 (`external_refs` уже занят Bitrix, где внешний id действительно чужой и
-непредсказуемый) — здесь идентификатор задаём мы сами, значит сверять
-не с чем.
+непредсказуемый). B5-6 (BUG-16): настоящий мок LMS `deal_id` не присылает
+вовсе — для таких строк `_find_deal_by_contact_and_course` ищет сделку по
+email учащегося (`student_email`/`email`) и коду курса
+(`course_external_id`/`external_course_id`), с необязательной подстановкой
+кода через `course_code_map` (B5-7), когда код курса мока и код продукта
+каталога расходятся.
 
 Push зачисления (`LEARNING_ENROLLMENT_SENT`/`LEARNING_TRANSFER_REQUESTED`,
 воронка `crm.workflow.seed`) вызывается из `integration.tasks.
@@ -28,8 +32,9 @@ sweep_outbox_events`, не отсюда напрямую — outbox публик
 
 Приём прогресса (`apply_progress_rows`) обрабатывает каждую строку в своём
 SAVEPOINT: одна «битая» строка не откатывает остальные ни в push-ручке, ни в
-pull-задаче.
-"""
+pull-задаче. B5-8: после успешного апсерта строки — попытка движения
+сделки по `routing.progress_rules` источника lms (`move_deal_by_progress`),
+тоже в своём SAVEPOINT."""
 
 from __future__ import annotations
 
@@ -45,12 +50,14 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.errors import AppError
 from app.core.normalize import normalize_email
 from app.modules.catalog.models import Contact, Organization, Product
 from app.modules.crm.models import Deal, DealProduct
 from app.modules.integration.http import TIMEOUT as _TIMEOUT
 from app.modules.integration.http import http_errors_without_url as _http_errors_without_url_base
 from app.modules.integration.models import LearningProgress, SyncCursor
+from app.modules.integration.routing import ProgressRule, ProgressWhen
 
 logger = structlog.get_logger(__name__)
 
@@ -203,20 +210,28 @@ def normalize_progress_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _find_deal_by_contact_and_course(
-    session: AsyncSession, *, student_email: str, course_external_id: str
+    session: AsyncSession,
+    *,
+    student_email: str,
+    course_external_id: str,
+    course_code_map: dict[str, str] | None = None,
 ) -> Deal | None:
     """B5-6 (BUG-16): мок не присылает `deal_id` вовсе — привязка по email учащегося и курсу,
     когда строка не называет сделку напрямую. Продукт ищется по совпадению `course_external_id`
-    с `Product.code` (значение мока — код курса; соответствие кодам каталога, если они разные,
-    даёт настраиваемый маппинг B5-3/B5-7, здесь — прямое совпадение). Предпочитается открытая
-    сделка контакта с этим продуктом, иначе — последняя по дате создания."""
+    с `Product.code` (значение мока — код курса; прямое совпадение, если коды каталога и мока
+    совпадают). `course_code_map` (B5-7: `integration_sources.config.course_code_map`,
+    сеется демо-профилем) — словарь «код курса мока → код продукта каталога» для случаев, когда
+    они расходятся (демо-мок LMS и каталог ИТ-Школы называют один курс по-разному); пусто или нет
+    совпадения — код мока используется как есть. Предпочитается открытая сделка контакта с этим
+    продуктом, иначе — последняя по дате создания."""
     normalized_email = normalize_email(student_email)
     if not normalized_email:
         return None
     contact = await session.scalar(select(Contact).where(Contact.email == normalized_email))
     if contact is None or contact.deleted_at is not None:
         return None
-    product = await session.scalar(select(Product).where(Product.code == course_external_id))
+    product_code = (course_code_map or {}).get(course_external_id, course_external_id)
+    product = await session.scalar(select(Product).where(Product.code == product_code))
     if product is None:
         return None
     candidates = (
@@ -238,7 +253,9 @@ async def _find_deal_by_contact_and_course(
     return candidates[0] if candidates else None
 
 
-async def upsert_progress(session: AsyncSession, row: dict[str, Any]) -> LearningProgress | None:
+async def upsert_progress(
+    session: AsyncSession, row: dict[str, Any], *, course_code_map: dict[str, str] | None = None
+) -> LearningProgress | None:
     """Один элемент ответа LMS → строка `learning_progress`; `None` — строка ни к какой нашей сделке
     не относится (нет способа её привязать, чужой или удалённый `deal_id`/контакт/продукт): LMS
     знает и учащихся, которых в CRM нет, это не ошибка. Значения неверного типа или вне диапазона —
@@ -246,7 +263,10 @@ async def upsert_progress(session: AsyncSession, row: dict[str, Any]) -> Learnin
 
     Неполная строка не затирает известное: поле, которого в строке нет (или оно `null`), у
     существующей записи остаётся как было — LMS присылает и «только процент», и «только
-    завершение», и обнулять остальное они не просят. `raw` — последняя присланная строка."""
+    завершение», и обнулять остальное они не просят. `raw` — последняя присланная строка.
+
+    `course_code_map` — см. `_find_deal_by_contact_and_course`; используется только когда строка
+    не называет сделку напрямую (мок без `deal_id`)."""
     row = normalize_progress_row(row)
     deal_id_raw = row.get("deal_id")
     course_external_id = row.get("course_external_id")
@@ -265,7 +285,10 @@ async def upsert_progress(session: AsyncSession, row: dict[str, Any]) -> Learnin
     elif row.get("student_email"):
         # BUG-16: мок не называет сделку напрямую — привязка по email учащегося и коду курса.
         deal = await _find_deal_by_contact_and_course(
-            session, student_email=str(row["student_email"]), course_external_id=course_external_id
+            session,
+            student_email=str(row["student_email"]),
+            course_external_id=course_external_id,
+            course_code_map=course_code_map,
         )
 
     if deal is None or deal.deleted_at is not None:
@@ -325,9 +348,15 @@ FAILED = "failed"
 
 @dataclass(slots=True)
 class ProgressBatchResult:
-    """Итог пачки строк прогресса: по одному исходу на каждую входную строку, в том же порядке."""
+    """Итог пачки строк прогресса: по одному исходу на каждую входную строку, в том же порядке.
+
+    B5-8: `moved`/`move_failed` — отдельные счётчики попыток движения сделки по `progress_rules`
+    (не по одному на строку прогресса: строка без подходящего правила не считается ни тем, ни
+    другим)."""
 
     outcomes: list[str] = field(default_factory=list)
+    moved: int = 0
+    move_failed: int = 0
 
     @property
     def applied(self) -> int:
@@ -343,13 +372,123 @@ class ProgressBatchResult:
         return len(self.outcomes) - self.applied
 
 
-async def apply_progress_rows(session: AsyncSession, rows: list[Any]) -> ProgressBatchResult:
+def _progress_matches(when: ProgressWhen, progress: LearningProgress) -> bool:
+    if when.completed and progress.completed_at is None:
+        return False
+    return not (
+        when.progress_pct_gte is not None
+        and (progress.progress_pct is None or progress.progress_pct < when.progress_pct_gte)
+    )
+
+
+#: Исход попытки движения сделки по прогрессу: нет подходящего правила (строка не в счётчиках),
+#: переход выполнен (`moved`) или правило подошло, но переход не удался (`move_failed`).
+NOT_MATCHED = "not_matched"
+MOVED = "moved"
+MOVE_FAILED = "move_failed"
+
+
+async def move_deal_by_progress(
+    session: AsyncSession, progress: LearningProgress, rules: list[ProgressRule]
+) -> str:
+    """B5-8: двигает сделку по подходящему правилу `progress_rules` (маршрутизация источника
+    `lms`, B5-4). Возвращает `NOT_MATCHED` (ни одно правило не подошло — не ошибка, большинство
+    строк прогресса), `MOVED` (переход выполнен) или `MOVE_FAILED` (правило подошло, но переход
+    не удался — сделка закрыта, конфликт версии, нет перехода в графе). Правило не срабатывает
+    дважды: после перехода текущий статус сделки уже другой и не совпадёт с `from_status` на
+    следующем прогоне.
+
+    Вызывается внутри ОТДЕЛЬНОГО SAVEPOINT вызывающим (`apply_progress_rows`): отказ перехода не
+    должен откатывать саму запись прогресса, применённую непосредственно перед этим."""
+    if not rules or progress.deal_id is None:
+        return NOT_MATCHED
+
+    # Ленивые импорты — тот же приём, что `catalog.service`/`identity.admin_service` уже
+    # применяют к `crm.service`: `crm` не ссылается на `integration`, цикл не создаётся.
+    from app.modules.workflow.models import Workflow, WorkflowState
+    from app.modules.workflow.service import get_cached_published_graph
+
+    deal = await session.get(Deal, progress.deal_id)
+    if deal is None or deal.workflow_id is None:
+        return NOT_MATCHED
+    workflow = await session.get(Workflow, deal.workflow_id)
+    if workflow is None or workflow.state != WorkflowState.PUBLISHED.value:
+        return NOT_MATCHED
+
+    graph = await get_cached_published_graph(workflow)
+    statuses_by_id = {s["id"]: s for s in graph["statuses"]}
+    current = statuses_by_id.get(str(deal.status_id))
+    if current is None:
+        return NOT_MATCHED
+
+    matched = next(
+        (
+            rule
+            for rule in rules
+            if rule.workflow_code == workflow.code
+            and rule.from_status == current["code"]
+            and _progress_matches(rule.when, progress)
+        ),
+        None,
+    )
+    if matched is None:
+        return NOT_MATCHED
+    if deal.deleted_at is not None:
+        logger.warning("lms_progress_move_failed", deal_id=str(deal.id), reason="deal_deleted")
+        return MOVE_FAILED
+    target = next((s for s in graph["statuses"] if s["code"] == matched.to_status), None)
+    if target is None:
+        logger.warning(
+            "lms_progress_rule_status_missing",
+            workflow_code=workflow.code,
+            to_status=matched.to_status,
+        )
+        return MOVE_FAILED
+
+    from app.modules.crm.service import DealService
+    from app.modules.integration.service import get_integration_principal
+
+    principal = await get_integration_principal(session)
+    comment = matched.comment.replace("{progress_pct}", str(progress.progress_pct or 0)) or None
+    try:
+        await DealService(session).transition(
+            deal,
+            principal,
+            to_status_id=uuid.UUID(target["id"]),
+            comment=comment,
+            fields={},
+            expected_version=deal.version,
+        )
+    except AppError as exc:
+        logger.warning(
+            "lms_progress_move_failed",
+            deal_id=str(deal.id),
+            workflow_code=workflow.code,
+            from_status=current["code"],
+            to_status=matched.to_status,
+            error=exc.code.value,
+        )
+        return MOVE_FAILED
+    return MOVED
+
+
+async def apply_progress_rows(
+    session: AsyncSession,
+    rows: list[Any],
+    *,
+    progress_rules: list[ProgressRule] | None = None,
+    course_code_map: dict[str, str] | None = None,
+) -> ProgressBatchResult:
     """Применяет строки прогресса, каждую в своём SAVEPOINT: строка с ошибкой (неверный тип,
     значение вне диапазона, сбой БД) откатывает только себя и попадает в `failed`, остальные
     строки и транзакция целиком не страдают. Раньше первая же такая строка роняла всю пачку —
     push-ручка отвечала 500, pull-задача терялась до следующего тика с тем же результатом.
 
-    Элементы, которые не объекты (`null`, числа), — мусор выгрузки: пропускаются без ошибки."""
+    Элементы, которые не объекты (`null`, числа), — мусор выгрузки: пропускаются без ошибки.
+
+    B5-8: после успешного `upsert_progress` каждой строки — попытка движения сделки по
+    `progress_rules`, в СВОЁМ отдельном SAVEPOINT (отказ перехода не должен откатывать уже
+    записанный прогресс)."""
     result = ProgressBatchResult()
     for index, row in enumerate(rows):
         if not isinstance(row, dict):
@@ -358,7 +497,7 @@ async def apply_progress_rows(session: AsyncSession, rows: list[Any]) -> Progres
             continue
         try:
             async with session.begin_nested():
-                applied = await upsert_progress(session, row)
+                applied = await upsert_progress(session, row, course_code_map=course_code_map)
         except Exception as exc:  # noqa: BLE001 — одна строка не должна ронять пачку
             logger.warning(
                 "lms_progress_row_failed",
@@ -370,6 +509,19 @@ async def apply_progress_rows(session: AsyncSession, rows: list[Any]) -> Progres
             result.outcomes.append(FAILED)
             continue
         result.outcomes.append(APPLIED if applied is not None else UNMATCHED)
+        if applied is not None and progress_rules:
+            try:
+                async with session.begin_nested():
+                    outcome = await move_deal_by_progress(session, applied, progress_rules)
+            except Exception as exc:  # noqa: BLE001 — движение сделки не должно ронять пачку
+                logger.warning(
+                    "lms_progress_move_error", index=index, error_type=type(exc).__name__
+                )
+                outcome = MOVE_FAILED
+            if outcome == MOVED:
+                result.moved += 1
+            elif outcome == MOVE_FAILED:
+                result.move_failed += 1
     return result
 
 

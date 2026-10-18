@@ -57,6 +57,7 @@ from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import (
+    ARRAY,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -194,10 +195,12 @@ class OutboxEvent(UuidPkMixin, Base):
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
     # Свободный текст, не CHECK: раздел 7.8 задаёт колонку как `text` без
-    # перечисления значений. Диспетчер `integration.tasks` понимает 'bitrix'
+    # перечисления значений. Диспетчер `integration.tasks` понимает 'bitrix24'
     # и 'lms' — остальное честно стареет до `dead` с `last_error=
     # 'unknown_target'`, тем же приёмом, что `notification` уже применяет к
-    # неизвестным каналам.
+    # неизвестным каналам. B5-9: универсальные webhook-подписки не используют
+    # этот `target` вовсе — они раздаются по `event_type`/`filters`
+    # независимо от него (`integration.webhooks.fan_out`).
     target: Mapped[str | None] = mapped_column(String(16), nullable=True)
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default=text("'pending'")
@@ -258,6 +261,137 @@ class SyncCursor(UuidPkMixin, Base):
         server_default=text("now()"),
         onupdate=text("now()"),
         nullable=False,
+    )
+
+
+class WebhookDeliveryStatus(StrEnum):
+    PENDING = "pending"
+    SENT = "sent"
+    FAILED = "failed"
+    DEAD = "dead"
+
+
+#: B5-9: события, на которые можно подписаться — каталог, не любая строка. `PING` не публикуется
+#: бизнес-кодом: он существует только для `POST .../webhooks/{id}/test` (синхронная проверка
+#: доставки администратором).
+WEBHOOK_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "DEAL_CREATED",
+        "DEAL_STATUS_CHANGED",
+        "DOCUMENT_SIGNED",
+        "LEARNING_ENROLLMENT_SENT",
+        "LEARNING_TRANSFER_REQUESTED",
+        "PING",
+    }
+)
+
+
+class WebhookSubscription(UuidPkMixin, TimestampMixin, Base):
+    """B5-9: администратор подписывает произвольный URL на события `WEBHOOK_EVENT_TYPES`, без
+    релиза (критерий жюри «интеграция в любые Enterprise-системы» — раньше исходящие события
+    уходили только в `lms`/`bitrix24`, зашитые в код `integration.tasks._KNOWN_TARGETS`).
+
+    `filters` сужает событие по значениям его нагрузки (сейчас — `deal_type`/`workflow_code`,
+    см. `integration.webhooks._filters_match`): пустой словарь — подписка получает любое событие
+    из `event_types`. `secret_encrypted` — конверт `admin.setting_crypto.encrypt_value` (секрет
+    показывается администратору только один раз, при создании и ротации)."""
+
+    __tablename__ = "webhook_subscriptions"
+    __table_args__ = (Index("ix_webhook_subscriptions_active", "is_active"),)
+
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    url: Mapped[str] = mapped_column(String(1024), nullable=False)
+    event_types: Mapped[list[str]] = mapped_column(
+        ARRAY(String(64)), nullable=False, server_default=text("'{}'::varchar[]")
+    )
+    filters: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    secret_encrypted: Mapped[Any] = mapped_column(JSONB, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    consecutive_failures: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    disabled_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
+
+
+class WebhookDelivery(UuidPkMixin, Base):
+    """Одна попытка доставить событие конкретной подписке (B5-9) — отдельная таблица от
+    `outbox_events`: у одного исходящего события теперь может быть много адресатов (подписок),
+    не один `OutboxEvent.target`."""
+
+    __tablename__ = "webhook_deliveries"
+    __table_args__ = (
+        Index(
+            "ix_webhook_deliveries_pending_retry",
+            "status",
+            "next_retry_at",
+            postgresql_where=text("status IN ('pending','failed')"),
+        ),
+        Index(
+            "ix_webhook_deliveries_subscription",
+            "subscription_id",
+            text("created_at DESC"),
+        ),
+        CheckConstraint(
+            "status IN ('pending','sent','failed','dead')",
+            name="webhook_deliveries_status_valid",
+        ),
+    )
+
+    subscription_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("webhook_subscriptions.id", ondelete="CASCADE"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    aggregate_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    aggregate_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'pending'")
+    )
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    next_retry_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), nullable=False, index=True
+    )
+    sent_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ApiKey(UuidPkMixin, Base):
+    """B5-10: ключи для систем, которые не умеют OAuth2 client_credentials. `user_id` —
+    сервисная учётка роли INTEGRATION (проверяется при создании, `ApiKeyService.create`); сам
+    ключ хранится только хэшем (SHA-256, `key_hash`), `key_prefix` — первые символы для
+    различения в списке, не секрет. Показывается администратору один раз, при создании."""
+
+    __tablename__ = "api_keys"
+    __table_args__ = (
+        UniqueConstraint("key_hash", name="uq_api_keys_key_hash"),
+        Index("ix_api_keys_user", "user_id"),
+    )
+
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    key_prefix: Mapped[str] = mapped_column(String(16), nullable=False)
+    key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_used_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), nullable=False
     )
 
 

@@ -207,10 +207,15 @@ _AUDITOR: frozenset[Permission] = frozenset(
 # статусу для INTEGRATION отмечен «✔ (огранич.)» — входящий лид создаёт
 # сделку и должен уметь провести её по автоматическим переходам (например,
 # зачисление в LMS по данным вебхука), не только создать саму запись.
+# B5-10: DEAL_READ — внешняя система должна читать то, что сама создала (скоуп
+# DealScope.SOURCE в deal_scope_for ниже ограничивает это её же сделками;
+# contact:read ей не выдаётся — контакты сделки видны через саму сделку
+# замаскированными, явного чтения контактов нет и не нужно).
 _INTEGRATION: frozenset[Permission] = frozenset(
     {
         Permission.INTEGRATION_INGEST,
         Permission.DEAL_CREATE,
+        Permission.DEAL_READ,
         Permission.DEAL_TRANSITION,
         Permission.CONTACT_WRITE,
         Permission.ORG_READ,

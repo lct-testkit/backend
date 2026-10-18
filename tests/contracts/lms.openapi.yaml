@@ -1,0 +1,123 @@
+# B5-12: РЕКОНСТРУИРОВАНО по коду клиента (`app/modules/integration/lms.py`), по
+# `tests/lms_helpers.py` (форма строк мока — BUG-16/BUG-17) и по тексту задач B5-6/B5-8 документа
+# спринтов — настоящего мока LMS (`deploy/mocks/lms/openapi.yaml`) в ЭТОМ репозитории нет
+# (отдельный репозиторий `deploy`).
+#
+# ИСТОЧНИК ИСТИНЫ — `deploy/mocks/lms/openapi.yaml`. Пути ниже — АБСОЛЮТНЫЕ от корня мок-сервера
+# (`LmsClient` добавляет `/students/progress`/`/enrollments` к `LMS_BASE_URL`, который сам уже
+# несёт префикс `/api` — `.env.example`: `LMS_BASE_URL=http://mock-lms:4010/api` — поэтому
+# итоговый путь на сервере и есть `/api/students/progress`/`/api/enrollments`, как в тексте
+# задачи B5-12). Этот файл и код клиента меняются ВМЕСТЕ — см. `tests/test_mock_contracts.py`
+# (контроль «от обратного»).
+openapi: 3.0.3
+info:
+  title: LMS — прогресс и зачисление (реконструкция)
+  version: "1.0"
+paths:
+  /api/students/progress:
+    get:
+      summary: Страница строк прогресса, изменённых начиная с updated_since
+      parameters:
+        - name: updated_since
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProgressPage"
+  /api/enrollments:
+    post:
+      summary: Зачисление учащегося на курс (push, при переходе сделки по воронке)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnrollmentRequest"
+      responses:
+        "200":
+          description: >
+            `already_enrolled` в теле ответа считается успехом (идемпотентный повтор), не
+            ошибкой — см. `integration.lms.LmsClient.push_enrollment`.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [enrolled, already_enrolled]
+components:
+  schemas:
+    ProgressPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProgressRecord"
+        next_cursor:
+          type: string
+          nullable: true
+    ProgressRecord:
+      type: object
+      description: >
+        Мок не присылает `deal_id` вовсе (BUG-16) — привязка к сделке идёт по email учащегося
+        (`student_email`, алиас `email`) и коду курса (`course_external_id`, алиас
+        `external_course_id`); B5-7 сопоставляет код курса мока с кодом продукта каталога
+        через `course_code_map`, если они расходятся (демо: crs-python-basics → py-base).
+      required: [external_course_id]
+      properties:
+        external_course_id: { type: string }
+        email: { type: string }
+        external_student_id: { type: string }
+        enrolled_at: { type: string }
+        progress_pct: { type: integer, minimum: 0, maximum: 100 }
+        score: { type: string }
+        completed_at: { type: string, nullable: true }
+        last_activity_at: { type: string }
+        updated_at: { type: string }
+      examples:
+        in_progress:
+          external_course_id: crs-python-basics
+          email: ivanova@example.edu
+          progress_pct: 92
+          updated_at: "2026-09-20T09:00:00Z"
+        completed:
+          external_course_id: crs-data-analysis
+          email: sidorov@example.edu
+          progress_pct: 100
+          completed_at: "2026-09-20T12:00:00Z"
+          updated_at: "2026-09-20T12:00:01Z"
+    EnrollmentRequest:
+      type: object
+      # BUG-17: мок требует именно эти поля — `integration.lms.build_enrollment_details`
+      # кладёт их наряду со старыми (deal_number/learner) для обратной совместимости.
+      required: [external_course_id, student, deal_ref]
+      properties:
+        external_course_id: { type: string }
+        deal_ref: { type: string }
+        stream_number: { type: integer }
+        student:
+          type: object
+          required: [email, first_name, last_name]
+          properties:
+            email: { type: string }
+            first_name: { type: string }
+            last_name: { type: string }

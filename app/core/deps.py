@@ -13,11 +13,14 @@ new_spec §3.1 — серверная сессия, idle-таймаут, CSRF и
 
 from __future__ import annotations
 
+import datetime as dt
+import hashlib
 import uuid
 from collections.abc import AsyncIterator
 from typing import Annotated
 
 from fastapi import Depends, Header, Query, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import (
@@ -47,13 +50,14 @@ from app.core.permissions import (
 from app.core.security import Principal, TokenClaims, decode_access_token
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService, record_denied_and_commit
-from app.modules.identity.models import Role, UserStatus
+from app.modules.identity.models import Role, User, UserStatus
 from app.modules.identity.service import IdentityService
 from app.modules.identity.session_store import (
     SessionData,
     ensure_fresh_access_token,
     session_store,
 )
+from app.modules.integration.models import ApiKey
 
 # scope="function": коммит транзакции идёт сразу после возврата из обработчика, ДО отправки
 # ответа. Иначе FastAPI выполняет код после `yield` уже после ответа: 201 успевал прийти раньше
@@ -106,10 +110,54 @@ async def _resolve_from_cache(claims: TokenClaims) -> CachedPrincipal | None:
     return cached
 
 
+async def _principal_from_api_key(session: AsyncSession, raw_key: str) -> Principal:
+    """B5-10: `X-API-Key` — альтернатива токену Keycloak для систем без OAuth2
+    (`docs/integration-auth.md`). Ключ хранится только хэшем (SHA-256); только роль
+    INTEGRATION — тот же принцип, что `bearer_auth_mode` уже применяет в prod к `Authorization:
+    Bearer`. Любой отказ — `UnauthenticatedError` (один и тот же ответ, по какой бы причине ключ
+    не прошёл — не подсказывать, что именно не так).
+
+    `last_used_at` обновляется не чаще раза в минуту: запись в его же сессии запроса, коммит —
+    обычным порядком `get_db_session` (scope="function")."""
+    key_hash = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+    api_key = (
+        await session.execute(select(ApiKey).where(ApiKey.key_hash == key_hash))
+    ).scalar_one_or_none()
+    now = dt.datetime.now(dt.UTC)
+    if api_key is None or api_key.revoked_at is not None or api_key.expires_at <= now:
+        raise UnauthenticatedError("Недействительный API-ключ")
+    user = await session.get(User, api_key.user_id)
+    if (
+        user is None
+        or user.role != Role.INTEGRATION.value
+        or user.status != UserStatus.ACTIVE.value
+    ):
+        raise UnauthenticatedError("Недействительный API-ключ")
+    if api_key.last_used_at is None or (now - api_key.last_used_at) >= dt.timedelta(minutes=1):
+        api_key.last_used_at = now
+    return Principal(
+        user_id=user.id,
+        keycloak_id=user.keycloak_id or f"system:api-key:{api_key.id}",
+        role=user.role,
+        status=user.status,
+        email=user.email,
+        full_name=user.effective_name,
+        team_id=user.team_id,
+        manager_id=user.manager_id,
+        perm_epoch=user.perm_epoch,
+        session_id=None,
+        consent_version=user.consent_version,
+        must_change_password=False,
+        claims=TokenClaims(subject=f"system:api-key:{api_key.id}", raw={}),
+        restricted=user.access_restricted,
+    )
+
+
 async def get_principal(
     request: Request,
     session: DbSession,
     authorization: Annotated[str | None, Header()] = None,
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
 ) -> Principal:
     """Основная зависимость аутентификации.
 
@@ -119,6 +167,15 @@ async def get_principal(
     через аргументы.
     """
     settings = get_settings()
+
+    # B5-10: минимальная вставка в самом начале — `X-API-Key` не трогает ветку Bearer и
+    # `config.allow_bearer_auth` ниже (эпик 1 меняет именно её, B6-10). `API_KEYS_ENABLED=false`
+    # — заголовок не проверяется вовсе, как будто фичи нет (откат без деплоя).
+    if x_api_key is not None and settings.api_keys_enabled:
+        principal = await _principal_from_api_key(session, x_api_key)
+        set_actor(ActorContext(user_id=principal.user_id, role=principal.role, session_id=None))
+        return principal
+
     sid: str | None = None
     stored: SessionData | None = None
 
@@ -258,7 +315,13 @@ async def get_consented_principal(principal: CurrentUser, session: DbSession) ->
     Требования: раздел 6.1 (CRM-1105) и new_spec §4.4 «Ситуация B» —
     невыполненное обязательное действие смены пароля должно отвергать
     запросы, а не только показывать баннер во фронтенде.
+
+    B5-10: роль INTEGRATION — сервисная учётка, не субъект ПДн и не вводит пароль
+    (`provision_from_claims`/сид API-ключей её не просят принять политику) — обе проверки
+    для неё пропускаются. Остальные роли — без изменений.
     """
+    if principal.role == Role.INTEGRATION.value:
+        return principal
     identity = IdentityService(session)
     policy = await identity.current_policy()
     if principal.consent_version != policy.version:

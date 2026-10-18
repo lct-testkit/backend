@@ -92,6 +92,25 @@ def _count_queries(client, path: str) -> int:
     return counter["n"]
 
 
+def _count_queries_for_coro(client, func, *args: object) -> int:
+    """Как `_count_queries`, но для произвольной корутины, запущенной в цикле `client`
+    (`tests.conftest.run`) — нужна B5-9: `fan_out` не делает HTTP, только SQL."""
+    from app.core.db import get_engine
+
+    counter = {"n": 0}
+
+    def _before(*_args: object, **_kwargs: object) -> None:
+        counter["n"] += 1
+
+    sync_engine = get_engine().sync_engine
+    event.listen(sync_engine, "before_cursor_execute", _before)
+    try:
+        run(client, func, *args)
+    finally:
+        event.remove(sync_engine, "before_cursor_execute", _before)
+    return counter["n"]
+
+
 class TestListQueryBudget:
     @pytest.mark.parametrize("path", ["/api/deals?limit=100", "/api/organizations?limit=100"])
     def test_queries_do_not_grow_with_rows(self, client, path: str) -> None:
@@ -110,4 +129,86 @@ class TestListQueryBudget:
             f"{path}: {small} запросов на {ROWS_SMALL}+ строк и {large} на "
             f"{ROWS_SMALL + ROWS_LARGE}+ — вероятен N+1 (ленивая загрузка связей в цикле). "
             "Загрузите связи явно: selectinload/joinedload."
+        )
+
+
+class TestWebhookFanOutQueryBudget:
+    """B5-9: `fan_out` (`integration.webhooks`) с прогретым кэшем `cache:webhook_subs` не
+    должен добавлять SELECT к публикации события — переход сделки стоит в бюджете 300 мс."""
+
+    def test_publish_with_warm_cache_adds_no_extra_query(self, client) -> None:
+        from tests.crm_helpers import login
+
+        login(client, "ADMIN")
+        created = client.post(
+            "/api/admin/integrations/webhooks",
+            json={
+                "name": "budget",
+                "url": "https://erp-budget.invalid/hooks/crm",
+                "event_types": ["DEAL_CREATED"],
+                "filters": {},
+            },
+        )
+        assert created.status_code == 201, created.text
+
+        async def _publish() -> None:
+            import uuid as uuid_module
+
+            from app.core.db import session_scope
+            from app.modules.catalog.models import Organization
+            from app.modules.crm.models import Deal
+            from app.modules.identity.models import User
+            from app.modules.integration.service import get_outbox_service
+            from app.modules.workflow.models import Workflow, WorkflowStatus
+
+            async with session_scope() as session:
+                workflow = Workflow(
+                    code=f"wf-budget-{uuid_module.uuid4().hex[:10]}",
+                    name="Воронка бюджета webhook",
+                    deal_type="b2b",
+                    state="draft",
+                )
+                session.add(workflow)
+                await session.flush()
+                status = WorkflowStatus(workflow_id=workflow.id, code="new", name="Новая")
+                org = Organization(name=f"Вуз {uuid_module.uuid4().hex[:6]}", org_type="university")
+                owner = User(
+                    keycloak_id=str(uuid_module.uuid4()),
+                    email=f"{uuid_module.uuid4().hex[:8]}@rt-it-school.ru",
+                    full_name="Петров П.П.",
+                    role="KAM",
+                    status="active",
+                    consent_version="1.0",
+                )
+                session.add_all([status, org, owner])
+                await session.flush()
+                deal = Deal(
+                    number=f"D-budget-{uuid_module.uuid4().hex[:10]}",
+                    title="Сделка бюджета webhook",
+                    deal_type="b2b",
+                    workflow_id=workflow.id,
+                    status_id=status.id,
+                    organization_id=org.id,
+                    owner_id=owner.id,
+                )
+                session.add(deal)
+                await session.flush()
+                await get_outbox_service().publish(
+                    session,
+                    aggregate_type="deal",
+                    aggregate_id=deal.id,
+                    event_type="DEAL_CREATED",
+                    payload={"title": deal.title, "deal_type": "b2b"},
+                )
+
+        # Первый вызов прогревает кэш подписок (одна SELECT сверх обычного). Второй и третий —
+        # с прогретым кэшем, число запросов не должно расти между ними.
+        _count_queries_for_coro(client, _publish)
+        warm_first = _count_queries_for_coro(client, _publish)
+        warm_second = _count_queries_for_coro(client, _publish)
+
+        assert warm_first > 0, "счётчик запросов не сработал — тест ничего не проверяет"
+        assert warm_second <= warm_first + TOLERANCE, (
+            f"{warm_first} запросов на публикацию с прогретым кэшем, {warm_second} на "
+            "следующую — fan_out, похоже, делает SELECT подписок на каждый вызов."
         )

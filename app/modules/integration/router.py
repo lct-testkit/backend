@@ -29,12 +29,21 @@ from app.core.permissions import Permission
 from app.core.rate_limit import enforce as rate_limit_enforce
 from app.core.security import Principal
 from app.modules.catalog.lookup import ProductIndex
+from app.modules.integration.api_keys import ApiKeyService
 from app.modules.integration.cms_client import CmsClient
 from app.modules.integration.field_mapping import TARGETS, FieldMapping, apply_mapping
 from app.modules.integration.lead_payload import parse_lead_payload
-from app.modules.integration.models import ExternalRef, InboundMessage, OutboxEvent
+from app.modules.integration.models import (
+    ExternalRef,
+    InboundMessage,
+    OutboxEvent,
+    WebhookDelivery,
+)
 from app.modules.integration.routing import Routing
 from app.modules.integration.schemas import (
+    ApiKeyCreatedOut,
+    ApiKeyCreateRequest,
+    ApiKeyOut,
     ExternalRefOut,
     InboundMessageOut,
     IntegrationSourceOut,
@@ -49,9 +58,16 @@ from app.modules.integration.schemas import (
     PullRequestResponse,
     RoutingGetResponse,
     TargetOut,
+    WebhookDeliveryOut,
+    WebhookSubscriptionCreatedOut,
+    WebhookSubscriptionCreateRequest,
+    WebhookSubscriptionOut,
+    WebhookSubscriptionUpdateRequest,
+    WebhookTestResultOut,
 )
 from app.modules.integration.security import check_outbound_url_resolved, resolve_secret
 from app.modules.integration.service import IntegrationSourceService, OutboxEventService
+from app.modules.integration.webhooks import WebhookSubscriptionService
 
 IntegrationAdminPerm = Annotated[
     Principal, Depends(require_permission(Permission.INTEGRATION_ADMIN))
@@ -505,3 +521,235 @@ async def list_external_refs(
     rows = list((await session.execute(stmt.limit(limit + 1))).scalars().all())
     visible = _page(response, rows, limit, lambda r: r.last_synced_at or _EPOCH)
     return [ExternalRefOut.model_validate(r) for r in visible]
+
+
+# =============================================================================
+# B5-9: универсальные webhook-подписки на исходящие события
+# =============================================================================
+
+
+@integration_admin_router.get(
+    "/webhooks",
+    summary="Список webhook-подписок",
+    description=(
+        "Подписки на исходящие события (DEAL_CREATED, DEAL_STATUS_CHANGED, DOCUMENT_SIGNED, "
+        "LEARNING_ENROLLMENT_SENT, LEARNING_TRANSFER_REQUESTED). Секрет не отдаётся. Роль: ADMIN."
+    ),
+    response_model=list[WebhookSubscriptionOut],
+)
+async def list_webhook_subscriptions(
+    session: DbSession, _principal: IntegrationAdminPerm
+) -> list[WebhookSubscriptionOut]:
+    rows = await WebhookSubscriptionService(session).list_all()
+    return [WebhookSubscriptionOut.model_validate(r) for r in rows]
+
+
+@integration_admin_router.post(
+    "/webhooks",
+    summary="Создать webhook-подписку",
+    description=(
+        "Администратор задаёт URL, список событий и необязательные фильтры (по значениям "
+        "нагрузки, например deal_type) без релиза. Секрет генерирует сервер и показывает РОВНО "
+        "ОДИН РАЗ в этом ответе — сохраните его сразу. В prod без SETTINGS_ENCRYPTION_KEY — "
+        "422 CRM-1706. Адрес проверяется на SSRF (как base_url источников интеграций)."
+    ),
+    response_model=WebhookSubscriptionCreatedOut,
+    status_code=201,
+)
+async def create_webhook_subscription(
+    payload: WebhookSubscriptionCreateRequest,
+    session: DbSession,
+    principal: IntegrationAdminPerm,
+) -> WebhookSubscriptionCreatedOut:
+    subscription, secret = await WebhookSubscriptionService(session).create(principal, payload)
+    return WebhookSubscriptionCreatedOut(
+        **WebhookSubscriptionOut.model_validate(subscription).model_dump(), secret=secret
+    )
+
+
+@integration_admin_router.post(
+    "/webhooks/deliveries/{delivery_id}/retry",
+    summary="Повторить доставку webhook",
+    description=(
+        "Возвращает доставку из failed/dead в очередь: статус pending, счётчик попыток и "
+        "ошибка сброшены. Для остальных статусов — 409 CRM-1704. Роль: ADMIN."
+    ),
+    response_model=WebhookDeliveryOut,
+)
+async def retry_webhook_delivery(
+    session: DbSession,
+    _principal: IntegrationAdminPerm,
+    delivery_id: Annotated[uuid.UUID, Path()],
+) -> WebhookDeliveryOut:
+    delivery = await WebhookSubscriptionService(session).retry_delivery(delivery_id)
+    return WebhookDeliveryOut.model_validate(delivery)
+
+
+@integration_admin_router.patch(
+    "/webhooks/{subscription_id}",
+    summary="Изменить webhook-подписку",
+    description=(
+        "Правка названия, URL, событий, фильтров или активности. Включение ранее выключенной "
+        "подписки сбрасывает счётчик дохлых попыток. Роль: ADMIN."
+    ),
+    response_model=WebhookSubscriptionOut,
+)
+async def update_webhook_subscription(
+    payload: WebhookSubscriptionUpdateRequest,
+    session: DbSession,
+    _principal: IntegrationAdminPerm,
+    subscription_id: Annotated[uuid.UUID, Path()],
+) -> WebhookSubscriptionOut:
+    service = WebhookSubscriptionService(session)
+    subscription = await service.get_or_404(subscription_id)
+    subscription = await service.update(subscription, payload)
+    return WebhookSubscriptionOut.model_validate(subscription)
+
+
+@integration_admin_router.delete(
+    "/webhooks/{subscription_id}",
+    summary="Удалить webhook-подписку",
+    description="Удаляет подписку и всю её очередь доставки (CASCADE). Роль: ADMIN.",
+    status_code=204,
+)
+async def delete_webhook_subscription(
+    session: DbSession,
+    _principal: IntegrationAdminPerm,
+    subscription_id: Annotated[uuid.UUID, Path()],
+) -> None:
+    service = WebhookSubscriptionService(session)
+    subscription = await service.get_or_404(subscription_id)
+    await service.delete(subscription)
+
+
+@integration_admin_router.post(
+    "/webhooks/{subscription_id}/rotate-secret",
+    summary="Сменить секрет подписки",
+    description=(
+        "Новый секрет показывается РОВНО ОДИН РАЗ в этом ответе; прежний перестаёт "
+        "действовать немедленно. Роль: ADMIN."
+    ),
+    response_model=WebhookSubscriptionCreatedOut,
+)
+async def rotate_webhook_secret(
+    session: DbSession,
+    _principal: IntegrationAdminPerm,
+    subscription_id: Annotated[uuid.UUID, Path()],
+) -> WebhookSubscriptionCreatedOut:
+    service = WebhookSubscriptionService(session)
+    subscription = await service.get_or_404(subscription_id)
+    secret = await service.rotate_secret(subscription)
+    return WebhookSubscriptionCreatedOut(
+        **WebhookSubscriptionOut.model_validate(subscription).model_dump(), secret=secret
+    )
+
+
+@integration_admin_router.post(
+    "/webhooks/{subscription_id}/test",
+    summary="Тестовая отправка (PING)",
+    description=(
+        "Синхронно отправляет подписанное событие PING на адрес подписки, минуя очередь "
+        "доставки: код ответа и время — в самом ответе. Не считается попыткой подписки. "
+        "Роль: ADMIN."
+    ),
+    response_model=WebhookTestResultOut,
+)
+async def ping_webhook_subscription(
+    session: DbSession,
+    _principal: IntegrationAdminPerm,
+    subscription_id: Annotated[uuid.UUID, Path()],
+) -> WebhookTestResultOut:
+    service = WebhookSubscriptionService(session)
+    subscription = await service.get_or_404(subscription_id)
+    result = await service.test_ping(subscription)
+    return WebhookTestResultOut(**result)
+
+
+@integration_admin_router.get(
+    "/webhooks/{subscription_id}/deliveries",
+    summary="Доставки подписки",
+    description=(
+        "Журнал доставок конкретной подписки, новые первыми. Фильтр `status`. Продолжение — "
+        "`cursor` из заголовка X-Next-Cursor. Роль: ADMIN."
+    ),
+    response_model=list[WebhookDeliveryOut],
+    responses=_PAGED,
+)
+async def list_webhook_deliveries(
+    session: DbSession,
+    response: Response,
+    _principal: IntegrationAdminPerm,
+    subscription_id: Annotated[uuid.UUID, Path()],
+    status: Annotated[str | None, Query()] = None,
+    limit: LimitParam = 50,
+    cursor: CursorParam = None,
+) -> list[WebhookDeliveryOut]:
+    await WebhookSubscriptionService(session).get_or_404(subscription_id)
+    stmt = (
+        select(WebhookDelivery)
+        .where(WebhookDelivery.subscription_id == subscription_id)
+        .order_by(WebhookDelivery.created_at.desc(), WebhookDelivery.id.desc())
+    )
+    if status:
+        stmt = stmt.where(WebhookDelivery.status == status)
+    if cursor:
+        stmt = stmt.where(
+            keyset_before(WebhookDelivery.created_at, WebhookDelivery.id, Cursor.decode(cursor))
+        )
+    rows = list((await session.execute(stmt.limit(limit + 1))).scalars().all())
+    visible = _page(response, rows, limit, lambda r: r.created_at)
+    return [WebhookDeliveryOut.model_validate(r) for r in visible]
+
+
+# =============================================================================
+# B5-10: API-ключи (X-API-Key, только роль INTEGRATION)
+# =============================================================================
+
+
+@integration_admin_router.get(
+    "/api-keys",
+    summary="Список API-ключей",
+    description=(
+        "Ключи сервисных учёток роли INTEGRATION для доступа по заголовку X-API-Key "
+        "(без OAuth2 client_credentials). Сам ключ не отдаётся, только key_prefix. Роль: ADMIN."
+    ),
+    response_model=list[ApiKeyOut],
+)
+async def list_api_keys(session: DbSession, _principal: IntegrationAdminPerm) -> list[ApiKeyOut]:
+    rows = await ApiKeyService(session).list_all()
+    return [ApiKeyOut.model_validate(r) for r in rows]
+
+
+@integration_admin_router.post(
+    "/api-keys",
+    summary="Создать API-ключ",
+    description=(
+        "`user_id` — активная учётка роли INTEGRATION (иначе 422). `expires_in_days` — срок "
+        "жизни, по умолчанию 90 дней. Ключ показывается РОВНО ОДИН РАЗ в этом ответе — "
+        "сохраните его сразу, в БД хранится только хэш. Роль: ADMIN."
+    ),
+    response_model=ApiKeyCreatedOut,
+    status_code=201,
+)
+async def create_api_key(
+    payload: ApiKeyCreateRequest, session: DbSession, principal: IntegrationAdminPerm
+) -> ApiKeyCreatedOut:
+    api_key, raw_key = await ApiKeyService(session).create(principal, payload)
+    return ApiKeyCreatedOut(**ApiKeyOut.model_validate(api_key).model_dump(), key=raw_key)
+
+
+@integration_admin_router.delete(
+    "/api-keys/{api_key_id}",
+    summary="Отозвать API-ключ",
+    description="Ключ немедленно перестаёт проходить аутентификацию. Роль: ADMIN.",
+    response_model=ApiKeyOut,
+)
+async def revoke_api_key(
+    session: DbSession,
+    _principal: IntegrationAdminPerm,
+    api_key_id: Annotated[uuid.UUID, Path()],
+) -> ApiKeyOut:
+    service = ApiKeyService(session)
+    api_key = await service.get_or_404(api_key_id)
+    api_key = await service.revoke(api_key)
+    return ApiKeyOut.model_validate(api_key)

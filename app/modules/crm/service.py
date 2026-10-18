@@ -2664,7 +2664,9 @@ class DealService:
             aggregate_type="deal",
             aggregate_id=deal.id,
             event_type="DEAL_STATUS_CHANGED",
-            payload={"status_code": to_status["code"]},
+            # B5-9: `deal_type` — для фильтра webhook-подписок (`filters.deal_type`); bitrix24
+            # его не читает, подписки читают его из нагрузки доставки, не отдельным запросом.
+            payload={"status_code": to_status["code"], "deal_type": deal.deal_type},
             target="bitrix24",
         )
 

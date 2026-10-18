@@ -1,0 +1,106 @@
+# B5-12: РЕКОНСТРУИРОВАНО по коду клиента (`app/modules/integration/cms_client.py`,
+# `app/modules/integration/cms_pull.py`, `app/modules/integration/lead_payload.py`) и по тексту
+# задач B5-2/B5-7 документа спринтов — настоящего мока сайта (`deploy/mocks/cms/openapi.yaml`)
+# в ЭТОМ репозитории нет (отдельный репозиторий `deploy`).
+#
+# ИСТОЧНИК ИСТИНЫ — `deploy/mocks/cms/openapi.yaml`. Этот файл и код клиента меняются ВМЕСТЕ:
+# правка пути/формата одного без другого — это расхождение контракта с реальным мок-сервером,
+# которое проверяет `tests/test_mock_contracts.py` (тест «от обратного» показывает, что без
+# синхронизации копий он падает).
+openapi: 3.0.3
+info:
+  title: Сайт (Laravel CMS) — забор лидов по API (реконструкция)
+  version: "1.0"
+paths:
+  /api/v1/leads:
+    get:
+      summary: Страница лидов, изменённых начиная с updated_since
+      parameters:
+        - name: updated_since
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LeadPage"
+  /api/v1/leads/{lead_id}:
+    get:
+      summary: Один лид по id (не используется забором, нужен только контракту)
+      parameters:
+        - name: lead_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Lead"
+components:
+  schemas:
+    LeadPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Lead"
+        next_cursor:
+          type: string
+          nullable: true
+    Lead:
+      type: object
+      # B5-7 (демо-маппинг): поле "course" несёт код мока ("python-basics"/"data-analysis"),
+      # переводимый в код продукта каталога ("py-base"/"ds-pro") настраиваемым маппингом B5-3.
+      description: >
+        Контакт обязателен хотя бы одним из email/phone (lead_payload.parse_lead_payload);
+        course обязателен, если это заказ (order_number присутствует).
+      properties:
+        first_name: { type: string }
+        last_name: { type: string }
+        middle_name: { type: string }
+        phone: { type: string }
+        email: { type: string }
+        course: { type: string }
+        order_number: { type: string }
+        stream_number: { type: integer }
+        amount: { type: string }
+        external_id: { type: string }
+        updated_at: { type: string }
+        created_at: { type: string }
+      examples:
+        lead_without_order:
+          first_name: Дарья
+          last_name: Осипенко
+          email: daria@example.ru
+          course: python-basics
+          external_id: lead-001
+          updated_at: "2026-09-01T10:00:00Z"
+        paid_order:
+          first_name: Пётр
+          last_name: Сидоров
+          phone: "+79990000001"
+          course: data-analysis
+          order_number: "ORD-2026-0001"
+          stream_number: 3
+          amount: "35000.00"
+          external_id: lead-002
+          updated_at: "2026-09-02T10:00:00Z"

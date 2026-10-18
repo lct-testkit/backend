@@ -114,6 +114,14 @@ cache_requests_total = Counter(
     labelnames=("cache", "result"),
 )
 
+# --- Webhook-подписки (B5-9) ----------------------------------------------
+
+webhook_deliveries_total = Counter(
+    "crm_webhook_deliveries_total",
+    "Попытки доставки webhook-подписок по итогу",
+    labelnames=("result",),
+)
+
 # --- Отчёты и подписи ----------------------------------------------------
 
 reports_in_progress = Gauge(

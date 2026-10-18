@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 import structlog
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -57,9 +57,38 @@ class RoutingRule(BaseModel):
     route: Route
 
 
+class ProgressWhen(BaseModel):
+    """B5-8: условие срабатывания правила движения сделки по прогрессу LMS. Хотя бы одно из
+    полей обязательно — иначе правило никогда не сработает."""
+
+    completed: bool | None = None
+    progress_pct_gte: int | None = Field(default=None, ge=0, le=100)
+
+    @model_validator(mode="after")
+    def _at_least_one_condition(self) -> ProgressWhen:
+        if self.completed is None and self.progress_pct_gte is None:
+            raise ValueError("нужно completed или progress_pct_gte")
+        return self
+
+
+class ProgressRule(BaseModel):
+    """B5-8: `{when, workflow_code, from_status, to_status, comment}` — переводит сделку в
+    `to_status`, когда прогресс учащегося в `workflow_code` (текущий статус сделки — `from_status`)
+    удовлетворяет `when`. `comment` — шаблон с подстановкой `{progress_pct}`."""
+
+    when: ProgressWhen
+    workflow_code: str = Field(min_length=1, max_length=64)
+    from_status: str = Field(min_length=1, max_length=64)
+    to_status: str = Field(min_length=1, max_length=64)
+    comment: str = Field(default="", max_length=500)
+
+
 class Routing(BaseModel):
     default: Route = Field(default_factory=Route)
     rules: list[RoutingRule] = Field(default_factory=list, max_length=_MAX_RULES)
+    #: B5-8: правила движения сделки по прогрессу LMS (источник `lms`, см. `integration.lms.
+    #: move_deal_by_progress`). У источника `cms` этот список просто не используется.
+    progress_rules: list[ProgressRule] = Field(default_factory=list, max_length=_MAX_RULES)
 
 
 @dataclass(slots=True)
@@ -226,9 +255,54 @@ async def validate_routing(session: AsyncSession, routing: Routing) -> list[Rout
                         )
                     )
 
+    async def _check_progress_rule(rule: ProgressRule, prefix: str) -> None:
+        workflow = await session.scalar(select(Workflow).where(Workflow.code == rule.workflow_code))
+        if workflow is None:
+            errors.append(RoutingValidationError(f"{prefix}.workflow_code", "воронка не найдена"))
+            return
+        if workflow.state != WorkflowState.PUBLISHED.value:
+            errors.append(
+                RoutingValidationError(f"{prefix}.workflow_code", "воронка не опубликована")
+            )
+            return
+        graph = await get_cached_published_graph(workflow)
+        codes = {s["code"]: s for s in graph["statuses"]}
+        from_ok = rule.from_status in codes
+        to_ok = rule.to_status in codes
+        if not from_ok:
+            errors.append(
+                RoutingValidationError(
+                    f"{prefix}.from_status", "статус не найден в опубликованном графе воронки"
+                )
+            )
+        if not to_ok:
+            errors.append(
+                RoutingValidationError(
+                    f"{prefix}.to_status", "статус не найден в опубликованном графе воронки"
+                )
+            )
+        if from_ok and to_ok:
+            from_id = codes[rule.from_status]["id"]
+            to_id = codes[rule.to_status]["id"]
+            has_transition = any(
+                t["from_status_id"] == from_id and t["to_status_id"] == to_id
+                for t in graph["transitions"]
+            )
+            if not has_transition:
+                errors.append(
+                    RoutingValidationError(
+                        f"{prefix}.to_status",
+                        "переход из from_status в to_status не найден в графе воронки",
+                    )
+                )
+
     await _check_route(routing.default, "default")
     for index, rule in enumerate(routing.rules):
         await _check_route(rule.route, f"rules[{index}].route")
     if len(routing.rules) > _MAX_RULES:
         errors.append(RoutingValidationError("rules", f"не более {_MAX_RULES} правил"))
+    for index, progress_rule in enumerate(routing.progress_rules):
+        await _check_progress_rule(progress_rule, f"progress_rules[{index}]")
+    if len(routing.progress_rules) > _MAX_RULES:
+        errors.append(RoutingValidationError("progress_rules", f"не более {_MAX_RULES} правил"))
     return errors
