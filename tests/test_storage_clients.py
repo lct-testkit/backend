@@ -15,7 +15,7 @@ import asyncio
 import pytest
 
 from app.core import storage
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.errors import AppError
 from tests.conftest import TEST_DATABASE_URL
 
@@ -74,6 +74,37 @@ class TestClientFor:
         result = storage._client_for("totally-unrelated-bucket")
 
         assert _access_key(result) == settings.s3_access_key.get_secret_value()
+
+
+class TestBlankSignaturesKeysMeanUnset:
+    """`.env.example`: «пусто — как раньше, общий клиент на все бакеты». Пустая строка (строка в
+    `.env` без значения, `${VAR:-}` в compose) без сведения к `None` стала бы `SecretStr('')`,
+    и `_client_for` выбрал бы клиент `signatures` с пустыми ключами."""
+
+    def test_blank_values_become_none(self) -> None:
+        base = get_settings().model_dump()
+
+        settings = Settings.model_validate(
+            {**base, "s3_signatures_access_key": "", "s3_signatures_secret_key": "  "}
+        )
+
+        assert settings.s3_signatures_access_key is None
+        assert settings.s3_signatures_secret_key is None
+
+    def test_a_blank_pair_falls_back_to_the_shared_client(self, monkeypatch) -> None:
+        settings = get_settings()
+        blank = Settings.model_validate(
+            {
+                **settings.model_dump(),
+                "s3_signatures_access_key": "",
+                "s3_signatures_secret_key": "",
+            }
+        )
+        monkeypatch.setattr(storage, "get_settings", lambda: blank)
+
+        result = storage._client_for(blank.s3_bucket_signatures)
+
+        assert _access_key(result) == blank.s3_access_key.get_secret_value()
 
 
 class TestEnsureBucketAutoCreate:

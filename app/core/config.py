@@ -393,6 +393,8 @@ class Settings(BaseSettings):
         "field_encryption_key",
         "field_encryption_key_prev",
         "health_details_token",
+        "s3_signatures_access_key",
+        "s3_signatures_secret_key",
         "cms_base_url",
         "lms_base_url",
         mode="before",
