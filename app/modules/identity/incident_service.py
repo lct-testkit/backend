@@ -429,6 +429,15 @@ class IncidentService:
         return incident
 
     async def generate_subjects_notice(self, incident: SecurityIncident) -> File:
+        # Кандидат ещё не признан инцидентом (возможна ложная тревога), отклонённый — не был им
+        # вовсе. Уведомление субъектам фиксирует `subjects_notified_at` и повторно не
+        # формируется — составлять его по пустой карточке нельзя.
+        if incident.status in (IncidentStatus.CANDIDATE.value, IncidentStatus.DISMISSED.value):
+            raise AppError(
+                ErrorCode.VALIDATION,
+                "Уведомление субъектам формируется только для подтверждённого инцидента",
+                extra={"status": incident.status},
+            )
         rkn_contact = await self._rkn_contact()
         fields = self._common_fields(incident, rkn_contact=rkn_contact)
         fields["subject_display"] = "субъект персональных данных"

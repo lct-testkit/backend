@@ -280,6 +280,29 @@ class TestRknNoticeFlow:
         assert response.status_code == 422, response.text
 
 
+class TestSubjectsNotice:
+    def test_a_candidate_cannot_have_a_subjects_notice(self, client) -> None:
+        admin = run(client, _make_user, "ADMIN")
+        target = run(client, _make_user, "KAM")
+        event_id = run(client, functools.partial(_record_malware_event, target.id))
+        incident = run(client, functools.partial(_incidents_for_event, event_id))[0]
+        _login(client, admin)
+
+        response = client.post(f"/api/admin/incidents/{incident.id}/subjects-notice")
+
+        assert response.status_code == 422, response.text
+
+    def test_a_confirmed_incident_gets_one_notice(self, client) -> None:
+        confirmed = TestRknNoticeFlow()._confirmed(client)
+
+        first = client.post(f"/api/admin/incidents/{confirmed['id']}/subjects-notice")
+        assert first.status_code == 200, first.text
+        assert first.json()["file_id"]
+
+        second = client.post(f"/api/admin/incidents/{confirmed['id']}/subjects-notice")
+        assert second.status_code == 409, second.text
+
+
 class TestPermissions:
     def test_admin_and_auditor_can_read_head_and_kam_cannot(self, client) -> None:
         for role, expected in (("ADMIN", 200), ("AUDITOR", 200), ("HEAD", 403), ("KAM", 403)):
