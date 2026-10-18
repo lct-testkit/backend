@@ -258,6 +258,13 @@ UPDATE signature_documents SET
 WHERE true;
 UPDATE signature_requests SET reject_reason = CASE WHEN reject_reason IS NOT NULL
     THEN '[обезличено для dev]' END WHERE true;
+UPDATE access_requests SET
+    reason = '[обезличено для dev]',
+    decision_comment = CASE WHEN decision_comment IS NOT NULL THEN '[обезличено для dev]' END
+WHERE true;
+UPDATE webhook_subscriptions SET disabled_reason = CASE WHEN disabled_reason IS NOT NULL
+    THEN '[обезличено для dev]' END WHERE true;
+UPDATE webhook_deliveries SET payload = '{}'::jsonb WHERE true;
 -- Заголовки сделок/задач/инцидентов — короткие, обычно шаблонные, но пользователь мог
 -- вписать туда что угодно (ФИО, название проекта) — безопаснее переписать, чем гадать.
 UPDATE deals SET title = '[обезличено для dev] сделка' WHERE true;

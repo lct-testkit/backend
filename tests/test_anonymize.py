@@ -604,6 +604,10 @@ _HANDLED_COLUMNS = frozenset(
         ("signature_requests", "signer_name_snapshot"),
         ("signature_requests", "signer_identifier_masked"),
         ("signature_requests", "reject_reason"),
+        ("access_requests", "reason"),
+        ("access_requests", "decision_comment"),
+        ("webhook_subscriptions", "disabled_reason"),
+        ("webhook_deliveries", "payload"),
         ("signatures", "signer_display"),
         ("signatures", "evidence"),
         ("signatures", "ip"),
@@ -652,6 +656,8 @@ _NOT_PDN: dict[tuple[str, str], str] = {
     ("organization_licenses", "product_name"): "название продукта лицензии, не ПДн",
     ("system_settings", "description"): "описание настройки, пишет администратор",
     ("feature_flags", "description"): "описание флага функциональности",
+    ("api_keys", "name"): "название API-ключа, придумано администратором",
+    ("webhook_subscriptions", "name"): "название webhook-подписки, придумано администратором",
 }
 
 # `contacts$`/`investigation_summary`/`causes`/`harm`/`measures`/`_reference$` — после находки:
