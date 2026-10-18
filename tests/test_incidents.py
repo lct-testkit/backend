@@ -279,6 +279,43 @@ class TestPermissions:
         assert response.status_code == 422, response.text
 
 
+class TestPatchRefusesToClearRequiredFields:
+    """`title` и `severity` — NOT NULL: `null` в PATCH раньше доходил до БД и давал 500."""
+
+    def _candidate(self, client):
+        admin = run(client, _make_user, "ADMIN")
+        target = run(client, _make_user, "KAM")
+        event_id = run(client, functools.partial(_record_malware_event, target.id))
+        incident = run(client, functools.partial(_incidents_for_event, event_id))[0]
+        _login(client, admin)
+        return incident
+
+    @pytest.mark.parametrize("body", [{"title": None}, {"severity": None}, {"title": "   "}])
+    def test_null_or_blank_required_field_is_422_not_500(self, client, body) -> None:
+        incident = self._candidate(client)
+
+        response = client.patch(
+            f"/api/admin/incidents/{incident.id}",
+            headers={"If-Match": str(incident.version)},
+            json=body,
+        )
+
+        assert response.status_code == 422, response.text
+
+    def test_nullable_fields_can_still_be_cleared(self, client) -> None:
+        incident = self._candidate(client)
+
+        response = client.patch(
+            f"/api/admin/incidents/{incident.id}",
+            headers={"If-Match": str(incident.version)},
+            json={"description": None, "title": "Новое название"},
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["description"] is None
+        assert response.json()["title"] == "Новое название"
+
+
 class TestDeadlineSweeper:
     async def _overdue_incident(self, admin_id: uuid.UUID) -> uuid.UUID:
         from app.core.db import session_scope

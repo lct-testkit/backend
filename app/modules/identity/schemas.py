@@ -721,7 +721,7 @@ class IncidentConfirmRequest(BaseModel):
 
 
 class IncidentPatchRequest(BaseModel):
-    title: str | None = Field(default=None, max_length=255)
+    title: NonEmptyStr | None = Field(default=None, max_length=255)
     severity: Literal["info", "warning", "critical"] | None = None
     description: str | None = Field(default=None, max_length=5000)
     data_categories: list[str] | None = Field(default=None, max_length=50)
@@ -731,6 +731,13 @@ class IncidentPatchRequest(BaseModel):
     measures: str | None = Field(default=None, max_length=5000)
     responsible_user_id: uuid.UUID | None = None
     investigation_summary: str | None = Field(default=None, max_length=5000)
+
+    @field_validator("title", "severity", mode="before")
+    @classmethod
+    def _required_are_not_nulled(cls, value: Any) -> Any:
+        # Эти колонки `security_incidents` — NOT NULL: `null` в PATCH доходил до БД и давал 500
+        # (так же, как в `UserPatchRequest`).
+        return reject_null(value)
 
     @model_validator(mode="after")
     def _not_empty(self) -> IncidentPatchRequest:
