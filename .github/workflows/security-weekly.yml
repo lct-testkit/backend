@@ -1,0 +1,90 @@
+name: security-weekly
+
+# B6-15: `ci.yml` стартует только на PR и push в main (`.github/docs/new_spec.md:610`
+# обещает «управление уязвимостями», но новая CVE в уже зафиксированной зависимости
+# ничего не краснит, пока кто-то не запушит). Этот workflow закрывает два пробела:
+# еженедельный аудит зависимостей/образа независимо от активности в репозитории и
+# gitleaks по ИСТОРИИ git (ci.yml/Trivy secret смотрит только рабочее дерево и
+# пропускает tests/loadtest/_spec/docs). На pull_request gitleaks смотрит только
+# диапазон этого PR (`origin/main..HEAD`) — быстро и достаточно для нового коммита;
+# полную историю (`--log-opts=--all`) проверяет только планово или по запросу.
+on:
+  schedule:
+    # 06:00 UTC по понедельникам — будний день, после выходных, до начала рабочего дня.
+    - cron: "0 6 * * 1"
+  workflow_dispatch: {}
+  pull_request:
+    paths:
+      - "**"
+
+concurrency:
+  group: security-weekly-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  dependencies:
+    name: pip-audit · Trivy fs
+    # Еженедельный аудит зависимостей не имеет смысла гонять на каждый PR — это задача
+    # schedule/workflow_dispatch; gitleaks (ниже) на PR устроен отдельным job.
+    if: github.event_name != 'pull_request'
+    runs-on: [self-hosted, lct]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+
+      - run: pip install --require-hashes -r requirements-dev.lock
+
+      - name: pip-audit (runtime lock)
+        run: pip-audit -r requirements.lock --require-hashes --disable-pip
+
+      - name: Trivy fs (уязвимости, секреты, misconfig)
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          scan-type: fs
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          skip-dirs: tests,loadtest,_spec,docs
+          trivyignores: .trivyignore
+
+  gitleaks:
+    name: gitleaks (история git)
+    runs-on: [self-hosted, lct]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Полная история: gitleaks ищет секреты в коммитах, не только в HEAD. На PR
+          # диапазон сканирования всё равно сужается ниже до origin/main..HEAD —
+          # fetch-depth: 0 здесь просто гарантирует, что origin/main есть локально.
+          fetch-depth: 0
+
+      - name: Диапазон сканирования
+        id: range
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "log_opts=origin/${{ github.base_ref }}..HEAD" >> "$GITHUB_OUTPUT"
+          else
+            echo "log_opts=--all" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: gitleaks detect
+        run: |
+          docker run --rm -v "$(pwd):/repo:ro" \
+            ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
+            detect --source=/repo --config=/repo/.gitleaks.toml \
+            --log-opts="${{ steps.range.outputs.log_opts }}" \
+            --redact -v

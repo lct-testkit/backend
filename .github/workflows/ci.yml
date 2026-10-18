@@ -20,7 +20,8 @@ permissions:
 env:
   PYTHON_VERSION: "3.12"
   UV_VERSION: "0.12.18"
-  HADOLINT_IMAGE: hadolint/hadolint:v2.12.0
+  # B6-15: закреплён по digest, не только тегом — тег можно переопубликовать поверх.
+  HADOLINT_IMAGE: hadolint/hadolint:v2.12.0@sha256:30a8fd2e785ab6176eed53f74769e04f125afb2f74a6c52aef7d463583b6d45e
   # import-linter читает .importlinter (кириллица в названиях контрактов).
   PYTHONUTF8: "1"
   PYTHONPATH: .
@@ -115,6 +116,17 @@ jobs:
       # Settings требует app_profile/redis_url/keycloak_*/s3_*/… (get_settings()
       # вызывается ещё до подключения к БД, в т.ч. из migrations/env.py).
       - run: cp .env.example .env
+
+      # B6-15: .env.example несёт демо-секреты нарочно (значения для разработки, не для
+      # запуска в prod) — preflight (B6-8) обязан отвергать их кодом 1. Если этот шаг
+      # когда-нибудь увидит код 0, значит либо preflight разучился ловить демо-значения,
+      # либо .env.example тихо подменили на что-то похожее на настоящий секрет.
+      - name: preflight отвергает демо-секреты .env.example
+        run: |
+          if python -m app.core.preflight --env-file .env; then
+            echo "preflight должен был завершиться кодом 1 на демо-секретах .env.example" >&2
+            exit 1
+          fi
 
       - name: Миграции — одна голова
         run: |

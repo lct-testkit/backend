@@ -1,0 +1,35 @@
+# B6-15: конфиг для gitleaks (`.github/workflows/security-weekly.yml`, история git
+# целиком, `--log-opts=--all`). Первый прогон по всей истории (2026-10-18, 230
+# коммитов, 24 ветки включая remotes/origin/dependabot/*) нашёл 14 находок — ни одна не
+# настоящий секрет: тестовый Fernet-ключ `TEST_FIELD_ENCRYPTION_KEY` (`tests/conftest.py`,
+# уже задокументирован там как «не настоящий секрет») и заглушки вида
+# `strong-signature-secret-0123456789`/`strong-secret-key-0123456789` в
+# tests/test_preflight.py, test_integration_env.py, test_cookies_secure.py,
+# test_config_prod_guard.py. Будь среди находок настоящий секрет — его бы перевыпустили
+# (ротация + отзыв), а не внесли сюда: это список для уже проверенных тестовых значений,
+# не способ спрятать утечку.
+#
+# Разрешены только эти ТОЧНЫЕ значения по регулярным выражениям — не пути и не каталоги
+# (`tests/` целиком не в исключениях: реальный секрет, случайно попавший туда, обязан
+# красниться так же, как в app/).
+title = "RTK CRM — allowlist для известных тестовых значений"
+
+[extend]
+# Берёт стандартный набор правил gitleaks (gitleaks.toml из релиза) и добавляет наш allowlist.
+useDefault = true
+
+[allowlist]
+description = "Задокументированные тестовые значения, не секреты"
+regexes = [
+  # tests/conftest.py: TEST_FIELD_ENCRYPTION_KEY (валидный формат Fernet-ключа для
+  # зашифрованного пути EncryptedText/EncryptedDate, не ключ ни одного окружения).
+  '''OnkqcWC6Wn4JMjNYnJiR2i9orwEMgF34hfQLXOClMBg=''',
+  # tests/test_preflight.py: такой же по формату тестовый ключ для проверки
+  # AUDIT_HMAC_KEY/SETTINGS_ENCRYPTION_KEY/FIELD_ENCRYPTION_KEY в prod-профиле.
+  '''5GhIE6Z0qz3m1C8n9F2k7V4bN6yQpR1sT8uW0xY2zA4=''',
+  # tests/test_integration_env.py, test_cookies_secure.py, test_config_prod_guard.py:
+  # заглушки для SIGNATURE_SERVER_SECRET и S3_SECRET_KEY — имя значения само говорит,
+  # что это не настоящий секрет.
+  '''Zx9-strong-signature-secret-0123456789''',
+  '''S3-strong-secret-key-0123456789''',
+]

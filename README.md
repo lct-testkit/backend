@@ -489,6 +489,22 @@ locust -f loadtest/locustfile_transition.py --headless -u 50 -r 25 -t 60s --host
 
 Образ собирается multi-stage из `requirements.lock` (`pip --require-hashes`), базовый образ закреплён по digest, в рантайме нет pip/setuptools; `.trivyignore` пуст намеренно. Настройки репозитория (защита `main`, обязательные проверки) — [`docs/REPO-SETTINGS.md`](https://github.com/lct-testkit/deploy/blob/main/docs/REPO-SETTINGS.md) в репозитории `deploy`.
 
+### Проверки безопасности в CI
+
+| Проверка | Где | Когда | Что делает |
+|---|---|---|---|
+| Права на маршрутах | `ci.yml` (job `lint`, через `pytest`), `tests/test_route_permissions.py` | каждый PR и push в `main` | Обходит живое дерево зависимостей FastAPI (`route.dependant`) для каждого закрытого маршрута: без `require_permission` (или функции из `EXPLICIT_PERMISSION_DEPENDENCIES`) и без записи в `ANY_CONSENTED_USER` с причиной — тест красный. `CurrentUser`/`ConsentedUser` пропускают любую роль, и без этого теста новый маршрут без права молча открывался бы любому вошедшему пользователю |
+| `pip-audit` + Trivy fs (вручную/на push) | `ci.yml`, job `security` | каждый PR и push в `main` | `pip-audit` по `requirements.lock` с проверкой хэшей (только runtime-зависимости — то, что попадает в образ); Trivy fs — уязвимости, секреты и misconfig в рабочем дереве (HIGH/CRITICAL, без игнора неисправленных), пропускает `tests,loadtest,_spec,docs` (поэтому историю и тестовые секреты проверяет gitleaks, не Trivy) |
+| `pip-audit` + Trivy fs (по расписанию) | `security-weekly.yml` | по понедельникам 06:00 UTC, вручную (`workflow_dispatch`) | Та же проверка независимо от активности в репозитории — новая CVE в уже зафиксированной зависимости иначе не краснила бы, пока кто-то не запушит |
+| gitleaks | `security-weekly.yml`, `.gitleaks.toml` | каждый PR (диапазон `origin/<base>..HEAD`), по расписанию и вручную (вся история, `--log-opts=--all`) | Секреты в ИСТОРИИ git, не только в рабочем дереве — Trivy secret (выше) историю не смотрит. `.gitleaks.toml` разрешает по точным регулярным выражениям только задокументированные тестовые значения (см. комментарий в файле), не каталоги целиком: секрет, случайно попавший в `tests/`, красится так же, как в `app/` |
+| `hadolint` | `ci.yml`, job `security` | каждый PR и push в `main` | Lint `Dockerfile`, порог — предупреждение; образ закреплён тегом и digest (`HADOLINT_IMAGE`) |
+| preflight против демо-секретов | `ci.yml`, job `test` | каждый PR и push в `main` | `python -m app.core.preflight --env-file .env` (`.env` — копия `.env.example`) обязан вернуть код 1: `.env.example` нарочно несёт учебные значения, и это проверяет, что preflight (B6-8) их действительно отвергает, а не разучился |
+| bandit (через ruff `S`) | `ci.yml`, job `lint` (`ruff check`) | каждый PR и push в `main` | Правила `S` набора ruff (`pyproject.toml`) — отдельный bandit не запускается: те же правила, дубли находок без пользы (`S105`/`S106` отключены — ложные срабатывания на коды ошибок вида `CRM-1001`, секреты ловят Trivy/gitleaks; `S110` отключён, обоснование там же) |
+
+Заглушить находку Trivy со сроком — строка в `.trivyignore` (сейчас пуст намеренно) в формате `CVE-XXXX-YYYYY exp:2026-12-31` (без `exp:` считается постоянным исключением — для разового решения срок обязателен). Заглушить находку gitleaks — только через `.gitleaks.toml` (`[allowlist].regexes`, точное значение, не каталог) и только когда это проверенное тестовое значение, а не потому что секрет "неудобно" менять; настоящий секрет перевыпускается, а не вносится в исключения.
+
+DAST (ZAP/nuclei) и проверка заголовков в `deploy/scripts/smoke.sh` на живом стенде — не в этом репозитории: ночной e2e уже поднимает стек (`deploy/.github/workflows/e2e.yml`, cron `30 2 * * *`), добавление ZAP baseline туда — задача спринта D. Отдельный bandit и semgrep сознательно не добавлены (см. таблицу выше и раздел «Варианты и решение» задачи B6-15 в истории спринта) — первый дублирует правила ruff `S`, второй тянет правила из сети и шумит на русскоязычном коде.
+
 ## Безопасность
 
 Честная сверка «мера → где в коде → что осталось» (приказ ФСТЭК № 117, 152-ФЗ) —
