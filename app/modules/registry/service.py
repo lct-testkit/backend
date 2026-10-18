@@ -14,7 +14,7 @@ import time
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import rate_limit
@@ -25,7 +25,7 @@ from app.core.security import Principal
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
 from app.modules.catalog.models import Organization
-from app.modules.catalog.service import organization_in_scope
+from app.modules.catalog.service import organization_scope_clause
 from app.modules.catalog.validators import validate_requisite
 from app.modules.files.models import File, FileStatus
 from app.modules.registry.models import (
@@ -109,31 +109,59 @@ class OrgLookupService:
         (ЕГРЮЛ) несут публичные сведения — элемент остаётся, только `organization_id` не
         заполняется для организаций вне скоупа."""
         inns = {item.inn for item in items if item.inn}
-        existing_by_inn: dict[str, Organization] = {}
+        internal_ids = {
+            uuid.UUID(item.source_id)
+            for item in items
+            if item.provider == "internal_cache" and item.source_id
+        }
+        conditions = []
         if inns:
-            rows = (
+            conditions.append(Organization.inn.in_(inns))
+        if internal_ids:
+            conditions.append(Organization.id.in_(internal_ids))
+        if not conditions:
+            return items
+
+        # Одним запросом — организации всех подсказок, одним же — какие из них в скоупе
+        # вызывающего: проверка скоупа по одной (`organization_in_scope`) давала запрос на
+        # каждую подсказку, а автоподстановка вызывается на каждое нажатие клавиши.
+        orgs = (
+            (
+                await self._session.execute(
+                    select(Organization).where(Organization.deleted_at.is_(None), or_(*conditions))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        scope_clause = await organization_scope_clause(self._session, principal)
+        if scope_clause is None:
+            visible_ids = {org.id for org in orgs}
+        else:
+            visible_ids = set(
                 (
                     await self._session.execute(
-                        select(Organization).where(
-                            Organization.inn.in_(inns), Organization.deleted_at.is_(None)
+                        select(Organization.id).where(
+                            Organization.id.in_([org.id for org in orgs]), scope_clause
                         )
                     )
                 )
                 .scalars()
                 .all()
             )
-            existing_by_inn = {row.inn: row for row in rows if row.inn}
+        by_id = {org.id: org for org in orgs}
+        by_inn = {org.inn: org for org in orgs if org.inn}
 
         kept: list[OrgSuggestion] = []
         for item in items:
             if item.provider == "internal_cache" and item.source_id:
-                org = await self._session.get(Organization, uuid.UUID(item.source_id))
-                if org is None or not await organization_in_scope(self._session, principal, org):
+                org = by_id.get(uuid.UUID(item.source_id))
+                if org is None or org.id not in visible_ids:
                     continue
                 item.organization_id = org.id
             else:
-                org = existing_by_inn.get(item.inn)
-                if org is not None and await organization_in_scope(self._session, principal, org):
+                org = by_inn.get(item.inn)
+                if org is not None and org.id in visible_ids:
                     item.organization_id = org.id
             kept.append(item)
         return kept

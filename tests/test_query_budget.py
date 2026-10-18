@@ -212,3 +212,43 @@ class TestWebhookFanOutQueryBudget:
             f"{warm_first} запросов на публикацию с прогретым кэшем, {warm_second} на "
             "следующую — fan_out, похоже, делает SELECT подписок на каждый вызов."
         )
+
+
+class TestOrgSuggestQueryBudget:
+    """B4-11: `GET /api/org-lookup/suggest` проверяет скоуп каждой подсказки. Число запросов не
+    должно расти с числом подсказок: автоподстановка вызывается на каждое нажатие клавиши."""
+
+    @staticmethod
+    async def _seed_orgs(owner_id: uuid.UUID, prefix: str, start: int, count: int) -> None:
+        from app.core.db import session_scope
+        from app.modules.catalog.models import Organization
+
+        async with session_scope() as session:
+            for index in range(start, start + count):
+                session.add(
+                    Organization(
+                        name=f"Вуз подсказки {prefix}{index}",
+                        org_type="university",
+                        inn=f"{prefix}{index:04d}",
+                        owner_id=owner_id,
+                    )
+                )
+            await session.flush()
+
+    def test_queries_do_not_grow_with_the_number_of_suggestions(self, client) -> None:
+        kam = run(client, _make_user, "KAM")
+        authenticate(client, kam)
+        prefix = str(uuid.uuid4().int % 10**6).zfill(6)
+        path = f"/api/org-lookup/suggest?q={prefix}&limit=20"
+
+        run(client, self._seed_orgs, kam.id, prefix, 0, 2)
+        _count_queries(client, path)  # прогрев кэшей (права, настройки)
+        small = _count_queries(client, path)
+
+        run(client, self._seed_orgs, kam.id, prefix, 2, 12)
+        large = _count_queries(client, path)
+
+        assert small > 0, "счётчик запросов не сработал — тест ничего не проверяет"
+        assert (
+            large <= small + TOLERANCE
+        ), f"{small} запросов на 2 подсказки и {large} на 14 — вероятен N+1 при проверке скоупа"
