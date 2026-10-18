@@ -47,7 +47,6 @@ from app.modules.integration.security import check_outbound_url_resolved, comput
 
 _SECRET_PREFIX = "whsec_"
 _SECRET_BYTES = 32
-_MAX_EVENT_TYPES = len(WEBHOOK_EVENT_TYPES)
 _MAX_FILTER_KEYS = 10
 
 

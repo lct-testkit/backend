@@ -291,10 +291,13 @@ class WebhookSubscription(UuidPkMixin, TimestampMixin, Base):
     релиза (критерий жюри «интеграция в любые Enterprise-системы» — раньше исходящие события
     уходили только в `lms`/`bitrix24`, зашитые в код `integration.tasks._KNOWN_TARGETS`).
 
-    `filters` сужает событие по значениям его нагрузки (сейчас — `deal_type`/`workflow_code`,
-    см. `integration.webhooks._filters_match`): пустой словарь — подписка получает любое событие
-    из `event_types`. `secret_encrypted` — конверт `admin.setting_crypto.encrypt_value` (секрет
-    показывается администратору только один раз, при создании и ротации)."""
+    `filters` сужает событие по значениям его нагрузки — любой ключ, который нагрузка
+    действительно несёт (`deal_type` у DEAL_CREATED/DEAL_STATUS_CHANGED, `status_code` у
+    DEAL_STATUS_CHANGED, `entity_type` у DOCUMENT_SIGNED; см. `integration.webhooks.
+    _filters_match`): ключа в нагрузке нет — событие не подходит. Пустой словарь — подписка
+    получает любое событие из `event_types`. `secret_encrypted` — конверт
+    `admin.setting_crypto.encrypt_value` (секрет показывается администратору только один раз,
+    при создании и ротации)."""
 
     __tablename__ = "webhook_subscriptions"
     __table_args__ = (Index("ix_webhook_subscriptions_active", "is_active"),)
