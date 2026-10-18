@@ -443,7 +443,10 @@ async def set_invite_password(
     # решение о доверии, не автоматическая выдумка; оно видно в аудите (`source=invite_link`).
     await keycloak_client.update_user(user.keycloak_id, {"emailVerified": True})
 
-    invite.used_at = dt.datetime.now(dt.UTC)
+    # Пароль задан — все остальные непогашенные ссылки этой учётной записи (приглашение рядом со
+    # ссылкой сброса, предыдущая ссылка) гасим вместе с использованной: иначе забытая или
+    # утёкшая вторая ссылка позволила бы заново сменить уже заданный пароль до конца её срока.
+    await IdentityService(session).mark_invites_used(user.id)
     user.must_change_password = False
     user.password_changed_at = dt.datetime.now(dt.UTC)
     await session.flush()

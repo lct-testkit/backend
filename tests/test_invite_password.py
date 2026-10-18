@@ -196,6 +196,30 @@ class TestSetInvitePassword:
 
         assert response.status_code == 200, response.text
 
+    def test_setting_the_password_burns_the_other_pending_links_of_the_user(
+        self, client, monkeypatch
+    ):
+        """Приглашение и ссылка сброса живут независимо: вторая, неиспользованная, после смены
+        пароля по первой не должна позволять сменить его снова."""
+        _mock_keycloak(monkeypatch)
+        user = _with_keycloak_user(client)
+        invite_token, reset_token = "h" * 32, "i" * 32
+        run(
+            client,
+            functools.partial(_insert_invite, user_id=user.id, token=invite_token),
+        )
+        run(
+            client,
+            functools.partial(_insert_invite, user_id=user.id, token=reset_token, purpose="reset"),
+        )
+
+        first = client.post(f"/api/auth/invite/{invite_token}/password", json=_BODY)
+        second = client.post(f"/api/auth/invite/{reset_token}/password", json=_BODY)
+
+        assert first.status_code == 200, first.text
+        assert second.status_code == 404, second.text
+        assert run(client, _invite_row, reset_token).used_at is not None
+
     def test_two_concurrent_requests_on_the_same_token_give_exactly_one_success(
         self, client, monkeypatch
     ):
