@@ -654,14 +654,14 @@ _NOT_PDN: dict[tuple[str, str], str] = {
     ("feature_flags", "description"): "описание флага функциональности",
 }
 
-# `contacts$`/`summary`/`causes`/`harm`/`measures`/`_reference$` добавлены после находки:
+# `contacts$`/`investigation_summary`/`causes`/`harm`/`measures`/`_reference$` — после находки:
 # `organization_licenses.responsible_contacts` (ФИО, телефоны и email сотрудников вуза одной
 # строкой) и свободный текст `security_incidents` долго оставались в дампе, потому что имена этих
 # колонок не совпадали ни с одним из шаблонов выше.
 _PII_NAME_PATTERN = re.compile(
     r"email|phone|name|body|payload|snils|passport|address|^ip$|user_agent|evidence|"
     r"raw_payload|row_data|snapshot|reason|comment|title|description|"
-    r"contacts$|summary|^causes$|^harm$|^measures$|_reference$",
+    r"contacts$|investigation_summary|^causes$|^harm$|^measures$|_reference$",
     re.IGNORECASE,
 )
 _TEXT_TYPES = {"VARCHAR", "TEXT", "JSONB", "JSON", "INET"}
