@@ -20481,6 +20481,7 @@
     },
     "/api/access-requests/{request_id}/cancel": {
       "post": {
+        "description": "Только сам инициатор запроса и только пока он ещё `pending` — объектная проверка, не право роли. Решённый (одобренный/отклонённый) или уже просроченный запрос отменить нельзя. Роль: organization:read (сама проверка — объектная).",
         "operationId": "cancel_access_request_api_access_requests__request_id__cancel_post",
         "parameters": [
           {
