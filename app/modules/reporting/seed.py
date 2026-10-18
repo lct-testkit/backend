@@ -14,10 +14,11 @@ B1-10 — настоящая реализация вместо честной з
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from sqlalchemy import delete, select, update
+from sqlalchemy.engine import CursorResult, Result
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -236,6 +237,15 @@ async def seed_report_templates(session: AsyncSession) -> int:
 # прогона `reports.mjs`, остаётся как есть).
 
 
+def _rows_affected(result: Result[Any]) -> int:
+    """Число строк, затронутых DELETE/UPDATE. `AsyncSession.execute` типизирован как
+    `Result[Any]`, а у DML это `CursorResult` с `rowcount`. Те же `result.rowcount or 0` в
+    `worker/main.py`, `crm/service.py`, `signing/service.py` обходятся без приведения лишь
+    потому, что эти модули в списке `ignore_errors` mypy (`pyproject.toml`); здесь модуль
+    проверяется строго."""
+    return cast("CursorResult[Any]", result).rowcount or 0
+
+
 async def seed_demo_report_history(session: AsyncSession) -> int:
     """Идемпотентная уборка, не создание: удаляет пустышки `completed` без файла, заведённые
     прежней версией этой функции (маркер `params._seed == "demo"`). Повторный запуск на базе,
@@ -247,14 +257,7 @@ async def seed_demo_report_history(session: AsyncSession) -> int:
         ReportJob.file_id.is_(None),
         ReportJob.status == ReportJobStatus.COMPLETED.value,
     )
-    result = await session.execute(stmt)
-    # `CursorResult.rowcount` существует у результата DML (DELETE/UPDATE) всегда — mypy здесь
-    # (и в этом же файле не из-за какой-то особенности `ReportJob`: минимальный пример с любой
-    # другой моделью воспроизводит то же самое) резолвит общий `Result[Any]`, у которого атрибута
-    # нет только по сигнатуре перегрузки `AsyncSession.execute`. Тот же `.rowcount or 0` без
-    # игнора уже применяют `app/worker/main.py`, `app/modules/crm/service.py`, `app/modules/
-    # signing/{tasks,service}.py` — там это по какой-то причине не ловится самим mypy.
-    removed = result.rowcount or 0  # type: ignore[attr-defined]
+    removed = _rows_affected(await session.execute(stmt))
     if removed:
         await session.flush()
     logger.info("demo_report_history_stubs_removed", removed=removed)
@@ -289,7 +292,7 @@ async def remediate_phantom_admin(session: AsyncSession) -> int:
     )
     phantom.status = UserStatus.TERMINATED.value
     await session.flush()
-    count = moved.rowcount or 0  # type: ignore[attr-defined]
+    count = _rows_affected(moved)
     logger.info(
         "demo_phantom_admin_remediated", phantom_id=str(phantom.id), report_jobs_moved=count
     )
