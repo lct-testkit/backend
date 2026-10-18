@@ -95,8 +95,8 @@ def make_licenses_multisheet() -> bytes:
 
     draft = workbook.add_sheet("Черновик")
     draft.write(0, 0, "Не готово")
-    # `xlwt` помечает лист скрытым через сам `Sheet`, а не через `Workbook` — см. `visibility`.
-    draft.set_visibility(1)  # 1 = hidden (как в xlrd: 0 видимый, 1 скрытый, 2 очень скрытый)
+    # 0 = видимый, 1 = скрытый, 2 = очень скрытый (как читает `xlrd.Sheet.visibility`).
+    draft.visibility = 1
 
     return _save(workbook)
 
