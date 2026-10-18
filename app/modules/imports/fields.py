@@ -129,7 +129,11 @@ LICENSE_FIELDS: tuple[FieldSpec, ...] = (
     FieldSpec("organization_name", "Название ВУЗа", "organization_name", required=True),
     FieldSpec("vendor", "Вендор", "text", required=True, max_length=255),
     FieldSpec("product_name", "ПО", "text", required=True, max_length=255),
-    FieldSpec("contract_number", "Номер договора", "text", required=True, max_length=128),
+    # B3-1: номер договора необязателен — составной ключ (вуз, вендор, ПО, номер договора,
+    # `catalog.license_keys.LicenseKey`) допускает пустой номер; `required=True` было здесь до
+    # перехода на составной ключ и противоречило и колонке БД (`contract_number` nullable с
+    # миграции 0041), и `ImportService._dry_run` (ключевое поле лицензии — вуз, не номер).
+    FieldSpec("contract_number", "Номер договора", "text", max_length=128),
     FieldSpec("license_signed_at", "Подписание лицензии", "license_signed"),
     FieldSpec("license_valid_year", "Срок действия лицензии (год)", "license_term"),
     FieldSpec("transfer_status", "Статус по передаче", "transfer_status"),

@@ -6,11 +6,12 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Path, Query, status
+from fastapi import APIRouter, Depends, Path, Query, Response, status
 from sqlalchemy import select, text
 
 from app.core.config import get_settings
 from app.core.deps import DbSession, Pagination, require_permission
+from app.core.errors import AppError, ErrorCode
 from app.core.masking import mask_mapping
 from app.core.pagination import Page, keyset_after, keyset_before
 from app.core.permissions import Permission
@@ -42,6 +43,12 @@ from app.modules.imports.schemas import (
     SheetOut,
 )
 from app.modules.imports.service import ImportService, entry_to_issue_dict, issue_text
+from app.modules.imports.templates import all_builtin_presets, build_template
+
+_TEMPLATE_CONTENT_TYPES = {
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "xls": "application/vnd.ms-excel",
+}
 
 import_jobs_router = APIRouter(prefix="/imports", tags=["imports"])
 import_presets_router = APIRouter(prefix="/import-presets", tags=["imports"])
@@ -105,6 +112,33 @@ async def list_import_entity_types(_: ImportRunPerm) -> ImportEntityTypeListResp
             )
             for code, label in ENTITY_TYPE_LABELS.items()
         ]
+    )
+
+
+@import_jobs_router.get(
+    "/templates/{entity_type}",
+    summary="Шаблон файла для скачивания",
+    description=(
+        "B3-9: заголовки, две учебные строки и лист «Инструкция» (обязательность, допустимые "
+        "значения). `format=xlsx` — с выпадающими списками и текстовым форматом номера договора; "
+        "`format=xls` — то же без списков (формат BIFF их не поддерживает). Роль: HEAD, ADMIN."
+    ),
+)
+async def download_import_template(
+    _: ImportRunPerm,
+    entity_type: Annotated[str, Path()],
+    format: Annotated[str, Query()] = "xlsx",  # noqa: A002 — имя параметра из контракта задачи
+) -> Response:
+    if entity_type not in ENTITY_TYPE_LABELS:
+        raise AppError(ErrorCode.VALIDATION, f"Неизвестный тип сущности: {entity_type!r}")
+    if format not in _TEMPLATE_CONTENT_TYPES:
+        raise AppError(ErrorCode.VALIDATION, f"Неизвестный формат шаблона: {format!r}")
+    content = build_template(entity_type, format)
+    filename = f"{entity_type}-template.{format}"
+    return Response(
+        content=content,
+        media_type=_TEMPLATE_CONTENT_TYPES[format],
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -398,7 +432,23 @@ async def list_import_presets(
         stmt = stmt.where(keyset_before(ImportPreset.created_at, ImportPreset.id, cursor))
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
     built: Page = Page.build(rows, limit=page.limit, serializer=ImportPresetOut.model_validate)
-    return ImportPresetListResponse(items=built.items, next_cursor=built.next_cursor)
+    items = built.items
+    if cursor is None:
+        # B3-9: встроенные пресеты («Лицензии: 10 колонок ТЗ» и т.п.) не хранятся в БД (нет `id`/
+        # `created_at`), поэтому не участвуют в keyset-пагинации — показываем их только на первой
+        # странице, перед пользовательскими.
+        builtin = [
+            ImportPresetOut(
+                name=p.name,
+                entity_type=p.entity_type,
+                mapping=p.mapping,
+                options=p.options,
+                builtin=True,
+            )
+            for p in all_builtin_presets(entity_type)
+        ]
+        items = [*builtin, *items]
+    return ImportPresetListResponse(items=items, next_cursor=built.next_cursor)
 
 
 @import_presets_router.delete(

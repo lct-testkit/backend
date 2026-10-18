@@ -275,8 +275,10 @@ class TestLicenseFields:
         assert natural_key_for("license") == "contract_number"
 
     def test_required_fields_are_the_identifying_ones(self) -> None:
+        # B3-1: номер договора необязателен (составной ключ вуз-вендор-ПО-договор допускает
+        # пустой номер, как и колонка БД, nullable с миграции 0041) — не входит в required.
         required = {f.target for f in LICENSE_FIELDS if f.required}
-        assert required == {"organization_name", "vendor", "product_name", "contract_number"}
+        assert required == {"organization_name", "vendor", "product_name"}
 
     def test_transfer_status_accepts_known_codes(self) -> None:
         spec = next(f for f in LICENSE_FIELDS if f.target == "transfer_status")

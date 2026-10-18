@@ -420,7 +420,9 @@ class ImportService:
         # dop.md §4.12, фаза 3: «второй импорт того же реестра не требует
         # ручной работы» — точное совпадение заголовка с уже сохранённым
         # пресетом важнее нечёткого угадывания по словарю синонимов.
-        preset = await self._latest_preset(job.entity_type)
+        # B3-9: только пресет АВТОРА этого задания — иначе один пользователь молча получал
+        # маппинг, который сохранил кто-то другой для того же типа сущности.
+        preset = await self._latest_preset(job.entity_type, created_by=job.initiated_by)
         applied_preset: str | None = None
         if preset is not None:
             allowed = {f.target for f in fields}
@@ -441,13 +443,13 @@ class ImportService:
             suggested_header_row=suggested_header_row,
         )
 
-    async def _latest_preset(self, entity_type: str) -> ImportPreset | None:
-        return await self._session.scalar(
-            select(ImportPreset)
-            .where(ImportPreset.entity_type == entity_type)
-            .order_by(ImportPreset.created_at.desc())
-            .limit(1)
-        )
+    async def _latest_preset(
+        self, entity_type: str, *, created_by: uuid.UUID | None = None
+    ) -> ImportPreset | None:
+        stmt = select(ImportPreset).where(ImportPreset.entity_type == entity_type)
+        if created_by is not None:
+            stmt = stmt.where(ImportPreset.created_by == created_by)
+        return await self._session.scalar(stmt.order_by(ImportPreset.created_at.desc()).limit(1))
 
     async def get_preset_or_404(self, preset_id: uuid.UUID) -> ImportPreset:
         preset = await self._session.get(ImportPreset, preset_id)
@@ -660,12 +662,14 @@ class ImportService:
             row_issues += [
                 RowIssue(code="other", severity="warning", message=w) for w in row_warnings
             ]
-            key_value = row_data.get(natural_key)
-            # B3-1: для лицензии дедуп внутри файла и поиск «уже существует»
-            # идут по составному ключу (см. `license_existing` выше), а не
-            # по значению одного `natural_key` (`contract_number`) — ключ
-            # для dict/set ниже подменяется, само обязательное поле
-            # `contract_number` продолжает проверяться как раньше.
+            # B3-1: номер договора у лицензии — необязательное поле (составной ключ вуз-вендор-ПО-
+            # договор, `catalog.license_keys.LicenseKey`, допускает пустой номер). «Ключевое поле»
+            # для определения пустой/заполненной строки у лицензии — вуз (`organization_id`), а не
+            # `natural_key` (`contract_number`, остаётся как ключ дедупликации только для
+            # organization/product, у которых он действительно обязателен).
+            key_value: object = (
+                row_data.get("organization_id") if is_license else row_data.get(natural_key)
+            )
             dedupe_key: object = key_value
             license_key_tuple: tuple[uuid.UUID, str, str, str] | None = None
             if is_license and row_data.get("organization_id"):
@@ -679,16 +683,19 @@ class ImportService:
 
             existing_id: uuid.UUID | None = None
             if not key_value:
-                msg = f"Не удалось определить ключевое поле «{key_spec.label}»"
-                notes.append(msg)
-                row_issues.append(
-                    RowIssue(
-                        code="required_empty",
-                        field=natural_key,
-                        message=msg,
-                        hint="Заполните ячейку",
+                # У лицензии это не случится без своей причины (`org_not_found`/`required_empty`
+                # уже даны `_extract_row`-ом выше) — отдельная ошибка не дублируется.
+                if not is_license:
+                    msg = f"Не удалось определить ключевое поле «{key_spec.label}»"
+                    notes.append(msg)
+                    row_issues.append(
+                        RowIssue(
+                            code="required_empty",
+                            field=natural_key,
+                            message=msg,
+                            hint="Заполните ячейку",
+                        )
                     )
-                )
                 status = ImportRowStatus.ERROR.value
             else:
                 status = ImportRowStatus.OK.value
