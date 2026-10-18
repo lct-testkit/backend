@@ -149,6 +149,9 @@ class AuditAction(StrEnum):
     STATUS_MAPPING_COMPLETED = "STATUS_MAPPING_COMPLETED"
     # Перенос сделок остановился: часть сделок перенести нельзя, статус не архивирован.
     STATUS_MAPPING_FAILED = "STATUS_MAPPING_FAILED"
+    # B2-3: массовый перенос открытых сделок с одной воронки на другую (CLI `python -m app.
+    # modules.workflow.migrate_deals`) — одна запись на партию (откуда, куда, число сделок).
+    WORKFLOW_DEALS_MIGRATED = "WORKFLOW_DEALS_MIGRATED"
 
     # --- Организации и ЕГРЮЛ ---
     ORGANIZATION_CREATED = "ORGANIZATION_CREATED"
