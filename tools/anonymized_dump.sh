@@ -37,10 +37,11 @@ usage() {
                               deploy/keycloak/realm-crm.json, чтобы входить под ними сразу
                               после восстановления дампа (вход привязывает keycloak_id по
                               email при первом логине).
-  --encrypt-with-dev-key      НЕ РЕАЛИЗОВАНО (TODO, B6-13 п.7): по умолчанию профиль учащегося
-                              остаётся в дампе плайнтекстом (данные уже вымышленные после
-                              anonymize.sql) — этот флаг сейчас завершает скрипт ошибкой,
-                              чтобы не создать ложное ощущение, что шифрование включено.
+  --encrypt-with-dev-key      не реализован: профиль учащегося всегда остаётся в дампе обычными
+                              значениями (они уже вымышленные после anonymize.sql). Флаг
+                              принимается, но сразу завершает скрипт с кодом 2 и пояснением —
+                              молча проигнорировать его нельзя: создалось бы ложное ощущение,
+                              что шифрование включено.
 EOF
 }
 
@@ -68,6 +69,12 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+if [ "$encrypt_with_dev_key" -eq 1 ]; then
+    echo "anonymized_dump.sh: --encrypt-with-dev-key не реализован — дамп НЕ создан." >&2
+    echo "  Профиль учащегося остаётся в дампе обычными значениями (после anonymize.sql они" >&2
+    echo "  вымышленные). Повторите запуск без этого флага." >&2
+    exit 2
+fi
 if [ -z "$backup" ]; then
     echo "anonymized_dump.sh: --backup обязателен" >&2
     usage >&2
@@ -75,10 +82,6 @@ if [ -z "$backup" ]; then
 fi
 if [ ! -r "$backup" ]; then
     echo "anonymized_dump.sh: не удаётся прочитать бэкап: $backup" >&2
-    exit 2
-fi
-if [ "$encrypt_with_dev_key" -eq 1 ]; then
-    echo "anonymized_dump.sh: --encrypt-with-dev-key пока не реализован (B6-13 п.7, TODO)" >&2
     exit 2
 fi
 if [ -z "$out" ]; then
@@ -101,7 +104,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "anonymized_dump.sh: временная база ${tmp_db}" >&2
-"${PSQL[@]}" -d postgres -c "CREATE DATABASE ${tmp_db} OWNER ${user};"
+"${PSQL[@]}" -d postgres -c "CREATE DATABASE ${tmp_db} OWNER \"${user}\";"
 
 echo "anonymized_dump.sh: восстановление ${backup}" >&2
 pg_restore -h "$host" -p "$port" -U "$user" -d "$tmp_db" --no-owner --no-privileges "$backup"
@@ -109,18 +112,27 @@ pg_restore -h "$host" -p "$port" -U "$user" -d "$tmp_db" --no-owner --no-privile
 echo "anonymized_dump.sh: обезличивание" >&2
 "${PSQL[@]}" -d "$tmp_db" -v salt="$salt" -f "${SCRIPT_DIR}/anonymize.sql"
 
+echo "anonymized_dump.sh: pii_scan" >&2
+scan_status=0
+# Текст для скана — `pg_dump` в простом SQL-формате по уже обезличенной временной базе (COPY-блоки
+# со всеми значениями). Не `pg_restore -f -`: ему нужен файл архива, а не база, и вместе с `-d` он
+# отказывается работать ("options -d/--dbname and -f/--file cannot be used together") — скан
+# получал бы пустой ввод.
+pg_dump -h "$host" -p "$port" -U "$user" -d "$tmp_db" --no-owner --no-privileges \
+    | python3 "${SCRIPT_DIR}/pii_scan.py" || scan_status=$?
+if [ "$scan_status" -eq 3 ]; then
+    echo "anonymized_dump.sh: pii_scan нашёл возможные ПДн — дамп НЕ сохранён" >&2
+    exit 3
+elif [ "$scan_status" -ne 0 ]; then
+    echo "anonymized_dump.sh: скан не удалось выполнить (код ${scan_status}) — дамп НЕ сохранён" >&2
+    exit "$scan_status"
+fi
+
+# После скана: демо-email из realm-crm.json — публичные учебные адреса, не ПДн, но по формату они
+# не `@example.invalid` и скан их бы отверг.
 if [ "$link_demo_accounts" -eq 1 ]; then
     echo "anonymized_dump.sh: привязка демо-учёток (deploy/keycloak/realm-crm.json)" >&2
     "${PSQL[@]}" -d "$tmp_db" -f "${SCRIPT_DIR}/link_demo_accounts.sql"
-fi
-
-echo "anonymized_dump.sh: pii_scan" >&2
-scan_status=0
-pg_restore -h "$host" -p "$port" -U "$user" -d "$tmp_db" -f - --no-owner --no-privileges \
-    | python3 "${SCRIPT_DIR}/pii_scan.py" || scan_status=$?
-if [ "$scan_status" -ne 0 ]; then
-    echo "anonymized_dump.sh: pii_scan нашёл возможные ПДн — дамп НЕ сохранён" >&2
-    exit "$scan_status"
 fi
 
 echo "anonymized_dump.sh: выгрузка в ${out}" >&2

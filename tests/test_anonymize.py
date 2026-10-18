@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import uuid
@@ -417,6 +418,41 @@ class TestPiiScan:
 
         assert not any(findings.values())
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "+7 (999) 123-45-12",
+            "8 999 123 45 67",
+            "8-999-123-45-67",
+            "89991234567",
+            "тел.: +7.999.123.45.67, доб. 12",
+        ],
+    )
+    def test_the_usual_phone_spellings_are_flagged(self, text: str) -> None:
+        from tools.pii_scan import scan
+
+        findings = scan([f"контакт: {text}\n"], real_email_hashes=frozenset())
+
+        assert findings["phone"] == 1
+
+    def test_ids_hashes_and_neighbouring_tab_columns_are_not_phones(self) -> None:
+        """Скан идёт по тексту `pg_dump`: колонки разделены табуляцией, а UUID, sha256 и
+        длинные числовые идентификаторы встречаются на каждой странице. Раньше `8` на конце
+        UUID-группы или на конце колонки плюс цифры соседней давали сотни ложных находок."""
+        from tools.pii_scan import scan
+
+        lines = [
+            "al\t01a14e9e-fdd2-7000-96d8-8132493078dd\tcontract\t\\N\n",
+            "9588\t146731\t00100159731\t12\t34\t5678901234\n",
+            "sha\t" + "5" * 20 + "8" + "1234567890" + "ab" + "\n",
+            "2026-10-18 15:12:48.123456+00\t2026-10-18\n",
+            "1234567890123456789012\t81234567890123\n",
+        ]
+
+        findings = scan(lines, real_email_hashes=frozenset())
+
+        assert not any(findings.values()), dict(findings)
+
     def test_formatted_snils_is_flagged(self) -> None:
         from tools.pii_scan import scan
 
@@ -434,6 +470,43 @@ class TestPiiScan:
 
         assert main([str(dirty)]) == 3
         assert main([str(clean)]) == 0
+
+
+class TestDumpScript:
+    """`tools/anonymized_dump.sh` целиком (с настоящим `pg_restore`/`pg_dump`) здесь не гоняется —
+    ему нужен клиент PostgreSQL в PATH; проверяются два места, которые ломались молча."""
+
+    _SCRIPT = ROOT / "tools" / "anonymized_dump.sh"
+
+    def test_no_pg_restore_call_combines_dbname_and_file(self) -> None:
+        """`pg_restore -d БАЗА -f -` — «options -d/--dbname and -f/--file cannot be used
+        together»: шаг скана раньше получал пустой ввод, печатал «ok» и валил весь скрипт
+        сообщением про найденные ПДн, так что обезличенный дамп нельзя было получить вовсе."""
+        offenders = []
+        for number, line in enumerate(self._SCRIPT.read_text(encoding="utf-8").splitlines(), 1):
+            code = line.split("#", 1)[0]
+            if "pg_restore" in code and re.search(r"\s-d\s", code) and re.search(r"\s-f\s", code):
+                offenders.append(f"{number}: {line.strip()}")
+        assert offenders == [], offenders
+
+    @pytest.mark.skipif(
+        sys.platform == "win32" or not shutil.which("bash"), reason="нужен bash (не WSL-заглушка)"
+    )
+    def test_encrypt_with_dev_key_fails_early_with_a_clear_message(self) -> None:
+        """Флаг не реализован: падать надо сразу и понятно (код 2, что делать), не доходя ни до
+        БД, ни до проверки остальных аргументов — и не молча его проигнорировать."""
+        result = subprocess.run(  # noqa: S603
+            ["bash", str(self._SCRIPT), "--encrypt-with-dev-key"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            timeout=30,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+        assert result.returncode == 2
+        assert "--encrypt-with-dev-key не реализован" in result.stderr
+        assert "без этого флага" in result.stderr
 
 
 # --- Защита от расхождения со схемой (без БД) --------------------------------------
