@@ -1299,6 +1299,11 @@ class ImportService:
     # -- фаза 5: применение -------------------------------------------------
 
     async def start_apply(self, job: ImportJob) -> ImportJob:
+        # Строка задания под замком до конца транзакции: два одновременных `POST /apply` (двойной
+        # клик, повтор клиента) не должны оба пройти проверку статуса ниже. Второй ждёт здесь, потом
+        # видит `applying`/`completed` и получает отказ, а не повторное «начато»/«применено» в
+        # журнале. Замок снимается коммитом запроса — после него задание уже в новом статусе.
+        await self._session.refresh(job, with_for_update=True)
         if job.status != ImportJobStatus.VALIDATED.value:
             raise AppError(
                 ErrorCode.IMPORT_NOT_APPLICABLE,
@@ -1319,21 +1324,27 @@ class ImportService:
 
         # B3-12: небольшое задание (по умолчанию ≤500 строк — один батч) применяется сразу в этом
         # запросе, а не ждёт минутный тик `imports.tasks.sweep_import_jobs` или арк-воркера.
-        # Отдельная блокировка строки не нужна: до коммита этой транзакции (конец HTTP-запроса,
-        # `DbSession`) ни cron, ни арк-задача не увидят статус `applying` — гонки с ними нет.
-        # Партии всё равно идут через `apply_batch` (построчный SAVEPOINT на отравленную строку,
-        # как и у фоновой задачи).
+        # Cron/арк-задача до коммита этой транзакции (конец HTTP-запроса, `DbSession`) статус
+        # `applying` не увидят, а от второго `POST /apply` защищает замок строки выше. Партии идут
+        # через `apply_batch` (построчный SAVEPOINT на отравленную строку, как у фоновой задачи),
+        # но от имени пользователя запроса: актор остаётся тем, кто нажал «применить», а не
+        # инициатором задания (им он становится только в фоновой задаче, где запроса нет).
         settings = get_settings()
         inline_limit = settings.import_inline_max_rows
         if inline_limit and job.total_rows <= inline_limit:
-            while await self.apply_batch(job, batch_size=settings.import_batch_size):
+            while await self.apply_batch(
+                job, batch_size=settings.import_batch_size, as_initiator=False
+            ):
                 pass
             await self.finalize_apply_if_done(job)
         return job
 
-    async def apply_batch(self, job: ImportJob, *, batch_size: int) -> int:
+    async def apply_batch(
+        self, job: ImportJob, *, batch_size: int, as_initiator: bool = True
+    ) -> int:
         """Обрабатывает одну партию — вызывается `imports.tasks.sweep_import_jobs`.
-        Возвращает число обработанных строк (0 — партия исчерпана)."""
+        Возвращает число обработанных строк (0 — партия исчерпана). `as_initiator=False` — вызов
+        из запроса (`start_apply` инлайн): актор журнала не подменяется на инициатора задания."""
         pending = (
             (
                 await self._session.execute(
@@ -1353,7 +1364,8 @@ class ImportService:
         if not pending:
             return 0
 
-        await self._set_actor(job)
+        if as_initiator:
+            await self._set_actor(job)
         handler = HANDLERS.get(job.entity_type)
         batch = Batch(self._session, job) if handler is not None else None
         # B3-2: один `LicenseMatcher` на партию, не на строку — кандидаты (вендоры/ПО) кэшируются
