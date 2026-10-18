@@ -250,4 +250,7 @@ class ImportSummaryOut(BaseModel):
     by_issue: list[IssueSummaryOut] = Field(default_factory=list)
     would: dict[str, dict[str, int]] = Field(default_factory=dict)
     applied: dict[str, dict[str, int]] = Field(default_factory=dict)
+    #: B3-M: заголовки, повторённые в файле — словарь колонок строится по имени, вторая колонка с
+    #: тем же заголовком иначе терялась бы молча.
+    duplicate_headers: list[str] = Field(default_factory=list)
     result_file_id: uuid.UUID | None = None

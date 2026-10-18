@@ -309,6 +309,7 @@ async def get_import_summary(
         by_issue=[IssueSummaryOut(**entry) for entry in summary.get("by_issue", [])],
         would=summary.get("would", {}),
         applied=summary.get("applied", {}),
+        duplicate_headers=summary.get("duplicate_headers", []),
         result_file_id=job.result_file_id,
     )
 

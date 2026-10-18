@@ -249,13 +249,20 @@ def _accumulate_issues(
 
 
 def _finalize_summary(
-    by_issue: dict[str, dict[str, Any]], would: dict[str, dict[str, int]]
+    by_issue: dict[str, dict[str, Any]],
+    would: dict[str, dict[str, int]],
+    duplicate_headers: list[str] | None = None,
 ) -> dict[str, Any]:
     ranked = sorted(by_issue.items(), key=lambda kv: kv[1]["rows"], reverse=True)
-    return {
+    summary: dict[str, Any] = {
         "by_issue": [{"code": code, **entry} for code, entry in ranked[:_SUMMARY_MAX_CODES]],
         "would": would,
     }
+    if duplicate_headers:
+        # B3-M: заголовок, повторённый в файле — колонка читается один раз (последняя), первая
+        # теряется молча без этого предупреждения.
+        summary["duplicate_headers"] = duplicate_headers
+    return summary
 
 
 @dataclass(slots=True)
@@ -568,6 +575,11 @@ class ImportService:
                 f"Слишком много строк: {len(table.rows)} > {settings.import_max_rows}{where}",
             )
 
+        # B3-M: `{h: i for i, h in enumerate(...)}` оставляет последнюю колонку с повторным
+        # заголовком — первая терялась молча. Предупреждение не блокирует маппинг (та же колонка
+        # просто читается один раз): пользователь узнаёт о дубле из `summary`, а не из пропавших
+        # без следа данных.
+        duplicate_headers = sorted({h for h in table.headers if h and table.headers.count(h) > 1})
         header_index = {h: i for i, h in enumerate(table.headers) if h}
         column_map: list[tuple[int, FieldSpec]] = [
             (header_index[header], fields_by_target[target])
@@ -575,7 +587,7 @@ class ImportService:
             if header in header_index and target in fields_by_target
         ]
         if job.entity_type in HANDLED_ENTITY_TYPES:
-            return await self._dry_run_handled(job, table, column_map)
+            return await self._dry_run_handled(job, table, column_map, duplicate_headers)
 
         natural_key = natural_key_for(job.entity_type)
         key_spec = fields_by_target[natural_key]
@@ -783,7 +795,7 @@ class ImportService:
         job.total_rows = len(table.rows)
         job.ok_rows, job.warn_rows, job.error_rows = ok, warn, error
         job.status = ImportJobStatus.VALIDATED.value
-        job.summary = _finalize_summary(by_issue, would)
+        job.summary = _finalize_summary(by_issue, would, duplicate_headers)
         job.result_file_id = await self._write_error_report(
             job, table.headers, report_rows, job.summary["by_issue"]
         )
@@ -1021,7 +1033,11 @@ class ImportService:
         return row_data, errors
 
     async def _dry_run_handled(
-        self, job: ImportJob, table: ParsedTable, column_map: list[tuple[int, FieldSpec]]
+        self,
+        job: ImportJob,
+        table: ParsedTable,
+        column_map: list[tuple[int, FieldSpec]],
+        duplicate_headers: list[str] | None = None,
     ) -> ImportJob:
         """Проверка типов, строка которых порождает несколько записей (`imports.handlers`)."""
         handler = HANDLERS[job.entity_type]
@@ -1122,7 +1138,7 @@ class ImportService:
         job.processed_rows = 0
         job.ok_rows, job.warn_rows, job.error_rows = ok, warn, error
         job.status = ImportJobStatus.VALIDATED.value
-        job.summary = _finalize_summary(by_issue, would)
+        job.summary = _finalize_summary(by_issue, would, duplicate_headers)
         job.result_file_id = await self._write_error_report(
             job, table.headers, report_rows, job.summary["by_issue"]
         )

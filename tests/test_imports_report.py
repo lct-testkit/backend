@@ -278,3 +278,69 @@ def _license_targets():
     from app.modules.imports.fields import LICENSE_FIELDS
 
     return LICENSE_FIELDS
+
+
+class TestDuplicateHeaderWarning:
+    """B3-M: заголовок, повторённый в файле, раньше терялся молча (`{h: i for i, h in
+    enumerate(...)}` оставляет последнюю колонку) — теперь предупреждение в `summary`."""
+
+    def test_repeated_header_is_reported_in_the_summary(self, client, monkeypatch) -> None:
+        tok = token()
+        admin = login(client, "ADMIN")
+        run(client, _seed_university, f"МГТУ {tok}")
+
+        headers = [*LICENSE_HEADERS[:1], "Вендор", "Вендор", *LICENSE_HEADERS[2:]]
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.append(headers)
+        sheet.append(
+            [f"МГТУ {tok}", "Яндекс (первая колонка)", "Ростелеком (вторая)", "RT.X", "Д-1", ""]
+        )
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        content = buffer.getvalue()
+
+        captured: dict = {}
+        job_id = self._start_raw(client, monkeypatch, admin, content, captured)
+
+        dry = client.post(f"/api/imports/{job_id}/dry-run")
+        assert dry.status_code == 200, dry.text
+
+        summary = client.get(f"/api/imports/{job_id}/summary").json()
+        assert "Вендор" in summary["duplicate_headers"]
+
+    @staticmethod
+    def _start_raw(client, monkeypatch, admin, content: bytes, captured: dict) -> str:
+        import app.modules.imports.service as imports_service
+        from tests.import_helpers import _seed_file
+
+        stub_storage(monkeypatch, content)
+
+        async def fake_upload(*, bucket: str, key: str, body: bytes, content_type: str) -> None:
+            captured["body"] = body
+
+        monkeypatch.setattr(imports_service, "upload_object_bytes", fake_upload)
+
+        file_id = run(
+            client, _seed_file, content, admin.id, f"dup-{token()}.xlsx", "application/octet-stream"
+        )
+        created = client.post(
+            "/api/imports",
+            json={
+                "file_id": str(file_id),
+                "entity_type": "license",
+                "mode": "upsert",
+                "source_format": "xlsx",
+            },
+        )
+        assert created.status_code == 201, created.text
+        job_id = created.json()["id"]
+
+        profile = client.get(f"/api/imports/{job_id}/profile")
+        assert profile.status_code == 200, profile.text
+        mapping = dict(zip(LICENSE_HEADERS, [f.target for f in _license_targets()], strict=True))
+        # С дублем "Вендор" ровно одна запись маппинга покрывает обе колонки по имени — так и
+        # должно быть: это сам факт дубля в файле, не ошибка маппинга.
+        saved = client.put(f"/api/imports/{job_id}/mapping", json={"mapping": mapping})
+        assert saved.status_code == 200, saved.text
+        return job_id
