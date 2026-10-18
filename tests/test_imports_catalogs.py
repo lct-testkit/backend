@@ -13,7 +13,15 @@ import pytest
 
 from tests.conftest import TEST_DATABASE_URL, run
 from tests.crm_helpers import login
-from tests.import_helpers import apply_job, job_rows, rollback_job, start_import, token, xlsx_bytes
+from tests.import_helpers import (
+    apply_job,
+    job_rows,
+    make_inn,
+    rollback_job,
+    start_import,
+    token,
+    xlsx_bytes,
+)
 
 pytestmark = pytest.mark.skipif(
     not TEST_DATABASE_URL, reason="нужен TEST_DATABASE_URL с применёнными миграциями"
@@ -35,6 +43,12 @@ def _in_session(fn, *args):
 
 DIRECTION_HEADERS = ["Код", "Название", "Родитель"]
 RESPONSIBLE_HEADERS = ["Вуз", "ИНН вуза", "Почта менеджера", "ФИО менеджера"]
+
+
+def _summary(client, job_id: str) -> dict:
+    response = client.get(f"/api/imports/{job_id}/summary")
+    assert response.status_code == 200, response.text
+    return response.json()
 
 
 async def _seed_university(session, name: str, *, inn: str | None = None):
@@ -379,6 +393,40 @@ class TestDirectionImport:
         assert restored.name == f"Старое {tok}"
         assert restored.deleted_at is None
 
+    def test_summary_counts_a_reimported_direction_as_skipped_not_created(
+        self, client, monkeypatch
+    ) -> None:
+        tok = token()
+        code = f"sum-{tok}"
+        admin = login(client, "ADMIN")
+        content = xlsx_bytes(DIRECTION_HEADERS, [[code, f"Направление {tok}", ""]])
+
+        first = start_import(
+            client,
+            monkeypatch,
+            admin,
+            entity_type="direction",
+            content=content,
+            source_format="xlsx",
+        )
+        apply_job(client, first["id"])
+        assert _summary(client, first["id"])["applied"]["create"] == {"direction": 1}
+
+        second = start_import(
+            client,
+            monkeypatch,
+            admin,
+            entity_type="direction",
+            content=content,
+            source_format="xlsx",
+        )
+        apply_job(client, second["id"])
+        assert _summary(client, second["id"])["applied"] == {
+            "create": {"direction": 0},
+            "update": {"direction": 0},
+            "skip": {"direction": 1},
+        }
+
     def test_head_cannot_create_a_direction_import_job(self, client, monkeypatch) -> None:
         head = login(client, "HEAD")
         content = xlsx_bytes(DIRECTION_HEADERS, [["x", "X", ""]])
@@ -496,6 +544,77 @@ class TestResponsibleImport:
             source_format="xlsx",
         )
         assert started["dry"]["error_rows"] == 1
+
+    def test_match_by_inn_is_not_flagged_as_a_fuzzy_match(self, client, monkeypatch) -> None:
+        # Вуз найден по ИНН и по точному названию - это самая надёжная ступень поиска, строка
+        # `ok`, а не предупреждение «найден как ...».
+        tok = token()
+        admin = login(client, "ADMIN")
+        manager_email = f"kam-{tok}@example.com"
+        inn = make_inn()
+
+        async def seed(session):
+            await _seed_university(session, f"Вуз {tok}", inn=inn)
+            await _seed_manager(session, full_name=f"Менеджер {tok}", email=manager_email)
+
+        run(client, _in_session(seed))
+        content = xlsx_bytes(RESPONSIBLE_HEADERS, [[f"Вуз {tok}", inn, manager_email, ""]])
+        started = start_import(
+            client,
+            monkeypatch,
+            admin,
+            entity_type="responsible",
+            content=content,
+            source_format="xlsx",
+        )
+        assert started["dry"]["error_rows"] == 0, job_rows(client, started["id"])
+        assert started["dry"]["warn_rows"] == 0, job_rows(client, started["id"])
+        assert started["dry"]["ok_rows"] == 1
+
+    def test_summary_tells_a_changed_owner_from_an_unchanged_one(self, client, monkeypatch) -> None:
+        tok = token()
+        admin = login(client, "ADMIN")
+        manager_email = f"kam-{tok}@example.com"
+
+        async def seed(session):
+            await _seed_university(session, f"Вуз {tok}")
+            await _seed_manager(session, full_name=f"Менеджер {tok}", email=manager_email)
+
+        run(client, _in_session(seed))
+        content = xlsx_bytes(RESPONSIBLE_HEADERS, [[f"Вуз {tok}", "", manager_email, ""]])
+
+        first = start_import(
+            client,
+            monkeypatch,
+            admin,
+            entity_type="responsible",
+            content=content,
+            source_format="xlsx",
+        )
+        assert _summary(client, first["id"])["would"] == {"update": {"responsible": 1}}
+        apply_job(client, first["id"])
+        assert _summary(client, first["id"])["applied"] == {
+            "create": {"responsible": 0},
+            "update": {"responsible": 1},
+            "skip": {"responsible": 0},
+        }
+
+        # Тот же файл ещё раз: ответственный уже назначен - ничего не меняется и не «создаётся».
+        second = start_import(
+            client,
+            monkeypatch,
+            admin,
+            entity_type="responsible",
+            content=content,
+            source_format="xlsx",
+        )
+        assert _summary(client, second["id"])["would"] == {"skip": {"responsible": 1}}
+        apply_job(client, second["id"])
+        assert _summary(client, second["id"])["applied"] == {
+            "create": {"responsible": 0},
+            "update": {"responsible": 0},
+            "skip": {"responsible": 1},
+        }
 
     def test_organization_not_found_is_a_row_error(self, client, monkeypatch) -> None:
         tok = token()

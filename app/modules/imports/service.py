@@ -102,14 +102,15 @@ _EDITABLE_MAPPING_STATUSES = (
 # `organization_name`, у которого колонка поиска не `code`, а `name`, так
 # что параметризовали явно (region_code/direction_code продолжают resolve'ить
 # по `.code`, поведение не изменилось).
-_FK_TARGETS: dict[str, tuple[type, str, Any]] = {
+_FK_TARGETS: dict[str, tuple[Any, str, Any]] = {
     "region_code": (Region, "region_id", Region.code),
     "direction_code": (Direction, "direction_id", Direction.code),
     "organization_name": (Organization, "organization_id", Organization.name),
 }
-# `Any`, не `type`: три разных модели (колонки, `id`/`deleted_at`) за одним именем — тот же приём,
-# что `imports.handlers`'s `models: dict[str, Any]` в `_rollback_one`. `type` здесь не ловит
-# реальных ошибок, только путает mypy на статических атрибутах класса (`.id`/`.deleted_at`) и на
+# `Any`, не `type` (и у `_FK_TARGETS` выше): разные модели (колонки, `id`/`deleted_at`) за одним
+# именем — тот же приём, что `imports.handlers`'s `models: dict[str, Any]` в `_rollback_one`. `type`
+# здесь не ловит реальных ошибок, только путает mypy на статических атрибутах класса (`.id`/
+# `.deleted_at`) и на
 # перегрузках `AsyncSession.get`, которые выбирают нужную модель по значению, а не по статическому
 # типу аргумента.
 _MODEL_BY_ENTITY: dict[str, Any] = {
@@ -627,10 +628,9 @@ class ImportService:
                 key_column.in_(raw_keys), model.deleted_at.is_(None)
             )
             rows = (await self._session.execute(key_stmt)).all()
-            # `dict(rows)` не типизируется: `model.id`/`model: Any` в `_MODEL_BY_ENTITY` стирает
-            # тип колонки, `Row[Any]` не совпадает с перегрузкой `dict.__init__` — распаковка
-            # типобезопасна и не меняет поведение.
-            existing_map = {key: value for key, value in rows}  # noqa: C416
+            # `dict(rows)` не типизируется: `model: Any` в `_MODEL_BY_ENTITY` стирает тип колонки,
+            # `Row[Any]` не совпадает с перегрузкой `dict.__init__` — читаем пару по индексам.
+            existing_map = {row[0]: row[1] for row in rows}
 
         # B3-1 (BUG-9): у лицензии составной ключ (вуз, вендор, ПО, номер
         # договора) — проверка «уже существует» строится по нему, а не по
@@ -678,7 +678,6 @@ class ImportService:
             row_data, field_errors = self._extract_row(
                 row, column_map, fk_lookup, row_warnings, row_issues
             )
-            notes: list[str] = [*field_errors, *row_warnings]
             row_issues += [
                 RowIssue(code="other", severity="warning", message=w) for w in row_warnings
             ]
@@ -707,7 +706,6 @@ class ImportService:
                 # уже даны `_extract_row`-ом выше) — отдельная ошибка не дублируется.
                 if not is_license:
                     msg = f"Не удалось определить ключевое поле «{key_spec.label}»"
-                    notes.append(msg)
                     row_issues.append(
                         RowIssue(
                             code="required_empty",
@@ -721,7 +719,6 @@ class ImportService:
                 status = ImportRowStatus.OK.value
                 if dedupe_key in seen_keys:
                     dup_text = "Дубликат ключа внутри файла"
-                    notes.append(dup_text)
                     status = ImportRowStatus.WARN.value
                     row_issues.append(
                         RowIssue(
@@ -740,14 +737,12 @@ class ImportService:
                 )
                 if existing_id is not None and job.mode == ImportMode.INSERT.value:
                     msg = "Уже существует — будет пропущена (режим «только создание»)"
-                    notes.append(msg)
                     status = ImportRowStatus.WARN.value
                     row_issues.append(
                         RowIssue(code="exists_insert_skip", severity="warning", message=msg)
                     )
                 elif existing_id is None and job.mode == ImportMode.UPDATE.value:
                     msg = "Запись для обновления не найдена"
-                    notes.append(msg)
                     status = ImportRowStatus.ERROR.value
                     row_issues.append(RowIssue(code="update_not_found", message=msg))
 
@@ -840,12 +835,8 @@ class ImportService:
             if not codes:
                 resolved[kind] = {}
                 continue
-            # `model` здесь из `_FK_TARGETS` (`type`, не `Any`) — getattr статический атрибут не
-            # выведет, та же причина, что у `deleted_at` ниже (уже `getattr` в исходном коде).
-            code_stmt = select(
-                lookup_column,
-                getattr(model, "id"),  # noqa: B009
-            ).where(lookup_column.in_(codes))
+            code_stmt = select(lookup_column, model.id).where(lookup_column.in_(codes))
+            # `deleted_at` есть не у каждой модели `_FK_TARGETS` (у `Region` его нет).
             deleted_at = getattr(model, "deleted_at", None)
             if deleted_at is not None:
                 code_stmt = code_stmt.where(deleted_at.is_(None))
@@ -857,8 +848,8 @@ class ImportService:
             # компромисс, что и у остального импортёра: dry-run показывает
             # результат резолва в `row_data` до применения, и явную
             # неоднозначность видно на этапе проверки, а не после apply.
-            # `dict(rows_found)` не типизируется по той же причине, что и выше (`getattr`).
-            resolved[kind] = {key: value for key, value in rows_found}  # noqa: C416
+            # Пара читается по индексам, а не `dict(rows_found)`: `Row[Any]` не типизируется.
+            resolved[kind] = {row[0]: row[1] for row in rows_found}
         return resolved
 
     async def _resolve_license_existing(
@@ -963,7 +954,7 @@ class ImportService:
                     # пропускалась. П3 заводит первый обязательный FK
                     # (`organization_name`) — без этой ветки пустое
                     # «Название ВУЗа» проходило бы строку в `ok` без
-                    # `organization_id» и падало бы уже на `apply()`.
+                    # `organization_id` и падало бы уже на `apply()`.
                     msg = f"«{spec.label}» — обязательное поле"
                     errors.append(msg)
                     if issues is not None:
@@ -1117,7 +1108,7 @@ class ImportService:
                 ok += 1
 
             if status != ImportRowStatus.ERROR.value:
-                bucket = _would_bucket(check.exists, job.mode)
+                bucket = check.would or _would_bucket(check.exists, job.mode)
                 counts = would.setdefault(bucket, {})
                 counts[job.entity_type] = counts.get(job.entity_type, 0) + 1
             _accumulate_issues(by_issue, row_issues, source_row)
@@ -1808,7 +1799,10 @@ class ImportService:
         типов без обработчика `before_snapshot is None` отличает создание от обновления
         (`_apply_organization_row` и соседи пишут `None` только при создании); для типов с
         обработчиком `before_snapshot` всегда `None` (`_record_outcome`), поэтому там смотрим на
-        `op` в `effects` — эффект с тем же `id`, что и `entity_id` строки."""
+        `op` в `effects` — эффект с тем же `id`, что и `entity_id` строки. Строка обработчика, у
+        которой effects пусты (запись уже была и не изменилась: тот же ответственный, то же
+        направление, неизменный контакт), - пропущена, а не «создана»: повторная загрузка того же
+        файла иначе показывала бы «создано N»."""
         rows = (
             await self._session.execute(
                 select(
@@ -1829,6 +1823,14 @@ class ImportService:
             own_op = next(
                 (e.get("op") for e in effects or [] if e.get("id") == str(entity_id)), None
             )
+            if job.entity_type in HANDLED_ENTITY_TYPES:
+                if own_op == "create":
+                    created += 1
+                elif effects:
+                    updated += 1
+                else:
+                    skipped += 1
+                continue
             is_update = before_snapshot is not None or own_op == "update"
             if is_update:
                 updated += 1

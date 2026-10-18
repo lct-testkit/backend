@@ -159,15 +159,19 @@ def start_import(
 
 
 async def _apply(job_id: uuid.UUID) -> None:
-    """Роутер только переводит задание в `applying`; построчную работу делает фоновая задача.
-    Здесь — те же вызовы, что делает `sweep_import_jobs`, без воркера."""
+    """Малое задание `start_apply` применяет сразу (B3-12, `IMPORT_INLINE_MAX_ROWS`); большее
+    он только переводит в `applying`, и построчную работу делает фоновая задача. Здесь — те же
+    вызовы, что делает `sweep_import_jobs`, без воркера, и только если задание ещё не завершено."""
     from app.core.db import session_scope
+    from app.modules.imports.models import ImportJobStatus
     from app.modules.imports.service import ImportService
 
     async with session_scope() as session:
         service = ImportService(session)
         job = await service.get_or_404(job_id)
         await service.start_apply(job)
+        if job.status != ImportJobStatus.APPLYING.value:
+            return
         while await service.apply_batch(job, batch_size=500):
             pass
         await service.finalize_apply_if_done(job)

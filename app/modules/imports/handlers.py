@@ -92,6 +92,10 @@ class RowCheck:
     issues: list[RowIssue] = field(default_factory=list)
     #: Запись/заказ/человек уже есть в БД — от режима зависит, что будет со строкой.
     exists: bool = False
+    #: Что `apply_row` сделает со строкой на самом деле (`create`/`update`/`skip`), если обработчик
+    #: знает это точнее, чем пара `exists` + режим: у `ResponsibleHandler` запись (вуз) есть всегда,
+    #: а режим применение не смотрит. `None` — считать по `exists` и режиму (`_would_bucket`).
+    would: str | None = None
     #: Ключ для поиска повторов внутри файла; `None` — повторы не считаются ошибкой.
     key: str | None = None
 
@@ -973,7 +977,7 @@ class ResponsibleHandler(EntityHandler):
                 )
             return check
         check.key = str(match.entity.id)
-        if match.how not in ("name", "short_name"):
+        if match.how in ("normalized", "stripped"):
             check.add_issue(
                 RowIssue(
                     code="org_found_fuzzy",
@@ -1033,6 +1037,10 @@ class ResponsibleHandler(EntityHandler):
                 )
             )
 
+        if manager is not None:
+            # Строка меняет `owner_id` вуза, а не создаёт запись: режим `apply_row` не смотрит, вуз
+            # есть всегда. Тот же ответственный - повторная загрузка файла ничего не изменит.
+            check.would = "skip" if match.entity.owner_id == manager.id else "update"
         if manager is not None and match.entity.owner_id and match.entity.owner_id != manager.id:
             current = ctx.current_owner_name.get(match.entity.owner_id, "")
             check.add_issue(
