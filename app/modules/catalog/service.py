@@ -59,6 +59,7 @@ from app.modules.catalog.license_matching import LicenseMatcher
 from app.modules.catalog.license_values import parse_transfer_status
 from app.modules.catalog.models import (
     AccessRequest,
+    AccessRequestStatus,
     Contact,
     ContactChannel,
     ContactLearnerProfile,
@@ -148,7 +149,7 @@ async def organization_scope_clause_for_rules(
     approved_access = select(AccessRequest.entity_id).where(
         AccessRequest.requester_id == principal.user_id,
         AccessRequest.entity_type == "organization",
-        AccessRequest.status == "approved",
+        AccessRequest.status == AccessRequestStatus.APPROVED.value,
         AccessRequest.expires_at > func.now(),
     )
     role_clause = or_(

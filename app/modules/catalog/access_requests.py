@@ -26,7 +26,7 @@ from app.core.pagination import Page, PageParams, keyset_before
 from app.core.security import Principal
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
-from app.modules.catalog.models import AccessRequest, Organization
+from app.modules.catalog.models import AccessRequest, AccessRequestStatus, Organization
 from app.modules.catalog.service import organization_in_scope
 from app.modules.identity.models import Role, Team, User
 from app.modules.notification.service import NotificationPriority, get_notification_service
@@ -103,7 +103,7 @@ class AccessRequestService:
             await self._session.scalar(
                 select(func.count(AccessRequest.id)).where(
                     AccessRequest.requester_id == principal.user_id,
-                    AccessRequest.status == "pending",
+                    AccessRequest.status == AccessRequestStatus.PENDING.value,
                     AccessRequest.created_at >= _pending_cutoff(),
                 )
             )
@@ -123,7 +123,7 @@ class AccessRequestService:
                 AccessRequest.requester_id == principal.user_id,
                 AccessRequest.entity_type == "organization",
                 AccessRequest.entity_id == entity_id,
-                AccessRequest.status == "pending",
+                AccessRequest.status == AccessRequestStatus.PENDING.value,
             )
         )
         if existing_pending is not None:
@@ -135,14 +135,14 @@ class AccessRequestService:
             # Просрочен лениво (раздел 3): строка остаётся в БД как pending, но
             # уникальный индекс (requester_id, entity_type, entity_id) WHERE status='pending'
             # не даст вставить новую, пока старая не сменит статус — закрываем её здесь.
-            existing_pending.status = "cancelled"
+            existing_pending.status = AccessRequestStatus.CANCELLED.value
 
         request = AccessRequest(
             requester_id=principal.user_id,
             entity_type="organization",
             entity_id=entity_id,
             reason=reason,
-            status="pending",
+            status=AccessRequestStatus.PENDING.value,
         )
         self._session.add(request)
         await self._session.flush()
@@ -245,7 +245,7 @@ class AccessRequestService:
         organization = await self._get_entity_or_404(request)
         await self._ensure_can_decide(principal, organization)
         ttl_days = min(days or _DEFAULT_GRANT_DAYS, _MAX_GRANT_DAYS)
-        request.status = "approved"
+        request.status = AccessRequestStatus.APPROVED.value
         request.decided_by = principal.user_id
         request.decided_at = dt.datetime.now(dt.UTC)
         request.decision_comment = comment
@@ -256,7 +256,10 @@ class AccessRequestService:
             entity_type="organization",
             entity_id=request.entity_id,
             changes={
-                "status": {"old": "pending", "new": "approved"},
+                "status": {
+                    "old": AccessRequestStatus.PENDING.value,
+                    "new": AccessRequestStatus.APPROVED.value,
+                },
                 "expires_at": {"old": None, "new": request.expires_at.isoformat()},
             },
         )
@@ -277,7 +280,7 @@ class AccessRequestService:
         self._ensure_pending(request)
         organization = await self._get_entity_or_404(request)
         await self._ensure_can_decide(principal, organization)
-        request.status = "rejected"
+        request.status = AccessRequestStatus.REJECTED.value
         request.decided_by = principal.user_id
         request.decided_at = dt.datetime.now(dt.UTC)
         request.decision_comment = comment
@@ -287,7 +290,10 @@ class AccessRequestService:
             entity_type="organization",
             entity_id=request.entity_id,
             changes={
-                "status": {"old": "pending", "new": "rejected"},
+                "status": {
+                    "old": AccessRequestStatus.PENDING.value,
+                    "new": AccessRequestStatus.REJECTED.value,
+                },
                 "comment": {"old": None, "new": comment},
             },
         )
@@ -303,19 +309,24 @@ class AccessRequestService:
 
     async def revoke(self, request: AccessRequest, principal: Principal) -> AccessRequest:
         await self._lock(request)
-        if request.status != "approved":
+        if request.status != AccessRequestStatus.APPROVED.value:
             raise AppError(
                 ErrorCode.VALIDATION, "Отозвать можно только одобренный и действующий доступ"
             )
         organization = await self._get_entity_or_404(request)
         await self._ensure_can_decide(principal, organization)
-        request.status = "revoked"
+        request.status = AccessRequestStatus.REVOKED.value
         await self._session.flush()
         await self._audit.record(
             AuditAction.ACCESS_REVOKED,
             entity_type="organization",
             entity_id=request.entity_id,
-            changes={"status": {"old": "approved", "new": "revoked"}},
+            changes={
+                "status": {
+                    "old": AccessRequestStatus.APPROVED.value,
+                    "new": AccessRequestStatus.REVOKED.value,
+                }
+            },
         )
         return request
 
@@ -324,12 +335,15 @@ class AccessRequestService:
             raise AppError(ErrorCode.FORBIDDEN, "Отменить можно только свой запрос")
         await self._lock(request)
         self._ensure_pending(request)
-        request.status = "cancelled"
+        request.status = AccessRequestStatus.CANCELLED.value
         await self._session.flush()
         return request
 
     def _ensure_pending(self, request: AccessRequest) -> None:
-        if request.status != "pending" or request.created_at < _pending_cutoff():
+        if (
+            request.status != AccessRequestStatus.PENDING.value
+            or request.created_at < _pending_cutoff()
+        ):
             raise AppError(
                 ErrorCode.VALIDATION,
                 "Решение возможно только по ожидающему запросу",
