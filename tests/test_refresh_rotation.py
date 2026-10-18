@@ -110,8 +110,10 @@ class TestRefreshReuseDetection:
         from app.modules.identity.keycloak import TokenRefreshError
 
         async def fake_refresh(_token: str):
+            # Дословный ответ Keycloak 25.0 на повторное использование обменянного refresh-токена.
             raise TokenRefreshError(
-                keycloak_error="invalid_grant", keycloak_error_description="Stale token"
+                keycloak_error="invalid_grant",
+                keycloak_error_description="Maximum allowed refresh token reuse exceeded",
             )
 
         async def _scene() -> tuple[str, object]:
@@ -138,13 +140,25 @@ class TestRefreshReuseDetection:
         assert [e["event_type"] for e in events] == ["SESSION_HIJACK_SUSPECT"]
         assert events[0]["severity"] == "warning"
 
-    def test_an_ordinary_expiry_does_not_log_a_security_event(self, client, monkeypatch) -> None:
+    @pytest.mark.parametrize(
+        "description",
+        [
+            "Token is expired",
+            # Ответы живого Keycloak 25.0 на плановые отзывы — не признак кражи сессии:
+            "Stale token",  # realm-wide logout-all / push-revocation
+            "Session not active",  # выход пользователя / завершение его сессий
+            "User disabled",
+        ],
+    )
+    def test_an_ordinary_expiry_does_not_log_a_security_event(
+        self, client, monkeypatch, description: str
+    ) -> None:
         from app.modules.identity import session_store as store_module
         from app.modules.identity.keycloak import TokenRefreshError
 
         async def fake_refresh(_token: str):
             raise TokenRefreshError(
-                keycloak_error="invalid_grant", keycloak_error_description="Token is expired"
+                keycloak_error="invalid_grant", keycloak_error_description=description
             )
 
         async def _scene() -> str:

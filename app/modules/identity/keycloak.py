@@ -57,11 +57,19 @@ class TokenRefreshError(AppError):
 
     @property
     def is_reuse(self) -> bool:
-        """Keycloak сообщает о повторном использовании разными текстами по версиям —
-        `error_description` вида `Stale token`/`Token reuse detected` при включённом
-        `revokeRefreshToken`; сверено только по тексту, не по отдельному полю (его нет)."""
+        """Повторное использование уже обменянного refresh-токена при включённом
+        `revokeRefreshToken` (`refreshTokenMaxReuse: 0`). Отдельного поля в ответе нет — признак
+        только в тексте: Keycloak 25.0 отвечает `invalid_grant` /
+        `Maximum allowed refresh token reuse exceeded` (проверено на живом Keycloak 25.0 с realm
+        из `deploy/keycloak/realm-crm.json`).
+
+        `Stale token` — НЕ признак кражи: так Keycloak отвечает на токен, выпущенный до
+        административного отзыва (`logout-all`/`push-revocation` на весь realm); пользователь
+        отозванного отдельно — `Session not active`/`User disabled`. Раньше `stale` считался
+        reuse, и каждый такой отзыв порождал ложное `SESSION_HIJACK_SUSPECT` с кандидатом в
+        инциденты и уведомлением всем ADMIN."""
         text = f"{self.keycloak_error or ''} {self.keycloak_error_description or ''}".lower()
-        return "reuse" in text or "stale" in text
+        return "reuse" in text
 
 
 @dataclass(slots=True)
