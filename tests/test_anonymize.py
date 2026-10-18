@@ -203,6 +203,26 @@ async def _seed(conn: Any, seeded: _Seeded) -> None:
         "INSERT INTO organizations (id, name, org_type, inn) "
         "VALUES (gen_random_uuid(), 'РТ Университет', 'university', '7700000000') RETURNING id"
     )
+    # Колонки, чьи имена не похожи на ПДн, но несут их: «Ответственные от ВУЗа» из xls лицензий
+    # (ФИО + телефон + email одной строкой) и свободный текст реестра инцидентов (B6-12).
+    await conn.execute(
+        "INSERT INTO organization_licenses (id, organization_id, vendor, product_name, "
+        "responsible_contacts) VALUES (gen_random_uuid(), $1, 'Вендор', 'Продукт', $2)",
+        uni_id,
+        f"{seeded.real_name}, {seeded.real_phone}, {seeded.real_email}",
+    )
+    await conn.execute(
+        "INSERT INTO security_incidents (id, number, title, status, severity, source, "
+        "causes, harm, measures, investigation_summary, rkn_24_reference) "
+        "VALUES (gen_random_uuid(), $1, 'Инцидент', 'open', 'warning', 'manual', $2, $3, $4, "
+        "$5, $6)",
+        f"INC-TEST-{uuid.uuid4().hex[:8]}",
+        f"Письмо отправлено {seeded.real_name} по ошибке",
+        f"Затронут {seeded.real_name} ({seeded.real_phone})",
+        f"Сброшен пароль {seeded.real_email}",
+        f"Расследование: {seeded.real_name}",
+        f"РКН-{seeded.real_name}",
+    )
     workflow_id = await conn.fetchval(
         "INSERT INTO workflows (id, code, name, deal_type, state, is_default) "
         "VALUES (gen_random_uuid(), $1, 'Тестовая воронка', 'b2b', 'draft', false) RETURNING id",
@@ -558,6 +578,7 @@ _HANDLED_COLUMNS = frozenset(
         ("organizations", "main_email"),
         ("organizations", "registry_snapshot"),
         ("organization_licenses", "manager_full_name"),
+        ("organization_licenses", "responsible_contacts"),
         ("organization_licenses", "comment"),
         ("deal_comments", "body"),
         ("deal_comment_revisions", "body"),
@@ -591,6 +612,12 @@ _HANDLED_COLUMNS = frozenset(
         ("consents", "user_agent"),
         ("security_incidents", "title"),
         ("security_incidents", "description"),
+        ("security_incidents", "causes"),
+        ("security_incidents", "harm"),
+        ("security_incidents", "measures"),
+        ("security_incidents", "investigation_summary"),
+        ("security_incidents", "rkn_24_reference"),
+        ("security_incidents", "rkn_72_reference"),
         ("system_settings", "value"),
     }
 )
@@ -617,16 +644,24 @@ _NOT_PDN: dict[tuple[str, str], str] = {
     ("workflows", "name"): "название воронки",
     ("deal_comments", "body_format"): "формат текста (plain/markdown), не содержимое",
     ("deal_status_history", "reason"): "код причины перехода (enum), не свободный текст",
-    ("organization_branches", "name"): "филиал вуза — решение владельца не трогать вузы",
-    ("organization_branches", "address"): "адрес филиала вуза — то же решение",
+    (
+        "organization_branches",
+        "name",
+    ): "филиал вуза — название юрлица, не ПДн (допущение, см. anonymize.sql)",
+    ("organization_branches", "address"): "адрес филиала вуза — то же допущение",
     ("organization_licenses", "product_name"): "название продукта лицензии, не ПДн",
     ("system_settings", "description"): "описание настройки, пишет администратор",
     ("feature_flags", "description"): "описание флага функциональности",
 }
 
+# `contacts$`/`summary`/`causes`/`harm`/`measures`/`_reference$` добавлены после находки:
+# `organization_licenses.responsible_contacts` (ФИО, телефоны и email сотрудников вуза одной
+# строкой) и свободный текст `security_incidents` долго оставались в дампе, потому что имена этих
+# колонок не совпадали ни с одним из шаблонов выше.
 _PII_NAME_PATTERN = re.compile(
     r"email|phone|name|body|payload|snils|passport|address|^ip$|user_agent|evidence|"
-    r"raw_payload|row_data|snapshot|reason|comment|title|description",
+    r"raw_payload|row_data|snapshot|reason|comment|title|description|"
+    r"contacts$|summary|^causes$|^harm$|^measures$|_reference$",
     re.IGNORECASE,
 )
 _TEXT_TYPES = {"VARCHAR", "TEXT", "JSONB", "JSON", "INET"}

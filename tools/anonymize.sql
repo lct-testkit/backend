@@ -13,9 +13,12 @@
 -- Только встроенные функции PostgreSQL (`sha256(bytea)` есть с версии 11) — без расширений
 -- (`postgresql_anonymizer` нет в образе `postgres:16-alpine`, и это ещё один пункт в офлайн-бандл).
 --
--- Названия вузов (`organizations` с `org_type <> 'individual_entrepreneur'`) НЕ обезличиваются — решение владельца
--- зафиксировать (вопрос в отчёте спринта B6-13): это не ПДн физлица. Названия и ИНН ИП —
--- обезличиваются (ст. 11.8 dop.md, ИП ведёт деятельность под собственным именем).
+-- Названия вузов (`organizations` с `org_type <> 'individual_entrepreneur'`) НЕ обезличиваются:
+-- юридическое лицо не субъект ПДн (152-ФЗ защищает физлиц). Это допущение разработчика, владельцем
+-- НЕ подтверждённое (открытый вопрос в README, раздел «Обезличенный дамп»): список клиентов — не ПДн,
+-- но может быть коммерческой тайной. Если решат заменять и вузы — правка здесь (раздел 4) и в
+-- `organization_branches`. Названия и ИНН ИП — обезличиваются (ст. 11.8 dop.md, ИП ведёт
+-- деятельность под собственным именем).
 
 \set ON_ERROR_STOP on
 \if :{?salt}
@@ -181,7 +184,7 @@ WHERE true;
 -- =============================================================================
 -- 4. Организации: ИП обезличивается целиком (ПДн физлица, dop.md §11.8), вузы — только
 --    контактные данные (главный email/телефон), названия и адреса вузов НЕ трогаем
---    (решение владельца, см. докстринг файла). `registry_snapshot` — кэш сырого ответа
+--    (допущение, см. докстринг файла). `registry_snapshot` — кэш сырого ответа
 --    ЕГРЮЛ/реестра, может дублировать те же поля — обнуляем всегда, кэш восстанавливается
 --    по требованию через обычный фоновый опрос реестра.
 -- =============================================================================
@@ -200,8 +203,13 @@ UPDATE organizations SET
     registry_snapshot = NULL
 WHERE true;
 
+-- `responsible_contacts` — свободный текст «Ответственные от ВУЗа» из исходного xls: ФИО,
+-- телефоны и email сотрудников вуза в одной строке (имя колонки не похоже на ПДн, поэтому
+-- страж схемы в tests/test_anonymize.py её не замечал — добавлена в его шаблон отдельно).
 UPDATE organization_licenses SET
-    manager_full_name = CASE WHEN manager_full_name IS NOT NULL THEN anon_full_name(id, :'salt') END
+    manager_full_name = CASE WHEN manager_full_name IS NOT NULL THEN anon_full_name(id, :'salt') END,
+    responsible_contacts = CASE WHEN responsible_contacts IS NOT NULL
+        THEN '[обезличено для dev]' END
 WHERE true;
 
 -- Кэш ответов ЕГРЮЛ по ИНН: для ИП несёт то же самое ФИО, что `organizations.name` выше, в
@@ -254,9 +262,18 @@ UPDATE signature_requests SET reject_reason = CASE WHEN reject_reason IS NOT NUL
 -- вписать туда что угодно (ФИО, название проекта) — безопаснее переписать, чем гадать.
 UPDATE deals SET title = '[обезличено для dev] сделка' WHERE true;
 UPDATE tasks SET title = '[обезличено для dev] задача' WHERE true;
+-- Причины, вред, меры и итоги расследования, а также номер/ссылка подачи в РКН — свободный
+-- текст, который вводит человек (B6-12); в нём вполне могут быть ФИО затронутых лиц.
 UPDATE security_incidents SET
     title = '[обезличено для dev] инцидент',
-    description = '[обезличено для dev]'
+    description = '[обезличено для dev]',
+    causes = CASE WHEN causes IS NOT NULL THEN '[обезличено для dev]' END,
+    harm = CASE WHEN harm IS NOT NULL THEN '[обезличено для dev]' END,
+    measures = CASE WHEN measures IS NOT NULL THEN '[обезличено для dev]' END,
+    investigation_summary = CASE WHEN investigation_summary IS NOT NULL
+        THEN '[обезличено для dev]' END,
+    rkn_24_reference = CASE WHEN rkn_24_reference IS NOT NULL THEN '[обезличено для dev]' END,
+    rkn_72_reference = CASE WHEN rkn_72_reference IS NOT NULL THEN '[обезличено для dev]' END
 WHERE true;
 
 -- =============================================================================
