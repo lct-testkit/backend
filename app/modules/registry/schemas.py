@@ -24,8 +24,9 @@ class OrgSuggestionOut(BaseModel):
     # B4-11 (A-21): организация уже заведена и видна вызывающему — переход на карточку вместо
     # дублирующего создания. `None` — не заведена либо вне скоупа (для internal_cache элемент в
     # этом случае не попадает в ответ вовсе, см. `OrgLookupService._attach_organization_ids`).
+    # Различать «не заведена» и «вне скоупа» нельзя намеренно: ответ не должен подтверждать
+    # существование чужого вуза.
     organization_id: uuid.UUID | None = None
-    accessible: bool = True
 
 
 class OrgSuggestResponse(BaseModel):
