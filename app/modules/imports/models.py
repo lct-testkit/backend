@@ -34,6 +34,11 @@ class ImportEntityType(StrEnum):
     VENDOR_CONTACT = "vendor_contact"  # «Вендоры»: компания, продукты, ответственный
     PAYMENT = "payment"  # «Данные оплат»: заказ физлица на курс
     LEARNER = "learner"  # «Загрузка пользователей» — шаблон учащихся LMS
+    # B3-8: «ИТ-продукты, ИТ-направления, список вузов и список ответственных» (ТЗ §4 п.1) —
+    # строка создаёт/обновляет каталожную запись (направление) либо меняет `Organization.owner_id`
+    # (ответственный), поэтому оба типа тоже идут через обработчики и effects. Только ADMIN.
+    DIRECTION = "direction"
+    RESPONSIBLE = "responsible"
 
 
 class ImportMode(StrEnum):
@@ -92,6 +97,14 @@ class ImportJob(UuidPkMixin, TimestampMixin, Base):
     mapping: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
+    # B3-2: `ImportOptions` (лист/листы, строка заголовка, `fill_down`, флаги автосоздания) —
+    # хранится на задании, а не только в запросе: `_load_table` перечитывает файл при каждом
+    # dry-run/apply и должна помнить выбор пользователя, сделанный на `PUT .../mapping`.
+    options: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    # B3-5: сводка dry-run — `by_issue`/`would`/`applied`, см. `imports.schemas.ImportSummaryOut`.
+    summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     status: Mapped[str] = mapped_column(
         String(24), nullable=False, server_default=text("'uploaded'")
     )
@@ -138,6 +151,11 @@ class ImportRowResult(UuidPkMixin, Base):
         ForeignKey("import_jobs.id", ondelete="CASCADE"), nullable=False
     )
     row_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    # B3-2/B3-5: номер строки Excel (считая пустые строки, не только непустые — `row_number` выше
+    # остаётся порядковым номером среди обработанных строк для обратной совместимости) и имя
+    # листа, из которого взята строка. `NULL` — CSV/JSON или задание, созданное до B3-2.
+    source_row: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sheet: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     entity_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
     before_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
@@ -167,6 +185,9 @@ class ImportPreset(UuidPkMixin, TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     entity_type: Mapped[str] = mapped_column(String(16), nullable=False)
     mapping: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # B3-2: опции листа/шапки, сохранённые вместе с маппингом (`save_as_preset`). `NULL` у
+    # пресетов, сохранённых до этой задачи — применяются без опций, как раньше.
+    options: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
     )

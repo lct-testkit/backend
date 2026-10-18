@@ -17,6 +17,7 @@ from app.core.permissions import Permission
 from app.core.queue import enqueue_after_commit
 from app.core.security import Principal
 from app.modules.imports.fields import (
+    ADMIN_ONLY_ENTITY_TYPES,
     ENTITY_TYPE_LABELS,
     fields_for,
     requirements_for,
@@ -35,6 +36,7 @@ from app.modules.imports.schemas import (
     ImportProfileResponse,
     ImportRowListResponse,
     ImportRowOut,
+    SheetOut,
 )
 from app.modules.imports.service import ImportService
 
@@ -96,6 +98,7 @@ async def list_import_entity_types(_: ImportRunPerm) -> ImportEntityTypeListResp
                     for field in fields_for(code)
                 ],
                 requirements=requirements_for(code),
+                admin_only=code in ADMIN_ONLY_ENTITY_TYPES,
             )
             for code, label in ENTITY_TYPE_LABELS.items()
         ]
@@ -146,20 +149,41 @@ async def get_import_job(
 @import_jobs_router.get(
     "/{job_id}/profile",
     summary="Профиль файла: первые строки и подсказка маппинга",
-    description="Раздел 4.12, фаза 2-3: превью первых 100 строк и автоподбор колонок.",
+    description=(
+        "Раздел 4.12, фаза 2-3: превью первых 100 строк и автоподбор колонок. B3-2: `sheet` и "
+        "`header_row` — предпросмотр книги с другим листом/строкой заголовка (ничего не "
+        "сохраняет; сохраняет только `PUT .../mapping` параметром `options`). Без параметров — "
+        "уже сохранённые на задании опции, а для нового задания первый видимый лист, строка 1."
+    ),
     response_model=ImportProfileResponse,
 )
 async def profile_import_job(
-    session: DbSession, _: ImportRunPerm, job_id: Annotated[uuid.UUID, Path()]
+    session: DbSession,
+    _: ImportRunPerm,
+    job_id: Annotated[uuid.UUID, Path()],
+    sheet: Annotated[str | None, Query()] = None,
+    header_row: Annotated[int | None, Query(ge=1)] = None,
 ) -> ImportProfileResponse:
     job = await ImportService(session).get_or_404(job_id)
-    result = await ImportService(session).profile(job)
+    result = await ImportService(session).profile(job, sheet=sheet, header_row=header_row)
     return ImportProfileResponse(
         headers=result.headers,
         sample_rows=result.sample_rows,
         suggested_mapping=result.suggested_mapping,
         total_rows=result.total_rows,
         applied_preset=result.applied_preset,
+        sheets=[
+            SheetOut(
+                name=s.name,
+                rows=s.rows,
+                visible=s.visible,
+                suggested_header_row=s.suggested_header_row,
+            )
+            for s in result.sheets
+        ],
+        sheet=result.sheet,
+        header_row=result.header_row,
+        suggested_header_row=result.suggested_header_row,
     )
 
 
@@ -212,7 +236,12 @@ async def list_import_rows(
 @import_jobs_router.put(
     "/{job_id}/mapping",
     summary="Сохранить маппинг колонок",
-    description="Опционально сохраняет маппинг как пресет для повторного использования.",
+    description=(
+        "Опционально сохраняет маппинг как пресет для повторного использования. B3-2: "
+        "`options.sheet`/`sheets`/`header_row`/`fill_down` — выбор листа книги и строки "
+        "заголовка, сохраняется вместе с маппингом и переживает повторный разбор файла на "
+        "dry-run/apply."
+    ),
     response_model=ImportJobOut,
 )
 async def save_import_mapping(
@@ -224,7 +253,11 @@ async def save_import_mapping(
     service = ImportService(session)
     job = await service.get_or_404(job_id)
     job = await service.save_mapping(
-        job, mapping=payload.mapping, principal=principal, save_as_preset=payload.save_as_preset
+        job,
+        mapping=payload.mapping,
+        principal=principal,
+        save_as_preset=payload.save_as_preset,
+        options=payload.options,
     )
     return ImportJobOut.model_validate(job)
 

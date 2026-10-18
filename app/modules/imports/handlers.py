@@ -18,28 +18,32 @@ import datetime as dt
 import uuid
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import FieldError, ValidationError
-from app.core.normalize import clean_text, name_key, normalize_email, normalize_phone
+from app.core.normalize import clean_text, name_key, normalize_email, normalize_phone, slugify_code
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
 from app.modules.catalog import learner
+from app.modules.catalog.license_matching import LicenseMatcher
 from app.modules.catalog.lookup import OrganizationIndex, ProductIndex
 from app.modules.catalog.models import (
     Contact,
     ContactLearnerProfile,
     ContactProduct,
+    Direction,
     Organization,
     Product,
 )
 from app.modules.catalog.service import ContactService
 from app.modules.crm.models import Deal, DealProduct
+from app.modules.identity.models import Role, User, UserStatus
 from app.modules.imports.models import ImportJob, ImportMode, ImportRowResult
 from app.modules.integration.orders import OrderData, OrderIngestService
+from app.modules.notification.service import NotificationPriority, get_notification_service
 
 _CHUNK = 1000
 
@@ -62,15 +66,41 @@ def _json(value: Any) -> Any:
 
 
 @dataclass(slots=True)
+class RowIssue:
+    """B3-5: один код проблемы строки — машиночитаемый (`code`), в отличие от свободного текста
+    `RowCheck.errors`/`.warnings`. Старые обработчики (`VendorContactHandler`/`PaymentHandler`/
+    `LearnerHandler`) продолжают писать в `errors`/`warnings` напрямую — их строки оборачиваются в
+    `RowIssue(code="other", ...)` на выходе из dry-run (`imports.service._dry_run_handled`), а не
+    здесь: сами эти три обработчика не меняются (риск спринта B3-5)."""
+
+    code: str
+    message: str
+    field: str | None = None
+    hint: str | None = None
+    severity: Literal["error", "warning"] = "error"
+
+
+@dataclass(slots=True)
 class RowCheck:
     """Итог проверки строки при dry-run (без записи в БД)."""
 
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    #: B3-5: источник правды для новых обработчиков (`DirectionHandler`/`ResponsibleHandler`).
+    #: `errors`/`warnings` остаются производными (через `add_issue`) для обратной совместимости.
+    issues: list[RowIssue] = field(default_factory=list)
     #: Запись/заказ/человек уже есть в БД — от режима зависит, что будет со строкой.
     exists: bool = False
     #: Ключ для поиска повторов внутри файла; `None` — повторы не считаются ошибкой.
     key: str | None = None
+
+    def add_issue(self, issue: RowIssue) -> None:
+        self.issues.append(issue)
+        text = issue.message if not issue.hint else f"{issue.message} ({issue.hint})"
+        if issue.severity == "error":
+            self.errors.append(text)
+        else:
+            self.warnings.append(text)
 
 
 @dataclass(slots=True)
@@ -127,6 +157,9 @@ class Batch:
         self.software = ProductIndex(session, kind="software")
         self.organizations = OrganizationIndex(session)
         self.contacts = ContactService(session)
+        # B3-8: `ResponsibleHandler` ищет вуз тем же многоступенчатым поиском, что и лицензии
+        # (B3-4) — один инстанс на партию, кандидаты кэшируются внутри него (докстринг класса).
+        self.license_matcher = LicenseMatcher(session)
 
     def invalidate(self) -> None:
         """После отката SAVEPOINT'а строки объекты, изменённые внутри неё, «протухли»: индексы
@@ -134,6 +167,7 @@ class Batch:
         self.products = ProductIndex(self.session, kind="course")
         self.software = ProductIndex(self.session, kind="software")
         self.organizations = OrganizationIndex(self.session)
+        self.license_matcher = LicenseMatcher(self.session)
 
 
 class EntityHandler:
@@ -543,9 +577,518 @@ async def _upsert_profile(
     }
 
 
+# ---------------------------------------------------------------------------
+# «Направления» (B3-8)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class DirectionContext:
+    #: Код -> запись в БД, включая мягко удалённые (занятый код удалённого направления — ошибка
+    #: строки, а не тихое совпадение).
+    by_code_db: dict[str, Direction]
+    #: Итоговый код родителя для каждого кода из файла (файл побеждает БД: если строка в файле
+    #: переопределяет `parent_code`, проверка цикла должна видеть новое значение).
+    parent_of: dict[str, str | None]
+    #: Коды, участвующие в цикле ссылок «родитель» внутри файла.
+    cycle_codes: set[str]
+
+
+class DirectionHandler(EntityHandler):
+    """B3-8: импорт ИТ-направлений (ТЗ §4 п.1). Ключ строки — `code`; пустой код строится из
+    названия (`slugify_code`). Родитель может стоять в файле ниже ребёнка — `apply_row` создаёт
+    его заранее по данным, уже провалидированным dry-run'ом и лежащим в `import_row_results.
+    row_data` (см. `_ensure_parent`): инстанс обработчика не хранит состояние между партиями и
+    тиками фоновой задачи, а БД — хранит."""
+
+    entity_type = "direction"
+
+    async def prepare(self, session: AsyncSession, rows: list[dict[str, Any]]) -> DirectionContext:
+        # Код пустой ячейки — из названия; мутация `row` на месте: тот же объект обработает
+        # `check_row` ниже и, через `import_row_results.row_data`, `apply_row`.
+        for row in rows:
+            if not row.get("code") and row.get("name"):
+                row["code"] = slugify_code(row["name"])
+
+        codes = sorted({row["code"] for row in rows if row.get("code")})
+        by_code_db: dict[str, Direction] = {}
+        for chunk in _chunks(codes):
+            found = await session.execute(select(Direction).where(Direction.code.in_(chunk)))
+            by_code_db.update({d.code: d for d in found.scalars()})
+
+        # «Последняя строка побеждает» — тот же приём, что и для `_FK_TARGETS` в `imports.service`.
+        parent_of: dict[str, str | None] = {}
+        for row in rows:
+            code = row.get("code")
+            if code:
+                parent_of[code] = clean_text(row.get("parent_code"))
+        for code, existing in by_code_db.items():
+            if code not in parent_of and existing.parent_id is not None:
+                parent_direction = await session.get(Direction, existing.parent_id)
+                parent_of[code] = parent_direction.code if parent_direction else None
+
+        cycle_codes: set[str] = set()
+        for start in parent_of:
+            seen: list[str] = []
+            current: str | None = start
+            while current is not None:
+                if current in seen:
+                    if current == start or start in seen:
+                        cycle_codes.update(seen)
+                    break
+                seen.append(current)
+                current = parent_of.get(current)
+                if current is not None and current not in parent_of and current not in by_code_db:
+                    break
+
+        return DirectionContext(by_code_db=by_code_db, parent_of=parent_of, cycle_codes=cycle_codes)
+
+    def check_row(self, row: dict[str, Any], ctx: DirectionContext, mode: str) -> RowCheck:
+        code = row.get("code")
+        check = RowCheck(key=code)
+        if not code or not row.get("name"):
+            # Поле `name` обязательное — `_extract_row` уже дал `required_empty`; без кода/названия
+            # дальше проверять нет смысла (checks ниже обратились бы к пустому ключу).
+            return check
+
+        existing = ctx.by_code_db.get(code)
+        if existing is not None and existing.deleted_at is not None:
+            check.add_issue(
+                RowIssue(
+                    code="direction_code_deleted",
+                    field="code",
+                    message=f"Код «{code}» занят удалённым направлением",
+                    hint="Восстановите прежнее направление или укажите другой код",
+                )
+            )
+        check.exists = existing is not None and existing.deleted_at is None
+        _apply_mode_to_check(check, mode, "Направление")
+
+        if code in ctx.cycle_codes:
+            check.add_issue(
+                RowIssue(
+                    code="direction_cycle",
+                    field="parent_code",
+                    message="Циклическая связь в родительских направлениях",
+                    hint="Проверьте цепочку «родитель» — она не должна возвращаться к этому коду",
+                )
+            )
+            return check
+
+        parent_code = clean_text(row.get("parent_code"))
+        if parent_code and parent_code not in ctx.parent_of and parent_code not in ctx.by_code_db:
+            check.add_issue(
+                RowIssue(
+                    code="direction_parent_not_found",
+                    field="parent_code",
+                    message=f"Направление-родитель «{parent_code}» не найдено",
+                    hint="Проверьте код/название или добавьте строку с этим направлением",
+                )
+            )
+        elif (
+            parent_code
+            and parent_code in ctx.by_code_db
+            and ctx.by_code_db[parent_code].deleted_at is not None
+            and parent_code not in ctx.parent_of
+        ):
+            check.add_issue(
+                RowIssue(
+                    code="direction_parent_not_found",
+                    field="parent_code",
+                    message=f"Направление-родитель «{parent_code}» удалено",
+                    hint="Укажите другого родителя или восстановите удалённое направление",
+                )
+            )
+        return check
+
+    async def _ensure_parent(
+        self, batch: Batch, code: str, job: ImportJob, *, depth: int = 0
+    ) -> uuid.UUID | None:
+        """Создаёт направление-родитель заранее, если его строка в файле стоит ниже ребёнка —
+        данные берёт из уже сохранённого `import_row_results.row_data` этой же партии импорта
+        (dry-run их туда положил), а не из `prepare()`: `apply_row` не получает контекст dry-run."""
+        if depth > 50:  # dry-run уже отсеял циклы — предохранитель от бага, не нормальный путь
+            return None
+        existing = await batch.session.scalar(
+            select(Direction).where(Direction.code == code, Direction.deleted_at.is_(None))
+        )
+        if existing is not None:
+            return existing.id
+
+        parent_row = await batch.session.scalar(
+            select(ImportRowResult).where(
+                ImportRowResult.import_job_id == job.id,
+                ImportRowResult.row_data["code"].astext == code,
+            )
+        )
+        if parent_row is None:
+            return None
+        parent_data = parent_row.row_data
+        grandparent_code = clean_text(parent_data.get("parent_code"))
+        parent_id = (
+            await self._ensure_parent(batch, grandparent_code, job, depth=depth + 1)
+            if grandparent_code
+            else None
+        )
+        direction = Direction(code=code, name=parent_data.get("name") or code, parent_id=parent_id)
+        batch.session.add(direction)
+        await batch.session.flush()
+        return direction.id
+
+    async def apply_row(self, batch: Batch, row: ImportRowResult) -> ApplyOutcome:
+        data = row.row_data
+        job = batch.job
+        outcome = ApplyOutcome()
+        code = data.get("code")
+        name = data.get("name")
+        if not code or not name:
+            raise ValidationError(
+                "Строка без кода/названия направления",
+                [FieldError(field="name", reason="обязательное поле")],
+            )
+
+        parent_code = clean_text(data.get("parent_code"))
+        parent_id = await self._ensure_parent(batch, parent_code, job) if parent_code else None
+
+        existing = await batch.session.scalar(
+            select(Direction).where(Direction.code == code, Direction.deleted_at.is_(None))
+        )
+        if existing is None:
+            if job.mode == ImportMode.UPDATE.value:
+                outcome.skipped = True
+                outcome.notes.append("Направление для обновления не найдено")
+                return outcome
+            direction = Direction(code=code, name=name, parent_id=parent_id)
+            batch.session.add(direction)
+            await batch.session.flush()
+            outcome.entity_id = direction.id
+            outcome.effects.append({"kind": "direction", "op": "create", "id": str(direction.id)})
+            await AuditService(batch.session).record(
+                AuditAction.DIRECTION_CREATED,
+                entity_type="direction",
+                entity_id=direction.id,
+                changes={"code": {"old": None, "new": code}, "name": {"old": None, "new": name}},
+            )
+            return outcome
+
+        if job.mode == ImportMode.INSERT.value:
+            outcome.skipped = True
+            outcome.notes.append("Направление уже существует — пропущена (режим «только создание»)")
+            return outcome
+
+        before: dict[str, Any] = {}
+        if existing.name != name:
+            before["name"] = existing.name
+            existing.name = name
+        if existing.parent_id != parent_id:
+            before["parent_id"] = str(existing.parent_id) if existing.parent_id else None
+            existing.parent_id = parent_id
+        outcome.entity_id = existing.id
+        if before:
+            existing.version += 1
+            await AuditService(batch.session).record(
+                AuditAction.DIRECTION_UPDATED,
+                entity_type="direction",
+                entity_id=existing.id,
+                changes={k: {"old": v, "new": None} for k, v in before.items()},
+            )
+        await batch.session.flush()
+        return outcome
+
+
+# ---------------------------------------------------------------------------
+# «Ответственные» (B3-8) — КАМ/руководитель вуза
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class ResponsibleContext:
+    #: `(название, ИНН)` -> итог поиска вуза (`LicenseMatcher.match_university`, B3-4) — поиск
+    #: асинхронный, а `check_row` синхронный, поэтому все уникальные пары разрешаются заранее.
+    org_results: dict[tuple[str, str], Any]
+    #: Текущий ответственный найденного вуза, человекочитаемо (для предупреждения о замене).
+    current_owner_name: dict[uuid.UUID, str]
+    users_by_email: dict[str, User]
+    users_by_name: dict[str, list[User]]
+
+
+_RESPONSIBLE_ROLES = (Role.KAM.value, Role.HEAD.value)
+
+
+class ResponsibleHandler(EntityHandler):
+    """B3-8: список ответственных за вуз (КАМ/руководитель). Строка меняет `Organization.
+    owner_id` — побочные эффекты (аудит, уведомления) те же, что у ручной смены через
+    `PUT /api/organizations/{id}/owner` (`OrganizationService.set_owner`, B4-1), но вызвать сам
+    метод здесь нельзя: он принимает `Principal` живого запроса, а импорт применяется фоновой
+    задачей без него — эффекты повторены напрямую (см. `apply_row`)."""
+
+    entity_type = "responsible"
+    dedupe_in_file = True  # повтор вуза в файле — предупреждение, последняя строка побеждает
+
+    async def prepare(
+        self, session: AsyncSession, rows: list[dict[str, Any]]
+    ) -> ResponsibleContext:
+        matcher = LicenseMatcher(session)
+        org_pairs = {
+            (
+                clean_text(r.get("organization_name")) or "",
+                clean_text(r.get("organization_inn")) or "",
+            )
+            for r in rows
+            if r.get("organization_name")
+        }
+        org_results: dict[tuple[str, str], Any] = {}
+        current_owner_name: dict[uuid.UUID, str] = {}
+        owner_ids: set[uuid.UUID] = set()
+        for name, inn in org_pairs:
+            result = await matcher.match_university(name, inn or None)
+            org_results[(name, inn)] = result
+            if result.entity is not None and result.entity.owner_id is not None:
+                owner_ids.add(result.entity.owner_id)
+
+        if owner_ids:
+            owners = await session.execute(select(User).where(User.id.in_(owner_ids)))
+            current_owner_name.update({u.id: u.full_name for u in owners.scalars()})
+
+        emails = {normalize_email(r.get("manager_email")) for r in rows if r.get("manager_email")}
+        emails.discard(None)
+        users_by_email: dict[str, User] = {}
+        if emails:
+            found = await session.execute(
+                select(User).where(
+                    func.lower(User.email).in_(emails),
+                    User.role.in_(_RESPONSIBLE_ROLES),
+                    User.status == UserStatus.ACTIVE.value,
+                    User.deleted_at.is_(None),
+                )
+            )
+            users_by_email = {(u.email or "").lower(): u for u in found.scalars()}
+
+        names = {name_key(r.get("manager_full_name")) for r in rows if r.get("manager_full_name")}
+        names.discard("")
+        users_by_name: dict[str, list[User]] = {}
+        if names:
+            found = await session.execute(
+                select(User).where(
+                    User.role.in_(_RESPONSIBLE_ROLES),
+                    User.status == UserStatus.ACTIVE.value,
+                    User.deleted_at.is_(None),
+                )
+            )
+            for user in found.scalars():
+                key = name_key(user.full_name)
+                if key in names:
+                    users_by_name.setdefault(key, []).append(user)
+
+        return ResponsibleContext(
+            org_results=org_results,
+            current_owner_name=current_owner_name,
+            users_by_email=users_by_email,
+            users_by_name=users_by_name,
+        )
+
+    def check_row(self, row: dict[str, Any], ctx: ResponsibleContext, mode: str) -> RowCheck:
+        org_key = (
+            clean_text(row.get("organization_name")) or "",
+            clean_text(row.get("organization_inn")) or "",
+        )
+        check = RowCheck()
+        if not org_key[0]:
+            return check  # «ВУЗ» обязателен — `required_empty` уже дан выше по конвейеру
+
+        match = ctx.org_results.get(org_key)
+        if match is None or match.entity is None:
+            if match is not None and match.how == "ambiguous":
+                check.add_issue(
+                    RowIssue(
+                        code="org_ambiguous",
+                        field="organization_name",
+                        message=f"Вуз неоднозначен: найдено {len(match.candidates)}",
+                        hint="Добавьте колонку «ИНН вуза»",
+                    )
+                )
+            else:
+                suggestions = ", ".join(match.suggestions) if match else ""
+                check.add_issue(
+                    RowIssue(
+                        code="org_not_found",
+                        field="organization_name",
+                        message=f"Вуз не найден: «{org_key[0]}»",
+                        hint=f"Возможно: {suggestions}" if suggestions else "Проверьте название",
+                    )
+                )
+            return check
+        check.key = str(match.entity.id)
+        if match.how not in ("name", "short_name"):
+            check.add_issue(
+                RowIssue(
+                    code="org_found_fuzzy",
+                    field="organization_name",
+                    message=f"Вуз найден как «{match.entity.name}»",
+                    severity="warning",
+                )
+            )
+
+        email = normalize_email(row.get("manager_email"))
+        full_name = clean_text(row.get("manager_full_name"))
+        manager: User | None = None
+        if email:
+            manager = ctx.users_by_email.get(email)
+            if manager is None:
+                check.add_issue(
+                    RowIssue(
+                        code="manager_not_found",
+                        field="manager_email",
+                        message=f"Менеджер с почтой «{email}» не найден среди активных КАМ/РОП",
+                        hint="Проверьте почту или укажите ФИО",
+                    )
+                )
+        elif full_name:
+            candidates = ctx.users_by_name.get(name_key(full_name), [])
+            if len(candidates) == 1:
+                manager = candidates[0]
+            elif len(candidates) > 1:
+                check.add_issue(
+                    RowIssue(
+                        code="manager_ambiguous",
+                        field="manager_full_name",
+                        message=f"Менеджер неоднозначен: найдено {len(candidates)}",
+                        hint="Укажите почту менеджера",
+                    )
+                )
+            else:
+                check.add_issue(
+                    RowIssue(
+                        code="manager_not_found",
+                        field="manager_full_name",
+                        message=f"Менеджер «{full_name}» не найден среди активных КАМ/РОП",
+                        hint="Проверьте ФИО или укажите почту",
+                    )
+                )
+        else:
+            check.add_issue(
+                RowIssue(
+                    code="required_empty",
+                    field="manager_email",
+                    message="Не указаны ни почта, ни ФИО менеджера",
+                    hint="Заполните один из двух столбцов",
+                )
+            )
+
+        if manager is not None and match.entity.owner_id and match.entity.owner_id != manager.id:
+            current = ctx.current_owner_name.get(match.entity.owner_id, "")
+            check.add_issue(
+                RowIssue(
+                    code="owner_replaced",
+                    field="manager_email",
+                    message=f"Текущий ответственный {current or '—'} будет заменён",
+                    severity="warning",
+                )
+            )
+        return check
+
+    async def apply_row(self, batch: Batch, row: ImportRowResult) -> ApplyOutcome:
+        data = row.row_data
+        outcome = ApplyOutcome()
+
+        match = await batch.license_matcher.match_university(
+            data.get("organization_name"), data.get("organization_inn")
+        )
+        organization = match.entity
+        if organization is None:
+            outcome.skipped = True
+            outcome.notes.append("Вуз не найден или неоднозначен — пропущена")
+            return outcome
+
+        manager: User | None = None
+        email = normalize_email(data.get("manager_email"))
+        if email:
+            manager = await batch.session.scalar(
+                select(User).where(
+                    func.lower(User.email) == email,
+                    User.role.in_(_RESPONSIBLE_ROLES),
+                    User.status == UserStatus.ACTIVE.value,
+                    User.deleted_at.is_(None),
+                )
+            )
+        elif data.get("manager_full_name"):
+            candidates = (
+                await batch.session.execute(
+                    select(User).where(
+                        User.role.in_(_RESPONSIBLE_ROLES),
+                        User.status == UserStatus.ACTIVE.value,
+                        User.deleted_at.is_(None),
+                    )
+                )
+            ).scalars()
+            wanted = name_key(data["manager_full_name"])
+            matches = [u for u in candidates if name_key(u.full_name) == wanted]
+            manager = matches[0] if len(matches) == 1 else None
+
+        if manager is None:
+            outcome.skipped = True
+            outcome.notes.append("Менеджер не найден или неоднозначен — пропущена")
+            return outcome
+
+        outcome.entity_id = organization.id
+        if organization.owner_id == manager.id:
+            return outcome  # уже назначен — повторная загрузка файла не меняет версию
+
+        old_owner_id = organization.owner_id
+        organization.owner_id = manager.id
+        organization.version += 1
+        await batch.session.flush()
+        outcome.effects.append(
+            {
+                "kind": "organization",
+                "op": "update",
+                "id": str(organization.id),
+                "before": {"owner_id": str(old_owner_id) if old_owner_id else None},
+            }
+        )
+        audit = AuditService(batch.session)
+        await audit.record(
+            AuditAction.ORGANIZATION_OWNER_CHANGED,
+            entity_type="organization",
+            entity_id=organization.id,
+            changes={
+                "owner_id": {
+                    "old": str(old_owner_id) if old_owner_id else None,
+                    "new": str(manager.id),
+                },
+                "reason": {"old": None, "new": "Импорт списка ответственных"},
+            },
+        )
+        notifications = get_notification_service()
+        await notifications.notify_user(
+            batch.session,
+            recipient_id=manager.id,
+            template_code="ORG_OWNER_ASSIGNED",
+            priority=NotificationPriority.NORMAL,
+            entity_type="organization",
+            entity_id=organization.id,
+        )
+        if old_owner_id is not None:
+            await notifications.notify_user(
+                batch.session,
+                recipient_id=old_owner_id,
+                template_code="ORG_OWNER_REMOVED",
+                priority=NotificationPriority.NORMAL,
+                entity_type="organization",
+                entity_id=organization.id,
+            )
+        return outcome
+
+
 HANDLERS: dict[str, EntityHandler] = {
     handler.entity_type: handler
-    for handler in (VendorContactHandler(), PaymentHandler(), LearnerHandler())
+    for handler in (
+        VendorContactHandler(),
+        PaymentHandler(),
+        LearnerHandler(),
+        DirectionHandler(),
+        ResponsibleHandler(),
+    )
 }
 
 
@@ -606,6 +1149,7 @@ async def _rollback_one(
         "product": Product,
         "contact": Contact,
         "deal": Deal,
+        "direction": Direction,
     }
     model = models[kind]
     entity = await session.get(model, entity_id)
@@ -619,7 +1163,8 @@ async def _rollback_one(
                 if line is not None:
                     line.stream_number = old["old"]
                 continue
-            if attr in ("vendor_id", "organization_id") and old is not None:
+            uuid_attrs = ("vendor_id", "organization_id", "owner_id", "parent_id")
+            if attr in uuid_attrs and old is not None:
                 old = uuid.UUID(old)
             if attr == "amount" and old is not None:
                 old = Decimal(str(old))
@@ -632,6 +1177,7 @@ async def _rollback_one(
         "product": "продукт",
         "contact": "контакт",
         "deal": "сделка",
+        "direction": "направление",
     }[kind]
     dependents = await _dependents(session, kind, entity_id)
     if dependents:
@@ -670,6 +1216,15 @@ async def _dependents(session: AsyncSession, kind: str, entity_id: uuid.UUID) ->
                 Deal.contact_id == entity_id, Deal.deleted_at.is_(None)
             ),
         }
+    elif kind == "direction":
+        checks = {
+            "продукты": select(Product.id).where(
+                Product.direction_id == entity_id, Product.deleted_at.is_(None)
+            ),
+            "дочерние направления": select(Direction.id).where(
+                Direction.parent_id == entity_id, Direction.deleted_at.is_(None)
+            ),
+        }
     else:  # deal: сделка, которую уже вели, откатывать нельзя
         deal = await session.get(Deal, entity_id)
         if deal is not None and deal.version > 1:
@@ -695,8 +1250,11 @@ __all__ = [
     "HANDLERS",
     "ApplyOutcome",
     "Batch",
+    "DirectionHandler",
     "EntityHandler",
+    "ResponsibleHandler",
     "RowCheck",
+    "RowIssue",
     "normalize_email",
     "normalize_phone",
     "rollback_effects",

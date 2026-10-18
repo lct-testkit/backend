@@ -153,6 +153,34 @@ _PAYMENT: dict[str, str] = {
 }
 _LEARNER: dict[str, str] = {}  # заголовки шаблона — через `catalog.learner.target_for_header`
 
+# B3-8.
+_DIRECTION: dict[str, str] = {
+    "код": "code",
+    "код направления": "code",
+    "название": "name",
+    "направление": "name",
+    "название направления": "name",
+    "родитель": "parent_code",
+    "родительское направление": "parent_code",
+    "код родителя": "parent_code",
+}
+_RESPONSIBLE: dict[str, str] = {
+    "вуз": "organization_name",
+    "название вуза": "organization_name",
+    "наименование вуза": "organization_name",
+    "организация": "organization_name",
+    "инн вуза": "organization_inn",
+    "инн": "organization_inn",
+    "почта менеджера": "manager_email",
+    "email менеджера": "manager_email",
+    "почта кам": "manager_email",
+    "фио менеджера": "manager_full_name",
+    "фио кам": "manager_full_name",
+    "кам": "manager_full_name",
+    "ответственный": "manager_full_name",
+    "руководитель": "manager_full_name",
+}
+
 _SYNONYMS_BY_ENTITY: dict[str, dict[str, str]] = {
     "organization": _ORGANIZATION,
     "product": _PRODUCT,
@@ -160,6 +188,8 @@ _SYNONYMS_BY_ENTITY: dict[str, dict[str, str]] = {
     "vendor_contact": _VENDOR_CONTACT,
     "payment": _PAYMENT,
     "learner": _LEARNER,
+    "direction": _DIRECTION,
+    "responsible": _RESPONSIBLE,
 }
 # Без типа сущности (вызов из старого кода/тестов): объединение словарей каталожных типов.
 _LEGACY_SYNONYMS: dict[str, str] = {**_LICENSE, **_PRODUCT, **_ORGANIZATION}

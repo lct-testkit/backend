@@ -166,6 +166,27 @@ PAYMENT_FIELDS: tuple[FieldSpec, ...] = (
     FieldSpec("currency", "Валюта", "currency"),
 )
 
+# B3-8: «ИТ-направления» (ТЗ §4 п.1). Код необязателен — `DirectionHandler` строит его из
+# названия (`core.normalize.slugify_code`), если колонки кода нет или ячейка пуста.
+DIRECTION_FIELDS: tuple[FieldSpec, ...] = (
+    FieldSpec("code", "Код", "text", max_length=64),
+    FieldSpec("name", "Название", "text", required=True, max_length=255),
+    FieldSpec("parent_code", "Родительское направление", "text", max_length=255),
+)
+
+# B3-8: «Список ответственных» — назначает `Organization.owner_id` (КАМ/руководитель) без
+# заведения нового вуза. Вуз ищется тем же многоступенчатым поиском, что и лицензии (B3-4),
+# но внутри `ResponsibleHandler.check_row`/`apply_row`, а не через `_FK_TARGETS` сервиса: для
+# типов, применяемых обработчиком, `_extract_row` вызывается с пустым `fk_lookup` (см. докстринг
+# `ImportService._dry_run_handled`) — вид `organization_name` там упал бы `KeyError`, поэтому
+# здесь, как и у лицензий исторически, это обычный текст (max_length как у `Organization.name`).
+RESPONSIBLE_FIELDS: tuple[FieldSpec, ...] = (
+    FieldSpec("organization_name", "Название ВУЗа", "text", required=True, max_length=512),
+    FieldSpec("organization_inn", "ИНН ВУЗа", "inn"),
+    FieldSpec("manager_email", "Почта менеджера", "email"),
+    FieldSpec("manager_full_name", "ФИО менеджера", "text", max_length=255),
+)
+
 # «Загрузка пользователей.xlsx»: 30 колонок шаблона LMS (заголовки и порядок — `catalog.learner`).
 _LEARNER_KINDS: dict[str, FieldKind] = {"phone": "phone", "email": "email"}
 LEARNER_FIELDS: tuple[FieldSpec, ...] = tuple(
@@ -185,6 +206,8 @@ _ENTITY_FIELDS: dict[str, tuple[FieldSpec, ...]] = {
     "vendor_contact": VENDOR_CONTACT_FIELDS,
     "payment": PAYMENT_FIELDS,
     "learner": LEARNER_FIELDS,
+    "direction": DIRECTION_FIELDS,
+    "responsible": RESPONSIBLE_FIELDS,
 }
 _NATURAL_KEYS: dict[str, str] = {
     "organization": "inn",
@@ -194,13 +217,27 @@ _NATURAL_KEYS: dict[str, str] = {
 
 # Типы, строка которых порождает несколько записей и применяется обработчиком
 # (`imports.handlers`), а не `_apply_*_row` общего сервиса.
-HANDLED_ENTITY_TYPES: frozenset[str] = frozenset({"vendor_contact", "payment", "learner"})
+HANDLED_ENTITY_TYPES: frozenset[str] = frozenset(
+    {"vendor_contact", "payment", "learner", "direction", "responsible"}
+)
+# Подмножество выше про файлы о людях — у них общее правило обязательности «ФИО или
+# фамилия+имя», «email или телефон» (`_NAME_GROUP`/`_CONTACT_GROUP`). `direction`/`responsible`
+# (B3-8) — тоже обработчики, но правило обязательности у них своё (см. `_RESPONSIBLE_GROUP`
+# ниже), не общее людское.
+PERSON_ENTITY_TYPES: frozenset[str] = frozenset({"vendor_contact", "payment", "learner"})
+# Только ADMIN может создать задание этого типа (`ImportService.create_job`, B3-8): смена
+# `Organization.owner_id` в фоновой задаче без интерактивного `Principal` — решение не для КАМ.
+ADMIN_ONLY_ENTITY_TYPES: frozenset[str] = frozenset({"direction", "responsible"})
 
 # Что обязательно присутствовать в маппинге, чтобы строка вообще могла быть применена. Кроме
 # `required=True` полей: «ФИО или фамилия+имя», «email или телефон» — это условия «или», их одним
 # флагом поля не выразить.
 _NAME_GROUP = ("full_name", ("last_name", "first_name"))
 _CONTACT_GROUP = ("email", "phone")
+# B3-8: «ответственный» требует вуз (уже `required=True` у `organization_name`) и хотя бы один
+# способ найти менеджера — почту или ФИО.
+_RESPONSIBLE_GROUP = ("manager_email", "manager_full_name")
+_RESPONSIBLE_REQUIREMENT = "Почта менеджера или ФИО менеджера"
 
 
 def fields_for(entity_type: str) -> tuple[FieldSpec, ...]:
@@ -225,8 +262,10 @@ def requirements_for(entity_type: str) -> list[str]:
     key = _NATURAL_KEYS.get(entity_type)
     if key is not None and by_target[key].label not in required:
         required.append(by_target[key].label)
-    if entity_type in HANDLED_ENTITY_TYPES:
+    if entity_type in PERSON_ENTITY_TYPES:
         required += [_NAME_REQUIREMENT, _CONTACT_REQUIREMENT]
+    if entity_type == "responsible":
+        required.append(_RESPONSIBLE_REQUIREMENT)
     return required
 
 
@@ -241,13 +280,15 @@ def missing_mapping_labels(entity_type: str, mapped_targets: set[str]) -> list[s
     key = _NATURAL_KEYS.get(entity_type)
     if key is not None and key not in mapped_targets and by_target[key].label not in missing:
         missing.append(by_target[key].label)
-    if entity_type in HANDLED_ENTITY_TYPES:
+    if entity_type in PERSON_ENTITY_TYPES:
         if not (
             _NAME_GROUP[0] in mapped_targets or all(t in mapped_targets for t in _NAME_GROUP[1])
         ):
             missing.append(_NAME_REQUIREMENT)
         if not any(t in mapped_targets for t in _CONTACT_GROUP):
             missing.append(_CONTACT_REQUIREMENT)
+    if entity_type == "responsible" and not any(t in mapped_targets for t in _RESPONSIBLE_GROUP):
+        missing.append(_RESPONSIBLE_REQUIREMENT)
     return missing
 
 
@@ -258,6 +299,8 @@ ENTITY_TYPE_LABELS: dict[str, str] = {
     "vendor_contact": "Вендоры и ответственные за продукты",
     "payment": "Оплаты (заказы физлиц на курсы)",
     "learner": "Учащиеся LMS (шаблон «Загрузка пользователей»)",
+    "direction": "ИТ-направления (каталог)",
+    "responsible": "Ответственные за вуз (КАМ/руководитель) — только администратор",
 }
 
 

@@ -1343,7 +1343,7 @@ class TestImportFramework:
         assert late.status_code == 422
         assert get_job(client, job_id)["status"] == "completed"  # задание не сброшено
 
-    def test_entity_types_endpoint_lists_all_six_with_fields(self, client) -> None:
+    def test_entity_types_endpoint_lists_all_eight_with_fields(self, client) -> None:
         login(client, "HEAD")
         response = client.get("/api/imports/entity-types")
         assert response.status_code == 200, response.text
@@ -1355,6 +1355,8 @@ class TestImportFramework:
             "vendor_contact",
             "payment",
             "learner",
+            "direction",
+            "responsible",
         }
         assert len(items["learner"]["fields"]) == 30
         assert "json" in items["payment"]["source_formats"]
@@ -1363,6 +1365,10 @@ class TestImportFramework:
             "order_number",
             "product_name",
         ]
+        # B3-8: только ADMIN может создать задание направлений/ответственных.
+        assert items["direction"]["admin_only"] is True
+        assert items["responsible"]["admin_only"] is True
+        assert items["organization"]["admin_only"] is False
 
     def test_rows_endpoint_masks_personal_data(self, client, monkeypatch) -> None:
         tok = token()

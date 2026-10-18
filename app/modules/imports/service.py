@@ -22,6 +22,7 @@ import uuid
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
+from dataclasses import field as _dc_field
 from decimal import Decimal
 from typing import Any
 
@@ -32,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.context import ActorContext, set_actor
-from app.core.errors import AppError, ErrorCode, NotFoundError
+from app.core.errors import AppError, ErrorCode, ForbiddenError, NotFoundError
 from app.core.ids import uuid7
 from app.core.metrics import import_duration_seconds, import_rows_total
 from app.core.normalize import parse_contact_methods, split_full_name
@@ -52,6 +53,7 @@ from app.modules.catalog.models import Direction, Organization, OrganizationLice
 from app.modules.files.models import Attachment, File, FileStatus
 from app.modules.identity.models import User
 from app.modules.imports.fields import (
+    ADMIN_ONLY_ENTITY_TYPES,
     HANDLED_ENTITY_TYPES,
     FieldSpec,
     fields_for,
@@ -70,7 +72,14 @@ from app.modules.imports.models import (
     ImportRowResult,
     ImportRowStatus,
 )
-from app.modules.imports.parsing import ParsedTable, parse_table, sanitize_formula
+from app.modules.imports.parsing import (
+    ParsedTable,
+    SheetInfo,
+    list_sheets,
+    parse_table,
+    sanitize_formula,
+)
+from app.modules.imports.schemas import ImportOptions
 from app.modules.registry.models import EgrulEntry
 
 logger = structlog.get_logger(__name__)
@@ -134,6 +143,12 @@ class ProfileResult:
     suggested_mapping: dict[str, str]
     total_rows: int
     applied_preset: str | None = None
+    #: B3-2: листы книги (пусто для CSV/JSON), выбранный лист/строка заголовка (из query-параметров
+    #: или уже сохранённых `job.options`, если query их не переопределяет) и подсказка автопоиска.
+    sheets: list[SheetInfo] = _dc_field(default_factory=list)
+    sheet: str | None = None
+    header_row: int = 1
+    suggested_header_row: int = 1
 
 
 class ImportService:
@@ -173,6 +188,11 @@ class ImportService:
     ) -> ImportJob:
         if entity_type not in _MODEL_BY_ENTITY and entity_type not in HANDLED_ENTITY_TYPES:
             raise AppError(ErrorCode.VALIDATION, f"Импорт типа {entity_type!r} не поддерживается")
+        # B3-8: направления и список ответственных меняют каталог/видимость вузов напрямую (без
+        # формы с привычными проверками скоупа) — только ADMIN. Право «владелец вуза» для
+        # руководителя (HEAD) появится в спринте B4, здесь только самый узкий безопасный вариант.
+        if entity_type in ADMIN_ONLY_ENTITY_TYPES and not principal.is_admin:
+            raise ForbiddenError("Импорт этого типа доступен только администратору")
         file = await self._get_ready_file(file_id)
         # Профиль файла отдаёт его первые строки; без этой проверки руководитель мог «импортировать»
         # любой готовый файл системы (чужое вложение сделки) и читать его превью. Чужой файл для
@@ -194,7 +214,7 @@ class ImportService:
 
     # -- фаза 2: профилирование и подсказка маппинга --------------------
 
-    async def _load_table(self, job: ImportJob) -> ParsedTable:
+    async def _download_checked(self, job: ImportJob) -> tuple[File, bytes]:
         file = await self._get_ready_file(job.file_id)
 
         # Раздел 4.12/3.7: лимит размера файла импорта нигде не проверялся
@@ -215,15 +235,64 @@ class ImportService:
             )
 
         content = await download_object_bytes(bucket=file.bucket, key=file.storage_key)
+        return file, content
+
+    async def _load_table(self, job: ImportJob) -> ParsedTable:
+        _file, content = await self._download_checked(job)
+        options = ImportOptions.model_validate(job.options or {})
         # B8-11: разбор xlsx/csv — чистый Python (openpyxl/csv), секунды CPU на крупный файл.
         # Внутри цикла событий это держало бы реплику api недоступной для всех остальных
         # запросов на всё время разбора (гипотеза B8-5, не измерено этой задачей, но правка
         # безвредна и дёшева: `to_thread` всегда корректен для CPU-синхронного кода).
-        return await asyncio.to_thread(parse_table, content, source_format=job.source_format)
+        # B3-2: `sheet`/`sheets`/`header_row`/`fill_down` — выбор пользователя, сохранённый на
+        # задании `PUT .../mapping`; без них разбор буквально как раньше (первый лист, первая
+        # строка) — `job.options` по умолчанию `{}`, `ImportOptions()` даёт все поля `None`/пустыми.
+        return await asyncio.to_thread(
+            parse_table,
+            content,
+            source_format=job.source_format,
+            sheet=options.sheet,
+            sheets=options.sheets,
+            header_row=options.header_row,
+            fill_down=options.fill_down,
+        )
 
-    async def profile(self, job: ImportJob) -> ProfileResult:
-        table = await self._load_table(job)
+    async def profile(
+        self, job: ImportJob, *, sheet: str | None = None, header_row: int | None = None
+    ) -> ProfileResult:
+        """Раздел 4.12, фаза 2-3: превью первых 100 строк и автоподбор колонок. B3-2: `sheet`/
+        `header_row` — предпросмотр ДРУГОГО листа/строки заголовка, чем уже сохранено на задании
+        (если вообще сохранено); ничего здесь не пишется в БД — сохраняет только `PUT .../mapping`
+        своим параметром `options`."""
         fields = fields_for(job.entity_type)
+        saved_options = ImportOptions.model_validate(job.options or {})
+        resolved_sheet = sheet if sheet is not None else saved_options.sheet
+        resolved_header_row = header_row if header_row is not None else saved_options.header_row
+
+        _file, content = await self._download_checked(job)
+        fmt = job.source_format.lower().lstrip(".")
+        sheets_info: list[SheetInfo] = []
+        suggested_header_row = 1
+        if fmt in ("xlsx", "xls"):
+            expected_labels = [f.label for f in fields]
+            sheets_info = await asyncio.to_thread(
+                list_sheets, content, source_format=fmt, expected_labels=expected_labels
+            )
+            if sheets_info:
+                if resolved_sheet:
+                    match = next((s for s in sheets_info if s.name == resolved_sheet), None)
+                    suggested_header_row = match.suggested_header_row if match else 1
+                else:
+                    visible = [s for s in sheets_info if s.visible] or sheets_info
+                    suggested_header_row = visible[0].suggested_header_row
+
+        table = await asyncio.to_thread(
+            parse_table,
+            content,
+            source_format=job.source_format,
+            sheet=resolved_sheet,
+            header_row=resolved_header_row,
+        )
         mapping = suggest_mapping(table.headers, list(fields), job.entity_type)
 
         # dop.md §4.12, фаза 3: «второй импорт того же реестра не требует
@@ -244,6 +313,10 @@ class ImportService:
             suggested_mapping=mapping,
             total_rows=len(table.rows),
             applied_preset=applied_preset,
+            sheets=sheets_info,
+            sheet=table.sheet_name or resolved_sheet,
+            header_row=table.header_row,
+            suggested_header_row=suggested_header_row,
         )
 
     async def _latest_preset(self, entity_type: str) -> ImportPreset | None:
@@ -284,6 +357,7 @@ class ImportService:
         mapping: dict[str, str],
         principal: Principal,
         save_as_preset: str | None,
+        options: ImportOptions | None = None,
     ) -> ImportJob:
         # Раньше маппинг перезаписывался в любом статусе: `PUT` на применяемое или завершённое
         # задание сбрасывало его в `mapped` и стирало основу для отката.
@@ -316,6 +390,9 @@ class ImportService:
             )
 
         job.mapping = mapping
+        # B3-2: опции листа/шапки/`fill_down` сохраняются вместе с маппингом — `_load_table`
+        # перечитывает файл на каждом dry-run/apply и должна помнить выбор пользователя.
+        job.options = options.model_dump(mode="json") if options is not None else {}
         job.status = ImportJobStatus.MAPPED.value
         await self._session.flush()
 
@@ -325,6 +402,7 @@ class ImportService:
                     name=save_as_preset,
                     entity_type=job.entity_type,
                     mapping=mapping,
+                    options=job.options or None,
                     created_by=principal.user_id,
                 )
             )
@@ -356,9 +434,14 @@ class ImportService:
         table = await self._load_table(job)
         settings = get_settings()
         if len(table.rows) > settings.import_max_rows:
+            # B3-M: лимит проверяется ПОСЛЕ склейки листов (B3-2) — `table.rows` уже содержит
+            # строки всех листов `sheets=["*"]`; называем листы, иначе непонятно, откуда взялось
+            # число больше, чем в одном листе на экране.
+            sheet_names = sorted({s for s in table.sheet_names if s})
+            where = f" (листы: {', '.join(sheet_names)})" if len(sheet_names) > 1 else ""
             raise AppError(
                 ErrorCode.IMPORT_BAD_FORMAT,
-                f"Слишком много строк: {len(table.rows)} > {settings.import_max_rows}",
+                f"Слишком много строк: {len(table.rows)} > {settings.import_max_rows}{where}",
             )
 
         header_index = {h: i for i, h in enumerate(table.headers) if h}
