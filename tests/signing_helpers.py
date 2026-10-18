@@ -1,19 +1,30 @@
 """Общие построители для тестов ПЭП поверх БД (`tests/test_signing_api.py`,
 `tests/test_signing_file.py`): документы, файлы, запросы и подписи заводятся в БД
 напрямую — S3 и NTP в тестах недоступны, `seal()` здесь не запускается.
+
+`stubbed_storage`/`_try_sign`/`_gather_signs`/`_issue_otp` (B7-7) — сюда же перенесены из
+`tests/test_signing_hardening.py`, где они выросли для тестов гонок и используются ещё двумя
+файлами (`test_signing_auto_advance.py`, `test_signing_security_events.py`). Тот модуль
+продолжает реэкспортировать те же имена, чтобы не трогать их импорты.
 """
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import functools
 import hashlib
 import uuid
 from dataclasses import dataclass, field
 
+import bcrypt
+import pytest
+
 from tests.conftest import authenticate, run
 
 PROTOCOL = b"%PDF-1.4 signing protocol"
+CODE = "123456"
+IP = "198.51.100.9"
 
 
 def _sha(data: bytes) -> str:
@@ -175,3 +186,109 @@ async def _request_state(request_id: uuid.UUID) -> dict[str, object]:
     async with session_scope() as session:
         request = await session.get(SignatureRequest, request_id)
         return {"status": request.status, "token_hash": request.access_token_hash}
+
+
+# --- Гонки (B7-7): подмена хранилища/времени, попытка подписи, вспомогательные чтения -----
+
+
+@pytest.fixture
+def stubbed_storage(monkeypatch):
+    """Хранилище, NTP и PDF заменены: проверяется логика подписи, а не инфраструктура."""
+    from sqlalchemy import select
+
+    from app.core.db import session_scope
+    from app.core.storage import ObjectInspection
+    from app.modules.files.models import File
+    from app.modules.signing import service as svc
+
+    async def inspect(*, bucket: str, key: str) -> ObjectInspection:
+        async with session_scope() as session:
+            sha = await session.scalar(
+                select(File.sha256).where(File.bucket == bucket, File.storage_key == key)
+            )
+        return ObjectInspection(exists=True, size_bytes=1, sha256=sha or "", magic_bytes=b"%PDF")
+
+    async def trusted_time():
+        return dt.datetime.now(dt.UTC), "test_clock", None
+
+    async def download(*, bucket: str, key: str) -> bytes:
+        return b"%PDF-1.4 stub"
+
+    async def nothing(*args, **kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(svc, "inspect_object", inspect)
+    monkeypatch.setattr(svc, "get_trusted_time", trusted_time)
+    monkeypatch.setattr(svc, "download_object_bytes", download)
+    monkeypatch.setattr(svc, "ensure_bucket", nothing)
+    monkeypatch.setattr(svc, "upload_object_bytes", nothing)
+    monkeypatch.setattr(svc, "apply_signature_stamp", lambda pdf, **kw: pdf + b" stamped")
+    monkeypatch.setattr(svc, "render_protocol_pdf", lambda **kw: b"%PDF-1.4 protocol")
+
+
+async def _issue_otp(request_id: uuid.UUID, code: str = CODE) -> None:
+    from app.core.db import session_scope
+    from app.modules.signing.models import SignatureOtpCode
+
+    salt = bcrypt.gensalt()
+    async with session_scope() as session:
+        session.add(
+            SignatureOtpCode(
+                request_id=request_id,
+                code_hash=bcrypt.hashpw(code.encode(), salt).decode(),
+                salt=salt.decode(),
+                channel="email",
+                sent_to_masked="p***@example.ru",
+                max_attempts=3,
+                expires_at=dt.datetime.now(dt.UTC) + dt.timedelta(minutes=5),
+            )
+        )
+
+
+async def _try_sign(request_id: uuid.UUID, code: str = CODE):
+    """`Signature.id` при успехе, `AppError` — при отказе (транзакция откатывается как в API)."""
+    from app.core.db import session_scope
+    from app.core.errors import AppError
+    from app.modules.signing.models import SignatureRequest
+    from app.modules.signing.service import SignatureRequestService
+
+    try:
+        async with session_scope() as session:
+            request = await session.get(SignatureRequest, request_id)
+            signature = await SignatureRequestService(session).sign(
+                request, otp_code=code, ip=IP, user_agent="pytest"
+            )
+            return signature.id
+    except AppError as exc:
+        return exc
+
+
+async def _gather_signs(*calls):
+    return await asyncio.gather(*(_try_sign(*call) for call in calls))
+
+
+async def _signatures_of(document_id: uuid.UUID) -> list:
+    from sqlalchemy import select
+
+    from app.core.db import session_scope
+    from app.modules.signing.models import Signature
+
+    async with session_scope() as session:
+        rows = await session.execute(select(Signature).where(Signature.document_id == document_id))
+        found = list(rows.scalars())
+        for row in found:
+            session.expunge(row)
+        return found
+
+
+async def _get(model, object_id):
+    from app.core.db import session_scope
+
+    async with session_scope() as session:
+        obj = await session.get(model, object_id)
+        session.expunge(obj)
+        return obj
+
+
+def _error_code(result) -> str:
+    return result.code.value
