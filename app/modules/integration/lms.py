@@ -393,13 +393,17 @@ async def move_deal_by_progress(
 ) -> str:
     """B5-8: двигает сделку по подходящему правилу `progress_rules` (маршрутизация источника
     `lms`, B5-4). Возвращает `NOT_MATCHED` (ни одно правило не подошло — не ошибка, большинство
-    строк прогресса), `MOVED` (переход выполнен) или `MOVE_FAILED` (правило подошло, но переход
-    не удался — сделка закрыта, конфликт версии, нет перехода в графе). Правило не срабатывает
-    дважды: после перехода текущий статус сделки уже другой и не совпадёт с `from_status` на
-    следующем прогоне.
+    строк прогресса), `MOVED` (переход выполнен) или `MOVE_FAILED` (правило подошло, но сделку
+    нельзя двигать, не трогая её: удалена, статус правила пропал из графа). Правило не
+    срабатывает дважды: после перехода текущий статус сделки уже другой и не совпадёт с
+    `from_status` на следующем прогоне.
 
     Вызывается внутри ОТДЕЛЬНОГО SAVEPOINT вызывающим (`apply_progress_rows`): отказ перехода не
-    должен откатывать саму запись прогресса, применённую непосредственно перед этим."""
+    должен откатывать саму запись прогресса, применённую непосредственно перед этим. Отказ самого
+    перехода (`AppError`: сделка закрыта, конфликт версии, нет перехода в графе) здесь НЕ
+    превращается в `MOVE_FAILED` — он пробрасывается наружу, чтобы SAVEPOINT откатил всё, что
+    `DealService.transition` успел записать до отказа (`claim_version` бьёт UPDATE сразу, ещё до
+    проверки условий: иначе версия сделки росла бы на каждом опросе LMS)."""
     if not rules or progress.deal_id is None:
         return NOT_MATCHED
 
@@ -468,7 +472,7 @@ async def move_deal_by_progress(
             to_status=matched.to_status,
             error=exc.code.value,
         )
-        return MOVE_FAILED
+        raise  # SAVEPOINT вызывающего откатит частичные записи перехода
     return MOVED
 
 
@@ -513,6 +517,10 @@ async def apply_progress_rows(
             try:
                 async with session.begin_nested():
                     outcome = await move_deal_by_progress(session, applied, progress_rules)
+            except AppError:
+                # Отказ перехода: причина уже в логе `move_deal_by_progress`, а SAVEPOINT откатил
+                # всё, что переход успел записать до отказа.
+                outcome = MOVE_FAILED
             except Exception as exc:  # noqa: BLE001 — движение сделки не должно ронять пачку
                 logger.warning(
                     "lms_progress_move_error", index=index, error_type=type(exc).__name__

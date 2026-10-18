@@ -124,6 +124,16 @@ async def _deal_status(deal_id: uuid.UUID) -> str:
         return next(s["code"] for s in graph["statuses"] if s["id"] == str(deal.status_id))
 
 
+async def _deal_version(deal_id: uuid.UUID) -> int:
+    from app.core.db import session_scope
+    from app.modules.crm.models import Deal
+
+    async with session_scope() as session:
+        deal = await session.get(Deal, deal_id)
+        assert deal is not None
+        return deal.version
+
+
 async def _deal_comments(deal_id: uuid.UUID) -> list[str]:
     from sqlalchemy import select
 
@@ -230,6 +240,38 @@ class TestMoveDealByProgress:
         assert result["applied"] == 1
         assert result["moved"] == 0
         assert result["move_failed"] == 1
+
+    def test_refused_transition_leaves_no_partial_writes(self, client, monkeypatch) -> None:
+        """Отказ перехода приходит как `AppError` уже ПОСЛЕ `claim_version` (тот бьёт UPDATE
+        сразу, до проверки условий). Раньше `move_deal_by_progress` ловил его внутри SAVEPOINT и
+        возвращал `MOVE_FAILED` обычным значением: SAVEPOINT закрывался успешно, и версия
+        сделки росла на каждом опросе LMS, пока правило подходило, а переход не удавался."""
+        from app.core.errors import AppError, ErrorCode
+        from app.core.optimistic import claim_version
+        from app.modules.crm.service import DealService
+
+        async def _claim_then_refuse(self, deal, principal, **kwargs):
+            await claim_version(self._session, deal, kwargs["expected_version"])
+            raise AppError(ErrorCode.TRANSITION_CONDITIONS, "условия не выполнены")
+
+        monkeypatch.setattr(DealService, "transition", _claim_then_refuse)
+
+        scene = run(client, _scene)
+        row = {
+            "deal_id": str(scene["deal_id"]),
+            "course_external_id": scene["product_code"],
+            "progress_pct": 100,
+            "completed_at": "2026-09-20T12:00:00Z",
+        }
+        version_before = run(client, _deal_version, scene["deal_id"])
+
+        result = run(client, _apply, [row], [_rule(scene)])
+
+        assert result["applied"] == 1
+        assert result["moved"] == 0
+        assert result["move_failed"] == 1
+        assert run(client, _deal_version, scene["deal_id"]) == version_before
+        assert run(client, _deal_status, scene["deal_id"]) == "lms_enrollment"
 
     def test_no_rules_does_not_attempt_move(self, client) -> None:
         scene = run(client, _scene)
