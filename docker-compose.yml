@@ -114,6 +114,10 @@ x-api-env: &api-env
   # B5-10: API-ключи для систем без OAuth2 (X-API-Key, только роль INTEGRATION).
   API_KEYS_ENABLED: ${API_KEYS_ENABLED:-true}
   API_KEY_DEFAULT_TTL_DAYS: ${API_KEY_DEFAULT_TTL_DAYS:-90}
+  # B4-13 (C-21): e-mail общих демо-учёток realm через запятую — действует только при
+  # APP_PROFILE=demo (Settings.demo_locked_emails игнорирует значение в dev/prod). Пусто по
+  # умолчанию; демо-деплой выставляет сюда пять адресов из realm-crm.json.
+  DEMO_LOCKED_PASSWORD_EMAILS: ${DEMO_LOCKED_PASSWORD_EMAILS:-}
   # Значения секретов, на которые ссылаются `credentials_ref`/`*_REF` выше
   # (раздел 7.8: в БД — только имя переменной, значение — здесь). Набор
   # фиксированный и пополняется по мере подключения реальных источников —

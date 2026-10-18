@@ -362,6 +362,10 @@ class Settings(BaseSettings):
     # Добровольная смена пароля: 5 неудачных попыток → блокировка формы.
     password_change_max_attempts: int = 5
     password_change_lock_seconds: int = 900
+    # B4-13 (C-21): e-mail общих демо-учёток через запятую (как allowed_file_extensions выше).
+    # Действует только при app_profile == "demo" — в dev/prod переменная игнорируется (в prod
+    # нельзя «заморозить» пароль настоящего сотрудника переменной окружения).
+    demo_locked_password_emails: str = ""
     # Grace period режима A перед обезличиванием (new_spec §4.8.2).
     erasure_grace_days: int = 30
     # Срок исполнения запроса субъекта ПДн по ст. 21 152-ФЗ.
@@ -557,6 +561,19 @@ class Settings(BaseSettings):
             ext.strip().lower().lstrip(".")
             for ext in self.allowed_file_extensions.split(",")
             if ext.strip()
+        )
+
+    @property
+    def demo_locked_emails(self) -> frozenset[str]:
+        """B4-13 (C-21): пустое множество вне `app_profile == "demo"` — список из
+        окружения не должен случайно «заморозить» пароль настоящего сотрудника, если
+        переменную забыли убрать при переключении профиля."""
+        if self.app_profile != "demo":
+            return frozenset()
+        return frozenset(
+            email.strip().lower()
+            for email in self.demo_locked_password_emails.split(",")
+            if email.strip()
         )
 
     @property

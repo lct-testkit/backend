@@ -70,6 +70,9 @@ class MeResponse(BaseModel):
     #: B4-6: ограничение видимости по вузам/направлениям — фронтенд показывает баннер и
     #: скрывает то, что `require_permission` всё равно отклонит (например «Импорт»).
     access_restricted: bool = False
+    #: B4-13 (C-21): e-mail в settings.demo_locked_emails (только app_profile == "demo") —
+    #: фронтенд скрывает кнопку «Сменить пароль», не дожидаясь 403 CRM-1108 от самой попытки.
+    password_locked: bool = False
     teams: list[uuid.UUID] = Field(default_factory=list)
     perm_epoch: int
     last_login_at: dt.datetime | None = None
@@ -239,6 +242,9 @@ class UserOut(BaseModel):
     #: B4-5: есть хоть одно правило `user_access_rules` — сужает видимость сделок/
     #: вузов/контактов этого пользователя (`GET /admin/users/{id}/access-rules`).
     access_restricted: bool = False
+    #: B4-13 (I16): служебная учётка без входа (`User.is_system` — keycloak_id IS NULL) —
+    #: фронтенд показывает её отдельно и не предлагает выбрать ответственным за сделку/вуз.
+    is_system: bool = False
     created_at: dt.datetime
     updated_at: dt.datetime
     version: int

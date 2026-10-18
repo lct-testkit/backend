@@ -231,6 +231,15 @@ class User(UuidPkMixin, TimestampMixin, SoftDeleteMixin, VersionMixin, Base):
     def effective_name(self) -> str:
         return self.display_name or self.full_name
 
+    @property
+    def is_system(self) -> bool:
+        """B4-13 (I16): служебная учётка без входа (роль INTEGRATION — `integration@
+        system.local` — либо исторический фантом ADMIN на уже развёрнутых стендах,
+        `reporting.seed.remediate_phantom_admin`). Обычный сотрудник заводится только через
+        Keycloak-инвайт, `keycloak_id` у него не бывает NULL, кроме как после обезличивания
+        (туда он уже не попадёт: такой пользователь не активен и не виден в пикерах)."""
+        return self.keycloak_id is None
+
 
 class UserAccessRule(UuidPkMixin, Base):
     """B4-5: ограничение видимости пользователя по вузу или направлению (ТЗ Функц.11:

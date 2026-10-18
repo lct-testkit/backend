@@ -28,6 +28,10 @@ class ErrorCode(StrEnum):
     PASSWORD_CHANGE_REQUIRED = "CRM-1106"
     # Двойная отправка формы без CSRF-токена (new_spec §3.1 п.5).
     CSRF_FAILED = "CRM-1107"
+    # B4-13 (C-21): пароль общей демо-учётки (settings.demo_locked_emails, только
+    # app_profile == "demo") нельзя менять ни самостоятельно, ни через сброс администратором —
+    # один эксперт сменил бы пароль, и следующий не вошёл бы на демо-стенде.
+    DEMO_PASSWORD_LOCKED = "CRM-1108"
 
     # --- Воронка и переходы ---
     TRANSITION_CONDITIONS = "CRM-1201"
@@ -200,6 +204,14 @@ ERROR_CATALOG: dict[ErrorCode, ErrorSpec] = {
         "Заголовок X-CSRF-Token отсутствует или не совпадает со значением cookie crm_csrf "
         "(требуется для всех мутаций при аутентификации по cookie).",
         "Возьмите значение cookie crm_csrf и передайте его в заголовке X-CSRF-Token.",
+    ),
+    ErrorCode.DEMO_PASSWORD_LOCKED: ErrorSpec(
+        403,
+        "Пароль демо-учётки нельзя менять",
+        "Пароль общий для всех участников демо-стенда — смена (самостоятельная или через сброс "
+        "администратором) сломала бы вход остальным.",
+        "На демо-стенде пароль этой учётки не меняется; настоящим сотрудникам в prod/dev это "
+        "ограничение не действует.",
     ),
     ErrorCode.TRANSITION_CONDITIONS: ErrorSpec(
         422,

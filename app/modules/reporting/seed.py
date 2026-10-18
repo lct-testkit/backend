@@ -17,7 +17,7 @@ import asyncio
 from typing import Any
 
 import structlog
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -31,6 +31,8 @@ from app.core.logging import configure_logging
 # тогда просто не зарегистрирована в `Base.metadata`. Внутри работающего приложения этого не
 # видно: `files.models` уже импортирован транзитивно через `reporting.service`.
 from app.modules.files import models as _files_models  # noqa: F401
+from app.modules.identity.models import User, UserStatus
+from app.modules.integration.seed import seed_integration_account
 from app.modules.reporting.models import ReportJob, ReportJobStatus, ReportTemplate
 
 logger = structlog.get_logger(__name__)
@@ -259,10 +261,46 @@ async def seed_demo_report_history(session: AsyncSession) -> int:
     return removed
 
 
+#: I16 (B4-13), шаг 5: e-mail фантома, который прежняя версия `_demo_requester` (до B1-14,
+#: см. докстрин выше) заводила без `keycloak_id` на стендах без единого реального ADMIN.
+_PHANTOM_ADMIN_EMAIL = "demo-reports@system.local"
+
+
+async def remediate_phantom_admin(session: AsyncSession) -> int:
+    """I16 (B4-13), шаг 5: лечение уже развёрнутых стендов. На чистой базе, где такой
+    строки никогда не было, — no-op (возвращает 0). Текущая версия `_demo_requester`
+    (B1-14) больше не создаёт фантома, поэтому второй прогон после первого успешного —
+    тоже no-op: `report_jobs.requested_by` уже перенесены, менять в них нечего, а
+    `status='terminated'` присвоить второй раз безвредно."""
+    phantom = await session.scalar(
+        select(User).where(
+            User.email == _PHANTOM_ADMIN_EMAIL,
+            User.keycloak_id.is_(None),
+            User.role == "ADMIN",
+        )
+    )
+    if phantom is None:
+        return 0
+    service_account = await seed_integration_account(session)
+    moved = await session.execute(
+        update(ReportJob)
+        .where(ReportJob.requested_by == phantom.id)
+        .values(requested_by=service_account.id)
+    )
+    phantom.status = UserStatus.TERMINATED.value
+    await session.flush()
+    count = moved.rowcount or 0  # type: ignore[attr-defined]
+    logger.info(
+        "demo_phantom_admin_remediated", phantom_id=str(phantom.id), report_jobs_moved=count
+    )
+    return count
+
+
 async def _main() -> None:
     async with session_scope() as session:
         await seed_report_templates(session)
         await seed_demo_report_history(session)
+        await remediate_phantom_admin(session)
 
 
 def main() -> None:

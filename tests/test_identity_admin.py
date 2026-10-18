@@ -118,6 +118,72 @@ class TestPatchUserStatus:
         assert response.json()["position"] == "Менеджер"
 
 
+class TestLastAdminProtection:
+    """CRM-1903: понизить последнего администратора нельзя. B4-13 (I16) добавил ADMIN-
+    фантомов без `keycloak_id` (служебные записи сида / обезличенный дамп эпика 1) — этот
+    тест проверяет через настоящую ручку `IdentityService.ensure_not_last_admin` (вызывается
+    из `AdminUserService.patch_user` при смене роли), что при `count_active_admins() == 0`
+    (после исключения заявителя) понижение блокируется 409, независимо от того, сколько
+    ADMIN-фантомов рядом — сам подсчёт `keycloak_id IS NOT NULL` уже проверен напрямую в
+    `tests/test_identity_hardening.py::TestEmailBinding::
+    test_a_phantom_admin_is_not_counted_as_an_active_administrator`.
+
+    Сквозной HTTP-прогон с подлинным «последний реальный администратор» здесь недостижим:
+    общая тестовая база уже содержит сотни ADMIN-строк с `keycloak_id` от прошлых прогонов
+    (стенд долгоживущий и общий — см. правила воркера), так что `count_active_admins`
+    никогда не вернёт 0 через реальные данные. Поэтому сам подсчёт подменяется — проверяется
+    именно ветвление `patch_user`, а не содержимое таблицы `users`."""
+
+    def test_patch_user_blocks_role_change_when_the_count_hits_zero(
+        self, client, monkeypatch
+    ) -> None:
+        from app.modules.identity import service as identity_service
+
+        admin = run(client, _make_user, "ADMIN")
+        _login(client, admin)
+
+        async def _zero(self, *, exclude=None):
+            return 0
+
+        monkeypatch.setattr(identity_service.IdentityService, "count_active_admins", _zero)
+
+        response = client.patch(
+            f"/api/admin/users/{admin.id}",
+            json={"role": "KAM"},
+            headers={"If-Match": str(admin.version)},
+        )
+
+        assert response.status_code == 409, response.text
+        assert response.json()["code"] == "CRM-1903", response.text
+        assert run(client, _load_user, admin.id).role == "ADMIN"
+
+    def test_patch_user_allows_the_change_once_another_admin_counts(
+        self, client, monkeypatch
+    ) -> None:
+        from app.modules.identity.keycloak import keycloak_client
+
+        async def _noop(*_args: object, **_kwargs: object) -> bool:
+            return False
+
+        monkeypatch.setattr(keycloak_client, "set_realm_role", _noop)
+        monkeypatch.setattr(keycloak_client, "set_attribute", _noop)
+
+        admin = run(client, _make_user, "ADMIN")
+        _login(client, admin)
+
+        # Подсчёт не подменяется: на общей базе он и так положителен (другие реальные
+        # администраторы от прошлых прогонов) — именно поэтому эта ветка доходит до
+        # Keycloak (замоканного выше), а не упирается в 409.
+        response = client.patch(
+            f"/api/admin/users/{admin.id}",
+            json={"role": "KAM"},
+            headers={"If-Match": str(admin.version)},
+        )
+
+        assert response.status_code == 200, response.text
+        assert run(client, _load_user, admin.id).role == "KAM"
+
+
 class TestFirstLoginActivatesInvitedUser:
     """`create_user` заводит учётку в Keycloak сразу, `keycloak_id` у неё уже
     есть — активация при первом входе не должна зависеть от пустого `keycloak_id`."""

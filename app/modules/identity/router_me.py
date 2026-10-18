@@ -80,6 +80,8 @@ async def build_me(session, user: User) -> MeResponse:
         password_change_required=user.must_change_password,
         scopes=scopes_for(user.role, restricted=user.access_restricted),
         access_restricted=user.access_restricted,
+        password_locked=user.email is not None
+        and user.email.lower() in get_settings().demo_locked_emails,
         teams=[user.team_id] if user.team_id else [],
         perm_epoch=user.perm_epoch,
         last_login_at=user.last_login_at,
@@ -403,6 +405,14 @@ async def change_password(
     settings = get_settings()
     identity = IdentityService(session)
     user = (await session.execute(select(User).where(User.id == principal.user_id))).scalar_one()
+
+    # B4-13 (C-21): до обращения к Keycloak и до расхода лимита попыток — демо-учётка не
+    # должна терять попытки на собственную блокировку.
+    if user.email and user.email.lower() in settings.demo_locked_emails:
+        raise AppError(
+            ErrorCode.DEMO_PASSWORD_LOCKED,
+            "Пароль демо-учётки нельзя менять: он общий для всех участников демо",
+        )
 
     if not user.keycloak_id or not user.email:
         raise AppError(
