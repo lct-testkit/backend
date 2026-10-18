@@ -160,3 +160,81 @@ class TestCallback:
         response = client.post("/api/auth/callback", json={"code": "auth-code-1", "state": state})
         assert response.status_code == 401, response.text
         assert response.json()["code"] == "CRM-1101"
+
+    def test_invalid_or_expired_authorization_code_is_rejected(self, client, monkeypatch) -> None:
+        """B9-11: Keycloak отвечает не-200 на обмен кода (код уже использован, истёк, или просто
+        неверный) — `KeycloakClient._token_request` превращает это в `AppError(UNAUTHENTICATED)`
+        (CRM-1101), без деталей ответа Keycloak в теле (там бывает технический текст)."""
+        from app.core.errors import AppError
+
+        async def fake_exchange_code_fails(*, code: str, redirect_uri: str, code_verifier):
+            raise AppError(ErrorCode.UNAUTHENTICATED, "Не удалось обменять код на токены")
+
+        monkeypatch.setattr(router_auth.keycloak_client, "exchange_code", fake_exchange_code_fails)
+        state, _stored = _start_login(client)
+
+        response = client.post(
+            "/api/auth/callback", json={"code": "expired-or-wrong-code", "state": state}
+        )
+        assert response.status_code == 401, response.text
+        assert response.json()["code"] == "CRM-1101"
+
+        # `state` читается через `redis.getdel` ДО обмена кода (router_auth._complete_login) —
+        # уже потрачен этим неудачным запросом. Повтор с тем же state, даже с правильным
+        # кодом на этот раз, не находит его — нужен новый `GET /api/auth/login`, не просто
+        # повторный POST с исправленным кодом.
+        user = run(client, _make_user, "KAM")
+        _patch_token_exchange(monkeypatch, subject=user.keycloak_id)
+        retry = client.post("/api/auth/callback", json={"code": "auth-code-1", "state": state})
+        assert retry.status_code == 401, retry.text
+        assert retry.json()["code"] == "CRM-1101"
+
+    def test_logging_in_again_creates_a_second_session_without_revoking_the_first(
+        self, client, monkeypatch
+    ) -> None:
+        """B9-11: находка, а не ожидание задачи — `session_store.create` (`identity.
+        session_store.py`) добавляет `sid` в множество `key_user_sessions(user_id)` (`sadd`), не
+        заменяет его: повторный вход поддерживает несколько параллельных сессий одного
+        пользователя (несколько устройств), а не ротирует/гасит прежнюю. Если это не то
+        поведение, которое ожидалось (однократный вход, старая сессия гаснет) — см. отчёт по
+        эпику, это вопрос владельцу."""
+        from app.core.redis_client import require_redis
+
+        user = run(client, _make_user, "KAM")
+        _patch_token_exchange(monkeypatch, subject=user.keycloak_id)
+
+        state1, _ = _start_login(client)
+        first = client.post("/api/auth/callback", json={"code": "auth-code-1", "state": state1})
+        assert first.status_code == 200, first.text
+        first_sid = first.cookies["crm_sid"]
+
+        state2, _ = _start_login(client)
+        second = client.post("/api/auth/callback", json={"code": "auth-code-1", "state": state2})
+        assert second.status_code == 200, second.text
+        second_sid = second.cookies["crm_sid"]
+
+        assert first_sid != second_sid
+
+        async def _session_exists(sid: str) -> bool:
+            from app.core.redis_client import key_session
+
+            redis = await require_redis()
+            return await redis.get(key_session(sid)) is not None
+
+        assert run(client, _session_exists, first_sid)
+        assert run(client, _session_exists, second_sid)
+
+    def test_no_rate_limit_on_repeated_wrong_state_callback_attempts(self, client) -> None:
+        """B9-11 (D-15/D-16, не перепроверено до этой задачи): в отличие от `POST /api/me/
+        password` (`password:change`, `rate_limit`, см. `test_identity_hardening.py`) и
+        `GET /api/auth/invite/{token}` (`invite:check`), `POST /api/auth/callback` не вызывает
+        `app.core.rate_limit.enforce` вовсе — многократный перебор `state` не упирается в лимит,
+        только в то, что каждое значение не находится в Redis. Находка для отчёта по эпику, не
+        исправление (нужно решение владельца — есть ли смысл добавлять лимит, с учётом что сам
+        `state` — длинный случайный токен, а не короткий код)."""
+        for _ in range(25):
+            response = client.post(
+                "/api/auth/callback", json={"code": "auth-code-1", "state": "never-issued"}
+            )
+            assert response.status_code == 401, response.text
+            assert response.json()["code"] == "CRM-1101"  # не CRM-8429 (RATE_LIMITED)
