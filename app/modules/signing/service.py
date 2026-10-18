@@ -399,11 +399,14 @@ class EdmAgreementService:
         return stmt
 
     async def party_displays(
-        self, agreements: Sequence[EdmAgreement]
+        self, principal: Principal, agreements: Sequence[EdmAgreement]
     ) -> dict[tuple[str, uuid.UUID], str]:
         """Название вуза, ФИО контакта или сотрудника — по запросу на каждый `party_type`,
-        встретившийся на СТРАНИЦЕ, а не на каждое соглашение (раздел 6: запрет N+1; то же
-        приём, что `DealService.party_names`)."""
+        встретившийся на СТРАНИЦЕ, а не на каждое соглашение (раздел 6: запрет N+1; тот же
+        приём, что `DealService.party_names`, и то же правило доступа: ФИО физлица — ПДн, без
+        права `contact:read`/`user:read` его нет. Список ЭДО читает и AUDITOR, у которого этих
+        прав нет; для него `party_display` остаётся пустым, `party_type`/`party_id` — как были).
+        Название вуза — не ПДн физлица и отдаётся всем, кто видит само соглашение."""
         ids_by_type: dict[str, set[uuid.UUID]] = {
             "organization": set(),
             "contact": set(),
@@ -422,7 +425,7 @@ class EdmAgreementService:
             )
             for row in rows:
                 displays[("organization", row.id)] = row.name
-        if ids_by_type["contact"]:
+        if ids_by_type["contact"] and has_permission(principal.role, Permission.CONTACT_READ):
             rows = await self._session.execute(
                 select(
                     Contact.id, Contact.last_name, Contact.first_name, Contact.middle_name
@@ -432,12 +435,15 @@ class EdmAgreementService:
                 displays[("contact", row.id)] = " ".join(
                     p for p in (row.last_name, row.first_name, row.middle_name) if p
                 )
-        if ids_by_type["user"]:
+        if ids_by_type["user"] and has_permission(principal.role, Permission.USER_READ):
             rows = await self._session.execute(
-                select(User.id, User.full_name).where(User.id.in_(ids_by_type["user"]))
+                select(User.id, User.display_name, User.full_name).where(
+                    User.id.in_(ids_by_type["user"])
+                )
             )
             for row in rows:
-                displays[("user", row.id)] = row.full_name
+                # Как `User.effective_name`: отображаемое имя, если задано, иначе ФИО.
+                displays[("user", row.id)] = row.display_name or row.full_name
         return displays
 
     async def find_active_for_contact(self, contact: Contact) -> EdmAgreement | None:

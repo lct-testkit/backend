@@ -537,7 +537,7 @@ async def verify_signature_file(
 )
 async def list_edm_agreements(
     session: DbSession,
-    _: Annotated[Principal, Depends(require_permission(Permission.EDM_READ))],
+    principal: Annotated[Principal, Depends(require_permission(Permission.EDM_READ))],
     page: Pagination,
     party_type: str | None = None,
     party_id: uuid.UUID | None = None,
@@ -549,7 +549,7 @@ async def list_edm_agreements(
         stmt = stmt.where(keyset_before(EdmAgreement.created_at, EdmAgreement.id, cursor))
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
     built: Page[EdmAgreement] = Page.build(rows, limit=page.limit)
-    displays = await service.party_displays(built.items)
+    displays = await service.party_displays(principal, built.items)
     items = [
         EdmAgreementOut.model_validate(row).model_copy(
             update={"party_display": displays.get((row.party_type, row.party_id))}

@@ -86,6 +86,58 @@ class TestPartyDisplay:
         assert item["party_display"] == "Иванов Иван"
 
 
+async def _user_with_display_name(display_name: str) -> uuid.UUID:
+    from app.core.db import session_scope
+    from app.modules.identity.models import User
+
+    async with session_scope() as session:
+        user = User(
+            email=f"edm-{uuid.uuid4().hex[:8]}@example.test",
+            full_name="Полное Имя Сотрудника",
+            display_name=display_name,
+            role="KAM",
+            status="active",
+            consent_version="1.0",
+        )
+        session.add(user)
+        await session.flush()
+        return user.id
+
+
+class TestPartyDisplayRespectsPersonalDataAccess:
+    """ФИО физлица — ПДн: AUDITOR читает список ЭДО (`edm:read`), но не `contact:read` и не
+    `user:read`; `DealService.party_names` в таком случае имён не отдаёт — и здесь тоже."""
+
+    def test_an_auditor_does_not_get_contact_or_employee_names(self, client) -> None:
+        _login(client, run(client, _make_user, "ADMIN"))
+        org_id = run(client, _organization, "Вуз для аудитора Б7-8")
+        contact_id = run(client, _contact, "Закрытов", "Иван")
+        employee_id = run(client, _user_with_display_name, "Закрытова Анна")
+        run(client, _agreement, "organization", org_id)
+        run(client, _agreement, "contact", contact_id)
+        run(client, _agreement, "user", employee_id)
+        _login(client, run(client, _make_user, "AUDITOR"))
+
+        response = client.get("/api/admin/edm-agreements?limit=100")
+
+        assert response.status_code == 200, response.text
+        displays = {i["party_id"]: i["party_display"] for i in response.json()["items"]}
+        assert displays[str(org_id)] == "Вуз для аудитора Б7-8"
+        assert displays[str(contact_id)] is None
+        assert displays[str(employee_id)] is None
+
+    def test_an_employee_is_shown_by_the_display_name_when_it_is_set(self, client) -> None:
+        _login(client, run(client, _make_user, "ADMIN"))
+        employee_id = run(client, _user_with_display_name, "Закрытова Анна")
+        run(client, _agreement, "user", employee_id)
+
+        response = client.get("/api/admin/edm-agreements?limit=100")
+
+        assert response.status_code == 200, response.text
+        displays = {i["party_id"]: i["party_display"] for i in response.json()["items"]}
+        assert displays[str(employee_id)] == "Закрытова Анна"
+
+
 class TestKeysetPagination:
     def test_small_pages_cover_every_agreement_once(self, client) -> None:
         _login(client, run(client, _make_user, "ADMIN"))
