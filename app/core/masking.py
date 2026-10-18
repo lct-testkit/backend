@@ -82,7 +82,14 @@ SECRET_KEYS: frozenset[str] = (
 
 # Ключи, которые маскируются по своему формату, а не вырезаются целиком.
 PII_PHONE_KEYS: frozenset[str] = frozenset({"phone", "main_phone", "mobile", "telephone"})
-PII_EMAIL_KEYS: frozenset[str] = frozenset({"email", "main_email"})
+# B3-8: "manager_email" — импорт списка ответственных за вуз (почта КАМ/руководителя).
+PII_EMAIL_KEYS: frozenset[str] = frozenset({"email", "main_email", "manager_email"})
+# B3-M: те же поля лицензии, что `catalog.schemas.OrganizationLicenseOut` маскирует своим
+# валидатором (`mask_name`/`mask_contacts_text`) для API лицензий — здесь то же самое по ключу,
+# для `imports.row_data`, которое проходит через общий `mask_mapping` (`GET /api/imports/{id}/
+# rows`), а не через схему лицензии.
+PII_NAME_KEYS: frozenset[str] = frozenset({"manager_full_name"})
+PII_CONTACTS_TEXT_KEYS: frozenset[str] = frozenset({"responsible_contacts"})
 
 REDACTED = "***"
 
@@ -231,6 +238,10 @@ def mask_field(key: str, value: object, *, depth: int = 0) -> object:
             return mask_email(value)
         if lowered == "inn":
             return mask_inn(value)
+        if lowered in PII_NAME_KEYS:
+            return mask_name(value)
+        if lowered in PII_CONTACTS_TEXT_KEYS:
+            return mask_contacts_text(value)
         return value
 
     if isinstance(value, dict) and set(value) <= {"old", "new"}:

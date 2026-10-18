@@ -171,3 +171,72 @@ class TestLicenseEndpoints:
         card = client.get(f"/api/organization-licenses/{license_id}").json()
 
         assert card["manager_full_name"] == _MANAGER
+
+
+@pytestmark_db
+class TestImportRowDataMasking:
+    """B3-M: те же два поля лицензии в `GET /api/imports/{id}/rows` (`row_data` проходит общий
+    `core.masking.mask_mapping`, а не схему `OrganizationLicenseOut`) — раньше там не были в
+    списке масок (`PII_NAME_KEYS`/`PII_CONTACTS_TEXT_KEYS` появились этой задачей)."""
+
+    def test_manager_full_name_and_contacts_are_masked_in_import_rows(
+        self, client, monkeypatch
+    ) -> None:
+        import uuid as uuid_mod
+
+        from tests.import_helpers import job_rows, start_import, token, xlsx_bytes
+
+        tok = token()
+        admin = login(client, "ADMIN")
+
+        async def seed(session):
+            from app.modules.catalog.models import Organization
+
+            org = Organization(name=f"Вуз {tok}", org_type="university")
+            session.add(org)
+            await session.flush()
+
+        run(client, _in_session, seed)
+
+        headers = [
+            "Название ВУЗа",
+            "Вендор",
+            "ПО",
+            "Номер договора",
+            "Подписание лицензии",
+            "Срок действия лицензии (год)",
+            "Статус по передаче",
+            "ФИО Менеджера",
+            "Ответственные от ВУЗа",
+            "Комментарий",
+        ]
+        row = [
+            f"Вуз {tok}",
+            "Вендор",
+            "ПО",
+            f"Д-{uuid_mod.uuid4().hex[:8]}",
+            "да",
+            "3",
+            "передано",
+            _MANAGER,
+            _CONTACTS,
+            "",
+        ]
+        content = xlsx_bytes(headers, [row])
+        started = start_import(
+            client, monkeypatch, admin, entity_type="license", content=content, source_format="xlsx"
+        )
+        assert started["dry"]["ok_rows"] == 1, started["dry"]
+
+        rows = job_rows(client, started["id"])
+        (item,) = rows
+        assert item["row_data"]["manager_full_name"] == "Менеджеров М. П."
+        assert "ivanov@vuz.ru" not in item["row_data"]["responsible_contacts"]
+        assert "Иван Иванович" not in item["row_data"]["responsible_contacts"]
+
+
+async def _in_session(fn):
+    from app.core.db import session_scope
+
+    async with session_scope() as session:
+        return await fn(session)

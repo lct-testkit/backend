@@ -24,6 +24,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import FieldError, ValidationError
+from app.core.masking import mask_email, mask_name
 from app.core.normalize import clean_text, name_key, normalize_email, normalize_phone, slugify_code
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
@@ -941,11 +942,14 @@ class ResponsibleHandler(EntityHandler):
         if email:
             manager = ctx.users_by_email.get(email)
             if manager is None:
+                # B3-M: сообщение не открывает почту в явном виде (та же защита, что у
+                # `manager_email`/`manager_full_name` в `row_data` — `core.masking.mask_field`).
                 check.add_issue(
                     RowIssue(
                         code="manager_not_found",
                         field="manager_email",
-                        message=f"Менеджер с почтой «{email}» не найден среди активных КАМ/РОП",
+                        message=f"Менеджер с почтой «{mask_email(email)}» не найден среди "
+                        "активных КАМ/РОП",
                         hint="Проверьте почту или укажите ФИО",
                     )
                 )
@@ -967,7 +971,8 @@ class ResponsibleHandler(EntityHandler):
                     RowIssue(
                         code="manager_not_found",
                         field="manager_full_name",
-                        message=f"Менеджер «{full_name}» не найден среди активных КАМ/РОП",
+                        message=f"Менеджер «{mask_name(full_name)}» не найден среди активных "
+                        "КАМ/РОП",
                         hint="Проверьте ФИО или укажите почту",
                     )
                 )
@@ -987,7 +992,7 @@ class ResponsibleHandler(EntityHandler):
                 RowIssue(
                     code="owner_replaced",
                     field="manager_email",
-                    message=f"Текущий ответственный {current or '—'} будет заменён",
+                    message=f"Текущий ответственный {mask_name(current) or '—'} будет заменён",
                     severity="warning",
                 )
             )
