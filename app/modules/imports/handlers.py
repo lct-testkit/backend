@@ -597,7 +597,10 @@ class DirectionContext:
     #: Итоговый код родителя для каждого кода из файла (файл побеждает БД: если строка в файле
     #: переопределяет `parent_code`, проверка цикла должна видеть новое значение).
     parent_of: dict[str, str | None]
-    #: Коды, участвующие в цикле ссылок «родитель» внутри файла.
+    #: Код родителя для направлений, которых в файле нет, но на которые он ссылается (родитель или
+    #: его предки из БД): цикл может замкнуться через них, а `parent_of` их не знает.
+    db_parent_of: dict[str, str | None]
+    #: Коды, участвующие в цикле ссылок «родитель» (файл плюс цепочки из БД).
     cycle_codes: set[str]
 
 
@@ -617,9 +620,13 @@ class DirectionHandler(EntityHandler):
             if not row.get("code") and row.get("name"):
                 row["code"] = slugify_code(row["name"])
 
-        codes = sorted({row["code"] for row in rows if row.get("code")})
+        codes = {row["code"] for row in rows if row.get("code")}
+        # Родитель из ячейки «Родитель» может уже лежать в БД и не повторяться в файле отдельной
+        # строкой (новое дочернее направление к существующему корню) — ищем и такие коды: иначе
+        # строка получала «родитель не найден» при том, что он есть в каталоге.
+        parent_codes = {c for c in (clean_text(row.get("parent_code")) for row in rows) if c}
         by_code_db: dict[str, Direction] = {}
-        for chunk in _chunks(codes):
+        for chunk in _chunks(sorted(codes | parent_codes)):
             found = await session.execute(select(Direction).where(Direction.code.in_(chunk)))
             by_code_db.update({d.code: d for d in found.scalars()})
 
@@ -629,10 +636,26 @@ class DirectionHandler(EntityHandler):
             code = row.get("code")
             if code:
                 parent_of[code] = clean_text(row.get("parent_code"))
-        for code, existing in by_code_db.items():
-            if code not in parent_of and existing.parent_id is not None:
-                parent_direction = await session.get(Direction, existing.parent_id)
-                parent_of[code] = parent_direction.code if parent_direction else None
+
+        # Цепочки родителей направлений, которых нет в файле: цикл может замкнуться через БД
+        # (файл ставит `a` под `b`, а `b` в каталоге уже под `a`). `visited` — предохранитель от
+        # цикла, который уже лежит в самой БД.
+        db_parent_of: dict[str, str | None] = {}
+        frontier = [code for code in by_code_db if code not in parent_of]
+        while frontier:
+            code = frontier.pop()
+            if code in db_parent_of:
+                continue
+            existing = by_code_db[code]
+            parent_direction = (
+                await session.get(Direction, existing.parent_id)
+                if existing.parent_id is not None
+                else None
+            )
+            db_parent_of[code] = parent_direction.code if parent_direction else None
+            if parent_direction is not None and parent_direction.code not in parent_of:
+                by_code_db.setdefault(parent_direction.code, parent_direction)
+                frontier.append(parent_direction.code)
 
         cycle_codes: set[str] = set()
         for start in parent_of:
@@ -644,11 +667,14 @@ class DirectionHandler(EntityHandler):
                         cycle_codes.update(seen)
                     break
                 seen.append(current)
-                current = parent_of.get(current)
-                if current is not None and current not in parent_of and current not in by_code_db:
-                    break
+                current = parent_of[current] if current in parent_of else db_parent_of.get(current)
 
-        return DirectionContext(by_code_db=by_code_db, parent_of=parent_of, cycle_codes=cycle_codes)
+        return DirectionContext(
+            by_code_db=by_code_db,
+            parent_of=parent_of,
+            db_parent_of=db_parent_of,
+            cycle_codes=cycle_codes,
+        )
 
     def check_row(self, row: dict[str, Any], ctx: DirectionContext, mode: str) -> RowCheck:
         code = row.get("code")
@@ -709,11 +735,14 @@ class DirectionHandler(EntityHandler):
         return check
 
     async def _ensure_parent(
-        self, batch: Batch, code: str, job: ImportJob, *, depth: int = 0
+        self, batch: Batch, code: str, job: ImportJob, outcome: ApplyOutcome, *, depth: int = 0
     ) -> uuid.UUID | None:
         """Создаёт направление-родитель заранее, если его строка в файле стоит ниже ребёнка —
         данные берёт из уже сохранённого `import_row_results.row_data` этой же партии импорта
-        (dry-run их туда положил), а не из `prepare()`: `apply_row` не получает контекст dry-run."""
+        (dry-run их туда положил), а не из `prepare()`: `apply_row` не получает контекст dry-run.
+        Созданный родитель попадает в `effects` строки-ребёнка (первым, до самого ребёнка — откат
+        идёт в обратном порядке) и в журнал: иначе откат импорта оставлял бы его в каталоге, а
+        строка самого родителя, дойдя до очереди, находила бы его уже готовым и ничего не писала."""
         if depth > 50:  # dry-run уже отсеял циклы — предохранитель от бага, не нормальный путь
             return None
         existing = await batch.session.scalar(
@@ -733,13 +762,21 @@ class DirectionHandler(EntityHandler):
         parent_data = parent_row.row_data
         grandparent_code = clean_text(parent_data.get("parent_code"))
         parent_id = (
-            await self._ensure_parent(batch, grandparent_code, job, depth=depth + 1)
+            await self._ensure_parent(batch, grandparent_code, job, outcome, depth=depth + 1)
             if grandparent_code
             else None
         )
-        direction = Direction(code=code, name=parent_data.get("name") or code, parent_id=parent_id)
+        name = parent_data.get("name") or code
+        direction = Direction(code=code, name=name, parent_id=parent_id)
         batch.session.add(direction)
         await batch.session.flush()
+        outcome.effects.append({"kind": "direction", "op": "create", "id": str(direction.id)})
+        await AuditService(batch.session).record(
+            AuditAction.DIRECTION_CREATED,
+            entity_type="direction",
+            entity_id=direction.id,
+            changes={"code": {"old": None, "new": code}, "name": {"old": None, "new": name}},
+        )
         return direction.id
 
     async def apply_row(self, batch: Batch, row: ImportRowResult) -> ApplyOutcome:
@@ -755,7 +792,9 @@ class DirectionHandler(EntityHandler):
             )
 
         parent_code = clean_text(data.get("parent_code"))
-        parent_id = await self._ensure_parent(batch, parent_code, job) if parent_code else None
+        parent_id = (
+            await self._ensure_parent(batch, parent_code, job, outcome) if parent_code else None
+        )
 
         existing = await batch.session.scalar(
             select(Direction).where(Direction.code == code, Direction.deleted_at.is_(None))
@@ -784,20 +823,28 @@ class DirectionHandler(EntityHandler):
             return outcome
 
         before: dict[str, Any] = {}
+        changes: dict[str, Any] = {}
         if existing.name != name:
             before["name"] = existing.name
+            changes["name"] = {"old": existing.name, "new": name}
             existing.name = name
         if existing.parent_id != parent_id:
-            before["parent_id"] = str(existing.parent_id) if existing.parent_id else None
+            old_parent = str(existing.parent_id) if existing.parent_id else None
+            before["parent_id"] = old_parent
+            changes["parent_id"] = {"old": old_parent, "new": str(parent_id) if parent_id else None}
             existing.parent_id = parent_id
         outcome.entity_id = existing.id
         if before:
             existing.version += 1
+            # `before` - то, что откат вернёт обратно (`handlers._rollback_one`, ветка `update`).
+            outcome.effects.append(
+                {"kind": "direction", "op": "update", "id": str(existing.id), "before": before}
+            )
             await AuditService(batch.session).record(
                 AuditAction.DIRECTION_UPDATED,
                 entity_type="direction",
                 entity_id=existing.id,
-                changes={k: {"old": v, "new": None} for k, v in before.items()},
+                changes=changes,
             )
         await batch.session.flush()
         return outcome

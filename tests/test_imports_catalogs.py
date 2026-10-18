@@ -215,6 +215,170 @@ class TestDirectionImport:
         direction = run(client, _in_session(scenario))
         assert direction.deleted_at is not None
 
+    def test_parent_that_is_only_in_the_catalog_is_accepted(self, client, monkeypatch) -> None:
+        # Новое дочернее направление к уже существующему корню: корня в файле нет.
+        tok = token()
+        root_code, child_code = f"root-{tok}", f"leaf-{tok}"
+        admin = login(client, "ADMIN")
+
+        async def seed(session):
+            from app.modules.catalog.models import Direction
+
+            session.add(Direction(code=root_code, name=f"Корень {tok}"))
+            await session.flush()
+
+        run(client, _in_session(seed))
+        content = xlsx_bytes(DIRECTION_HEADERS, [[child_code, f"Лист {tok}", root_code]])
+        started = start_import(
+            client,
+            monkeypatch,
+            admin,
+            entity_type="direction",
+            content=content,
+            source_format="xlsx",
+        )
+        assert started["dry"]["error_rows"] == 0, job_rows(client, started["id"])
+        apply_job(client, started["id"])
+
+        async def scenario(session):
+            return await _get_direction(session, child_code), await _get_direction(
+                session, root_code
+            )
+
+        child, root = run(client, _in_session(scenario))
+        assert child is not None and root is not None
+        assert child.parent_id == root.id
+
+    def test_cycle_closing_through_the_catalog_is_a_row_error(self, client, monkeypatch) -> None:
+        # В каталоге `b` уже под `a`; файл ставит `a` под `b` — цикл замыкается через БД.
+        tok = token()
+        code_a, code_b = f"a-{tok}", f"b-{tok}"
+        admin = login(client, "ADMIN")
+
+        async def seed(session):
+            from app.modules.catalog.models import Direction
+
+            root = Direction(code=code_a, name=f"A {tok}")
+            session.add(root)
+            await session.flush()
+            session.add(Direction(code=code_b, name=f"B {tok}", parent_id=root.id))
+            await session.flush()
+
+        run(client, _in_session(seed))
+        content = xlsx_bytes(DIRECTION_HEADERS, [[code_a, f"A {tok}", code_b]])
+        started = start_import(
+            client,
+            monkeypatch,
+            admin,
+            entity_type="direction",
+            content=content,
+            source_format="xlsx",
+        )
+        assert started["dry"]["error_rows"] == 1
+        (row,) = job_rows(client, started["id"], status="error")
+        assert [issue["code"] for issue in row["issues"]] == ["direction_cycle"]
+
+    def test_rollback_removes_a_parent_created_ahead_of_its_own_row(
+        self, client, monkeypatch
+    ) -> None:
+        tok = token()
+        child_code, parent_code = f"child-{tok}", f"parent-{tok}"
+        admin = login(client, "ADMIN")
+        content = xlsx_bytes(
+            DIRECTION_HEADERS,
+            [
+                [child_code, f"Дочернее {tok}", parent_code],
+                [parent_code, f"Родитель {tok}", ""],
+            ],
+        )
+        started = start_import(
+            client,
+            monkeypatch,
+            admin,
+            entity_type="direction",
+            content=content,
+            source_format="xlsx",
+        )
+        apply_job(client, started["id"])
+
+        async def created_audit(session):
+            from sqlalchemy import select
+
+            from app.modules.audit.models import AuditLog
+
+            parent = await _get_direction(session, parent_code)
+            rows = await session.execute(
+                select(AuditLog.id).where(
+                    AuditLog.entity_id == parent.id, AuditLog.action == "DIRECTION_CREATED"
+                )
+            )
+            return len(rows.all())
+
+        # Родитель создан строкой-ребёнком (она раньше в файле) - создание попало в журнал.
+        assert run(client, _in_session(created_audit)) == 1
+
+        rollback_job(client, started["id"])
+
+        async def scenario(session):
+            return await _get_direction(session, child_code), await _get_direction(
+                session, parent_code
+            )
+
+        child, parent = run(client, _in_session(scenario))
+        assert child.deleted_at is not None
+        assert parent.deleted_at is not None
+
+    def test_update_is_audited_with_the_new_value_and_rolled_back(
+        self, client, monkeypatch
+    ) -> None:
+        tok = token()
+        code = f"upd-{tok}"
+        admin = login(client, "ADMIN")
+
+        async def seed(session):
+            from app.modules.catalog.models import Direction
+
+            session.add(Direction(code=code, name=f"Старое {tok}"))
+            await session.flush()
+
+        run(client, _in_session(seed))
+        content = xlsx_bytes(DIRECTION_HEADERS, [[code, f"Новое {tok}", ""]])
+        started = start_import(
+            client,
+            monkeypatch,
+            admin,
+            entity_type="direction",
+            content=content,
+            source_format="xlsx",
+        )
+        apply_job(client, started["id"])
+
+        async def audit_changes(session):
+            from sqlalchemy import select
+
+            from app.modules.audit.models import AuditLog
+
+            direction = await _get_direction(session, code)
+            row = await session.scalar(
+                select(AuditLog).where(
+                    AuditLog.entity_id == direction.id, AuditLog.action == "DIRECTION_UPDATED"
+                )
+            )
+            return direction.name, row.changes
+
+        name, changes = run(client, _in_session(audit_changes))
+        assert name == f"Новое {tok}"
+        assert changes == {"name": {"old": f"Старое {tok}", "new": f"Новое {tok}"}}
+
+        rollback_job(client, started["id"])
+
+        async def after_rollback(session):
+            return await _get_direction(session, code)
+
+        restored = run(client, _in_session(after_rollback))
+        assert restored.name == f"Старое {tok}"
+        assert restored.deleted_at is None
+
     def test_head_cannot_create_a_direction_import_job(self, client, monkeypatch) -> None:
         head = login(client, "HEAD")
         content = xlsx_bytes(DIRECTION_HEADERS, [["x", "X", ""]])
