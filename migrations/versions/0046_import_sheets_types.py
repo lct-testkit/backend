@@ -73,9 +73,7 @@ def upgrade() -> None:
     op.add_column("import_jobs", sa.Column("summary", postgresql.JSONB(), nullable=True))
     op.add_column("import_presets", sa.Column("options", postgresql.JSONB(), nullable=True))
     op.add_column("import_row_results", sa.Column("source_row", sa.Integer(), nullable=True))
-    op.add_column(
-        "import_row_results", sa.Column("sheet", sa.String(length=255), nullable=True)
-    )
+    op.add_column("import_row_results", sa.Column("sheet", sa.String(length=255), nullable=True))
 
     old_name = _find_check_constraint("import_jobs", "entity_type")
     op.execute(f'ALTER TABLE import_jobs DROP CONSTRAINT "{old_name}"')

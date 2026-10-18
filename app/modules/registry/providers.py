@@ -105,7 +105,9 @@ class LocalRegistryProvider:
                 # dop.md §11.5 п.3: выпадающий список показывает «город», не
                 # цифровой код региона — код разрешается в имя одним батч-
                 # запросом (`ix_regions_code`), а не по одному на кандидата.
-                region=region_names.get(row.region_code, row.region_code),
+                region=(
+                    region_names.get(row.region_code, row.region_code) if row.region_code else None
+                ),
                 status=row.status,
                 is_liquidated=row.status in ("liquidating", "liquidated"),
                 provider=self.name,
@@ -118,7 +120,10 @@ class LocalRegistryProvider:
             return {}
         stmt = select(Region.code, Region.name).where(Region.code.in_(codes))
         rows = (await self._session.execute(stmt)).all()
-        return dict(rows)
+        # B9-10: `dict(rows)` не типизируется mypy (`Sequence[Row[tuple[str, str]]]` не совпадает
+        # с перегрузкой `dict.__init__`) — распаковка через comprehension читает ровно то же, но
+        # типобезопасно.
+        return {code: name for code, name in rows}  # noqa: C416
 
     async def get_by_inn(self, inn: str) -> OrgDetails | None:
         entry = await self._session.get(EgrulEntry, inn)

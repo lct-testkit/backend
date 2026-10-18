@@ -167,11 +167,17 @@ plugins = ["pydantic.mypy"]
 
 # «Храповик»: новые и чистые модули проверяются строго; перечисленные ниже
 # модули несут накопленный долг типизации (93 ошибки на момент включения
-# mypy в CI, в списке было 26 модулей, теперь 20). Исправили модуль — удалите
-# его из списка, и он навсегда останется чистым. Список не должен расти.
+# mypy в CI, в списке было 26 модулей, потом 20, теперь 14: B9-10 снял
+# `core.problem`, `notification.router`, `registry.providers`,
+# `reporting.rendering`, `reporting.router` (исправления были в пару строк
+# каждое: аннотация `Page`, сужение типа после `mask_mapping`, `schema_`
+# вместо зарезервированного `schema` у `ReportResultV1`) и `imports.service`
+# (типизация ключа строки лицензии/организации, `getattr` вместо статического
+# атрибута на обобщённом `type` — поведение не менялось, только типы).
+# Исправили модуль — удалите его из списка, и он навсегда останется чистым.
+# Список не должен расти.
 [[tool.mypy.overrides]]
 module = [
-    "app.core.problem",
     "app.modules.catalog.router",
     "app.modules.catalog.service",
     "app.modules.crm.router",
@@ -180,12 +186,7 @@ module = [
     "app.modules.identity.erasure_service",
     "app.modules.identity.router_auth",
     "app.modules.identity.session_store",
-    "app.modules.imports.service",
     "app.modules.integration.tasks",
-    "app.modules.notification.router",
-    "app.modules.registry.providers",
-    "app.modules.reporting.rendering",
-    "app.modules.reporting.router",
     "app.modules.signing.service",
     "app.modules.signing.tasks",
     "app.modules.workflow.dsl",

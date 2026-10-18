@@ -85,7 +85,7 @@ async def list_notifications(
     if cursor:
         stmt = stmt.where(keyset_before(Notification.created_at, Notification.id, cursor))
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
-    built = Page.build(rows, limit=page.limit)
+    built: Page = Page.build(rows, limit=page.limit)
 
     templates = await service.in_app_templates_by_code({n.template_code for n in built.items})
     items: list[NotificationOut] = []
@@ -233,7 +233,9 @@ async def list_notification_templates(
             keyset_before(NotificationTemplate.created_at, NotificationTemplate.id, cursor)
         )
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
-    built = Page.build(rows, limit=page.limit, serializer=NotificationTemplateOut.model_validate)
+    built: Page = Page.build(
+        rows, limit=page.limit, serializer=NotificationTemplateOut.model_validate
+    )
     return NotificationTemplateListResponse(items=built.items, next_cursor=built.next_cursor)
 
 

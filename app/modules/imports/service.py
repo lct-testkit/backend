@@ -107,7 +107,12 @@ _FK_TARGETS: dict[str, tuple[type, str, Any]] = {
     "direction_code": (Direction, "direction_id", Direction.code),
     "organization_name": (Organization, "organization_id", Organization.name),
 }
-_MODEL_BY_ENTITY: dict[str, type] = {
+# `Any`, не `type`: три разных модели (колонки, `id`/`deleted_at`) за одним именем — тот же приём,
+# что `imports.handlers`'s `models: dict[str, Any]` в `_rollback_one`. `type` здесь не ловит
+# реальных ошибок, только путает mypy на статических атрибутах класса (`.id`/`.deleted_at`) и на
+# перегрузках `AsyncSession.get`, которые выбирают нужную модель по значению, а не по статическому
+# типу аргумента.
+_MODEL_BY_ENTITY: dict[str, Any] = {
     ImportEntityType.ORGANIZATION.value: Organization,
     ImportEntityType.PRODUCT.value: Product,
     ImportEntityType.LICENSE.value: OrganizationLicense,
@@ -622,7 +627,10 @@ class ImportService:
                 key_column.in_(raw_keys), model.deleted_at.is_(None)
             )
             rows = (await self._session.execute(key_stmt)).all()
-            existing_map = dict(rows)
+            # `dict(rows)` не типизируется: `model.id`/`model: Any` в `_MODEL_BY_ENTITY` стирает
+            # тип колонки, `Row[Any]` не совпадает с перегрузкой `dict.__init__` — распаковка
+            # типобезопасна и не меняет поведение.
+            existing_map = {key: value for key, value in rows}  # noqa: C416
 
         # B3-1 (BUG-9): у лицензии составной ключ (вуз, вендор, ПО, номер
         # договора) — проверка «уже существует» строится по нему, а не по
@@ -679,7 +687,7 @@ class ImportService:
             # для определения пустой/заполненной строки у лицензии — вуз (`organization_id`), а не
             # `natural_key` (`contract_number`, остаётся как ключ дедупликации только для
             # organization/product, у которых он действительно обязателен).
-            key_value: object = (
+            key_value: str | None = (
                 row_data.get("organization_id") if is_license else row_data.get(natural_key)
             )
             dedupe_key: object = key_value
@@ -726,7 +734,7 @@ class ImportService:
                     seen_keys[dedupe_key] = source_row
 
                 existing_id = (
-                    license_existing.get(license_key_tuple)
+                    (license_existing.get(license_key_tuple) if license_key_tuple else None)
                     if is_license
                     else existing_map.get(key_value)
                 )
@@ -832,7 +840,12 @@ class ImportService:
             if not codes:
                 resolved[kind] = {}
                 continue
-            code_stmt = select(lookup_column, model.id).where(lookup_column.in_(codes))
+            # `model` здесь из `_FK_TARGETS` (`type`, не `Any`) — getattr статический атрибут не
+            # выведет, та же причина, что у `deleted_at` ниже (уже `getattr` в исходном коде).
+            code_stmt = select(
+                lookup_column,
+                getattr(model, "id"),  # noqa: B009
+            ).where(lookup_column.in_(codes))
             deleted_at = getattr(model, "deleted_at", None)
             if deleted_at is not None:
                 code_stmt = code_stmt.where(deleted_at.is_(None))
@@ -844,7 +857,8 @@ class ImportService:
             # компромисс, что и у остального импортёра: dry-run показывает
             # результат резолва в `row_data` до применения, и явную
             # неоднозначность видно на этапе проверки, а не после apply.
-            resolved[kind] = dict(rows_found)
+            # `dict(rows_found)` не типизируется по той же причине, что и выше (`getattr`).
+            resolved[kind] = {key: value for key, value in rows_found}  # noqa: C416
         return resolved
 
     async def _resolve_license_existing(

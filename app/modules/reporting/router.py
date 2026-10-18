@@ -117,7 +117,7 @@ async def list_reports(
     if cursor:
         stmt = stmt.where(keyset_before(ReportJob.created_at, ReportJob.id, cursor))
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
-    built = Page.build(rows, limit=page.limit, serializer=ReportJobOut.model_validate)
+    built: Page = Page.build(rows, limit=page.limit, serializer=ReportJobOut.model_validate)
     return ReportJobListResponse(items=built.items, next_cursor=built.next_cursor)
 
 
@@ -232,7 +232,7 @@ async def list_dashboards(
     if cursor:
         stmt = stmt.where(keyset_before(Dashboard.created_at, Dashboard.id, cursor))
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
-    built = Page.build(rows, limit=page.limit, serializer=DashboardOut.model_validate)
+    built: Page = Page.build(rows, limit=page.limit, serializer=DashboardOut.model_validate)
     return DashboardListResponse(items=built.items, next_cursor=built.next_cursor)
 
 

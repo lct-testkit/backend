@@ -89,7 +89,12 @@ def build_problem(
             for e in errors
         ]
     if extra:
-        body.update(mask_mapping(extra))  # type: ignore[arg-type]
+        # `mask_mapping` типизирована широко (`object -> object`, рекурсия по произвольным
+        # структурам), но для входа-словаря всегда возвращает словарь — проверка вместо
+        # `type: ignore`, чтобы мы не потеряли случай, когда это правда перестанет быть так.
+        masked_extra = mask_mapping(extra)
+        if isinstance(masked_extra, dict):
+            body.update(masked_extra)
     return body
 
 

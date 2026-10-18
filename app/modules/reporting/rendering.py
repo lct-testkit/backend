@@ -619,7 +619,7 @@ def render_json(
     # (`tools/export_report_schema.py`/`docs/schemas/rtk-crm-report-1.schema.json`), а не только
     # текстом в этом докстринге.
     result = ReportResultV1(
-        schema=REPORT_RESULT_SCHEMA_VERSION,
+        schema_=REPORT_RESULT_SCHEMA_VERSION,
         report=ReportResultReport(
             code=template_code,
             title=dataset.title,
