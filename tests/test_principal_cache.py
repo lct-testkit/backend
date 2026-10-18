@@ -11,6 +11,7 @@ JIT-пользователь создаётся в транзакции перв
 
 from __future__ import annotations
 
+import json
 import types
 import uuid
 
@@ -72,6 +73,65 @@ class TestJitUserAndPrincipalCache:
             return bool(await get_redis().get(key_permissions(user_id)))
 
         assert run(client, _permissions_cached)
+
+
+class TestCacheFormatCompatibility:
+    """B4-14 (п.8): формат `cache:perm:{id}` должен переживать поэтапную выкладку B4-6
+    без 500-к. `CachedPrincipal.restricted` имеет значение по умолчанию — старая запись
+    без этого поля читается как `restricted=False`; ошибка разбора (например, от поля,
+    которого эта версия кода ещё не знает) ловится в `get_principal_cache`
+    (`core/cache.py`) и даёт промах кэша, а не падение запроса."""
+
+    async def _seed(self, keycloak_id: str, user_id: str, raw: dict) -> None:
+        redis = get_redis()
+        await redis.set(key_keycloak_map(keycloak_id), user_id)
+        await redis.set(key_permissions(user_id), json.dumps(raw))
+
+    @staticmethod
+    def _base_entry(user_id: str, keycloak_id: str) -> dict:
+        return {
+            "user_id": user_id,
+            "keycloak_id": keycloak_id,
+            "role": "KAM",
+            "status": "active",
+            "email": "x@rt-it-school.ru",
+            "full_name": "Сотрудник",
+            "team_id": None,
+            "manager_id": None,
+            "perm_epoch": 1,
+            "consent_version": "1.0",
+            "must_change_password": False,
+        }
+
+    def test_an_entry_without_restricted_reads_as_not_restricted(self, client) -> None:
+        from app.core.cache import get_principal_cache
+
+        keycloak_id, user_id = str(uuid.uuid4()), str(uuid.uuid4())
+        # Поля `restricted` нет вовсе — запись до выкладки B4-6.
+        run(client, self._seed, keycloak_id, user_id, self._base_entry(user_id, keycloak_id))
+
+        cached = run(client, get_principal_cache, keycloak_id)
+
+        assert cached is not None
+        assert cached.restricted is False
+
+    def test_an_entry_with_an_unknown_future_field_is_a_cache_miss_not_a_crash(
+        self, client
+    ) -> None:
+        from app.core.cache import get_principal_cache
+
+        keycloak_id, user_id = str(uuid.uuid4()), str(uuid.uuid4())
+        future_entry = {
+            **self._base_entry(user_id, keycloak_id),
+            "restricted": False,
+            "some_field_from_a_future_deploy": "x",
+        }
+        run(client, self._seed, keycloak_id, user_id, future_entry)
+
+        # Реплика со старым кодом (без этого поля в `CachedPrincipal`) не ловит
+        # TypeError и не отвечает 500-кой — `get_principal_cache` перехватывает
+        # ошибку разбора сам и отдаёт промах кэша.
+        assert run(client, get_principal_cache, keycloak_id) is None
 
 
 class TestRunAfterCommit:

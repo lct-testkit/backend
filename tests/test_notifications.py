@@ -145,6 +145,18 @@ class TestSeedCoversAllReferencedTemplateCodes:
             "ORG_DRIFT_APPLIED",
             "DEAL_REASSIGNED",
             "DEAL_EVENT",
+            # B4-1/B4-2/B4-4: ответственный за вуз (одиночная и массовая смена, мастер
+            # передачи дел).
+            "ORG_OWNER_ASSIGNED",
+            "ORG_OWNER_REMOVED",
+            # B4-3: мягкое удаление сделки.
+            "DEAL_DELETED",
+            # B4-12: запрос временного доступа к чужому вузу.
+            "ACCESS_REQUEST_CREATED",
+            "ACCESS_REQUEST_APPROVED",
+            "ACCESS_REQUEST_REJECTED",
+            # Упоминание в комментарии сделки.
+            "DEAL_MENTION",
         ],
     )
     def test_code_has_at_least_one_seeded_template(self, code: str) -> None:

@@ -190,7 +190,9 @@ _HEAD: frozenset[Permission] = _KAM | {
 
 # AUDITOR — только журнал, плюс явное «чтение» соглашений ЭДО из матрицы
 # dop.md §13 и карточек документов на подпись, на которые этот же журнал
-# ссылается по id (разделение обязанностей: видит, но не управляет).
+# ссылается по id (разделение обязанностей: видит, но не управляет). B4-7:
+# COMMENT_AUDIT_READ — комментарии сделки через отдельную ручку
+# (GET /admin/audit/deals/{id}/comments), DEAL_READ при этом у роли так и нет.
 _AUDITOR: frozenset[Permission] = frozenset(
     {
         Permission.AUDIT_READ,

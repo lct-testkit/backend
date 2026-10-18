@@ -2956,9 +2956,10 @@ class DealService:
                 "Новый ответственный совпадает с текущим",
                 [FieldError(field="owner_id", reason="совпадает с текущим владельцем")],
             )
-        new_owner = await self._session.get(User, owner_id)
-        if new_owner is None:
-            raise NotFoundError("Пользователь", owner_id)
+        # B4-14 (п.2): раньше проверялось только существование — Руководитель мог отдать
+        # сделку неактивному сотруднику или сотруднику чужой команды. `bulk_reassign` ниже
+        # уже шёл через эту же проверку, `reassign` (одна сделка) — нет.
+        await ensure_assignable_user(self._session, principal, owner_id, roles=None)
 
         old_owner = deal.owner_id
         await claim_version(self._session, deal, expected_version, conflicting=conflicting)
@@ -3306,6 +3307,7 @@ class CommentService:
         principal: Principal,
         *,
         body: str,
+        body_format: str = "plain",
         parent_id: uuid.UUID | None,
         mentions: list[uuid.UUID],
         is_internal: bool,
@@ -3321,6 +3323,7 @@ class CommentService:
             author_id=principal.user_id,
             parent_id=parent_id,
             body=body,
+            body_format=body_format,
             mentions=[str(m) for m in mention_ids],
             is_internal=is_internal,
         )
@@ -3397,7 +3400,14 @@ class CommentService:
             )
         return unique
 
-    async def update(self, comment: DealComment, principal: Principal, *, body: str) -> DealComment:
+    async def update(
+        self,
+        comment: DealComment,
+        principal: Principal,
+        *,
+        body: str,
+        body_format: str | None = None,
+    ) -> DealComment:
         if comment.is_system:
             raise AppError(ErrorCode.VALIDATION, "Системные комментарии нельзя редактировать")
         if comment.author_id != principal.user_id and not principal.is_admin:
@@ -3416,6 +3426,8 @@ class CommentService:
         )
         old_length = len(comment.body)
         comment.body = body
+        if body_format is not None:
+            comment.body_format = body_format
         comment.edited_at = dt.datetime.now(dt.UTC)
         await self._session.flush()
         # Текст в журнал не кладём: он бессрочный и неизменяемый, а комментарий можно

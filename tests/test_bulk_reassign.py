@@ -46,6 +46,14 @@ def _comments(client, deal_id: str) -> list[dict]:
     return body["items"] if isinstance(body, dict) else body
 
 
+def _reassign(client, deal: dict, owner_id, reason: str = "передача одной сделки"):
+    return client.post(
+        f"/api/deals/{deal['id']}/reassign",
+        json={"owner_id": str(owner_id), "reason": reason},
+        headers={"If-Match": str(deal["version"])},
+    )
+
+
 class TestBulkReassign:
     def test_open_deals_move_and_leave_a_system_comment(self, client) -> None:
         graph, _codes = _prepare(client)
@@ -128,3 +136,42 @@ class TestBulkReassign:
         response = _bulk(client, [deal["id"]], teammate.id)
         assert response.status_code == 200, response.text
         assert response.json()["reassigned_count"] == 0
+
+
+class TestSingleReassign:
+    """B4-14 (п.2): `DealService.reassign` (одна сделка) проверял только существование
+    нового владельца (`session.get(User, owner_id)`) — в отличие от `bulk_reassign`, который
+    уже шёл через `ensure_assignable_user`. Руководитель мог отдать сделку неактивному
+    сотруднику или сотруднику чужой команды в обход тех же правил."""
+
+    def test_an_inactive_user_is_rejected(self, client) -> None:
+        graph, _codes = _prepare(client)
+        blocked = create_user(client, "KAM", status="blocked")
+        deal = create_deal(client, graph["workflow"]["id"])
+
+        response = _reassign(client, deal, blocked.id)
+
+        assert response.status_code == 422, response.text
+        card = client.get(f"/api/deals/{deal['id']}").json()["deal"]
+        assert card["owner_id"] != str(blocked.id)
+
+    def test_head_reassigns_only_inside_the_own_team(self, client) -> None:
+        graph, _codes = _prepare(client)
+        own_team, other_team = create_team(client), create_team(client)
+        head = create_user(client, "HEAD", team_id=own_team)
+        owner = create_user(client, "KAM", team_id=own_team)
+        new_teammate = create_user(client, "KAM", team_id=own_team)
+        outsider = create_user(client, "KAM", team_id=other_team)
+
+        # Сделка должна принадлежать команде руководителя — иначе он не видит её вовсе
+        # (404 от скоупа раньше любой проверки нового владельца, см. B4-6).
+        sign_in(client, owner)
+        deal = create_deal(client, graph["workflow"]["id"])
+
+        sign_in(client, head)
+        response = _reassign(client, deal, outsider.id)
+        assert response.status_code == 403, response.text
+
+        response = _reassign(client, deal, new_teammate.id)
+        assert response.status_code == 200, response.text
+        assert response.json()["owner_id"] == str(new_teammate.id)

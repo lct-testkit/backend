@@ -1634,6 +1634,15 @@
             "title": "Body",
             "type": "string"
           },
+          "body_format": {
+            "default": "plain",
+            "enum": [
+              "plain",
+              "markdown"
+            ],
+            "title": "Body Format",
+            "type": "string"
+          },
           "is_internal": {
             "default": false,
             "title": "Is Internal",
@@ -1812,6 +1821,21 @@
             "minLength": 1,
             "title": "Body",
             "type": "string"
+          },
+          "body_format": {
+            "anyOf": [
+              {
+                "enum": [
+                  "plain",
+                  "markdown"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Body Format"
           }
         },
         "required": [

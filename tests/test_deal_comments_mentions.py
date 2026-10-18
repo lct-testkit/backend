@@ -88,6 +88,66 @@ class TestMentionNotifications:
         assert _mention_notifications(client, colleague.id, deal["id"]) == []
 
 
+class TestCommentBodyFormat:
+    """B4-14 (A-14): `body_format` — выбор клиента, CHECK на базе проверяет значение,
+    бэкенд markdown не очищает (санитайзинг — на фронтенде, спринт F3)."""
+
+    def test_defaults_to_plain(self, client) -> None:
+        login(client, "ADMIN")
+        graph = create_published_workflow(client)
+        deal = create_deal(client, graph["workflow"]["id"])
+
+        response = client.post(f"/api/deals/{deal['id']}/comments", json={"body": "Так"})
+
+        assert response.status_code == 201, response.text
+        assert response.json()["body_format"] == "plain"
+
+    def test_markdown_is_saved_and_returned(self, client) -> None:
+        login(client, "ADMIN")
+        graph = create_published_workflow(client)
+        deal = create_deal(client, graph["workflow"]["id"])
+
+        created = client.post(
+            f"/api/deals/{deal['id']}/comments",
+            json={"body": "**важно**", "body_format": "markdown"},
+        )
+        assert created.status_code == 201, created.text
+        assert created.json()["body_format"] == "markdown"
+
+        listed = client.get(f"/api/deals/{deal['id']}/comments")
+        assert listed.json()["items"][0]["body_format"] == "markdown"
+
+    def test_invalid_value_is_422(self, client) -> None:
+        login(client, "ADMIN")
+        graph = create_published_workflow(client)
+        deal = create_deal(client, graph["workflow"]["id"])
+
+        response = client.post(
+            f"/api/deals/{deal['id']}/comments",
+            json={"body": "Так", "body_format": "html"},
+        )
+        assert response.status_code == 422, response.text
+
+    def test_update_can_change_the_format_or_leave_it_as_is(self, client) -> None:
+        login(client, "ADMIN")
+        graph = create_published_workflow(client)
+        deal = create_deal(client, graph["workflow"]["id"])
+        comment = client.post(f"/api/deals/{deal['id']}/comments", json={"body": "Так"}).json()
+
+        switched = client.patch(
+            f"/api/comments/{comment['id']}",
+            json={"body": "**стало markdown**", "body_format": "markdown"},
+        )
+        assert switched.status_code == 200, switched.text
+        assert switched.json()["body_format"] == "markdown"
+
+        unchanged = client.patch(
+            f"/api/comments/{comment['id']}", json={"body": "текст без смены формата"}
+        )
+        assert unchanged.status_code == 200, unchanged.text
+        assert unchanged.json()["body_format"] == "markdown"
+
+
 class TestDefaultCommentLimit:
     def test_without_a_limit_the_first_hundred_come_and_the_rest_by_cursor(self, client) -> None:
         from app.core.db import session_scope

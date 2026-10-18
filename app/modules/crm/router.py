@@ -922,6 +922,7 @@ async def create_comment(
         deal,
         principal,
         body=payload.body,
+        body_format=payload.body_format,
         parent_id=payload.parent_id,
         mentions=payload.mentions,
         is_internal=payload.is_internal,
@@ -1018,7 +1019,9 @@ async def update_comment(
     comment_service = CommentService(session)
     comment = await comment_service.get_or_404(comment_id)
     await DealService(session).get_or_404(comment.deal_id, principal, write=True)
-    comment = await comment_service.update(comment, principal, body=payload.body)
+    comment = await comment_service.update(
+        comment, principal, body=payload.body, body_format=payload.body_format
+    )
     return CommentOut.model_validate(comment)
 
 

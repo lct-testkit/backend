@@ -411,6 +411,10 @@ class ParticipantListResponse(BaseModel):
 
 class CommentCreateRequest(BaseModel):
     body: NonEmptyStr
+    # B4-14 (A-14): CHECK на базе уже есть (`crm/models.py`, `deal_comments_format_valid`) —
+    # недопустимое значение ловит сам `Literal` раньше, чем дойдёт до INSERT. Markdown
+    # бэкенд не очищает: рендер с санитайзингом — на фронтенде (спринт F3).
+    body_format: CommentFormatLiteral = "plain"
     parent_id: uuid.UUID | None = None
     mentions: list[uuid.UUID] = Field(default_factory=list)
     is_internal: bool = False
@@ -418,6 +422,8 @@ class CommentCreateRequest(BaseModel):
 
 class CommentUpdateRequest(BaseModel):
     body: NonEmptyStr
+    # Не присланное — формат не трогаем (правка только текста, как раньше).
+    body_format: CommentFormatLiteral | None = None
 
 
 class CommentDeleteRequest(BaseModel):
