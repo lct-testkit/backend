@@ -62,6 +62,10 @@ class EdmAgreementOut(BaseModel):
     id: uuid.UUID
     party_type: str
     party_id: uuid.UUID
+    #: Название вуза (party_type=organization) или ФИО контакта/сотрудника
+    #: (contact/user) — не колонка `edm_agreements`, проставляется роутером
+    #: списка одним доп. запросом на party_type (`EdmAgreementService.party_displays`).
+    party_display: str | None = None
     agreement_number: str | None
     agreement_file_id: uuid.UUID | None
     conclusion_method: str

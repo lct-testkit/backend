@@ -16,11 +16,12 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.context import get_client
-from app.core.deps import ConsentedUser, DbSession, require_permission
+from app.core.deps import ConsentedUser, DbSession, Pagination, require_permission
 from app.core.errors import FieldError, ForbiddenError, NotFoundError, ValidationError
+from app.core.pagination import Page, keyset_before
 from app.core.permissions import Permission
 from app.core.security import Principal
-from app.modules.signing.models import SignatureDocument
+from app.modules.signing.models import EdmAgreement, SignatureDocument
 from app.modules.signing.schemas import (
     ChallengeResponse,
     DownloadUrlOut,
@@ -528,20 +529,34 @@ async def verify_signature_file(
     "",
     summary="Список соглашений об ЭДО",
     description=(
-        "Соглашения об электронном документообороте с вузами/вендорами (сторона, срок "
-        "действия, статус отзыва); фильтры `party_type`/`party_id`. Роль: AUDITOR, ADMIN."
+        "Соглашения об электронном документообороте с вузами/вендорами (сторона — "
+        "`party_display`, срок действия, статус отзыва); фильтры `party_type`/`party_id`. "
+        "Курсорная пагинация (раздел 2): `limit`/`cursor`, максимум 100. Роль: AUDITOR, ADMIN."
     ),
     response_model=EdmAgreementListResponse,
 )
 async def list_edm_agreements(
     session: DbSession,
     _: Annotated[Principal, Depends(require_permission(Permission.EDM_READ))],
+    page: Pagination,
     party_type: str | None = None,
     party_id: uuid.UUID | None = None,
 ) -> EdmAgreementListResponse:
-    stmt = EdmAgreementService(session).list_query(party_type=party_type, party_id=party_id)
-    rows = (await session.execute(stmt.limit(100))).scalars().all()
-    return EdmAgreementListResponse(items=[EdmAgreementOut.model_validate(r) for r in rows])
+    service = EdmAgreementService(session)
+    stmt = service.list_query(party_type=party_type, party_id=party_id)
+    cursor = page.decoded_cursor
+    if cursor:
+        stmt = stmt.where(keyset_before(EdmAgreement.created_at, EdmAgreement.id, cursor))
+    rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
+    built: Page[EdmAgreement] = Page.build(rows, limit=page.limit)
+    displays = await service.party_displays(built.items)
+    items = [
+        EdmAgreementOut.model_validate(row).model_copy(
+            update={"party_display": displays.get((row.party_type, row.party_id))}
+        )
+        for row in built.items
+    ]
+    return EdmAgreementListResponse(items=items, next_cursor=built.next_cursor)
 
 
 @edm_agreements_router.post(

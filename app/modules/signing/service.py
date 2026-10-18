@@ -38,7 +38,7 @@ import secrets
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, TypeVar, runtime_checkable
 from urllib.parse import quote
@@ -397,6 +397,48 @@ class EdmAgreementService:
         if party_id:
             stmt = stmt.where(EdmAgreement.party_id == party_id)
         return stmt
+
+    async def party_displays(
+        self, agreements: Sequence[EdmAgreement]
+    ) -> dict[tuple[str, uuid.UUID], str]:
+        """Название вуза, ФИО контакта или сотрудника — по запросу на каждый `party_type`,
+        встретившийся на СТРАНИЦЕ, а не на каждое соглашение (раздел 6: запрет N+1; то же
+        приём, что `DealService.party_names`)."""
+        ids_by_type: dict[str, set[uuid.UUID]] = {
+            "organization": set(),
+            "contact": set(),
+            "user": set(),
+        }
+        for agreement in agreements:
+            if agreement.party_type in ids_by_type:
+                ids_by_type[agreement.party_type].add(agreement.party_id)
+
+        displays: dict[tuple[str, uuid.UUID], str] = {}
+        if ids_by_type["organization"]:
+            rows = await self._session.execute(
+                select(Organization.id, Organization.name).where(
+                    Organization.id.in_(ids_by_type["organization"])
+                )
+            )
+            for row in rows:
+                displays[("organization", row.id)] = row.name
+        if ids_by_type["contact"]:
+            rows = await self._session.execute(
+                select(
+                    Contact.id, Contact.last_name, Contact.first_name, Contact.middle_name
+                ).where(Contact.id.in_(ids_by_type["contact"]))
+            )
+            for row in rows:
+                displays[("contact", row.id)] = " ".join(
+                    p for p in (row.last_name, row.first_name, row.middle_name) if p
+                )
+        if ids_by_type["user"]:
+            rows = await self._session.execute(
+                select(User.id, User.full_name).where(User.id.in_(ids_by_type["user"]))
+            )
+            for row in rows:
+                displays[("user", row.id)] = row.full_name
+        return displays
 
     async def find_active_for_contact(self, contact: Contact) -> EdmAgreement | None:
         """Соглашение может быть оформлено на самого контакта (B2C-физлицо)

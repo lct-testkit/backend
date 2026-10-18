@@ -5045,6 +5045,17 @@
             "title": "Id",
             "type": "string"
           },
+          "party_display": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Party Display"
+          },
           "party_id": {
             "format": "uuid",
             "title": "Party Id",
@@ -19503,7 +19514,7 @@
     },
     "/api/admin/edm-agreements": {
       "get": {
-        "description": "Соглашения об электронном документообороте с вузами/вендорами (сторона, срок действия, статус отзыва); фильтры `party_type`/`party_id`. Роль: AUDITOR, ADMIN.",
+        "description": "Соглашения об электронном документообороте с вузами/вендорами (сторона — `party_display`, срок действия, статус отзыва); фильтры `party_type`/`party_id`. Курсорная пагинация (раздел 2): `limit`/`cursor`, максимум 100. Роль: AUDITOR, ADMIN.",
         "operationId": "list_edm_agreements_api_admin_edm_agreements_get",
         "parameters": [
           {
@@ -19537,6 +19548,34 @@
                 }
               ],
               "title": "Party Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
             }
           },
           {
