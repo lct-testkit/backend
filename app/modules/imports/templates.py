@@ -118,12 +118,6 @@ def all_builtin_presets(entity_type: str | None = None) -> list[BuiltinPreset]:
     return presets
 
 
-def _instruction_line(spec: FieldSpec) -> str:
-    required = "да" if spec.required else "нет"
-    allowed = _allowed_values_hint(spec)
-    return f"{spec.label}\t{required}\t{allowed}"
-
-
 def _allowed_values_hint(spec: FieldSpec) -> str:
     if spec.kind == "transfer_status":
         return "Допустимо: " + ", ".join(TRANSFER_STATUS_LABELS.values())
