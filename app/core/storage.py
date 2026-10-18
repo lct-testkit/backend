@@ -29,6 +29,9 @@ from botocore.exceptions import ClientError
 from app.core.config import get_settings
 from app.core.errors import AppError, DependencyStatus, ErrorCode
 
+# Коды ответа S3 на head_bucket, означающие «бакета нет» (SeaweedFS/MinIO/AWS отдают разные).
+_MISSING_BUCKET_CODES = frozenset({"404", "NoSuchBucket", "NotFound"})
+
 # Сколько байт объекта скачивать за один потоковый чанк при подсчёте sha256.
 _HASH_CHUNK_SIZE = 1024 * 1024
 # Достаточно для проверки самых длинных сигнатур из раздела 9 (OLE2 — 8 байт).
@@ -130,13 +133,22 @@ async def ensure_bucket(bucket: str) -> None:
         try:
             client.head_bucket(Bucket=bucket)
             return
-        except ClientError:
+        except ClientError as exc:
             if not settings.s3_auto_create_buckets:
-                raise AppError(
-                    ErrorCode.DEPENDENCY_UNAVAILABLE,
-                    f"Бакет {bucket!r} не существует: ожидается, что его создаст "
-                    "инициализирующее задание инфраструктуры (S3_AUTO_CREATE_BUCKETS=false)",
-                ) from None
+                code = str(exc.response.get("Error", {}).get("Code", ""))
+                if code in _MISSING_BUCKET_CODES:
+                    message = (
+                        f"Бакет {bucket!r} не существует: ожидается, что его создаст "
+                        "инициализирующее задание инфраструктуры (S3_AUTO_CREATE_BUCKETS=false)"
+                    )
+                else:
+                    # 403/5xx и т.п. — бакет может существовать, просто проверить его не
+                    # удалось: «не существует» отправило бы оператора не в ту сторону.
+                    message = (
+                        f"Не удалось проверить бакет {bucket!r} (ответ S3: {code or 'без кода'}): "
+                        "проверьте доступность хранилища и права ключа на head_bucket"
+                    )
+                raise AppError(ErrorCode.DEPENDENCY_UNAVAILABLE, message) from None
         try:
             client.create_bucket(Bucket=bucket)
         except ClientError:

@@ -97,6 +97,27 @@ class TestEnsureBucketAutoCreate:
         with pytest.raises(AppError):
             asyncio.run(storage.ensure_bucket("some-bucket"))
 
+    def test_a_forbidden_head_is_not_reported_as_a_missing_bucket(self, monkeypatch) -> None:
+        settings = get_settings()
+        monkeypatch.setattr(settings, "s3_auto_create_buckets", False)
+
+        class _FakeClient:
+            def head_bucket(self, Bucket: str) -> None:  # noqa: N803
+                from botocore.exceptions import ClientError
+
+                raise ClientError({"Error": {"Code": "403"}}, "HeadBucket")
+
+            def create_bucket(self, Bucket: str) -> None:  # noqa: N803
+                raise AssertionError("не должен создавать бакет при s3_auto_create_buckets=false")
+
+        monkeypatch.setattr(storage, "_client_for", lambda _bucket: _FakeClient())
+
+        with pytest.raises(AppError) as raised:
+            asyncio.run(storage.ensure_bucket("some-bucket"))
+
+        assert "не существует" not in raised.value.detail
+        assert "403" in raised.value.detail
+
     def test_auto_create_true_creates_the_missing_bucket(self, monkeypatch) -> None:
         settings = get_settings()
         monkeypatch.setattr(settings, "s3_auto_create_buckets", True)
