@@ -235,6 +235,32 @@ class TestApiKeys:
         response = client.get(_DEALS_URL, headers={"X-API-Key": key})
         assert response.status_code == 401
 
+    def test_soft_deleted_account_invalidates_the_key(self, client) -> None:
+        """Bearer-путь (`provision_from_claims`) не видит мягко удалённых пользователей; ключ
+        удалённой учётки со статусом `active` не должен оставаться рабочим."""
+        login(client, "ADMIN")
+        integration_user = run(client, lambda: _integration_user(consent_version="1.0"))
+        created = client.post(
+            _KEYS_URL,
+            json={"name": "x", "user_id": str(integration_user.id), "expires_in_days": 10},
+        )
+        key = created.json()["key"]
+
+        async def _soft_delete() -> None:
+            from app.core.db import session_scope
+            from app.modules.identity.models import User
+
+            async with session_scope() as session:
+                user = await session.get(User, integration_user.id)
+                assert user is not None
+                user.deleted_at = dt.datetime.now(dt.UTC)
+
+        run(client, _soft_delete)
+        client.cookies.clear()
+
+        response = client.get(_DEALS_URL, headers={"X-API-Key": key})
+        assert response.status_code == 401
+
     def test_disabling_the_feature_flag_ignores_the_header(
         self, client, monkeypatch: pytest.MonkeyPatch
     ) -> None:

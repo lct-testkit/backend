@@ -129,6 +129,7 @@ async def _principal_from_api_key(session: AsyncSession, raw_key: str) -> Princi
     user = await session.get(User, api_key.user_id)
     if (
         user is None
+        or user.deleted_at is not None
         or user.role != Role.INTEGRATION.value
         or user.status != UserStatus.ACTIVE.value
     ):
