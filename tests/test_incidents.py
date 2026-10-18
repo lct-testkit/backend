@@ -280,6 +280,29 @@ class TestRknNoticeFlow:
         assert response.status_code == 422, response.text
 
 
+class TestTemplatesShipWithTheImage:
+    """Образ контейнера копирует только `app/`, `migrations/` и `alembic.ini` (Dockerfile), а
+    `docs/` исключён в `.dockerignore`: шаблоны уведомлений, лежавшие в `docs/`, в контейнере
+    не находились — обе ручки формирования PDF отвечали 500, тесты из дерева исходников этого
+    не видели."""
+
+    def test_the_template_directory_is_inside_the_app_package(self) -> None:
+        from pathlib import Path
+
+        import app
+        from app.modules.identity import incident_service as svc
+
+        app_root = Path(app.__file__).resolve().parent
+        assert svc._TEMPLATES_DIR.resolve().is_relative_to(app_root)
+
+    def test_every_template_the_service_renders_exists(self) -> None:
+        from app.modules.identity import incident_service as svc
+
+        names = [*svc._STAGE_TEMPLATES.values(), "subjects-notice.md.j2"]
+        for name in names:
+            assert svc._template_source(name).strip(), name
+
+
 class TestSubjectsNotice:
     def test_a_candidate_cannot_have_a_subjects_notice(self, client) -> None:
         admin = run(client, _make_user, "ADMIN")

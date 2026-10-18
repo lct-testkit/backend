@@ -66,9 +66,11 @@ INCIDENT_CANDIDATE_TRIGGERS = frozenset(
 _RKN_CONTACT_SETTING_KEY = "pdn.rkn_contact"
 _OPERATOR_NAME = "ИТ Школа Ростелекома"
 
-_TEMPLATES_DIR = (
-    Path(__file__).resolve().parent.parent.parent.parent / "docs" / "security" / "templates"
-)
+# Внутри пакета `app/`, рядом со шрифтами (`signing/rendering.py`): образ копирует только `app`,
+# `migrations` и `alembic.ini` (Dockerfile), а `docs/` в него не попадает и исключён в
+# `.dockerignore` — шаблоны в `docs/security/templates/` в контейнере не находились, и обе ручки
+# формирования уведомлений (РКН и субъектам) отвечали 500.
+_TEMPLATES_DIR = Path(__file__).resolve().parent.parent.parent / "assets" / "templates" / "security"
 
 _STAGE_TEMPLATES = {
     "24h": "rkn-notice-24h.md.j2",
