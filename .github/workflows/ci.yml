@@ -70,7 +70,10 @@ jobs:
   test:
     name: pytest + миграции (Postgres)
     runs-on: [self-hosted, lct]
-    timeout-minutes: 30
+    # Было 30: хватало до слияния P1/P2 трёх эпиков разом. Набор тестов вырос (3400+), джоб
+    # гонит pytest дважды (полный прогон + подмножество под crm_app) плюс миграции/preflight —
+    # 30 минут стало тесно, прогон обрезался таймаутом на ~44% первого прогона, не падением теста.
+    timeout-minutes: 90
     services:
       postgres:
         image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
