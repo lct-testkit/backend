@@ -24,6 +24,7 @@ LEARNER_PII_KEYS: frozenset[str] = frozenset(
         "passport_series",
         "passport_number",
         "passport_issued_by",
+        "passport_issued_at",
         "passport_dept_code",
         "birth_date",
         "reg_region",
@@ -36,6 +37,11 @@ LEARNER_PII_KEYS: frozenset[str] = frozenset(
         "diploma_series",
         "diploma_reg_number",
         "diploma_surname",
+        # B6-14: склонения ФИО в дательном падеже для документов об обучении
+        # (contact_learner_profiles.*_dative) — такое же ПДн, как и сами ФИО.
+        "first_name_dative",
+        "last_name_dative",
+        "middle_name_dative",
     }
 )
 
