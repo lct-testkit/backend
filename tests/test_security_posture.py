@@ -152,3 +152,49 @@ class TestCaching:
         assert after_first["has_otp"] > 0  # первый запрос действительно сходил в Keycloak
         # Второй запрос обслужен из кэша Redis (60 с) — ни одного нового вызова.
         assert calls == after_first
+
+    def test_a_degraded_answer_is_not_cached(self, client, monkeypatch) -> None:
+        """Keycloak не ответил — `realm: null` и пустой список «без TOTP» нельзя держать минуту
+        как достоверные: следующий вызов обязан спросить Keycloak заново."""
+        admin = run(client, _make_user, "ADMIN")
+        _login(client, admin)
+        _mock_keycloak(monkeypatch, otp_by_id={}, realm=None)
+        first = client.get("/api/admin/security/posture")
+        assert first.status_code == 200, first.text
+        assert first.json()["realm"] is None
+
+        _mock_keycloak(monkeypatch, otp_by_id={}, realm=_REALM_SAMPLE)
+        second = client.get("/api/admin/security/posture")
+
+        assert second.status_code == 200, second.text
+        assert second.json()["realm"]["brute_force_protected"] is True
+
+
+class TestKeycloakConcurrencyIsBounded:
+    def test_no_more_than_the_limit_of_has_otp_calls_run_at_once(self, client, monkeypatch) -> None:
+        import asyncio
+
+        from app.modules.identity import admin_service
+
+        for _ in range(admin_service._POSTURE_KEYCLOAK_CONCURRENCY + 4):
+            run(client, _make_user, "ADMIN")
+        state = {"running": 0, "peak": 0}
+
+        async def has_otp(_keycloak_id: str) -> bool:
+            state["running"] += 1
+            state["peak"] = max(state["peak"], state["running"])
+            await asyncio.sleep(0.01)
+            state["running"] -= 1
+            return True
+
+        async def realm_posture() -> dict:
+            return _REALM_SAMPLE
+
+        monkeypatch.setattr(admin_service.keycloak_client, "has_otp", has_otp)
+        monkeypatch.setattr(admin_service.keycloak_client, "realm_posture", realm_posture)
+        _login(client, run(client, _make_user, "ADMIN"))
+
+        response = client.get("/api/admin/security/posture")
+
+        assert response.status_code == 200, response.text
+        assert 1 < state["peak"] <= admin_service._POSTURE_KEYCLOAK_CONCURRENCY

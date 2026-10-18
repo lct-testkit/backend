@@ -1115,6 +1115,10 @@ class AdminUserService:
 # --- Посадочная панель безопасности (B6-11) -------------------------------
 
 _POSTURE_CACHE_TTL_SECONDS = 60
+#: Сколько запросов `has_otp` к Admin API Keycloak идёт одновременно: администраторов и
+#: руководителей может быть десятки, а безлимитный `gather` открыл бы столько же параллельных
+#: соединений к Keycloak на каждый непрогретый вызов панели.
+_POSTURE_KEYCLOAK_CONCURRENCY = 8
 
 
 async def get_security_posture(session: AsyncSession) -> dict[str, Any]:
@@ -1146,9 +1150,16 @@ async def get_security_posture(session: AsyncSession) -> dict[str, Any]:
         .scalars()
         .all()
     )
+    # Запрос уже отбирает `keycloak_id IS NOT NULL`; условие ниже — для типизации, не фильтр.
+    candidates = [(user, user.keycloak_id) for user in admins_and_heads if user.keycloak_id]
+    limiter = asyncio.Semaphore(_POSTURE_KEYCLOAK_CONCURRENCY)
+
+    async def _has_otp(keycloak_id: str) -> bool:
+        async with limiter:
+            return await keycloak_client.has_otp(keycloak_id)
+
     otp_flags = await asyncio.gather(
-        *(keycloak_client.has_otp(user.keycloak_id) for user in admins_and_heads),  # type: ignore[arg-type]
-        return_exceptions=True,
+        *(_has_otp(keycloak_id) for _, keycloak_id in candidates), return_exceptions=True
     )
     admins_without_totp = [
         {
@@ -1156,9 +1167,10 @@ async def get_security_posture(session: AsyncSession) -> dict[str, Any]:
             "email_masked": mask_email(user.email) if user.email else None,
             "role": user.role,
         }
-        for user, has_otp in zip(admins_and_heads, otp_flags, strict=True)
+        for (user, _), has_otp in zip(candidates, otp_flags, strict=True)
         if has_otp is False  # True -> настроен; Exception -> Keycloak недоступен, не считаем
     ]
+    keycloak_degraded = any(isinstance(flag, BaseException) for flag in otp_flags)
 
     from app.modules.files.service import get_antivirus_scanner
 
@@ -1195,7 +1207,9 @@ async def get_security_posture(session: AsyncSession) -> dict[str, Any]:
         "field_encryption_enabled": settings.field_encryption_key is not None,
         "realm": realm_out,
     }
-    if redis is not None:
+    # Неполный ответ (Keycloak не ответил хотя бы раз) в кэш не кладём: иначе «список админов без
+    # TOTP пуст» от сбойного опроса держался бы минуту как достоверный.
+    if redis is not None and not keycloak_degraded and realm is not None:
         try:
             await redis.set(
                 key_security_posture(), json.dumps(posture), ex=_POSTURE_CACHE_TTL_SECONDS
