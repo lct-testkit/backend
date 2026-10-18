@@ -6,7 +6,7 @@ import datetime as dt
 import uuid
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ImportEntityLiteral = Literal[
     "organization",
@@ -52,6 +52,13 @@ class ImportOptions(BaseModel):
     create_missing_organizations: bool = False
     create_missing_vendors: bool = True
     create_missing_software: bool = True
+
+    @model_validator(mode="after")
+    def _sheet_xor_sheets(self) -> ImportOptions:
+        # `parse_table` при непустом `sheets` склеивает листы и молча игнорирует `sheet`.
+        if self.sheet is not None and self.sheets:
+            raise ValueError("`sheet` и `sheets` взаимоисключающие: укажите что-то одно")
+        return self
 
 
 class ImportJobCreateRequest(BaseModel):

@@ -299,3 +299,18 @@ class TestMergeAllSheets:
         table = parse_table(content, source_format="xlsx", sheets=["*"], header_row=2)
         assert table.rows == [["МГТУ"], ["СПбГУ"]]
         assert table.source_rows == [3, 3]
+
+
+class TestImportOptions:
+    def test_sheet_and_sheets_are_mutually_exclusive(self) -> None:
+        import pytest
+        from pydantic import ValidationError
+
+        from app.modules.imports.schemas import ImportOptions
+
+        with pytest.raises(ValidationError, match="взаимоисключающие"):
+            ImportOptions(sheet="2024", sheets=["*"])
+
+        assert ImportOptions(sheet="2024").sheets is None
+        assert ImportOptions(sheets=["*"]).sheet is None
+        assert ImportOptions(sheet="2024", sheets=[]).sheets == []
