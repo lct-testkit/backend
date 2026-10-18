@@ -466,10 +466,16 @@ class FileService:
         if file.status != FileStatus.PENDING.value:
             return file
 
+        extension = _extension(file.original_filename)
+        # Тело объекта держим в памяти только для office-форматов (глубокая проверка ниже): для
+        # остальных (pdf, png, zip …) оно бы лишь копилось до `files_deep_check_max_bytes` и
+        # копировалось в `bytes` на каждый commit без всякой пользы.
         inspection = await inspect_object(
             bucket=file.bucket,
             key=file.storage_key,
-            keep_up_to=settings.files_deep_check_max_bytes,
+            keep_up_to=(
+                settings.files_deep_check_max_bytes if extension in _OFFICE_EXTENSIONS else 0
+            ),
         )
         if not inspection.exists:
             raise AppError(
@@ -508,7 +514,6 @@ class FileService:
                 AppError(ErrorCode.FILE_TOO_LARGE, "Превышен допустимый размер файла")
             )
 
-        extension = _extension(file.original_filename)
         magic_ok = _check_magic_bytes(extension, inspection.magic_bytes)
         hash_ok = expected_sha256 is None or expected_sha256 == inspection.sha256
 

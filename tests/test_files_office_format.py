@@ -26,6 +26,7 @@ needs_db = pytest.mark.skipif(
 )
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "files"
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
 def _zip_with(*names: str) -> bytes:
@@ -178,6 +179,31 @@ class TestDeepCheckOnCommit:
         row = run(self.client, self._row, file_id)
         assert row.status == "ready"
         assert row.mime_type == "application/vnd.ms-excel"
+
+    def test_the_object_body_is_kept_in_memory_only_for_office_formats(self) -> None:
+        """Глубокая проверка нужна doc/xls/docx/xlsx; для png/pdf/zip тело объекта копить в
+        памяти (до 32 МБ и ещё копия в `bytes`) на каждый commit незачем."""
+        from app.modules.files import service as files_service
+
+        original = files_service.inspect_object
+        seen: dict[str, int] = {}
+
+        async def spy(*, bucket: str, key: str, keep_up_to: int = 0) -> ObjectInspection:
+            seen[key] = keep_up_to
+            return await original(bucket=bucket, key=key, keep_up_to=keep_up_to)
+
+        self.monkeypatch.setattr(files_service, "inspect_object", spy)
+
+        _, png = self._upload_and_commit("scan.png", _PNG_SIGNATURE + b"x" * 32)
+        _, docx = self._upload_and_commit(
+            "report.docx", _zip_with("word/document.xml", "[Content_Types].xml")
+        )
+
+        assert png.status_code == 200, png.text
+        assert docx.status_code == 200, docx.text
+        assert sorted(seen.values())[0] == 0
+        assert sorted(seen.values())[-1] > 0
+        assert len(seen) == 2
 
     def test_a_file_over_the_deep_check_limit_is_accepted_by_signature_only(self) -> None:
         from app.core.config import get_settings
