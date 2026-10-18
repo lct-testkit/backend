@@ -944,3 +944,104 @@ class TestOneSignaturePerRequest:
         constraint = run(client, self._second_signature, built.request_ids[0], built.document_id)
 
         assert constraint == "uq_signatures_request_id"
+
+
+class TestPreviousStatusRuleRespectsTheWorkflow:
+    """B2-3: `_apply_deal_signature_outcome(rule="previous_status")` не должен выбирать
+    статус чужой воронки. Воспроизводит состояние после переноса сделки на новую воронку
+    (`migrate_deals`): `deal.workflow_id` уже указывает на новую воронку, а старая строка
+    `deal_status_history.from_status_id` всё ещё ссылается на статус прежней — без фильтра по
+    воронке запрос вернул бы её, и сделка получила бы `status_id` из воронки, на которую
+    `workflow_id` больше не ссылается."""
+
+    @staticmethod
+    async def _scene() -> dict[str, uuid.UUID]:
+        from app.core.db import session_scope
+        from app.modules.catalog.models import Organization
+        from app.modules.crm.models import Deal, DealStatusHistory
+        from app.modules.identity.models import User
+        from app.modules.workflow.models import Workflow, WorkflowStatus
+
+        async with session_scope() as session:
+            old_workflow = Workflow(
+                code=f"wf-old-{uuid.uuid4().hex[:8]}", name="Старая воронка", deal_type="b2b"
+            )
+            new_workflow = Workflow(
+                code=f"wf-new-{uuid.uuid4().hex[:8]}", name="Новая воронка", deal_type="b2b"
+            )
+            session.add_all([old_workflow, new_workflow])
+            await session.flush()
+
+            old_status = WorkflowStatus(
+                workflow_id=old_workflow.id, code="old_step", name="Старый шаг"
+            )
+            new_status_a = WorkflowStatus(
+                workflow_id=new_workflow.id, code="new_step_a", name="Новый шаг A"
+            )
+            new_status_b = WorkflowStatus(
+                workflow_id=new_workflow.id, code="new_step_b", name="Новый шаг B"
+            )
+            org = Organization(name=f"Вуз {uuid.uuid4().hex[:6]}", org_type="university")
+            owner = User(
+                keycloak_id=str(uuid.uuid4()),
+                email=f"{uuid.uuid4().hex[:8]}@rt-it-school.ru",
+                full_name="Петров П.П.",
+                role="KAM",
+                status="active",
+                consent_version="1.0",
+            )
+            session.add_all([old_status, new_status_a, new_status_b, org, owner])
+            await session.flush()
+
+            # Сделка уже перенесена (`workflow_id` — новая воронка), но история статусов
+            # сохранена как есть (`migrate_deals` истории не трогает, только статус и SLA) —
+            # ровно то состояние, в котором `rule="previous_status"` раньше ломался.
+            deal = Deal(
+                number=f"D-{uuid.uuid4().hex[:10]}",
+                title="Перенесённая сделка",
+                deal_type="b2b",
+                workflow_id=new_workflow.id,
+                status_id=new_status_b.id,
+                organization_id=org.id,
+                owner_id=owner.id,
+            )
+            session.add(deal)
+            await session.flush()
+            session.add(
+                DealStatusHistory(
+                    deal_id=deal.id,
+                    from_status_id=old_status.id,
+                    to_status_id=new_status_b.id,
+                    changed_by=None,
+                    reason="workflow_migration",
+                    comment="перенос",
+                )
+            )
+            await session.flush()
+            return {
+                "deal_id": deal.id,
+                "old_status_id": old_status.id,
+                "new_status_b_id": new_status_b.id,
+            }
+
+    @staticmethod
+    async def _apply(deal_id: uuid.UUID) -> uuid.UUID:
+        from app.core.db import session_scope
+        from app.modules.crm.models import Deal
+        from app.modules.signing.service import _apply_deal_signature_outcome
+
+        async with session_scope() as session:
+            deal = await session.get(Deal, deal_id)
+            await _apply_deal_signature_outcome(session, deal, rule="previous_status", note="тест")
+            return deal.status_id
+
+    def test_previous_status_never_crosses_into_a_foreign_workflow(self, client) -> None:
+        scene = run(client, self._scene)
+
+        final_status_id = run(client, self._apply, scene["deal_id"])
+
+        # Единственная запись истории ссылается на статус СТАРОЙ воронки — для текущей
+        # (новой) воронки подходящего "предыдущего статуса" нет, и сделка должна остаться
+        # на месте, а не получить status_id из воронки old_workflow.
+        assert final_status_id != scene["old_status_id"]
+        assert final_status_id == scene["new_status_b_id"]

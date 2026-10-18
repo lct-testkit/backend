@@ -2766,11 +2766,18 @@ async def _apply_deal_signature_outcome(
 
     target_status_id: uuid.UUID | None = None
     if rule == "previous_status":
+        # B2-3: латентный баг — без JOIN на WorkflowStatus с фильтром по текущей воронке
+        # сделки, перенесённая на другую воронку (`migrate_deals`, сменился `deal.workflow_id`,
+        # но старая история статусов осталась) могла получить `status_id` из ЧУЖОЙ воронки
+        # (строка `from_status_id` в `deal_status_history` принадлежала прежней). Проверка
+        # ниже `target_status_id == deal.status_id` этого не ловит: id разные, воронка — тоже.
         target_status_id = await session.scalar(
             select(DealStatusHistory.from_status_id)
+            .join(WorkflowStatus, WorkflowStatus.id == DealStatusHistory.from_status_id)
             .where(
                 DealStatusHistory.deal_id == deal.id,
                 DealStatusHistory.from_status_id.is_not(None),
+                WorkflowStatus.workflow_id == deal.workflow_id,
             )
             .order_by(DealStatusHistory.changed_at.desc())
             .limit(1)
