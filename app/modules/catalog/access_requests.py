@@ -61,6 +61,14 @@ class AccessRequestService:
             raise NotFoundError("Запрос доступа", request_id)
         return request
 
+    async def _lock(self, request: AccessRequest) -> None:
+        """Строка запроса под `FOR UPDATE` перед любым переходом статуса. Решение — переход
+        `pending → …`, и без блокировки два одновременных (два одобряющих, одобрение и отмена
+        автором) оба проходили `_ensure_pending` по статусу, прочитанному ДО блокировки: аудит и
+        уведомление дублировались, `decided_by` затирался, а отменённый запрос мог остаться
+        выданным доступом. Перечитывание после блокировки отдаёт уже актуальный статус."""
+        await self._session.refresh(request, with_for_update=True)
+
     # --- Создание ------------------------------------------------------------------------
 
     async def create(
@@ -232,6 +240,7 @@ class AccessRequestService:
     async def approve(
         self, request: AccessRequest, principal: Principal, *, days: int | None, comment: str | None
     ) -> AccessRequest:
+        await self._lock(request)
         self._ensure_pending(request)
         organization = await self._get_entity_or_404(request)
         await self._ensure_can_decide(principal, organization)
@@ -264,6 +273,7 @@ class AccessRequestService:
     async def reject(
         self, request: AccessRequest, principal: Principal, *, comment: str
     ) -> AccessRequest:
+        await self._lock(request)
         self._ensure_pending(request)
         organization = await self._get_entity_or_404(request)
         await self._ensure_can_decide(principal, organization)
@@ -292,6 +302,7 @@ class AccessRequestService:
         return request
 
     async def revoke(self, request: AccessRequest, principal: Principal) -> AccessRequest:
+        await self._lock(request)
         if request.status != "approved":
             raise AppError(
                 ErrorCode.VALIDATION, "Отозвать можно только одобренный и действующий доступ"
@@ -311,6 +322,7 @@ class AccessRequestService:
     async def cancel(self, request: AccessRequest, principal: Principal) -> AccessRequest:
         if request.requester_id != principal.user_id:
             raise AppError(ErrorCode.FORBIDDEN, "Отменить можно только свой запрос")
+        await self._lock(request)
         self._ensure_pending(request)
         request.status = "cancelled"
         await self._session.flush()

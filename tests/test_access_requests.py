@@ -536,3 +536,105 @@ class TestListingAndCancel:
 
         second = _create(client, org_id)
         assert second.status_code == 201, second.text
+
+
+def _principal_of(user) -> Any:
+    from app.core.security import Principal, TokenClaims
+
+    return Principal(
+        user_id=user.id,
+        keycloak_id=user.keycloak_id or "x",
+        role=user.role,
+        status=user.status,
+        email=user.email,
+        full_name=user.full_name,
+        team_id=user.team_id,
+        manager_id=user.manager_id,
+        perm_epoch=user.perm_epoch,
+        session_id=None,
+        consent_version=user.consent_version,
+        must_change_password=False,
+        claims=TokenClaims(subject="x", raw={}),
+        restricted=False,
+    )
+
+
+class TestConcurrentDecisions:
+    """Решение по запросу — переход `pending → …`. Два одновременных решения читали статус до
+    блокировки строки, оба проходили `_ensure_pending`, и каждое писало аудит и уведомление."""
+
+    def test_two_simultaneous_approvals_decide_once(self, client) -> None:
+        owner = create_user(client, "KAM")
+        requester = create_user(client, "KAM")
+        org_id = create_organization(client)
+        run(client, lambda: _set_owner(org_id, owner.id))
+        sign_in(client, requester)
+        request_id = _create(client, org_id).json()["id"]
+
+        async def _race() -> list[str]:
+            import asyncio
+
+            from app.core.db import session_scope
+            from app.core.errors import AppError
+            from app.modules.catalog.access_requests import AccessRequestService
+
+            loaded = asyncio.Barrier(2)
+
+            async def _approve() -> str:
+                async with session_scope() as session:
+                    service = AccessRequestService(session)
+                    request = await service.get_or_404(uuid.UUID(request_id))
+                    await loaded.wait()  # оба уже прочитали статус pending
+                    try:
+                        await service.approve(request, _principal_of(owner), days=7, comment=None)
+                    except AppError:
+                        return "refused"
+                    return "approved"
+
+            return list(await asyncio.gather(_approve(), _approve()))
+
+        outcomes = run(client, _race)
+
+        assert sorted(outcomes) == ["approved", "refused"]
+        assert run(client, lambda: _count_audit("ACCESS_GRANTED", uuid.UUID(org_id))) == 1
+
+    def test_approval_racing_the_requesters_cancel_has_one_winner(self, client) -> None:
+        owner = create_user(client, "KAM")
+        requester = create_user(client, "KAM")
+        org_id = create_organization(client)
+        run(client, lambda: _set_owner(org_id, owner.id))
+        sign_in(client, requester)
+        request_id = _create(client, org_id).json()["id"]
+
+        async def _race() -> list[str]:
+            import asyncio
+
+            from app.core.db import session_scope
+            from app.core.errors import AppError
+            from app.modules.catalog.access_requests import AccessRequestService
+
+            loaded = asyncio.Barrier(2)
+
+            async def _decide(action: str) -> str:
+                async with session_scope() as session:
+                    service = AccessRequestService(session)
+                    request = await service.get_or_404(uuid.UUID(request_id))
+                    await loaded.wait()
+                    try:
+                        if action == "approve":
+                            await service.approve(
+                                request, _principal_of(owner), days=7, comment=None
+                            )
+                        else:
+                            await service.cancel(request, _principal_of(requester))
+                    except AppError:
+                        return "refused"
+                    return action
+
+            return list(await asyncio.gather(_decide("approve"), _decide("cancel")))
+
+        outcomes = run(client, _race)
+
+        assert outcomes.count("refused") == 1
+        granted = run(client, lambda: _count_audit("ACCESS_GRANTED", uuid.UUID(org_id)))
+        assert granted == (1 if "approve" in outcomes else 0)
