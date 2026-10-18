@@ -20,7 +20,7 @@ from app.core.csrf import SAFE_METHODS, verify_csrf
 from app.core.errors import AppError, ErrorCode
 from app.core.idempotency import request_hash, scoped_key
 from app.core.pagination import Cursor, keyset_after, keyset_before
-from app.core.permissions import Permission, has_permission
+from app.core.permissions import DealScope, Permission, deal_scope_for, has_permission
 from app.modules.identity.admin_service import ApprovalService
 from app.modules.identity.models import User
 from app.modules.identity.schemas import (
@@ -240,6 +240,17 @@ class TestPermissionMatrix:
             assert not has_permission(role, Permission.SECURITY_EVENT_READ)
 
     def test_integration_has_no_ui_rights(self) -> None:
-        assert not has_permission("INTEGRATION", Permission.DEAL_READ)
-        assert not has_permission("INTEGRATION", Permission.REPORT_CREATE)
+        # B5-10: DEAL_READ у INTEGRATION — чтение того, что сама внешняя система создала
+        # (`DealScope.SOURCE` сужает любой список до её же сделок); ни интерфейсных прав на
+        # правку, ни контактов, ни отчётов у неё нет.
+        assert has_permission("INTEGRATION", Permission.DEAL_READ)
+        assert deal_scope_for("INTEGRATION") is DealScope.SOURCE
+        for ui_permission in (
+            Permission.DEAL_UPDATE,
+            Permission.CONTACT_READ,
+            Permission.REPORT_READ,
+            Permission.REPORT_CREATE,
+            Permission.USER_READ,
+        ):
+            assert not has_permission("INTEGRATION", ui_permission), ui_permission
         assert has_permission("INTEGRATION", Permission.INTEGRATION_INGEST)
