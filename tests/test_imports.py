@@ -934,6 +934,11 @@ class TestLicenseImportEndToEnd:
         dry = client.post(f"/api/imports/{job_id}/dry-run").json()
         assert dry["ok_rows"] == 1, dry
 
+        # B3-12: инлайн-применение (`job.total_rows <= import_inline_max_rows`, здесь 1 <= 500)
+        # иначе завершило бы задание прямо в `start_apply`, не оставив его в `applying` для
+        # проверки именно фонового пути `_run_one_batch`, которую делает этот тест.
+        monkeypatch.setattr(imports_service.get_settings(), "import_inline_max_rows", 0)
+
         async def _start_apply() -> None:
             async with session_scope() as session:
                 service = imports_service.ImportService(session)

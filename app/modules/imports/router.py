@@ -23,7 +23,7 @@ from app.modules.imports.fields import (
     fields_for,
     requirements_for,
 )
-from app.modules.imports.models import ImportJob, ImportPreset, ImportRowResult
+from app.modules.imports.models import ImportJob, ImportJobStatus, ImportPreset, ImportRowResult
 from app.modules.imports.schemas import (
     ImportEntityTypeListResponse,
     ImportEntityTypeOut,
@@ -366,9 +366,10 @@ async def dry_run_import_job(
     "/{job_id}/apply",
     summary="Применить импорт",
     description=(
-        "Переводит задание в статус `applying`; построчная обработка батчами по "
-        "500 с чекпоинтом продолжается фоновой задачей. Прогресс — в счётчиках "
-        "и статусе задания при повторном GET."
+        "B3-12: задание не больше `IMPORT_INLINE_MAX_ROWS` строк (по умолчанию 500) применяется "
+        "сразу — ответ приходит уже со статусом `completed`/`completed_with_errors`. Большее "
+        "задание переходит в `applying`; построчная обработка батчами по 500 с чекпоинтом "
+        "продолжается фоновой задачей, прогресс — в счётчиках и статусе при повторном GET."
     ),
     response_model=ImportJobOut,
 )
@@ -379,7 +380,9 @@ async def apply_import_job(
     job = await service.get_or_404(job_id)
     job = await service.start_apply(job)
     # B8-11: не ждать минутного тика cron — поставить задание в arq сразу после коммита.
-    if get_settings().reports_enqueue:
+    # B3-12: небольшое задание `start_apply` уже применил инлайн (статус терминальный) — ставить
+    # задачу в очередь незачем, `run_import_job` нашёл бы там только обработанные строки.
+    if get_settings().reports_enqueue and job.status == ImportJobStatus.APPLYING.value:
         enqueue_after_commit(
             session, "run_import_job", str(job.id), "apply", job_id=f"import:{job.id}:apply"
         )

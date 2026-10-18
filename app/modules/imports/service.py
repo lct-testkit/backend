@@ -1302,6 +1302,19 @@ class ImportService:
             entity_id=job.id,
             changes={"mode": {"old": None, "new": job.mode}},
         )
+
+        # B3-12: небольшое задание (по умолчанию ≤500 строк — один батч) применяется сразу в этом
+        # запросе, а не ждёт минутный тик `imports.tasks.sweep_import_jobs` или арк-воркера.
+        # Отдельная блокировка строки не нужна: до коммита этой транзакции (конец HTTP-запроса,
+        # `DbSession`) ни cron, ни арк-задача не увидят статус `applying` — гонки с ними нет.
+        # Партии всё равно идут через `apply_batch` (построчный SAVEPOINT на отравленную строку,
+        # как и у фоновой задачи).
+        settings = get_settings()
+        inline_limit = settings.import_inline_max_rows
+        if inline_limit and job.total_rows <= inline_limit:
+            while await self.apply_batch(job, batch_size=settings.import_batch_size):
+                pass
+            await self.finalize_apply_if_done(job)
         return job
 
     async def apply_batch(self, job: ImportJob, *, batch_size: int) -> int:

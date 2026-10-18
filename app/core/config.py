@@ -229,6 +229,11 @@ class Settings(BaseSettings):
     import_max_rows: int = 100000
     import_max_file_size_bytes: int = 52428800
     import_batch_size: int = 500
+    # B3-12: заданию не больше этого числа строк `start_apply` применяет сразу в своём запросе
+    # (под `FOR UPDATE SKIP LOCKED`, та же защита от гонки с cron/arq, что и `imports.tasks.
+    # _run_one_batch`) — пользователь видит `completed` в ответе `POST /apply`, не ждёт минутного
+    # тика `sweep_import_jobs`, если арк-воркер недоступен. `0` выключает инлайн-применение.
+    import_inline_max_rows: int = 500
 
     # --- Автоподстановка по ИНН и локальный реестр ЕГРЮЛ ------------------
     org_lookup_rate_limit_per_min: int = 30
