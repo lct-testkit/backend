@@ -399,7 +399,9 @@ class TestRouteCoverage:
         ),
         # Шаг 14 задания (контроль исполнения этапов): тот же DealService.get_or_404, что уже
         # покрыт для /deals/{deal_id}.
-        "/deals/{deal_id}/stages": "наследует deal_scope_clause через DealService.get_or_404 (не прогнано)",
+        "/deals/{deal_id}/stages": (
+            "наследует deal_scope_clause через DealService.get_or_404 (не прогнано)"
+        ),
         # ПЭП, отчёты и дашборды — отдельный сетап (подписанты, очередь
         # генерации, виджеты), не поднятый в этом проходе. Отчёты уже вызывают
         # deal_scope_clause в builders.py (B1), дашборды и ПЭП — открытый вопрос.
