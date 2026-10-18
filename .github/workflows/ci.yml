@@ -151,11 +151,38 @@ jobs:
           alembic downgrade -1
           alembic upgrade head
 
-      # Тесты идут под суперпользователем `crm` (он же мигрирует), поэтому права роли приложения
-      # `crm_app` (журнал аудита только на чтение и вставку, без DDL) проверяет
-      # tests/test_app_role_grants.py отдельным соединением под этой ролью.
+      # Основной прогон идёт под суперпользователем `crm` (он же мигрирует) — быстрее и не
+      # зависит от GRANT на каждую новую таблицу. tests/test_app_role_grants.py отдельным
+      # соединением проверяет сами права роли `crm_app` (журнал аудита только на чтение и
+      # вставку, без DDL), но ни он, ни основной прогон не ловят нехватку GRANT в обычном
+      # коде (забытый GRANT на новую таблицу/sequence для `crm_app`) — обычный прогон обходит
+      # роль приложения стороной, подключаясь сам.
       - name: pytest (покрытие, без пропусков)
         run: pytest -q --cov=app --cov-report=term --cov-report=xml
+
+      # B9-11: то же приложение, но подключённое как crm_app (api/worker в проде ходят под
+      # ней — 0012_audit_role_hardening), на подмножестве ручек с реальной нагрузкой на БД
+      # (сделки, импорт). Нехватка прав ловится здесь, а не в проде. Миграции уже применены
+      # суперпользователем выше; здесь меняется только то, под какой ролью подключается само
+      # приложение (DATABASE_URL/TEST_DATABASE_URL — conftest.client читает их заново).
+      - name: pytest — подмножество API-тестов под ролью crm_app
+        env:
+          DATABASE_URL: postgresql+asyncpg://crm_app:crm_app@localhost:${{ job.services.postgres.ports['5432'] }}/crm_test
+          TEST_DATABASE_URL: postgresql+asyncpg://crm_app:crm_app@localhost:${{ job.services.postgres.ports['5432'] }}/crm_test
+        run: >
+          pytest -q
+          tests/test_api_smoke.py
+          tests/test_deals.py
+          tests/test_deals_transition_attachments.py
+          tests/test_imports.py
+          tests/test_imports_catalogs.py
+          tests/test_imports_inline_apply.py
+          tests/test_imports_parsing.py
+          tests/test_imports_people.py
+          tests/test_imports_report.py
+          tests/test_imports_samples.py
+          tests/test_imports_templates.py
+          tests/test_imports_xls.py
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()

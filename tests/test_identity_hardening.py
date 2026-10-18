@@ -448,6 +448,77 @@ class TestPasswordChangeBruteForce:
         response = self._attempt(client)
         assert response.status_code == 422, response.text
 
+    def test_a_successful_change_resets_the_attempt_counter(self, client, monkeypatch) -> None:
+        """`router_me.change_password` сбрасывает счётчик (`reset_rate_limit`) только после
+        успешной смены — не проверялось, что он действительно сбрасывается, а не продолжает
+        копиться с прежних неудачных попыток."""
+        from app.core.config import get_settings
+        from app.core.errors import AppError, ErrorCode
+        from app.modules.identity import router_me
+
+        user = run(client, _make_user, "KAM")
+        sign_in(client, user)
+        limit = get_settings().password_change_max_attempts
+
+        async def fake_wrong_password(*, username: str, password: str):
+            raise AppError(ErrorCode.VALIDATION, "Текущий пароль неверен")
+
+        monkeypatch.setattr(router_me.keycloak_client, "password_grant", fake_wrong_password)
+
+        # Несколько неудачных попыток, лимит не исчерпан.
+        for attempt in range(limit - 1):
+            response = self._attempt(client)
+            assert response.status_code == 422, (attempt, response.text)
+
+        async def fake_right_password(*, username: str, password: str):
+            return None
+
+        async def fake_set_password(keycloak_id: str, *, password: str, temporary: bool = False):
+            return None
+
+        async def fake_update_required_actions(keycloak_id: str, *, add=(), remove=()):
+            return None
+
+        async def fake_logout_all_sessions(keycloak_id: str):
+            return None
+
+        monkeypatch.setattr(router_me.keycloak_client, "password_grant", fake_right_password)
+        monkeypatch.setattr(router_me.keycloak_client, "set_password", fake_set_password)
+        monkeypatch.setattr(
+            router_me.keycloak_client, "update_required_actions", fake_update_required_actions
+        )
+        monkeypatch.setattr(
+            router_me.keycloak_client, "logout_all_sessions", fake_logout_all_sessions
+        )
+
+        success = client.post(
+            "/api/me/password",
+            json={
+                "current_password": "correct-current-password",
+                "new_password": "New-Password-12345",
+                "new_password_repeat": "New-Password-12345",
+            },
+        )
+        assert success.status_code == 200, success.text
+        # Успешная смена переиздаёт sid и CSRF-токен (защита от session fixation) — клиент
+        # должен подхватить новый токен, иначе следующие запросы получат CRM-1107, а не 422/429.
+        new_csrf = success.cookies.get("crm_csrf")
+        if new_csrf:
+            client.headers["X-CSRF-Token"] = new_csrf
+
+        monkeypatch.setattr(router_me.keycloak_client, "password_grant", fake_wrong_password)
+
+        # Если счётчик не сбросился, предыдущие (limit - 1) неудач уже посчитаны бы в текущем
+        # окне, и блок наступил бы раньше. Полный новый круг из `limit` неудач должен пройти без
+        # 429, и только попытка (limit + 1) должна его получить.
+        for attempt in range(limit):
+            response = self._attempt(client)
+            assert response.status_code == 422, (attempt, response.text)
+
+        blocked = self._attempt(client)
+        assert blocked.status_code == 429, blocked.text
+        assert blocked.json()["code"] == "CRM-8429"
+
 
 # --- Скоуп руководителя -----------------------------------------------------------------------
 
