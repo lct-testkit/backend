@@ -4,11 +4,10 @@
 перед шапкой, иногда со скрытым листом (черновик/архив). До этой задачи
 читался только первый лист и первая строка.
 
-Полный контракт задачи (режим `sheets: ["*"]` для склейки всех листов,
-`fill_down` для объединённых ячеек, `source_row`/`sheet` на строку
-результата) не реализован — см. отчёт по эпику. Эти тесты покрывают то,
-что реализовано: выбор листа, автопоиск строки заголовка, разбор с явно
-указанной строкой заголовка.
+Полный контракт задачи: выбор листа, автопоиск строки заголовка, разбор с
+явно указанной строкой заголовка, абсолютная нумерация строк Excel
+(`source_rows`), склейка нескольких листов (`sheets=["*"]`) с проверкой
+одинаковой шапки и `fill_down` для объединённых ячеек.
 """
 
 from __future__ import annotations
@@ -17,6 +16,7 @@ import io
 
 import openpyxl
 import pytest
+import xlwt
 
 from app.core.errors import AppError
 from app.modules.imports.parsing import detect_header_row, list_sheets, parse_table
@@ -44,6 +44,17 @@ def _xlsx_bytes(sheets: dict[str, list[list[object]]], *, hidden: set[str] = fro
             sheet.append(row)
         if name in hidden:
             sheet.sheet_state = "hidden"
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def _xls_bytes(rows: list[list[object]]) -> bytes:
+    workbook = xlwt.Workbook()
+    sheet = workbook.add_sheet("Лист1")
+    for r, row in enumerate(rows):
+        for c, value in enumerate(row):
+            sheet.write(r, c, value)
     buffer = io.BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
@@ -156,3 +167,135 @@ class TestParseTableWithSheetAndHeaderRow:
         content = _xlsx_bytes({"Лист1": [["a"], ["1"]]})
         with pytest.raises(AppError):
             parse_table(content, source_format="xlsx", header_row=50)
+
+
+class TestSourceRows:
+    """B3-2: `source_rows`/`sheet_names` — абсолютный номер строки Excel и имя листа на каждую
+    строку результата, для отчёта об ошибках (B3-5)."""
+
+    def test_header_after_title_and_blank_rows_gives_absolute_source_row(self) -> None:
+        content = _xlsx_bytes(
+            {
+                "Лицензии": [
+                    ["Каталог лицензий 2026"],
+                    [],
+                    [],
+                    ["Название ВУЗа", "Вендор"],
+                    ["МГТУ", "Яндекс"],
+                ]
+            }
+        )
+        table = parse_table(content, source_format="xlsx", header_row=4)
+        assert table.rows == [["МГТУ", "Яндекс"]]
+        assert table.source_rows == [5]
+        assert table.sheet_names == ["Лицензии"]
+
+    def test_blank_row_inside_data_keeps_the_gap_in_source_rows(self) -> None:
+        content = _xlsx_bytes(
+            {
+                "Лист1": [
+                    ["Название ВУЗа", "Вендор"],
+                    ["МГТУ", "Яндекс"],
+                    [],
+                    ["СПбГУ", "Ростелеком"],
+                ]
+            }
+        )
+        table = parse_table(content, source_format="xlsx")
+        assert table.rows == [["МГТУ", "Яндекс"], ["СПбГУ", "Ростелеком"]]
+        # Строка 2 — первая строка данных, строка 3 пуста и пропущена, строка 4 — вторая.
+        assert table.source_rows == [2, 4]
+
+    def test_default_single_sheet_name_is_populated(self) -> None:
+        content = _xlsx_bytes({"Лист1": [["a"], ["1"]]})
+        table = parse_table(content, source_format="xlsx")
+        assert table.sheet_names == ["Лист1"]
+
+
+class TestFillDown:
+    """B3-2: объединённые ячейки (вуз/вендор записаны один раз на блок строк)."""
+
+    def test_fills_empty_cell_from_the_row_above(self) -> None:
+        content = _xlsx_bytes(
+            {
+                "Лист1": [
+                    ["Название ВУЗа", "ПО"],
+                    ["МГТУ", "DataLake"],
+                    ["", "CRM"],
+                    ["СПбГУ", "ERP"],
+                ]
+            }
+        )
+        table = parse_table(content, source_format="xlsx", fill_down=["Название ВУЗа"])
+        assert table.rows == [["МГТУ", "DataLake"], ["МГТУ", "CRM"], ["СПбГУ", "ERP"]]
+        assert table.filled_cells == [(3, "Название ВУЗа")]
+
+    def test_fully_blank_row_resets_the_fill(self) -> None:
+        content = _xlsx_bytes(
+            {
+                "Лист1": [
+                    ["Название ВУЗа", "ПО"],
+                    ["МГТУ", "DataLake"],
+                    [],
+                    ["", "ERP"],
+                ]
+            }
+        )
+        table = parse_table(content, source_format="xlsx", fill_down=["Название ВУЗа"])
+        # Пустая строка (строка 3) разделяет блоки — колонка в строке 4 остаётся пустой.
+        assert table.rows == [["МГТУ", "DataLake"], ["", "ERP"]]
+        assert table.filled_cells == []
+
+    def test_fill_down_works_on_xls_too(self) -> None:
+        content = _xls_bytes([["Название ВУЗа", "ПО"], ["МГТУ", "DataLake"], ["", "CRM"]])
+        table = parse_table(content, source_format="xls", fill_down=["Название ВУЗа"])
+        assert table.rows == [["МГТУ", "DataLake"], ["МГТУ", "CRM"]]
+
+
+class TestMergeAllSheets:
+    """B3-2: `sheets=["*"]` склеивает все видимые листы с одинаковой шапкой."""
+
+    def test_merges_two_sheets_with_the_same_header(self) -> None:
+        content = _xlsx_bytes(
+            {
+                "2024": [["Название ВУЗа", "ПО"], ["МГТУ", "DataLake"]],
+                "2025": [["Название ВУЗа", "ПО"], ["СПбГУ", "ERP"]],
+            }
+        )
+        table = parse_table(content, source_format="xlsx", sheets=["*"])
+        assert table.headers == ["Название ВУЗа", "ПО"]
+        assert table.rows == [["МГТУ", "DataLake"], ["СПбГУ", "ERP"]]
+        assert table.sheet_names == ["2024", "2025"]
+        assert table.source_rows == [2, 2]
+
+    def test_hidden_sheet_is_excluded_from_merge(self) -> None:
+        content = _xlsx_bytes(
+            {
+                "Видимый": [["Название ВУЗа"], ["МГТУ"]],
+                "Архив": [["Название ВУЗа"], ["Черновик"]],
+            },
+            hidden={"Архив"},
+        )
+        table = parse_table(content, source_format="xlsx", sheets=["*"])
+        assert table.rows == [["МГТУ"]]
+
+    def test_mismatched_headers_raise_a_clear_error(self) -> None:
+        content = _xlsx_bytes(
+            {
+                "Лист1": [["Название ВУЗа", "ПО"], ["МГТУ", "DataLake"]],
+                "Лист2": [["Вуз", "Продукт"], ["СПбГУ", "ERP"]],
+            }
+        )
+        with pytest.raises(AppError):
+            parse_table(content, source_format="xlsx", sheets=["*"])
+
+    def test_explicit_header_row_applies_to_every_sheet(self) -> None:
+        content = _xlsx_bytes(
+            {
+                "A": [["Титул"], ["Название ВУЗа"], ["МГТУ"]],
+                "B": [["Титул"], ["Название ВУЗа"], ["СПбГУ"]],
+            }
+        )
+        table = parse_table(content, source_format="xlsx", sheets=["*"], header_row=2)
+        assert table.rows == [["МГТУ"], ["СПбГУ"]]
+        assert table.source_rows == [3, 3]
