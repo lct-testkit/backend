@@ -72,6 +72,7 @@ from app.modules.crm.schemas import (
     ParticipantListResponse,
     ParticipantOut,
     ReassignRequest,
+    StageSummaryOut,
     TaskCreateRequest,
     TaskListResponse,
     TaskOut,
@@ -364,6 +365,27 @@ async def get_deal(
     # Названия в кэш не попадают: переименование организации версию сделки не меняет.
     card.deal = (await _deal_outs(service, principal, [deal]))[0]
     return card
+
+
+@deals_router.get(
+    "/{deal_id}/stages",
+    summary="Контроль исполнения этапов",
+    description=(
+        "Шаг 14 задания: по каждому этапу воронки — посещён ли (done/current/skipped/"
+        "pending), сколько времени занял, был ли просрочен SLA на выходе, число "
+        "комментариев и файлов, чек-лист вложений для перехода вперёд. Чужая сделка — 404 "
+        "(раздел 3.2). Роль: чтение сделок."
+    ),
+    response_model=StageSummaryOut,
+)
+async def get_deal_stages(
+    session: DbSession,
+    principal: DealRead,
+    deal_id: Annotated[uuid.UUID, Path()],
+) -> StageSummaryOut:
+    service = DealService(session)
+    deal = await service.get_or_404(deal_id, principal)
+    return StageSummaryOut.model_validate(await service.stage_summary(deal))
 
 
 async def _build_card(service: DealService, deal: Deal) -> DealCardOut:

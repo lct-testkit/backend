@@ -134,6 +134,12 @@ logger = structlog.get_logger(__name__)
 
 _TERMINAL_TYPE_VALUES = {t.value for t in TERMINAL_TYPES}
 
+# B2-10: до этой даты `DealStatusHistory.sla_state_at_change` хранит состояние НОВОГО статуса
+# (ошибка, описанная в докстринге колонки), а не покидаемого — `DealService.stage_summary` не
+# может доверять ему `sla_breached=false` для записей старше этой границы и отдаёт `None`
+# («неизвестно»). Дата — день выката исправления в `transition` (см. риски B2-10).
+STAGE_SLA_FIXED_SINCE = dt.datetime(2026, 10, 18, tzinfo=dt.UTC)
+
 
 # =============================================================================
 # Контракт для identity: сколько держит пользователь (раздел 4.7, 4.8.3)
@@ -2245,6 +2251,173 @@ class DealService:
             )
         return results
 
+    async def stage_summary(self, deal: Deal) -> dict[str, Any]:
+        """B2-10 (шаг 14 задания — «контроль за исполнением каждого этапа»): по каждому
+        статусу пайплайна (initial/intermediate снимка воронки) — посещён ли, сколько раз,
+        сколько времени занял, нарушен ли был SLA на выходе, сколько комментариев и файлов.
+        Не больше шести запросов: воронка (`_load_graph` — кэш графа, без запроса при
+        попадании), история одним запросом, вложения одним `GROUP BY`."""
+        _workflow, graph = await self._load_graph(deal)
+        statuses = sorted(
+            (
+                s
+                for s in graph["statuses"]
+                if s["type"] in (StatusType.INITIAL.value, StatusType.INTERMEDIATE.value)
+            ),
+            key=lambda s: s["sort_order"],
+        )
+        statuses_by_id = {s["id"]: s for s in statuses}
+        # Полный справочник статусов снимка (с `won`/`lost`/`parked`) — нужен только чтобы
+        # отличить переход «вперёд к won» (14→won тоже несёт условие по вложениям, раздел
+        # 2 таблицы B2-1) от перехода в `lost`/`parked`, которые в чек-лист не идут.
+        all_statuses_by_id = {s["id"]: s for s in graph["statuses"]}
+        current_id = str(deal.status_id)
+        now = dt.datetime.now(dt.UTC)
+
+        history = (
+            (
+                await self._session.execute(
+                    select(DealStatusHistory)
+                    .where(DealStatusHistory.deal_id == deal.id)
+                    .order_by(DealStatusHistory.changed_at)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        visits: dict[str, int] = {}
+        first_entered_at: dict[str, dt.datetime] = {}
+        last_left_at: dict[str, dt.datetime] = {}
+        time_spent: dict[str, dt.timedelta] = {}
+        comments_count: dict[str, int] = {}
+        # Записи ухода из статуса, сгруппированные по исходу — считаем известным "breached"
+        # только по записям с `changed_at >= STAGE_SLA_FIXED_SINCE`; более старые помечают
+        # статус как "неизвестно", если среди них не нашлось настоящего нарушения.
+        breached_true: set[str] = set()
+        breached_unknown: set[str] = set()
+        for row in history:
+            to_id = str(row.to_status_id)
+            if to_id not in first_entered_at:
+                first_entered_at[to_id] = row.changed_at
+            visits[to_id] = visits.get(to_id, 0) + 1
+            from_id = str(row.from_status_id) if row.from_status_id else None
+            if from_id is None:
+                continue
+            last_left_at[from_id] = row.changed_at
+            time_spent[from_id] = time_spent.get(from_id, dt.timedelta()) + (
+                row.duration_in_prev or dt.timedelta()
+            )
+            if row.comment and row.comment.strip():
+                comments_count[from_id] = comments_count.get(from_id, 0) + 1
+            if row.changed_at < STAGE_SLA_FIXED_SINCE:
+                breached_unknown.add(from_id)
+            elif row.sla_state_at_change == "breached":
+                breached_true.add(from_id)
+
+        def _breached(status_id: str) -> bool | None:
+            if status_id in breached_true:
+                return True
+            if status_id in breached_unknown:
+                return None
+            return False
+
+        file_rows = await self._session.execute(
+            select(Attachment.status_id, Attachment.category, func.count())
+            .where(
+                Attachment.entity_type == "deal",
+                Attachment.entity_id == deal.id,
+                Attachment.deleted_at.is_(None),
+                Attachment.status_id.is_not(None),
+            )
+            .group_by(Attachment.status_id, Attachment.category)
+        )
+        files_count: dict[str, int] = {}
+        attached_categories: dict[str, set[str]] = {}
+        for status_id, category, count in file_rows:
+            key = str(status_id)
+            files_count[key] = files_count.get(key, 0) + count
+            attached_categories.setdefault(key, set()).add(category)
+
+        max_visited_sort = max(
+            (statuses_by_id[sid]["sort_order"] for sid in visits if sid in statuses_by_id),
+            default=-1,
+        )
+        deal_is_won = deal.closed_at is not None and current_id not in statuses_by_id
+
+        items: list[dict[str, Any]] = []
+        counts = {"done": 0, "skipped": 0, "pending": 0, "current": 0, "sla_breached": 0}
+        for status in statuses:
+            sid = status["id"]
+            visited = visits.get(sid, 0) > 0
+            if sid == current_id:
+                state = "current"
+            elif visited:
+                state = "done"
+            elif deal_is_won or status["sort_order"] < max_visited_sort:
+                state = "skipped"
+            else:
+                state = "pending"
+            counts[state] += 1
+
+            spent = time_spent.get(sid, dt.timedelta())
+            if sid == current_id:
+                spent += now - deal.status_changed_at
+                stage_breached: bool | None = deal.sla_state == "breached"
+            else:
+                stage_breached = _breached(sid)
+            if stage_breached:
+                counts["sla_breached"] += 1
+
+            required = {
+                leaf["field"].removeprefix("step_attachments.")
+                for transition in graph["transitions"]
+                if transition["from_status_id"] == sid
+                and (target := all_statuses_by_id.get(transition["to_status_id"])) is not None
+                and (
+                    target["type"] == StatusType.WON.value
+                    or (
+                        target["type"] in (StatusType.INITIAL.value, StatusType.INTERMEDIATE.value)
+                        and target["sort_order"] > status["sort_order"]
+                    )
+                )
+                for leaf in dsl.flatten_leaves(transition["conditions"])
+                if str(leaf.get("field", "")).startswith("step_attachments.")
+            }
+            attached = attached_categories.get(sid, set())
+            evidence_ok = True if state != "current" else required <= attached
+
+            rule = _sla_rule(graph, sid)
+            items.append(
+                {
+                    "status_id": uuid.UUID(sid),
+                    "code": status["code"],
+                    "name": status["name"],
+                    "sort_order": status["sort_order"],
+                    "state": state,
+                    "visits": visits.get(sid, 0),
+                    "first_entered_at": first_entered_at.get(sid),
+                    "last_left_at": last_left_at.get(sid),
+                    "time_spent_seconds": int(spent.total_seconds()),
+                    "sla_hours": (rule["max_duration_seconds"] / 3600) if rule else None,
+                    "sla_breached": stage_breached,
+                    "comments_count": comments_count.get(sid, 0),
+                    "files_count": files_count.get(sid, 0),
+                    "evidence": {
+                        "required": sorted(required),
+                        "attached": sorted(attached),
+                        "ok": evidence_ok,
+                    },
+                }
+            )
+
+        return {
+            "deal_id": deal.id,
+            "current_status_id": deal.status_id,
+            "summary": counts,
+            "items": items,
+        }
+
     async def _apply_transition_field(self, deal: Deal, key: str, value: Any) -> None:
         if key.startswith("custom_fields."):
             sub = key.removeprefix("custom_fields.")
@@ -2421,6 +2594,11 @@ class DealService:
         # запись истории ниже раньше сохраняла почти всегда `ok` — состояние нового статуса, а
         # не то, было ли нарушение SLA в статусе, который сделка покидает.
         sla_before = deal.sla_state
+        # B2-10: `sla_before` отражает последний пересчёт по скану (раз в 15 минут) — срок мог
+        # истечь между сканами, и переход ушёл бы раньше, чем скан это заметил. Проверяем срок
+        # прямо здесь, а не ждём скана; `parked` не считается (SLA на паузе — см. выше).
+        breached_on_exit = deal.sla_due_at is not None and now > deal.sla_due_at and not from_parked
+        sla_state_at_change = "breached" if breached_on_exit else sla_before
         deal.status_id = uuid.UUID(to_status["id"])
         deal.status_changed_at = now
         await apply_sla(self._session, deal, graph, to_status, now)
@@ -2454,7 +2632,7 @@ class DealService:
             reason=HistoryReason.MANUAL.value,
             comment=comment,
             duration_in_prev=duration_in_prev,
-            sla_state_at_change=sla_before,
+            sla_state_at_change=sla_state_at_change,
             changed_at=now,
         )
         self._session.add(history_row)

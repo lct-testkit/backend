@@ -278,6 +278,53 @@ class TransitionResponse(BaseModel):
     deal: DealOut
 
 
+# --- B2-10: сводка исполнения этапов (шаг 14 задания) ----------------------
+
+
+class StageEvidenceOut(BaseModel):
+    """Чек-лист вложений перехода «вперёд» с этого этапа (условия `step_attachments.*`)."""
+
+    required: list[str] = Field(default_factory=list)
+    attached: list[str] = Field(default_factory=list)
+    ok: bool = True
+
+
+class StageItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    status_id: uuid.UUID
+    code: str
+    name: str
+    sort_order: int
+    state: Literal["done", "current", "skipped", "pending"]
+    visits: int
+    first_entered_at: dt.datetime | None = None
+    last_left_at: dt.datetime | None = None
+    time_spent_seconds: int
+    sla_hours: float | None = None
+    #: `null` — переход через этот этап случился до выката B2-10, состояние SLA на выходе
+    #: неизвестно (`STAGE_SLA_FIXED_SINCE`, `app/modules/crm/service.py`).
+    sla_breached: bool | None = None
+    comments_count: int
+    files_count: int
+    evidence: StageEvidenceOut
+
+
+class StageSummaryCounts(BaseModel):
+    done: int
+    current: int
+    skipped: int
+    pending: int
+    sla_breached: int
+
+
+class StageSummaryOut(BaseModel):
+    deal_id: uuid.UUID
+    current_status_id: uuid.UUID
+    summary: StageSummaryCounts
+    items: list[StageItemOut]
+
+
 # --- История --------------------------------------------------------------
 
 

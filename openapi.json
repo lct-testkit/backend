@@ -16051,6 +16051,207 @@
         "title": "SlaRuleOut",
         "type": "object"
       },
+      "StageEvidenceOut": {
+        "description": "Чек-лист вложений перехода «вперёд» с этого этапа (условия `step_attachments.*`).",
+        "properties": {
+          "attached": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Attached",
+            "type": "array"
+          },
+          "ok": {
+            "default": true,
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "required": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required",
+            "type": "array"
+          }
+        },
+        "title": "StageEvidenceOut",
+        "type": "object"
+      },
+      "StageItemOut": {
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "comments_count": {
+            "title": "Comments Count",
+            "type": "integer"
+          },
+          "evidence": {
+            "$ref": "#/components/schemas/StageEvidenceOut"
+          },
+          "files_count": {
+            "title": "Files Count",
+            "type": "integer"
+          },
+          "first_entered_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Entered At"
+          },
+          "last_left_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Left At"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "sla_breached": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sla Breached"
+          },
+          "sla_hours": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sla Hours"
+          },
+          "sort_order": {
+            "title": "Sort Order",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "done",
+              "current",
+              "skipped",
+              "pending"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "status_id": {
+            "format": "uuid",
+            "title": "Status Id",
+            "type": "string"
+          },
+          "time_spent_seconds": {
+            "title": "Time Spent Seconds",
+            "type": "integer"
+          },
+          "visits": {
+            "title": "Visits",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status_id",
+          "code",
+          "name",
+          "sort_order",
+          "state",
+          "visits",
+          "time_spent_seconds",
+          "comments_count",
+          "files_count",
+          "evidence"
+        ],
+        "title": "StageItemOut",
+        "type": "object"
+      },
+      "StageSummaryCounts": {
+        "properties": {
+          "current": {
+            "title": "Current",
+            "type": "integer"
+          },
+          "done": {
+            "title": "Done",
+            "type": "integer"
+          },
+          "pending": {
+            "title": "Pending",
+            "type": "integer"
+          },
+          "skipped": {
+            "title": "Skipped",
+            "type": "integer"
+          },
+          "sla_breached": {
+            "title": "Sla Breached",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "done",
+          "current",
+          "skipped",
+          "pending",
+          "sla_breached"
+        ],
+        "title": "StageSummaryCounts",
+        "type": "object"
+      },
+      "StageSummaryOut": {
+        "properties": {
+          "current_status_id": {
+            "format": "uuid",
+            "title": "Current Status Id",
+            "type": "string"
+          },
+          "deal_id": {
+            "format": "uuid",
+            "title": "Deal Id",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/StageItemOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/StageSummaryCounts"
+          }
+        },
+        "required": [
+          "deal_id",
+          "current_status_id",
+          "summary",
+          "items"
+        ],
+        "title": "StageSummaryOut",
+        "type": "object"
+      },
       "StatusArchiveRequest": {
         "properties": {
           "fallback_status_id": {
@@ -31118,6 +31319,74 @@
           }
         ],
         "summary": "Восстановить сделку",
+        "tags": [
+          "deals"
+        ]
+      }
+    },
+    "/api/deals/{deal_id}/stages": {
+      "get": {
+        "description": "Шаг 14 задания: по каждому этапу воронки — посещён ли (done/current/skipped/pending), сколько времени занял, был ли просрочен SLA на выходе, число комментариев и файлов, чек-лист вложений для перехода вперёд. Чужая сделка — 404 (раздел 3.2). Роль: чтение сделок.",
+        "operationId": "get_deal_stages_api_deals__deal_id__stages_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "deal_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Deal Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StageSummaryOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "summary": "Контроль исполнения этапов",
         "tags": [
           "deals"
         ]

@@ -298,8 +298,12 @@ class DealStatusHistory(UuidPkMixin, Base):
     # DealService.transition`: `sla_before = deal.sla_state`, записано ДО `apply_sla` для
     # нового статуса — та сбрасывает `deal.sla_state` на `ok`). Раньше здесь по ошибке писалось
     # состояние уже НОВОГО статуса (почти всегда `ok` сразу после сброса) — по истории
-    # нарушения SLA было не восстановить (найдено при подготовке спринта B1, не потребляется
-    # ни одним отчётом в этом спринте).
+    # нарушения SLA было не восстановить (найдено при подготовке спринта B1). B2-10:
+    # `DealService.stage_summary` читает это поле, чтобы показать просроченные этапы; срок
+    # мог истечь между сканами (раз в 15 минут) — `breached_on_exit` в `transition` проверяет
+    # его прямо в момент перехода и пишет `"breached"`, не дожидаясь скана. У записей до
+    # релиза B2-10 поле хранит состояние НОВОГО статуса (см. выше) — `stage_summary` не
+    # должен доверять им `sla_breached=false`, см. `STAGE_SLA_FIXED_SINCE`.
     sla_state_at_change: Mapped[str | None] = mapped_column(String(16), nullable=True)
     changed_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False, index=True
