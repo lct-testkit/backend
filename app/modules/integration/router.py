@@ -137,6 +137,11 @@ async def update_source(
 @integration_admin_router.get(
     "/sources/{code}/mapping",
     summary="Текущий маппинг полей и каталог целей",
+    description=(
+        "B5-3: сохранённый маппинг полей источника (пустой — действует прежнее поведение приёма "
+        "без маппинга) и каталог целей, на которые можно сопоставить поля заявки. Роль: "
+        "администратор интеграций."
+    ),
     response_model=MappingGetResponse,
 )
 async def get_source_mapping(
@@ -173,6 +178,10 @@ async def put_source_mapping(
 @integration_admin_router.delete(
     "/sources/{code}/mapping",
     summary="Вернуть прежнее поведение (без маппинга)",
+    description=(
+        "B5-3: удаляет сохранённый маппинг — источник возвращается к прежнему приёму заявок, "
+        "поля берутся как есть. Ответ 204. Роль: администратор интеграций."
+    ),
     status_code=204,
 )
 async def delete_source_mapping(
@@ -184,6 +193,12 @@ async def delete_source_mapping(
 @integration_admin_router.post(
     "/sources/{code}/mapping/preview",
     summary="Предпросмотр маппинга без записи в БД",
+    description=(
+        "B5-3: как запись источника (`record` либо первая запись удалённого источника при "
+        "`from_remote`) превратится в заявку по переданному `mapping` или по сохранённому. "
+        "Телефон и email в ответе маскированы, в БД ничего не пишется; ошибки маппинга — в "
+        "`errors[]`. Роль: администратор интеграций."
+    ),
     response_model=MappingPreviewResponse,
 )
 async def preview_source_mapping(
@@ -252,6 +267,10 @@ async def preview_source_mapping(
 @integration_admin_router.get(
     "/sources/{code}/routing",
     summary="Текущая маршрутизация (воронка/тип сделки на источник)",
+    description=(
+        "B5-4: сохранённые правила выбора воронки, типа сделки и ответственного для заявок "
+        "источника и маршрут по умолчанию. Роль: администратор интеграций."
+    ),
     response_model=RoutingGetResponse,
 )
 async def get_source_routing(
@@ -284,6 +303,10 @@ async def put_source_routing(
 @integration_admin_router.delete(
     "/sources/{code}/routing",
     summary="Вернуть прежнее поведение (без маршрутизации)",
+    description=(
+        "B5-4: удаляет сохранённую маршрутизацию — заявки источника снова идут по прежнему "
+        "маршруту. Ответ 204. Роль: администратор интеграций."
+    ),
     status_code=204,
 )
 async def delete_source_routing(

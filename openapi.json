@@ -22365,6 +22365,7 @@
     },
     "/api/admin/integrations/sources/{code}/mapping": {
       "delete": {
+        "description": "B5-3: удаляет сохранённый маппинг — источник возвращается к прежнему приёму заявок, поля берутся как есть. Ответ 204. Роль: администратор интеграций.",
         "operationId": "delete_source_mapping_api_admin_integrations_sources__code__mapping_delete",
         "parameters": [
           {
@@ -22434,6 +22435,7 @@
         ]
       },
       "get": {
+        "description": "B5-3: сохранённый маппинг полей источника (пустой — действует прежнее поведение приёма без маппинга) и каталог целей, на которые можно сопоставить поля заявки. Роль: администратор интеграций.",
         "operationId": "get_source_mapping_api_admin_integrations_sources__code__mapping_get",
         "parameters": [
           {
@@ -22590,6 +22592,7 @@
     },
     "/api/admin/integrations/sources/{code}/mapping/preview": {
       "post": {
+        "description": "B5-3: как запись источника (`record` либо первая запись удалённого источника при `from_remote`) превратится в заявку по переданному `mapping` или по сохранённому. Телефон и email в ответе маскированы, в БД ничего не пишется; ошибки маппинга — в `errors[]`. Роль: администратор интеграций.",
         "operationId": "preview_source_mapping_api_admin_integrations_sources__code__mapping_preview_post",
         "parameters": [
           {
@@ -22773,6 +22776,7 @@
     },
     "/api/admin/integrations/sources/{code}/routing": {
       "delete": {
+        "description": "B5-4: удаляет сохранённую маршрутизацию — заявки источника снова идут по прежнему маршруту. Ответ 204. Роль: администратор интеграций.",
         "operationId": "delete_source_routing_api_admin_integrations_sources__code__routing_delete",
         "parameters": [
           {
@@ -22842,6 +22846,7 @@
         ]
       },
       "get": {
+        "description": "B5-4: сохранённые правила выбора воронки, типа сделки и ответственного для заявок источника и маршрут по умолчанию. Роль: администратор интеграций.",
         "operationId": "get_source_routing_api_admin_integrations_sources__code__routing_get",
         "parameters": [
           {
@@ -42242,6 +42247,7 @@
     },
     "/public/signed/{token}/protocol": {
       "get": {
+        "description": "Протокол подписания (PDF) по той же отдельной ссылке скачивания, что и подписанный файл: свой TTL и лимит скачиваний, неизвестный, просроченный и отозванный токен отвечают одинаково. Откат — SIGNATURE_PUBLIC_DOWNLOAD_ENABLED=false.",
         "operationId": "get_signed_protocol_public_signed__token__protocol_get",
         "parameters": [
           {

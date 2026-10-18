@@ -381,6 +381,11 @@ async def get_signed_file(session: DbSession, token: Annotated[str, Path()]) -> 
 @public_download_router.get(
     "/{token}/protocol",
     summary="Скачать протокол подписания по ссылке",
+    description=(
+        "Протокол подписания (PDF) по той же отдельной ссылке скачивания, что и подписанный "
+        "файл: свой TTL и лимит скачиваний, неизвестный, просроченный и отозванный токен "
+        "отвечают одинаково. Откат — SIGNATURE_PUBLIC_DOWNLOAD_ENABLED=false."
+    ),
     response_class=Response,
     responses={200: {"content": {"application/pdf": {}}}},
     dependencies=[Depends(_require_public_download_enabled), Depends(_rate_limited_download)],
