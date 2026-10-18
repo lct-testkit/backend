@@ -332,7 +332,7 @@ async def save_import_mapping(
     job_id: Annotated[uuid.UUID, Path()],
 ) -> ImportJobOut:
     service = ImportService(session)
-    job = await service.get_or_404(job_id)
+    job = await service.get_for_write_or_404(job_id, principal)
     job = await service.save_mapping(
         job,
         mapping=payload.mapping,
@@ -354,10 +354,10 @@ async def save_import_mapping(
     response_model=ImportJobOut,
 )
 async def dry_run_import_job(
-    session: DbSession, _: ImportRunPerm, job_id: Annotated[uuid.UUID, Path()]
+    session: DbSession, principal: ImportRunPerm, job_id: Annotated[uuid.UUID, Path()]
 ) -> ImportJobOut:
     service = ImportService(session)
-    job = await service.get_or_404(job_id)
+    job = await service.get_for_write_or_404(job_id, principal)
     job = await service.dry_run(job)
     return ImportJobOut.model_validate(job)
 
@@ -374,10 +374,10 @@ async def dry_run_import_job(
     response_model=ImportJobOut,
 )
 async def apply_import_job(
-    session: DbSession, _: ImportRunPerm, job_id: Annotated[uuid.UUID, Path()]
+    session: DbSession, principal: ImportRunPerm, job_id: Annotated[uuid.UUID, Path()]
 ) -> ImportJobOut:
     service = ImportService(session)
-    job = await service.get_or_404(job_id)
+    job = await service.get_for_write_or_404(job_id, principal)
     job = await service.start_apply(job)
     # B8-11: не ждать минутного тика cron — поставить задание в arq сразу после коммита.
     # B3-12: небольшое задание `start_apply` уже применил инлайн (статус терминальный) — ставить
@@ -400,10 +400,10 @@ async def apply_import_job(
     response_model=ImportJobOut,
 )
 async def rollback_import_job(
-    session: DbSession, _: ImportRollbackPerm, job_id: Annotated[uuid.UUID, Path()]
+    session: DbSession, principal: ImportRollbackPerm, job_id: Annotated[uuid.UUID, Path()]
 ) -> ImportJobOut:
     service = ImportService(session)
-    job = await service.get_or_404(job_id)
+    job = await service.get_for_write_or_404(job_id, principal)
     job = await service.start_rollback(job)
     if get_settings().reports_enqueue:
         enqueue_after_commit(

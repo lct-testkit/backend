@@ -448,6 +448,60 @@ class TestDirectionImport:
         assert response.status_code == 403, response.text
 
 
+class TestAdminOnlyJobsAreClosedToHead:
+    """Список и карточки заданий видны любому HEAD/ADMIN, поэтому «только ADMIN» для направлений и
+    ответственных проверяется не только при создании, но и на каждом действии над заданием."""
+
+    def test_head_cannot_map_dry_run_apply_or_roll_back_an_admin_job(
+        self, client, monkeypatch
+    ) -> None:
+        from tests.crm_helpers import create_user, sign_in
+
+        tok = token()
+        admin = login(client, "ADMIN")
+        content = xlsx_bytes(DIRECTION_HEADERS, [[f"adm-{tok}", f"Направление {tok}", ""]])
+        started = start_import(
+            client,
+            monkeypatch,
+            admin,
+            entity_type="direction",
+            content=content,
+            source_format="xlsx",
+        )
+        job_id = started["id"]
+
+        head = create_user(client, "HEAD")
+        sign_in(client, head)
+
+        assert client.get(f"/api/imports/{job_id}").status_code == 200  # чтение открыто
+        mapping = client.put(f"/api/imports/{job_id}/mapping", json={"mapping": started["mapping"]})
+        assert mapping.status_code == 403, mapping.text
+        assert client.post(f"/api/imports/{job_id}/dry-run").status_code == 403
+        assert client.post(f"/api/imports/{job_id}/apply").status_code == 403
+        assert client.post(f"/api/imports/{job_id}/rollback").status_code == 403
+
+        # Администратору всё по-прежнему доступно: отказ не испортил задание.
+        sign_in(client, admin)
+        applied = client.post(f"/api/imports/{job_id}/apply")
+        assert applied.status_code == 200, applied.text
+        assert applied.json()["status"] in ("completed", "completed_with_errors")
+
+    def test_head_still_drives_the_jobs_of_the_open_types(self, client, monkeypatch) -> None:
+        tok = token()
+        head = login(client, "HEAD")
+        content = xlsx_bytes(["Наименование", "ИНН"], [[f"Организация {tok}", make_inn()]])
+        started = start_import(
+            client,
+            monkeypatch,
+            head,
+            entity_type="organization",
+            content=content,
+            source_format="xlsx",
+        )
+        response = client.post(f"/api/imports/{started['id']}/apply")
+        assert response.status_code == 200, response.text
+
+
 class TestResponsibleImport:
     def test_found_by_email_changes_owner_and_audits(self, client, monkeypatch) -> None:
         tok = token()

@@ -302,6 +302,23 @@ class ImportService:
             raise NotFoundError("Задание импорта", job_id)
         return job
 
+    @staticmethod
+    def _ensure_type_allowed(entity_type: str, principal: Principal) -> None:
+        # B3-8: направления и список ответственных меняют каталог/видимость вузов напрямую (без
+        # формы с привычными проверками скоупа) — только ADMIN. Право «владелец вуза» для
+        # руководителя (HEAD) появится в спринте B4, здесь только самый узкий безопасный вариант.
+        if entity_type in ADMIN_ONLY_ENTITY_TYPES and not principal.is_admin:
+            raise ForbiddenError("Импорт этого типа доступен только администратору")
+
+    async def get_for_write_or_404(self, job_id: uuid.UUID, principal: Principal) -> ImportJob:
+        """Задание для действия, которое что-то меняет (маппинг, dry-run, применение, откат).
+        Список и карточки заданий видны любому HEAD/ADMIN, поэтому «только ADMIN» для направлений
+        и ответственных проверяется на каждом таком действии, а не только при создании: иначе
+        руководитель применял бы или откатывал чужое задание этого типа по его id."""
+        job = await self.get_or_404(job_id)
+        self._ensure_type_allowed(job.entity_type, principal)
+        return job
+
     async def _get_ready_file(self, file_id: uuid.UUID) -> File:
         file = await self._session.get(File, file_id)
         if file is None or file.deleted_at is not None:
@@ -323,11 +340,7 @@ class ImportService:
     ) -> ImportJob:
         if entity_type not in _MODEL_BY_ENTITY and entity_type not in HANDLED_ENTITY_TYPES:
             raise AppError(ErrorCode.VALIDATION, f"Импорт типа {entity_type!r} не поддерживается")
-        # B3-8: направления и список ответственных меняют каталог/видимость вузов напрямую (без
-        # формы с привычными проверками скоупа) — только ADMIN. Право «владелец вуза» для
-        # руководителя (HEAD) появится в спринте B4, здесь только самый узкий безопасный вариант.
-        if entity_type in ADMIN_ONLY_ENTITY_TYPES and not principal.is_admin:
-            raise ForbiddenError("Импорт этого типа доступен только администратору")
+        self._ensure_type_allowed(entity_type, principal)
         file = await self._get_ready_file(file_id)
         # Профиль файла отдаёт его первые строки; без этой проверки руководитель мог «импортировать»
         # любой готовый файл системы (чужое вложение сделки) и читать его превью. Чужой файл для
