@@ -8,7 +8,7 @@
 Подпадает под `ALTER DEFAULT PRIVILEGES ... GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO
 crm_app` из `0002_identity_sprint` автоматически.
 
-Revision ID: 0049_b4_access_requests
+Revision ID: 0052_b4_access_requests
 Revises: 0048_b4_org_drift_dismissed
 """
 
@@ -20,8 +20,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0049_b4_access_requests"
-down_revision: str | None = "0048_b4_org_drift_dismissed"
+revision: str = "0052_b4_access_requests"
+down_revision: str | None = "0051_b4_org_drift_dismissed"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

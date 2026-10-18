@@ -7,7 +7,7 @@
 Подпадает под `ALTER DEFAULT PRIVILEGES ... GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO
 crm_app` из `0002_identity_sprint` автоматически.
 
-Revision ID: 0047_b5_api_keys
+Revision ID: 0050_b5_api_keys
 Revises: 0046_b5_webhook_subscriptions
 """
 
@@ -19,8 +19,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0047_b5_api_keys"
-down_revision: str | None = "0046_b5_webhook_subscriptions"
+revision: str = "0050_b5_api_keys"
+down_revision: str | None = "0049_b5_webhook_subscriptions"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -21,7 +21,7 @@ CHECK `import_jobs_entity_type_valid` (сейчас шесть значений,
 применялся: имя ограничения ищем через `pg_constraint`, потому что naming
 convention и имя в истории миграций расходятся (см. пояснение в `0015`).
 
-Revision ID: 0046_import_sheets_types
+Revision ID: 0048_import_sheets_types
 Revises: 0045_learning_progress_report
 """
 
@@ -33,8 +33,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0046_import_sheets_types"
-down_revision: str | None = "0045_learning_progress_report"
+revision: str = "0048_import_sheets_types"
+down_revision: str | None = "0047_b6_security_incidents"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

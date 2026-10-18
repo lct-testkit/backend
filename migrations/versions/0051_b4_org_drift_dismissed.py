@@ -6,7 +6,7 @@
 `manual_overrides` словарь: если в реестре появится ДРУГОЕ значение (не то, что отклонили), баннер
 обязан вернуться.
 
-Revision ID: 0048_b4_org_drift_dismissed
+Revision ID: 0051_b4_org_drift_dismissed
 Revises: 0047_b5_api_keys
 """
 
@@ -18,8 +18,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0048_b4_org_drift_dismissed"
-down_revision: str | None = "0047_b5_api_keys"
+revision: str = "0051_b4_org_drift_dismissed"
+down_revision: str | None = "0050_b5_api_keys"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
