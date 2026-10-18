@@ -191,7 +191,7 @@ async def list_organizations(
     if cursor:
         stmt = stmt.where(keyset_before(Organization.created_at, Organization.id, cursor))
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
-    built = Page.build(rows, limit=page.limit, serializer=OrganizationOut.from_model)
+    built: Page = Page.build(rows, limit=page.limit, serializer=OrganizationOut.from_model)
     return OrganizationListResponse(items=built.items, next_cursor=built.next_cursor)
 
 
@@ -562,7 +562,7 @@ async def list_contacts(
     if cursor:
         stmt = stmt.where(keyset_before(Contact.created_at, Contact.id, cursor))
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
-    built = Page.build(rows, limit=page.limit, serializer=ContactOut.from_model)
+    built: Page = Page.build(rows, limit=page.limit, serializer=ContactOut.from_model)
     return ContactListResponse(items=built.items, next_cursor=built.next_cursor)
 
 
@@ -716,7 +716,11 @@ async def list_contact_products(
     return ContactProductListResponse(
         items=[
             ContactProductOut(
-                product=ProductOut.from_model(product, names.get(product.vendor_id)), role=role
+                product=ProductOut.from_model(
+                    product,
+                    names.get(product.vendor_id) if product.vendor_id is not None else None,
+                ),
+                role=role,
             )
             for product, role in rows
         ]
@@ -824,7 +828,7 @@ async def list_products(
         stmt = stmt.where(keyset_before(Product.created_at, Product.id, cursor))
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
     names = await service.vendor_names(rows)
-    built = Page.build(
+    built: Page = Page.build(
         rows,
         limit=page.limit,
         serializer=lambda product: ProductOut.from_model(product, names.get(product.vendor_id)),
@@ -849,7 +853,8 @@ async def create_product(
     service = ProductService(session)
     product = await service.create(payload)
     names = await service.vendor_names([product])
-    return ProductOut.from_model(product, names.get(product.vendor_id))
+    vendor_name = names.get(product.vendor_id) if product.vendor_id is not None else None
+    return ProductOut.from_model(product, vendor_name)
 
 
 @products_router.patch(
@@ -872,7 +877,8 @@ async def update_product(
     product = await service.get_or_404(product_id)
     product = await service.update(product, payload, expected_version=if_match)
     names = await service.vendor_names([product])
-    return ProductOut.from_model(product, names.get(product.vendor_id))
+    vendor_name = names.get(product.vendor_id) if product.vendor_id is not None else None
+    return ProductOut.from_model(product, vendor_name)
 
 
 @products_router.delete(
@@ -995,7 +1001,7 @@ async def list_directions(
     if cursor:
         stmt = stmt.where(keyset_before(Direction.created_at, Direction.id, cursor))
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
-    built = Page.build(rows, limit=page.limit, serializer=DirectionOut.model_validate)
+    built: Page = Page.build(rows, limit=page.limit, serializer=DirectionOut.model_validate)
     return DirectionListResponse(items=built.items, next_cursor=built.next_cursor)
 
 
@@ -1406,7 +1412,7 @@ async def list_organization_licenses(
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
     reveal = has_permission(principal.role, Permission.CONTACT_REVEAL)
     names = await service.organization_names(rows)
-    built = Page.build(
+    built: Page = Page.build(
         rows,
         limit=page.limit,
         serializer=lambda row: _license_out(row, reveal=reveal, names=names),

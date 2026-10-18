@@ -131,7 +131,9 @@ async def organization_scope_clause_for_rules(
         return false()
 
     if principal.role == Role.HEAD.value:
-        owner_clause = Organization.owner_id.in_(await head_scope_member_ids(session, principal))
+        owner_clause: ColumnElement[bool] = Organization.owner_id.in_(
+            await head_scope_member_ids(session, principal)
+        )
     else:
         owner_clause = Organization.owner_id == principal.user_id
 
@@ -490,7 +492,9 @@ class OrganizationService:
         (убран из `_PATCHABLE_FIELDS`), только эта ветка и ручки `PUT`/`DELETE
         .../owner`, которые требуют `Permission.ORG_OWNER_ASSIGN`. `owner_id=None`
         снимает ответственного (B4-2: вуз становится «ничьим»)."""
-        conflicting = {"owner_id": str(organization.owner_id) if organization.owner_id else None}
+        conflicting: dict[str, object] = {
+            "owner_id": str(organization.owner_id) if organization.owner_id else None
+        }
         if organization.owner_id == owner_id:
             raise ValidationError(
                 "Новый ответственный совпадает с текущим",
@@ -1552,7 +1556,7 @@ class ContactService:
         contact.is_anonymized = True
         contact.anonymized_at = dt.datetime.now(dt.UTC)
         await self._session.execute(
-            ContactChannel.__table__.delete().where(ContactChannel.contact_id == contact.id)
+            delete(ContactChannel).where(ContactChannel.contact_id == contact.id)
         )
         # Профиль учащегося (СНИЛС, паспорт, адрес, диплом) — те же ПДн, что и у контакта: запись
         # контакта остаётся ради истории сделок, а эти данные после обезличивания хранить нельзя.
