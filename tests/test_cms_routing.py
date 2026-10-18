@@ -62,6 +62,7 @@ def _cleanup_cms_source_config(client):
     yield
     run(client, _reset_cms_source_config)
 
+
 _URL = "/api/v1/integrations/cms/leads"
 _ROUTING_URL = "/api/admin/integrations/sources/cms/routing"
 _SECRET_ENV = "CMS_ROUTING_TEST_SECRET"
@@ -264,12 +265,16 @@ async def _inbound_error(key: str) -> str | None:
 
     async with session_scope() as session:
         return (
-            await session.execute(
-                select(InboundMessage.error)
-                .where(InboundMessage.source_code == "cms", InboundMessage.external_id == key)
-                .order_by(InboundMessage.received_at.desc())
+            (
+                await session.execute(
+                    select(InboundMessage.error)
+                    .where(InboundMessage.source_code == "cms", InboundMessage.external_id == key)
+                    .order_by(InboundMessage.received_at.desc())
+                )
             )
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
 
 
 async def _deal_comment_bodies(deal_id: uuid.UUID) -> list[str]:
@@ -329,7 +334,7 @@ def _routing_body(
     route: dict[str, Any] = {
         "deal_type": "b2b",
         "workflow_code": workflow_code,
-        "initial_status_code": "first_contact",
+        "initial_status_code": "contact_search",
         "owner_policy": owner_policy,
     }
     if fixed_owner_id is not None:
@@ -383,7 +388,7 @@ class TestB2BLead:
         assert deal["owner_id"] == kam.id
         assert deal["students_planned"] == 120
         assert deal["workflow_id"] == run(client, _workflow_id_by_code, code)
-        assert deal["status_code"] == "first_contact"
+        assert deal["status_code"] == "contact_search"
 
     def test_second_lead_for_the_same_organization_is_a_duplicate_not_a_new_deal(
         self, client, monkeypatch
@@ -427,9 +432,7 @@ class TestB2BLead:
         comments = run(client, _deal_comment_bodies, first_deal_id)
         assert any("Повторная заявка" in body for body in comments)
 
-    def test_ambiguous_organization_name_without_inn_is_rejected(
-        self, client, monkeypatch
-    ) -> None:
+    def test_ambiguous_organization_name_without_inn_is_rejected(self, client, monkeypatch) -> None:
         monkeypatch.setenv(_SECRET_ENV, _SECRET)
         code = f"b2b_route_{_marker()}"
         run(client, _seed_b2b_workflow, code)
@@ -444,16 +447,12 @@ class TestB2BLead:
         run(client, functools.partial(_insert_organization, name=name, inn=None))
 
         seed = f"ambiguous-{_marker()}"
-        response = _send_webhook(
-            client, _university_lead(seed, org_name=name), key=seed
-        )
+        response = _send_webhook(client, _university_lead(seed, org_name=name), key=seed)
         assert response.status_code == 422, response.text
         error = run(client, _inbound_error, seed)
         assert error is not None and "неоднозначно" in error
 
-    def test_organization_with_a_soft_deleted_inn_is_rejected(
-        self, client, monkeypatch
-    ) -> None:
+    def test_organization_with_a_soft_deleted_inn_is_rejected(self, client, monkeypatch) -> None:
         monkeypatch.setenv(_SECRET_ENV, _SECRET)
         code = f"b2b_route_{_marker()}"
         run(client, _seed_b2b_workflow, code)
@@ -479,9 +478,7 @@ class TestB2BLead:
         error = run(client, _inbound_error, seed)
         assert error is not None and "удалена" in error
 
-    def test_organization_owner_policy_uses_the_existing_owner(
-        self, client, monkeypatch
-    ) -> None:
+    def test_organization_owner_policy_uses_the_existing_owner(self, client, monkeypatch) -> None:
         monkeypatch.setenv(_SECRET_ENV, _SECRET)
         code = f"b2b_route_{_marker()}"
         run(client, _seed_b2b_workflow, code)

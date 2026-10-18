@@ -12,7 +12,7 @@ started_at=now()` отдельной короткой транзакцией —
 «зависло после падения воркера» по возрасту `started_at` (порог 15 минут,
 заметно больше таймаута самой задачи в 600 с).
 
-Revision ID: 0026_b8_report_jobs_started_at
+Revision ID: 0036_b8_report_jobs_started_at
 Revises: 0025_import_job_last_error
 """
 
@@ -23,8 +23,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0026_b8_report_jobs_started_at"
-down_revision: str | None = "0025_import_job_last_error"
+revision: str = "0036_b8_report_jobs_started_at"
+down_revision: str | None = "0035_erasure_act_document"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

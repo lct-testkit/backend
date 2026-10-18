@@ -531,6 +531,81 @@ class TestProductValidityPeriod:
         assert ok.status_code == 200, ok.text
 
 
+class TestProductKind:
+    """B3-7: `Product.kind` различает ИТ-программу/курс (`course`, по умолчанию)
+    и ИТ-продукт — ПО вендора (`software`). Настоящая Postgres обязательна —
+    см. докстринг модуля."""
+
+    pytestmark = pytest.mark.skipif(
+        not TEST_DATABASE_URL, reason="нужен TEST_DATABASE_URL с применёнными миграциями"
+    )
+
+    def _create(self, client, **extra):
+        payload = {"code": f"prod-{uuid.uuid4().hex[:8]}", "name": "Продукт", **extra}
+        return client.post("/api/products", json=payload)
+
+    def test_default_kind_is_course(self, client) -> None:
+        _admin(client)
+        product = self._create(client).json()
+        assert product["kind"] == "course"
+
+    def test_explicit_software_kind_is_stored(self, client) -> None:
+        _admin(client)
+        product = self._create(client, kind="software").json()
+        assert product["kind"] == "software"
+
+    def test_filter_by_kind_returns_only_matching_products(self, client) -> None:
+        _admin(client)
+        software = self._create(client, kind="software").json()
+        course = self._create(client, kind="course").json()
+
+        response = client.get("/api/products", params={"kind": "software"})
+        assert response.status_code == 200, response.text
+        ids = {item["id"] for item in response.json()["items"]}
+        assert software["id"] in ids
+        assert course["id"] not in ids
+
+    def test_changing_kind_of_product_used_in_license_is_409(self, client) -> None:
+        from app.core.db import session_scope
+        from app.modules.catalog.models import Organization, OrganizationLicense
+
+        _admin(client)
+        product = self._create(client, kind="software").json()
+
+        async def _attach_license() -> None:
+            async with session_scope() as session:
+                org = Organization(name=f"Вуз {uuid.uuid4().hex[:8]}", org_type="university")
+                session.add(org)
+                await session.flush()
+                session.add(
+                    OrganizationLicense(
+                        organization_id=org.id,
+                        vendor="Вендор",
+                        product_name="Продукт",
+                        contract_number=f"L-{uuid.uuid4().hex[:8]}",
+                        product_id=uuid.UUID(product["id"]),
+                    )
+                )
+
+        run(client, _attach_license)
+
+        response = client.patch(
+            f"/api/products/{product['id']}",
+            json={"kind": "course"},
+            headers={"If-Match": str(product["version"])},
+        )
+        assert response.status_code == 409, response.text
+        assert response.json()["code"] == "CRM-1303"
+
+        # Продукт по-прежнему можно править, просто не менять тип.
+        rename = client.patch(
+            f"/api/products/{product['id']}",
+            json={"name": "Продукт переименован"},
+            headers={"If-Match": str(product["version"])},
+        )
+        assert rename.status_code == 200, rename.text
+
+
 class TestDirectionsAll:
     """B#12: `GET /directions?all=true` — весь справочник одним ответом для дерева, без
     `limit`/`cursor`. Настоящая Postgres обязательна — см. докстринг модуля."""

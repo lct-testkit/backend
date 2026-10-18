@@ -59,6 +59,8 @@ from app.modules.catalog.schemas import (
     LearnerProfileOut,
     LearnerProfileRevealOut,
     LearnerProfileUpdateRequest,
+    LicenseCreateRequest,
+    LicenseUpdateRequest,
     LossReasonCreateRequest,
     LossReasonListResponse,
     LossReasonOut,
@@ -77,6 +79,7 @@ from app.modules.catalog.schemas import (
     ProductContactListResponse,
     ProductContactOut,
     ProductCreateRequest,
+    ProductKindLiteral,
     ProductListResponse,
     ProductOut,
     ProductUpdateRequest,
@@ -91,6 +94,7 @@ from app.modules.catalog.service import (
     DirectionService,
     HolidayService,
     LearnerProfileService,
+    LicenseFilters,
     LossReasonService,
     OrganizationFilters,
     OrganizationLicenseService,
@@ -126,6 +130,8 @@ ContactWrite = Annotated[Principal, Depends(require_permission(Permission.CONTAC
 ContactReveal = Annotated[Principal, Depends(require_permission(Permission.CONTACT_REVEAL))]
 CatalogRead = Annotated[Principal, Depends(require_permission(Permission.CATALOG_READ))]
 CatalogWrite = Annotated[Principal, Depends(require_permission(Permission.CATALOG_WRITE))]
+LicenseWrite = Annotated[Principal, Depends(require_permission(Permission.LICENSE_WRITE))]
+LicenseDelete = Annotated[Principal, Depends(require_permission(Permission.LICENSE_DELETE))]
 
 
 # =============================================================================
@@ -133,7 +139,16 @@ CatalogWrite = Annotated[Principal, Depends(require_permission(Permission.CATALO
 # =============================================================================
 
 
-@organizations_router.get("", summary="Список организаций", response_model=OrganizationListResponse)
+@organizations_router.get(
+    "",
+    summary="Список организаций",
+    description=(
+        "Фильтры: `name`, `inn`, `ogrn`, `org_type`, `region_id`, `owner_id`, "
+        "`registry_status`, `is_accredited`, `source`, `q` (поиск по названию, короткому "
+        "названию или ИНН). Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=OrganizationListResponse,
+)
 async def list_organizations(
     session: DbSession,
     page: Pagination,
@@ -265,7 +280,14 @@ async def bulk_set_organization_owner(
 
 
 @organizations_router.get(
-    "/check-duplicate", summary="Проверить дубль по ИНН/ОГРН", response_model=DuplicateCheckResponse
+    "/check-duplicate",
+    summary="Проверить дубль по ИНН/ОГРН",
+    description=(
+        "Точные совпадения по `inn`/`ogrn` и похожие по названию (`name`). Организация вне "
+        "скоупа вызывающего — только факт существования без реквизитов (`accessible=false`), "
+        "иначе КАМ мог бы подобрать ИНН и узнать название чужого вуза. Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=DuplicateCheckResponse,
 )
 async def check_duplicate_organization(
     session: DbSession,
@@ -303,7 +325,10 @@ async def check_duplicate_organization(
 
 
 @organizations_router.get(
-    "/{organization_id}", summary="Карточка организации", response_model=OrganizationOut
+    "/{organization_id}",
+    summary="Карточка организации",
+    description="Вне скоупа вызывающего или не существует — 404 CRM-9004. Роль: KAM, HEAD, ADMIN.",
+    response_model=OrganizationOut,
 )
 async def get_organization(
     session: DbSession, principal: OrgRead, organization_id: Annotated[uuid.UUID, Path()]
@@ -313,7 +338,14 @@ async def get_organization(
 
 
 @organizations_router.patch(
-    "/{organization_id}", summary="Обновить организацию", response_model=OrganizationOut
+    "/{organization_id}",
+    summary="Обновить организацию",
+    description=(
+        "Правка реквизитов и атрибутов организации. Обязателен `If-Match` с текущей "
+        "версией — расхождение даёт 409 CRM-1002; вне скоупа или не существует — 404 "
+        "CRM-9004. Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=OrganizationOut,
 )
 async def update_organization(
     payload: OrganizationUpdateRequest,
@@ -494,7 +526,16 @@ async def restore_organization(
 # =============================================================================
 
 
-@contacts_router.get("", summary="Список контактов", response_model=ContactListResponse)
+@contacts_router.get(
+    "",
+    summary="Список контактов",
+    description=(
+        "Фильтры: `organization_id`, `position`, `is_decision_maker`, `is_anonymized`, "
+        "`source`, `q`. Телефон и email маскированы — полные значения через "
+        "`POST /api/contacts/{id}/reveal`. Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=ContactListResponse,
+)
 async def list_contacts(
     session: DbSession,
     page: Pagination,
@@ -528,6 +569,7 @@ async def list_contacts(
 @contacts_router.post(
     "",
     summary="Создать контакт",
+    description="ФИО, должность, телефон/email и признак ЛПР. Поддерживает Idempotency-Key.",
     response_model=ContactOut,
     status_code=status.HTTP_201_CREATED,
 )
@@ -560,7 +602,16 @@ async def create_contact(
     return result
 
 
-@contacts_router.get("/{contact_id}", summary="Карточка контакта", response_model=ContactOut)
+@contacts_router.get(
+    "/{contact_id}",
+    summary="Карточка контакта",
+    description=(
+        "Телефон и email маскированы — полные значения через "
+        "`POST /api/contacts/{id}/reveal`; не существует — 404 CRM-9004. "
+        "Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=ContactOut,
+)
 async def get_contact(
     session: DbSession, principal: ContactRead, contact_id: Annotated[uuid.UUID, Path()]
 ) -> ContactOut:
@@ -568,7 +619,15 @@ async def get_contact(
     return ContactOut.from_model(contact)
 
 
-@contacts_router.patch("/{contact_id}", summary="Обновить контакт", response_model=ContactOut)
+@contacts_router.patch(
+    "/{contact_id}",
+    summary="Обновить контакт",
+    description=(
+        "Обязателен `If-Match` с текущей версией — расхождение даёт 409 CRM-1002; "
+        "не существует — 404 CRM-9004. Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=ContactOut,
+)
 async def update_contact(
     payload: ContactUpdateRequest,
     session: DbSession,
@@ -728,7 +787,15 @@ async def update_learner_profile(
 # =============================================================================
 
 
-@products_router.get("", summary="Справочник продуктов", response_model=ProductListResponse)
+@products_router.get(
+    "",
+    summary="Справочник продуктов",
+    description=(
+        "Фильтр `kind` различает ИТ-программу/курс (`course`, по умолчанию у старых записей) "
+        "и ИТ-продукт — ПО вендора (`software`, B3-7). Роль: чтение каталога."
+    ),
+    response_model=ProductListResponse,
+)
 async def list_products(
     session: DbSession,
     page: Pagination,
@@ -738,6 +805,7 @@ async def list_products(
     code: Annotated[str | None, Query()] = None,
     is_active: Annotated[bool | None, Query()] = None,
     product_format: Annotated[str | None, Query(alias="format")] = None,
+    kind: Annotated[ProductKindLiteral | None, Query()] = None,
     q: Annotated[str | None, Query()] = None,
 ) -> ProductListResponse:
     filters = ProductFilters(
@@ -746,6 +814,7 @@ async def list_products(
         code=code,
         is_active=is_active,
         format=product_format,
+        kind=kind,
         q=q,
     )
     service = ProductService(session)
@@ -990,7 +1059,13 @@ async def delete_direction(
 
 
 @loss_reasons_router.get(
-    "", summary="Справочник причин отказа", response_model=LossReasonListResponse
+    "",
+    summary="Справочник причин отказа",
+    description=(
+        "Причины для перехода сделки в lost (код, название, активность). Фильтр "
+        "`is_active`. Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=LossReasonListResponse,
 )
 async def list_loss_reasons(
     session: DbSession,
@@ -1008,6 +1083,7 @@ async def list_loss_reasons(
 @loss_reasons_router.post(
     "",
     summary="Создать причину отказа",
+    description="Код, название, категория и порядок сортировки новой причины отказа. Роль: ADMIN.",
     response_model=LossReasonOut,
     status_code=status.HTTP_201_CREATED,
 )
@@ -1019,7 +1095,13 @@ async def create_loss_reason(
 
 
 @loss_reasons_router.patch(
-    "/{loss_reason_id}", summary="Обновить причину отказа", response_model=LossReasonOut
+    "/{loss_reason_id}",
+    summary="Обновить причину отказа",
+    description=(
+        "Правка названия, категории, активности или порядка сортировки; обязателен "
+        "`If-Match` с текущей версией — расхождение даёт 409 CRM-1002. Роль: ADMIN."
+    ),
+    response_model=LossReasonOut,
 )
 async def update_loss_reason(
     payload: LossReasonUpdateRequest,
@@ -1056,7 +1138,15 @@ async def delete_loss_reason(
 # =============================================================================
 
 
-@holidays_router.get("", summary="Производственный календарь", response_model=HolidayListResponse)
+@holidays_router.get(
+    "",
+    summary="Производственный календарь",
+    description=(
+        "Выходные и перенесённые рабочие дни (`is_working_day`) — основа расчёта SLA в "
+        "рабочих днях. Фильтр по периоду `date_from`/`date_to`. Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=HolidayListResponse,
+)
 async def list_holidays(
     session: DbSession,
     principal: CatalogRead,
@@ -1080,6 +1170,7 @@ async def list_holidays(
 @holidays_router.post(
     "",
     summary="Добавить дату в календарь",
+    description="Дата, название и признак рабочего дня (перенос выходного). Роль: ADMIN.",
     response_model=HolidayOut,
     status_code=status.HTTP_201_CREATED,
 )
@@ -1091,7 +1182,13 @@ async def create_holiday(
 
 
 @holidays_router.patch(
-    "/{holiday_id}", summary="Изменить дату календаря", response_model=HolidayOut
+    "/{holiday_id}",
+    summary="Изменить дату календаря",
+    description=(
+        "Правка даты, названия или признака рабочего дня; обязателен `If-Match` с текущей "
+        "версией — расхождение даёт 409 CRM-1002. Роль: ADMIN."
+    ),
+    response_model=HolidayOut,
 )
 async def update_holiday(
     payload: HolidayUpdateRequest,
@@ -1129,7 +1226,14 @@ async def delete_holiday(
 
 
 @custom_field_defs_router.get(
-    "", summary="Определения пользовательских полей", response_model=CustomFieldDefListResponse
+    "",
+    summary="Определения пользовательских полей",
+    description=(
+        "Каталог определений `custom_fields` (тип, обязательность, правила проверки "
+        "значения) для сделок, организаций и продуктов. Фильтры: `entity_type`, "
+        "`is_active`. Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=CustomFieldDefListResponse,
 )
 async def list_custom_field_defs(
     session: DbSession,
@@ -1176,7 +1280,14 @@ async def create_custom_field_def(
 
 
 @custom_field_defs_router.patch(
-    "/{field_id}", summary="Обновить пользовательское поле", response_model=CustomFieldDefOut
+    "/{field_id}",
+    summary="Обновить пользовательское поле",
+    description=(
+        "Правка названия, правил проверки или активности определения; не меняет уже "
+        "сохранённые значения `custom_fields`. Обязателен `If-Match` с текущей версией — "
+        "расхождение даёт 409 CRM-1002. Роль: ADMIN."
+    ),
+    response_model=CustomFieldDefOut,
 )
 async def update_custom_field_def(
     payload: CustomFieldDefUpdateRequest,
@@ -1213,26 +1324,48 @@ async def delete_custom_field_def(
 # =============================================================================
 
 
-@regions_router.get("", summary="Справочник регионов", response_model=RegionListResponse)
+@regions_router.get(
+    "",
+    summary="Справочник регионов",
+    description=(
+        "Регионы РФ для поля организации `region_id` (код, название). Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=RegionListResponse,
+)
 async def list_regions(session: DbSession, principal: CatalogRead) -> RegionListResponse:
     rows = (await session.execute(region_list_query())).scalars().all()
     return RegionListResponse(items=[RegionOut.model_validate(r) for r in rows])
 
 
 # =============================================================================
-# Лицензии/договоры вуз↔вендор↔ПО (П3, rtk_requiriments.md разд. 4, Треб.1)
+# Лицензии/договоры вуз↔вендор↔ПО (rtk_requiriments.md разд. 4, Треб.1; B3-6)
 #
-# Только чтение: загружаются через POST /api/imports (entity_type='license'),
-# см. `imports.router`. Достаточно для показа на карточке организации —
-# отдельного экрана управления в этом минимуме нет (см. отчёт по П3).
+# До B3-6 была только читалка (загрузка — POST /api/imports,
+# entity_type='license', см. `imports.router`). CRUD здесь использует тот
+# же составной ключ (B3-1) и разбор значений (B3-3), что и импорт.
 # =============================================================================
+
+
+def _license_out(
+    license_: OrganizationLicense,
+    *,
+    reveal: bool,
+    names: dict[uuid.UUID, tuple[str, str | None]],
+) -> OrganizationLicenseOut:
+    name, short_name = names.get(license_.organization_id, (None, None))
+    return OrganizationLicenseOut.from_model(
+        license_, reveal=reveal, organization_name=name, organization_short_name=short_name
+    )
 
 
 @organization_licenses_router.get(
     "",
     summary="Список лицензий/договоров вуз-вендор-ПО",
     description=(
-        "Фильтр: organization_id. Только организации из скоупа вызывающего (KAM/HEAD — свои "
+        "Фильтры: organization_id, vendor_id, product_id, transfer_status (можно несколько раз), "
+        "is_signed, year (лицензия действует в этом году), signed_year, q (поиск по вузу, "
+        "вендору, ПО, номеру договора). `with_total=true` добавляет точное число строк "
+        "(отдельный COUNT-запрос). Только организации из скоупа вызывающего (KAM/HEAD — свои "
         "и по своим сделкам, ADMIN — все). Роль: чтение каталога."
     ),
     response_model=OrganizationLicenseListResponse,
@@ -1242,12 +1375,29 @@ async def list_organization_licenses(
     page: Pagination,
     principal: CatalogRead,
     organization_id: Annotated[uuid.UUID | None, Query()] = None,
+    vendor_id: Annotated[uuid.UUID | None, Query()] = None,
+    product_id: Annotated[uuid.UUID | None, Query()] = None,
+    transfer_status: Annotated[list[str] | None, Query()] = None,
+    is_signed: Annotated[bool | None, Query()] = None,
+    year: Annotated[int | None, Query()] = None,
+    signed_year: Annotated[int | None, Query()] = None,
+    q: Annotated[str | None, Query()] = None,
+    with_total: Annotated[bool, Query()] = False,
 ) -> OrganizationLicenseListResponse:
-    stmt = (
-        await OrganizationLicenseService(session).list_query(
-            principal, organization_id=organization_id
-        )
-    ).order_by(OrganizationLicense.created_at.desc(), OrganizationLicense.id.desc())
+    filters = LicenseFilters(
+        organization_id=organization_id,
+        vendor_id=vendor_id,
+        product_id=product_id,
+        transfer_statuses=tuple(transfer_status or ()),
+        is_signed=is_signed,
+        year=year,
+        signed_year=signed_year,
+        q=q,
+    )
+    service = OrganizationLicenseService(session)
+    stmt = (await service.list_query(principal, filters)).order_by(
+        OrganizationLicense.created_at.desc(), OrganizationLicense.id.desc()
+    )
     cursor = page.decoded_cursor
     if cursor:
         stmt = stmt.where(
@@ -1255,23 +1405,119 @@ async def list_organization_licenses(
         )
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
     reveal = has_permission(principal.role, Permission.CONTACT_REVEAL)
+    names = await service.organization_names(rows)
     built = Page.build(
         rows,
         limit=page.limit,
-        serializer=lambda row: OrganizationLicenseOut.from_model(row, reveal=reveal),
+        serializer=lambda row: _license_out(row, reveal=reveal, names=names),
     )
-    return OrganizationLicenseListResponse(items=built.items, next_cursor=built.next_cursor)
+    total = await service.count(principal, filters) if with_total else None
+    return OrganizationLicenseListResponse(
+        items=built.items, next_cursor=built.next_cursor, total=total
+    )
 
 
 @organization_licenses_router.get(
     "/{license_id}",
     summary="Карточка лицензии/договора",
+    description=(
+        "ФИО менеджера и ответственные от вуза маскированы без права contact:reveal. "
+        "Организация вне скоупа или запись не существует — 404 CRM-9004. "
+        "Роль: KAM, HEAD, ADMIN."
+    ),
     response_model=OrganizationLicenseOut,
 )
 async def get_organization_license(
     session: DbSession, principal: CatalogRead, license_id: Annotated[uuid.UUID, Path()]
 ) -> OrganizationLicenseOut:
-    license_ = await OrganizationLicenseService(session).get_or_404(license_id, principal)
-    return OrganizationLicenseOut.from_model(
-        license_, reveal=has_permission(principal.role, Permission.CONTACT_REVEAL)
+    service = OrganizationLicenseService(session)
+    license_ = await service.get_or_404(license_id, principal)
+    names = await service.organization_names([license_])
+    return _license_out(
+        license_, reveal=has_permission(principal.role, Permission.CONTACT_REVEAL), names=names
     )
+
+
+@organization_licenses_router.post(
+    "",
+    summary="Создать лицензию/договор",
+    description=(
+        "Вендор и ПО — либо ссылкой (vendor_id/product_id из каталога), либо текстом "
+        "(vendor/product_name: сервис пытается найти однозначное совпадение, не находит — "
+        "сохраняет как текст без ссылки). Дубль составного ключа (вуз, вендор, ПО, номер "
+        "договора) — 409 CRM-1301 с license_id существующей записи. transfer_status принимает "
+        "английские коды и русские синонимы (BUG-10). Поддерживает Idempotency-Key. "
+        "Роль: license:write (KAM — по своим вузам)."
+    ),
+    response_model=OrganizationLicenseOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_organization_license(
+    payload: LicenseCreateRequest,
+    request: Request,
+    session: DbSession,
+    principal: LicenseWrite,
+    idempotency_key: IdempotencyKeyHeader,
+) -> OrganizationLicenseOut:
+    guard = IdempotencyGuard(session, actor_id=principal.user_id)
+    body = await request.body()
+    if idempotency_key:
+        cached = await guard.lookup(
+            key=idempotency_key, method=request.method, path=request.url.path, body=body
+        )
+        if cached is not None:
+            return OrganizationLicenseOut.model_validate(cached.body)
+        await guard.reserve(
+            key=idempotency_key, method=request.method, path=request.url.path, body=body
+        )
+
+    service = OrganizationLicenseService(session)
+    license_ = await service.create(principal, payload)
+    names = await service.organization_names([license_])
+    result = _license_out(license_, reveal=True, names=names)
+
+    if idempotency_key:
+        await guard.store(
+            key=idempotency_key,
+            status=status.HTTP_201_CREATED,
+            body=result.model_dump(mode="json"),
+        )
+    return result
+
+
+@organization_licenses_router.patch(
+    "/{license_id}",
+    summary="Изменить лицензию/договор",
+    description=(
+        "`organization_id` не редактируется — удалить и создать заново. Смена вендора/ПО/номера "
+        "договора, приводящая к дублю ключа у другой записи, — 409 CRM-1301. Роль: license:write "
+        "(KAM — по своим вузам)."
+    ),
+    response_model=OrganizationLicenseOut,
+)
+async def update_organization_license(
+    payload: LicenseUpdateRequest,
+    session: DbSession,
+    principal: LicenseWrite,
+    if_match: IfMatch,
+    license_id: Annotated[uuid.UUID, Path()],
+) -> OrganizationLicenseOut:
+    service = OrganizationLicenseService(session)
+    license_ = await service.get_or_404(license_id, principal)
+    license_ = await service.update(license_, payload, expected_version=if_match)
+    names = await service.organization_names([license_])
+    return _license_out(license_, reveal=True, names=names)
+
+
+@organization_licenses_router.delete(
+    "/{license_id}",
+    summary="Удалить лицензию/договор",
+    description="Мягкое удаление. Роль: license:delete (HEAD, ADMIN).",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_organization_license(
+    session: DbSession, principal: LicenseDelete, license_id: Annotated[uuid.UUID, Path()]
+) -> None:
+    service = OrganizationLicenseService(session)
+    license_ = await service.get_or_404(license_id, principal)
+    await service.delete(license_)

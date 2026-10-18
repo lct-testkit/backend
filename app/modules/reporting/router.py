@@ -28,13 +28,13 @@ from app.modules.reporting.schemas import (
     ReportJobListResponse,
     ReportJobOut,
     ReportTemplateListResponse,
-    ReportTemplateOut,
 )
 from app.modules.reporting.service import (
     DashboardService,
     DashboardWidgetService,
     ReportJobService,
     ReportTemplateService,
+    report_template_out,
 )
 
 reports_router = APIRouter(prefix="/reports", tags=["reporting"])
@@ -54,14 +54,22 @@ ReportCreate = Annotated[Principal, Depends(require_permission(Permission.REPORT
 
 
 @report_templates_router.get(
-    "", summary="Доступные виды отчётов", response_model=ReportTemplateListResponse
+    "",
+    summary="Доступные виды отчётов",
+    description=(
+        "Каталог шаблонов отчётов, доступных роли вызывающего (`allowed_roles` шаблона пусто — "
+        "доступен всем с правом на отчёты), с описанием параметров, выбираемых колонок, полей "
+        "даты и форматов вывода (`xlsx`/`xls`/`pdf`/`png`/`json`) каждого вида. Роль: KAM, "
+        "HEAD, ADMIN."
+    ),
+    response_model=ReportTemplateListResponse,
 )
 async def list_report_templates(
     session: DbSession, principal: ReportRead
 ) -> ReportTemplateListResponse:
     stmt = ReportTemplateService(session).list_query(principal)
     rows = (await session.execute(stmt)).scalars().all()
-    return ReportTemplateListResponse(items=[ReportTemplateOut.model_validate(r) for r in rows])
+    return ReportTemplateListResponse(items=[report_template_out(r) for r in rows])
 
 
 # =============================================================================
@@ -75,7 +83,11 @@ async def list_report_templates(
     description=(
         "Лёгкий отчёт формируется сразу (`status=completed`, `progress_pct=100`), "
         "тяжёлый встаёт в очередь. Незавершённых отчётов у одного сотрудника не "
-        "больше REPORTS_MAX_CONCURRENT — иначе 429 CRM-1601. Роль: создание отчётов."
+        "больше REPORTS_MAX_CONCURRENT — иначе 429 CRM-1601. Роль: создание отчётов. "
+        '`"format":"json"` даёт файл-конверт `rtk-crm-report/1` '
+        "(`docs/schemas/rtk-crm-report-1.schema.json`, модель "
+        "`reporting.result_schema.ReportResultV1`) — тот же набор данных, "
+        "что и `GET /{report_id}/data`."
     ),
     response_model=ReportJobOut,
     status_code=status.HTTP_201_CREATED,
@@ -109,7 +121,18 @@ async def list_reports(
     return ReportJobListResponse(items=built.items, next_cursor=built.next_cursor)
 
 
-@reports_router.get("/{report_id}", summary="Статус отчёта", response_model=ReportJobOut)
+@reports_router.get(
+    "/{report_id}",
+    summary="Статус отчёта",
+    description=(
+        "Статус задачи (`queued`/`processing`/`completed`/`failed`), прогресс, параметры "
+        "запуска (`params`) и `result_meta` готового результата (строки, усечение, момент "
+        "снимка данных); `file_id` — только внутренняя ссылка на файл, скачивание — через "
+        "`GET /api/reports/{report_id}/download`. Доступен только тому, кто запросил отчёт, "
+        "либо ADMIN — иначе 403 CRM-1102; не найден — 404 CRM-9004. Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=ReportJobOut,
+)
 async def get_report(
     session: DbSession, principal: ReportRead, report_id: Annotated[uuid.UUID, Path()]
 ) -> ReportJobOut:
@@ -145,6 +168,8 @@ async def get_report_data(
         note=dataset.note,
         generated_at=dataset.generated_at,
         row_count=len(dataset.rows),
+        total_rows=dataset.total_rows,
+        truncated=dataset.truncated,
     )
 
 
@@ -173,7 +198,14 @@ async def download_report(
 
 
 @dashboards_router.post(
-    "", summary="Создать дашборд", response_model=DashboardOut, status_code=status.HTTP_201_CREATED
+    "",
+    summary="Создать дашборд",
+    description=(
+        "Название, признак общего доступа (`is_shared`) и раскладка виджетов (`layout`); "
+        "владелец — вызывающий. Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=DashboardOut,
+    status_code=status.HTTP_201_CREATED,
 )
 async def create_dashboard(
     payload: DashboardCreateRequest, session: DbSession, principal: ReportCreate
@@ -182,7 +214,15 @@ async def create_dashboard(
     return DashboardOut.model_validate(dashboard)
 
 
-@dashboards_router.get("", summary="Мои дашборды", response_model=DashboardListResponse)
+@dashboards_router.get(
+    "",
+    summary="Мои дашборды",
+    description=(
+        "Дашборды вызывающего и дашборды с `is_shared=true`; ADMIN видит все. Роль: KAM, "
+        "HEAD, ADMIN."
+    ),
+    response_model=DashboardListResponse,
+)
 async def list_dashboards(
     session: DbSession, page: Pagination, principal: ReportRead
 ) -> DashboardListResponse:
@@ -196,7 +236,15 @@ async def list_dashboards(
     return DashboardListResponse(items=built.items, next_cursor=built.next_cursor)
 
 
-@dashboards_router.get("/{dashboard_id}", summary="Дашборд", response_model=DashboardOut)
+@dashboards_router.get(
+    "/{dashboard_id}",
+    summary="Дашборд",
+    description=(
+        "Доступен владельцу, любому при `is_shared=true`, либо ADMIN — иначе 403 CRM-1102; "
+        "не найден — 404 CRM-9004. Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=DashboardOut,
+)
 async def get_dashboard(
     session: DbSession, principal: ReportRead, dashboard_id: Annotated[uuid.UUID, Path()]
 ) -> DashboardOut:
@@ -206,7 +254,16 @@ async def get_dashboard(
     return DashboardOut.model_validate(dashboard)
 
 
-@dashboards_router.patch("/{dashboard_id}", summary="Обновить дашборд", response_model=DashboardOut)
+@dashboards_router.patch(
+    "/{dashboard_id}",
+    summary="Обновить дашборд",
+    description=(
+        "Правка названия, общего доступа или раскладки; изменять может только владелец или "
+        "ADMIN — иначе 403 CRM-1102. Обязателен `If-Match` с текущей версией — расхождение "
+        "даёт 409 CRM-1002. Роль: KAM, HEAD, ADMIN."
+    ),
+    response_model=DashboardOut,
+)
 async def update_dashboard(
     payload: DashboardUpdateRequest,
     session: DbSession,
@@ -222,7 +279,13 @@ async def update_dashboard(
 
 
 @dashboards_router.delete(
-    "/{dashboard_id}", summary="Удалить дашборд", status_code=status.HTTP_204_NO_CONTENT
+    "/{dashboard_id}",
+    summary="Удалить дашборд",
+    description=(
+        "Удаляет дашборд и его виджеты; доступно только владельцу или ADMIN — иначе 403 "
+        "CRM-1102. Роль: KAM, HEAD, ADMIN."
+    ),
+    status_code=status.HTTP_204_NO_CONTENT,
 )
 async def delete_dashboard(
     session: DbSession, principal: ReportCreate, dashboard_id: Annotated[uuid.UUID, Path()]
@@ -239,6 +302,11 @@ async def delete_dashboard(
 @dashboards_router.post(
     "/{dashboard_id}/widgets",
     summary="Добавить виджет",
+    description=(
+        "Тип виджета (`widget_type`), его конфигурация (`config`) и позиция на раскладке "
+        "(`position`); изменять дашборд может только владелец или ADMIN — иначе 403 CRM-1102. "
+        "Роль: KAM, HEAD, ADMIN."
+    ),
     response_model=DashboardWidgetOut,
     status_code=status.HTTP_201_CREATED,
 )
@@ -258,6 +326,9 @@ async def add_widget(
 @dashboards_router.get(
     "/{dashboard_id}/widgets",
     summary="Виджеты дашборда",
+    description=(
+        "Права на чтение — как у `GET /api/dashboards/{dashboard_id}`. Роль: KAM, HEAD, ADMIN."
+    ),
     response_model=DashboardWidgetListResponse,
 )
 async def list_widgets(
@@ -279,6 +350,11 @@ def _ensure_widget_belongs(widget: DashboardWidget, dashboard: Dashboard) -> Non
 @dashboards_router.patch(
     "/{dashboard_id}/widgets/{widget_id}",
     summary="Обновить виджет",
+    description=(
+        "Правка типа, конфигурации или позиции виджета; виджет с другого дашборда — 404 "
+        "CRM-9004. Изменять дашборд может только владелец или ADMIN — иначе 403 CRM-1102. "
+        "Роль: KAM, HEAD, ADMIN."
+    ),
     response_model=DashboardWidgetOut,
 )
 async def update_widget(
@@ -301,6 +377,10 @@ async def update_widget(
 @dashboards_router.delete(
     "/{dashboard_id}/widgets/{widget_id}",
     summary="Удалить виджет",
+    description=(
+        "Виджет с другого дашборда — 404 CRM-9004. Изменять дашборд может только владелец "
+        "или ADMIN — иначе 403 CRM-1102. Роль: KAM, HEAD, ADMIN."
+    ),
     status_code=status.HTTP_204_NO_CONTENT,
 )
 async def remove_widget(

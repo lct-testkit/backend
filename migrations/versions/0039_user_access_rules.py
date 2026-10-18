@@ -12,8 +12,8 @@ INSERT, UPDATE, DELETE ON TABLES TO crm_app` из `0002_identity_sprint`
 автоматически — права объекта, созданного ролью-владельцем миграций, не
 нужно выставлять заново.
 
-Revision ID: 0029_user_access_rules
-Revises: 0028_b5_mapping_routing
+Revision ID: 0039_user_access_rules
+Revises: 0038_b5_mapping_routing
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0029_user_access_rules"
-down_revision: str | None = "0028_b5_mapping_routing"
+revision: str = "0039_user_access_rules"
+down_revision: str | None = "0038_b5_mapping_routing"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

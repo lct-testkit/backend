@@ -122,6 +122,10 @@ async def start_registry_import(
 @registry_admin_router.get(
     "/versions",
     summary="Список версий реестра",
+    description=(
+        "Загруженные выгрузки ЕГРЮЛ: источник, статус разбора, число обработанных "
+        "записей, от новых к старым. Роль: ADMIN."
+    ),
     response_model=RegistryVersionListResponse,
 )
 async def list_registry_versions(
@@ -137,6 +141,24 @@ async def list_registry_versions(
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
     built: Page = Page.build(rows, limit=page.limit, serializer=RegistryVersionOut.model_validate)
     return RegistryVersionListResponse(items=built.items, next_cursor=built.next_cursor)
+
+
+@registry_admin_router.get(
+    "/versions/{version_id}",
+    summary="Карточка версии реестра",
+    description=(
+        "Прогресс разбора конкретной выгрузки без постраничного поиска в списке: статус "
+        "(`pending`/`running`/`completed`/`failed`) и `entries_count` — счётчик растёт по "
+        "ходу фоновой задачи, пока `status=running`. Не существует — 404 CRM-9004. "
+        "Роль: ADMIN."
+    ),
+    response_model=RegistryVersionOut,
+)
+async def get_registry_version(
+    session: DbSession, _: RegistryImportPerm, version_id: Annotated[uuid.UUID, Path()]
+) -> RegistryVersionOut:
+    version = await RegistryImportService(session).get_or_404(version_id)
+    return RegistryVersionOut.model_validate(version)
 
 
 @registry_admin_router.delete(

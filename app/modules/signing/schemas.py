@@ -259,6 +259,9 @@ class ChallengeResponse(BaseModel):
 
 
 class SignRequest(BaseModel):
+    # B9-2: пример — код из `tests/test_signing_api.py` (сценарии подписания OTP).
+    model_config = ConfigDict(json_schema_extra={"example": {"otp": "123456"}})
+
     otp: Annotated[str, StringConstraints(strip_whitespace=True, min_length=4, max_length=8)]
 
 

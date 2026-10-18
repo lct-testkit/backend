@@ -266,3 +266,47 @@ class TestDeleteRegistryVersion:
 
         delete = client.delete(f"/api/admin/registry/versions/{failed_id}")
         assert delete.status_code == 204, delete.text
+
+
+class TestGetRegistryVersion:
+    """B9-8 (OPEN-ISSUES B-22): `GET /api/admin/registry/versions/{id}` не было вовсе — прогресс
+    конкретной выгрузки видно было только постраничным поиском в списке. Настоящая Postgres
+    обязательна — см. докстринг модуля."""
+
+    pytestmark = pytest.mark.skipif(
+        not TEST_DATABASE_URL, reason="нужен TEST_DATABASE_URL с применёнными миграциями"
+    )
+
+    async def _seed_version(self, status: str, entries_count: int) -> uuid.UUID:
+        from app.core.db import session_scope
+        from app.modules.registry.models import RegistryVersion
+
+        async with session_scope() as session:
+            version = RegistryVersion(
+                source="fns_egrul", file_id=uuid.uuid4(), status=status, entries_count=entries_count
+            )
+            session.add(version)
+            await session.flush()
+            return version.id
+
+    def _admin(self, client) -> None:
+        admin = run(client, _make_user, "ADMIN")
+        csrf = authenticate(client, admin)
+        client.headers["X-CSRF-Token"] = csrf
+
+    def test_returns_status_and_progress_counter(self, client) -> None:
+        self._admin(client)
+        version_id = run(client, self._seed_version, "running", 12_345)
+
+        response = client.get(f"/api/admin/registry/versions/{version_id}")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["id"] == str(version_id)
+        assert body["status"] == "running"
+        assert body["entries_count"] == 12_345
+
+    def test_unknown_version_is_404(self, client) -> None:
+        self._admin(client)
+        response = client.get(f"/api/admin/registry/versions/{uuid.uuid4()}")
+        assert response.status_code == 404, response.text
+        assert response.json()["code"] == "CRM-9004"

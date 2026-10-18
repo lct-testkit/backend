@@ -246,9 +246,7 @@ class CmsPullService:
             except Exception:  # noqa: BLE001 — одна битая строка не должна ронять прогон
                 logger.exception("cms_lead_pull_row_failed", key=key)
                 return "failed", True
-        is_duplicate = (
-            ingested.replayed or ingested.message.status == InboundStatus.DUPLICATE.value
-        )
+        is_duplicate = ingested.replayed or ingested.message.status == InboundStatus.DUPLICATE.value
         return ("duplicate" if is_duplicate else "created"), False
 
     async def _record_run(self, trigger: str, result: CmsPullResult) -> None:

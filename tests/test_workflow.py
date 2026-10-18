@@ -209,19 +209,37 @@ class TestDslActions:
         assert errors and "неизвестные ключи" in errors[0]
 
 
+def _split(issues: list) -> tuple[list[str], list[str]]:
+    """B9-6: `_validate_graph_data` отдаёт структурированные `ValidationIssue`, а не голые
+    строки — большинство тестов этого класса интересует только текст и `severity`, поэтому
+    здесь то же разбиение на `errors`/`warnings`, что раньше делала сама функция."""
+    errors = [issue.message for issue in issues if issue.severity == "error"]
+    warnings = [issue.message for issue in issues if issue.severity == "warning"]
+    return errors, warnings
+
+
 class TestGraphValidation:
     def test_requires_exactly_one_initial(self) -> None:
         a = _status("a", StatusType.INITIAL.value)
         b = _status("b", StatusType.INITIAL.value)
         won = _status("won", StatusType.WON.value)
         transitions = [_transition(a, won), _transition(b, won)]
-        errors, _ = _validate_graph_data([a, b, won], transitions)
+        errors, _ = _split(_validate_graph_data([a, b, won], transitions))
         assert any("initial" in e for e in errors)
+
+    def test_requires_exactly_one_initial_has_stable_code(self) -> None:
+        a = _status("a", StatusType.INITIAL.value)
+        b = _status("b", StatusType.INITIAL.value)
+        won = _status("won", StatusType.WON.value)
+        transitions = [_transition(a, won), _transition(b, won)]
+        issues = _validate_graph_data([a, b, won], transitions)
+        issue = next(i for i in issues if i.code == "INITIAL_COUNT")
+        assert issue.severity == "error"
 
     def test_requires_at_least_one_terminal(self) -> None:
         a = _status("a", StatusType.INITIAL.value)
         b = _status("b", StatusType.INTERMEDIATE.value)
-        errors, _ = _validate_graph_data([a, b], [_transition(a, b)])
+        errors, _ = _split(_validate_graph_data([a, b], [_transition(a, b)]))
         assert any("терминальный" in e for e in errors)
 
     def test_detects_unreachable_status(self) -> None:
@@ -230,8 +248,10 @@ class TestGraphValidation:
         orphan = _status("orphan", StatusType.INTERMEDIATE.value)
         won = _status("won", StatusType.WON.value)
         transitions = [_transition(a, b), _transition(b, won)]
-        errors, _ = _validate_graph_data([a, b, orphan, won], transitions)
-        assert any("Недостижимые" in e and "orphan" in e for e in errors)
+        issues = _validate_graph_data([a, b, orphan, won], transitions)
+        issue = next(i for i in issues if i.code == "UNREACHABLE_STATUS")
+        assert issue.severity == "error"
+        assert "orphan" in issue.refs
 
     def test_detects_trap_status(self) -> None:
         # `b` достижим из initial, но из него нет пути ни в один терминал.
@@ -239,8 +259,9 @@ class TestGraphValidation:
         b = _status("b", StatusType.INTERMEDIATE.value)
         won = _status("won", StatusType.WON.value)
         transitions = [_transition(a, b)]
-        errors, _ = _validate_graph_data([a, b, won], transitions)
-        assert any("ловушки" in e and "b" in e for e in errors)
+        issues = _validate_graph_data([a, b, won], transitions)
+        issue = next(i for i in issues if i.code == "TRAP_STATUS")
+        assert "b" in issue.refs
 
     def test_archived_status_and_its_transitions_are_excluded(self) -> None:
         # Архивный статус не обязан быть достижимым и не создаёт ловушку —
@@ -249,7 +270,7 @@ class TestGraphValidation:
         won = _status("won", StatusType.WON.value)
         archived = _status("old", StatusType.INTERMEDIATE.value, archived=True)
         transitions = [_transition(a, won), _transition(a, archived)]
-        errors, _ = _validate_graph_data([a, won, archived], transitions)
+        errors, _ = _split(_validate_graph_data([a, won, archived], transitions))
         assert errors == []
 
     def test_request_signature_on_rejected_must_reference_existing_status(self) -> None:
@@ -268,13 +289,15 @@ class TestGraphValidation:
                 }
             ],
         )
-        errors, _ = _validate_graph_data([a, b, won], [bad_transition, _transition(b, won)])
-        assert any("on_rejected" in e for e in errors)
+        issues = _validate_graph_data([a, b, won], [bad_transition, _transition(b, won)])
+        issue = next(i for i in issues if i.code == "SIGNATURE_REJECT_TARGET_UNKNOWN")
+        assert "no_such_status" in issue.refs
+        assert issue.path == "transitions[t].actions"
 
     def test_lost_transition_without_reason_condition_warns_not_errors(self) -> None:
         a = _status("a", StatusType.INITIAL.value)
         lost = _status("lost", StatusType.LOST.value)
-        errors, warnings = _validate_graph_data([a, lost], [_transition(a, lost)])
+        errors, warnings = _split(_validate_graph_data([a, lost], [_transition(a, lost)]))
         assert errors == []
         assert any("lost" in w for w in warnings)
 
@@ -287,15 +310,17 @@ class TestGraphValidation:
             requires_comment=True,
             conditions={"field": "loss_reason_id", "op": "not_null"},
         )
-        _, warnings = _validate_graph_data([a, lost], [t])
+        _, warnings = _split(_validate_graph_data([a, lost], [t]))
         assert warnings == []
 
     def test_condition_errors_include_transition_name_for_debugging(self) -> None:
         a = _status("a", StatusType.INITIAL.value)
         won = _status("won", StatusType.WON.value)
         bad = _transition(a, won, name="bad", conditions={"field": "nope", "op": "eq", "value": 1})
-        errors, _ = _validate_graph_data([a, won], [bad])
-        assert any("bad" in e for e in errors)
+        issues = _validate_graph_data([a, won], [bad])
+        issue = next(i for i in issues if i.code == "CONDITION_INVALID")
+        assert issue.path == "transitions[bad].conditions"
+        assert issue.severity == "error"
 
 
 class TestSeedGraphs:
@@ -350,7 +375,7 @@ class TestSeedGraphs:
 
     def test_b2b_seed_passes_validation_cleanly(self) -> None:
         statuses, transitions = self._build(_b2b_spec())
-        errors, warnings = _validate_graph_data(statuses, transitions)
+        errors, warnings = _split(_validate_graph_data(statuses, transitions))
         assert errors == []
         assert warnings == []
 
@@ -366,7 +391,7 @@ class TestSeedGraphs:
 
     def test_b2c_seed_passes_validation_cleanly(self) -> None:
         statuses, transitions = self._build(_b2c_spec())
-        errors, warnings = _validate_graph_data(statuses, transitions)
+        errors, warnings = _split(_validate_graph_data(statuses, transitions))
         assert errors == []
         assert warnings == []
 
@@ -599,6 +624,68 @@ class TestDeleteDraftWorkflow:
         assert delete.json()["code"] == "CRM-1207"
         # Не удалилась — карточка всё ещё читается.
         assert client.get(f"/api/workflows/{workflow_id}").status_code == 200
+
+
+class TestArchiveWorkflow:
+    """B9-7 (OPEN-ISSUES B-4): `POST /api/workflows/{id}/archive` — раньше `WorkflowState.
+    ARCHIVED` существовал (и `_ensure_not_archived` блокировал правки архивной воронки), но
+    ничто его не присваивало. Настоящая Postgres обязательна — см. докстринг модуля."""
+
+    pytestmark = pytest.mark.skipif(
+        not TEST_DATABASE_URL, reason="нужен TEST_DATABASE_URL с применёнными миграциями"
+    )
+
+    def _admin(self, client) -> None:
+        admin = run(client, _make_user, "ADMIN")
+        client.headers["X-CSRF-Token"] = authenticate(client, admin)
+
+    def _archive(self, client, workflow: dict, *, version: int | None = None):
+        return client.post(
+            f"/api/workflows/{workflow['id']}/archive",
+            headers={"If-Match": str(version if version is not None else workflow["version"])},
+        )
+
+    def test_archives_a_draft_without_deals(self, client) -> None:
+        self._admin(client)
+        workflow = create_draft_workflow(client)
+
+        response = self._archive(client, workflow)
+        assert response.status_code == 200, response.text
+        assert response.json()["state"] == "archived"
+        assert get_graph(client, workflow["id"])["workflow"]["state"] == "archived"
+
+    def test_archived_workflow_rejects_further_graph_changes(self, client) -> None:
+        self._admin(client)
+        workflow = create_draft_workflow(client)
+        archived = self._archive(client, workflow).json()
+
+        saved = put_graph(client, archived, graph_body())
+        assert saved.status_code == 422, saved.text
+
+    def test_cannot_archive_twice(self, client) -> None:
+        self._admin(client)
+        workflow = create_draft_workflow(client)
+        archived = self._archive(client, workflow).json()
+
+        again = self._archive(client, archived, version=archived["version"])
+        assert again.status_code == 422, again.text
+
+    def test_cannot_archive_a_workflow_with_deals(self, client) -> None:
+        self._admin(client)
+        graph = create_published_workflow(client)
+        create_deal(client, graph["workflow"]["id"])
+
+        response = self._archive(client, graph["workflow"])
+        assert response.status_code == 409, response.text
+        assert response.json()["code"] == "CRM-1303"
+
+    def test_cannot_archive_the_default_workflow(self, client) -> None:
+        self._admin(client)
+        workflow = create_draft_workflow(client, deal_type="b2c", is_default=True)
+
+        response = self._archive(client, workflow)
+        assert response.status_code == 409, response.text
+        assert response.json()["code"] == "CRM-1303"
 
 
 class TestSaveGraphWithDeals:
@@ -1206,3 +1293,59 @@ class TestImpactWithTarget:
             client, graph, statuses, target_status_id=by_code(other)["won"]["id"]
         )
         assert foreign.status_code == 404, foreign.text
+
+
+class TestValidateEndpointStructuredIssues:
+    """B9-6 (BUG-25): `POST /{id}/validate` отдаёт `issues[]`, и серия пробных вызовов (так
+    делает редактор воронок на каждое изменение графа) не растит журнал аудита."""
+
+    pytestmark = pytest.mark.skipif(
+        not TEST_DATABASE_URL, reason="нужен TEST_DATABASE_URL с применёнными миграциями"
+    )
+
+    def test_issues_have_code_severity_and_path(self, client) -> None:
+        login(client)
+        draft = create_draft_workflow(client)
+        # Статусы без единого перехода между ними — "work"/"won" недостижимы из "new".
+        saved = put_graph(client, draft, graph_body(transitions=[]))
+        assert saved.status_code == 200, saved.text
+
+        response = client.post(f"/api/workflows/{draft['id']}/validate")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["issues"], "ожидается хотя бы один issue для графа без переходов"
+        issue = body["issues"][0]
+        assert {"code", "severity", "message", "path", "refs"} <= set(issue)
+        assert issue["severity"] in ("error", "warning")
+        # Старые поля остаются зеркалом issues до перехода редактора (риск задачи B9-6).
+        assert body["errors"] == [i["message"] for i in body["issues"] if i["severity"] == "error"]
+
+    def test_repeated_validation_calls_do_not_grow_the_audit_log(self, client) -> None:
+        from sqlalchemy import func, select
+
+        from app.core.db import session_scope
+        from app.modules.audit.models import AuditLog
+
+        login(client)
+        workflow = create_draft_workflow(client)
+
+        async def _count_validated() -> int:
+            async with session_scope() as session:
+                return (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(AuditLog)
+                        .where(
+                            AuditLog.entity_type == "workflow",
+                            AuditLog.entity_id == uuid.UUID(workflow["id"]),
+                            AuditLog.action == "WORKFLOW_VALIDATED",
+                        )
+                    )
+                ) or 0
+
+        before = run(client, _count_validated)
+        for _ in range(3):
+            response = client.post(f"/api/workflows/{workflow['id']}/validate")
+            assert response.status_code == 200, response.text
+        after = run(client, _count_validated)
+        assert after == before == 0

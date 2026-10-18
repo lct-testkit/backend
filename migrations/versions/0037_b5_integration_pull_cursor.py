@@ -9,8 +9,8 @@ cms/leads`); регулярного опроса не было вовсе. Тр�
 журнал: `webhook` (как раньше, значение по умолчанию для старых строк),
 `pull` (эта задача) или `manual` (B5-5, кнопка «Забрать сейчас»).
 
-Revision ID: 0027_b5_integration_pull_cursor
-Revises: 0026_b8_report_jobs_started_at
+Revision ID: 0037_b5_integration_pull_cursor
+Revises: 0036_b8_report_jobs_started_at
 """
 
 from __future__ import annotations
@@ -21,8 +21,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0027_b5_integration_pull_cursor"
-down_revision: str | None = "0026_b8_report_jobs_started_at"
+revision: str = "0037_b5_integration_pull_cursor"
+down_revision: str | None = "0036_b8_report_jobs_started_at"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

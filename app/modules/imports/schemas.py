@@ -16,6 +16,19 @@ SourceFormatLiteral = Literal["xlsx", "xls", "csv", "json"]
 
 
 class ImportJobCreateRequest(BaseModel):
+    # B9-2: пример — реальное тело из `tests/test_imports.py::TestLicenseImportEndToEnd`
+    # (импорт реестра лицензий вуз-вендор-ПО, B3).
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "file_id": "018f0a3e-4444-7c3e-8c3e-3e7c3e7c3e7c",
+                "entity_type": "license",
+                "mode": "upsert",
+                "source_format": "xlsx",
+            }
+        }
+    )
+
     file_id: uuid.UUID
     entity_type: ImportEntityLiteral
     mode: ImportModeLiteral = "upsert"
@@ -42,6 +55,11 @@ class ImportJobOut(BaseModel):
     source_format: str
     started_at: dt.datetime | None = None
     finished_at: dt.datetime | None = None
+    # B9-8 (OPEN-ISSUES B-14): миграция 0025_import_job_last_error и `imports.tasks` (запись
+    # причины ухода в `failed`, фоновая партия вне построчного цикла) существуют с прошлого
+    # спринта, но поле не отдавалось в ответе — пользователь видел только статус `failed` без
+    # причины, пока не открывал БД напрямую.
+    last_error: str | None = None
     rollback_available: bool
     rolled_back_at: dt.datetime | None = None
     created_at: dt.datetime

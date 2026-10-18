@@ -52,6 +52,12 @@ class Permission(StrEnum):
     # --- Каталоги ---
     CATALOG_READ = "catalog:read"
     CATALOG_WRITE = "catalog:write"
+    # B3-6: лицензии вуз-вендор-ПО были read-only через catalog:read; запись
+    # и удаление — отдельные права (KAM пишет лицензии своих вузов, но не
+    # должен уметь их удалять без HEAD/ADMIN — тот же приём, что
+    # ORG_RESTORE отделён от ORG_WRITE).
+    LICENSE_WRITE = "license:write"
+    LICENSE_DELETE = "license:delete"
 
     # --- Воронки ---
     WORKFLOW_READ = "workflow:read"
@@ -122,6 +128,12 @@ class Permission(StrEnum):
     AUDIT_EXPORT = "audit:export"
     SETTINGS_WRITE = "settings:write"
     ERASURE_MANAGE = "erasure:manage"
+    # B6-2: журнал security_events несёт IP и попытки входа — отдельное право, не `audit:read`.
+    # HEAD его не получает: руководитель увидел бы попытки входа и IP чужих команд.
+    SECURITY_EVENT_READ = "security_event:read"
+    # B4-5: ограничения видимости по вузам/направлениям — только ADMIN (матрица прав);
+    # цель ограничения сама не управляет своими же ограничениями.
+    ACCESS_SCOPE_MANAGE = "access_scope:manage"
 
 
 # KAM — менеджер по вузам: только свои сделки и связанные с ними сущности.
@@ -139,6 +151,7 @@ _KAM: frozenset[Permission] = frozenset(
         Permission.CONTACT_WRITE,
         Permission.CONTACT_REVEAL,
         Permission.CATALOG_READ,
+        Permission.LICENSE_WRITE,
         Permission.WORKFLOW_READ,
         Permission.FILE_UPLOAD,
         Permission.FILE_DOWNLOAD,
@@ -160,6 +173,7 @@ _HEAD: frozenset[Permission] = _KAM | {
     Permission.DEAL_REASSIGN_BULK,
     Permission.ORG_RESTORE,
     Permission.ORG_OWNER_ASSIGN,
+    Permission.LICENSE_DELETE,
     Permission.AUDIT_READ,
     Permission.SIGNATURE_VOID,
     Permission.FILE_DELETE,
@@ -179,6 +193,8 @@ _AUDITOR: frozenset[Permission] = frozenset(
         Permission.AUDIT_EXPORT,
         Permission.EDM_READ,
         Permission.SIGNATURE_READ,
+        Permission.SECURITY_EVENT_READ,
+        Permission.COMMENT_AUDIT_READ,
     }
 )
 

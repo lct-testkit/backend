@@ -31,19 +31,23 @@ _ORGANIZATION_NAME_MAX = 512
 class ProductIndex:
     """Продукты по `company_key` названия и кода. Учитывает только неудалённые записи; код,
     занятый удалённым продуктом, при создании нового всё равно считается занятым (уникальный
-    индекс `uq_products_code` не смотрит на `deleted_at`)."""
+    индекс `uq_products_code` не смотрит на `deleted_at`).
 
-    def __init__(self, session: AsyncSession) -> None:
+    `kind` (B3-7) сужает индекс до курсов или ПО: курс и ПО с одним названием больше не
+    перехватывают друг друга (вендорский импорт ищет среди `software`, оплаты — среди `course`,
+    `batch.products`/`batch.software` в `imports.handlers`)."""
+
+    def __init__(self, session: AsyncSession, kind: str | None = None) -> None:
         self._session = session
+        self._kind = kind
         self._by_key: dict[str, Product] | None = None
 
     async def _load(self) -> dict[str, Product]:
         if self._by_key is None:
-            rows = (
-                (await self._session.execute(select(Product).where(Product.deleted_at.is_(None))))
-                .scalars()
-                .all()
-            )
+            stmt = select(Product).where(Product.deleted_at.is_(None))
+            if self._kind is not None:
+                stmt = stmt.where(Product.kind == self._kind)
+            rows = (await self._session.execute(stmt)).scalars().all()
             index: dict[str, Product] = {}
             for product in rows:
                 # Название сильнее кода: продукт с кодом, совпавшим с чужим названием, не
@@ -81,10 +85,12 @@ class ProductIndex:
         import_job_id: uuid.UUID | None = None,
         source: str = "import",
         base_price: Decimal | None = None,
+        kind: str = "course",
     ) -> Product:
         """Заводит продукт, которого нет в каталоге: курс из оплаты или продукт из вендорского
-        файла. Помечается `custom_fields.auto_created`, чтобы методист мог разобрать заведённое
-        автоматически (опечатка в названии курса тоже породила бы продукт)."""
+        файла (B3-7: `kind="software"` для последнего). Помечается `custom_fields.auto_created`,
+        чтобы методист мог разобрать заведённое автоматически (опечатка в названии курса тоже
+        породила бы продукт)."""
         title = clean_text(name)
         if title is None:
             raise ValidationError(
@@ -104,6 +110,7 @@ class ProductIndex:
         product = Product(
             code=code,
             name=title,
+            kind=kind,
             vendor_id=vendor_id,
             import_job_id=import_job_id,
             base_price=base_price,

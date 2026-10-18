@@ -27,7 +27,7 @@ from typing import Any
 
 import openpyxl
 import structlog
-from sqlalchemy import Select, delete, func, select, update
+from sqlalchemy import Select, and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -45,6 +45,9 @@ from app.core.storage import (
 )
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
+from app.modules.catalog.license_keys import LicenseKey
+from app.modules.catalog.license_matching import LicenseMatcher
+from app.modules.catalog.license_values import parse_signed, parse_term
 from app.modules.catalog.models import Direction, Organization, OrganizationLicense, Product, Region
 from app.modules.files.models import Attachment, File, FileStatus
 from app.modules.identity.models import User
@@ -251,6 +254,27 @@ class ImportService:
             .limit(1)
         )
 
+    async def get_preset_or_404(self, preset_id: uuid.UUID) -> ImportPreset:
+        preset = await self._session.get(ImportPreset, preset_id)
+        if preset is None:
+            raise NotFoundError("Пресет маппинга", preset_id)
+        return preset
+
+    async def delete_preset(self, preset: ImportPreset) -> None:
+        """B9-8 (OPEN-ISSUES B-15): раньше пресет можно было только создать (`save_mapping`,
+        `save_as_preset`), убрать — только прямым SQL. Жёсткое удаление, не мягкое: пресет —
+        сохранённый маппинг колонок, а не бизнес-сущность с историей переходов (как шаблон
+        уведомления, `notification.service.NotificationTemplateService.delete`)."""
+        preset_id = preset.id
+        await self._session.delete(preset)
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.IMPORT_PRESET_DELETED,
+            entity_type="import_preset",
+            entity_id=preset_id,
+            changes={"name": {"old": preset.name, "new": None}},
+        )
+
     # -- фаза 3: маппинг --------------------------------------------------
 
     async def save_mapping(
@@ -372,8 +396,7 @@ class ImportService:
         # organization/product.
         key_column = getattr(model, natural_key)
         existing_map: dict[str, uuid.UUID] = {}
-        license_orgs: dict[str, uuid.UUID] = {}
-        if raw_keys:
+        if raw_keys and job.entity_type != ImportEntityType.LICENSE.value:
             # Мягко удалённые записи не считаются существующими: иначе строка объявляла «уже есть»
             # запись, которой пользователь не видит, а применение находило бы её же и «обновляло».
             key_stmt = select(key_column, model.id).where(
@@ -381,20 +404,16 @@ class ImportService:
             )
             rows = (await self._session.execute(key_stmt)).all()
             existing_map = dict(rows)
-            if job.entity_type == ImportEntityType.LICENSE.value:
-                license_orgs = dict(
-                    (
-                        await self._session.execute(
-                            select(
-                                OrganizationLicense.contract_number,
-                                OrganizationLicense.organization_id,
-                            ).where(
-                                OrganizationLicense.contract_number.in_(raw_keys),
-                                OrganizationLicense.deleted_at.is_(None),
-                            )
-                        )
-                    ).all()
-                )
+
+        # B3-1 (BUG-9): у лицензии составной ключ (вуз, вендор, ПО, номер
+        # договора) — проверка «уже существует» строится по нему, а не по
+        # одному `contract_number`, иначе dry-run расходился бы с тем, что
+        # реально делает `_apply_license_row` (тот же составной ключ).
+        license_existing: dict[tuple[uuid.UUID, str, str, str], uuid.UUID] = {}
+        if job.entity_type == ImportEntityType.LICENSE.value:
+            license_existing = await self._resolve_license_existing(
+                column_map, fk_lookup, table.rows
+            )
 
         egrul_map: dict[str, EgrulEntry] = {}
         if job.entity_type == ImportEntityType.ORGANIZATION.value and raw_keys:
@@ -413,41 +432,52 @@ class ImportService:
             delete(ImportRowResult).where(ImportRowResult.import_job_id == job.id)
         )
 
-        seen_keys: set[str] = set()
+        seen_keys: set[object] = set()
         ok = warn = error = 0
         report_rows: list[tuple[list[str], str]] = []
+        is_license = job.entity_type == ImportEntityType.LICENSE.value
 
         for row_number, row in enumerate(table.rows, start=1):
             row_warnings: list[str] = []
             row_data, field_errors = self._extract_row(row, column_map, fk_lookup, row_warnings)
             notes: list[str] = [*field_errors, *row_warnings]
             key_value = row_data.get(natural_key)
+            # B3-1: для лицензии дедуп внутри файла и поиск «уже существует»
+            # идут по составному ключу (см. `license_existing` выше), а не
+            # по значению одного `natural_key` (`contract_number`) — ключ
+            # для dict/set ниже подменяется, само обязательное поле
+            # `contract_number` продолжает проверяться как раньше.
+            dedupe_key: object = key_value
+            license_key_tuple: tuple[uuid.UUID, str, str, str] | None = None
+            if is_license and row_data.get("organization_id"):
+                license_key_tuple = LicenseKey.build(
+                    uuid.UUID(row_data["organization_id"]),
+                    vendor=row_data.get("vendor"),
+                    product_name=row_data.get("product_name"),
+                    contract_number=row_data.get("contract_number"),
+                ).as_tuple()
+                dedupe_key = license_key_tuple
 
             if not key_value:
                 notes.append(f"Не удалось определить ключевое поле «{key_spec.label}»")
                 status = ImportRowStatus.ERROR.value
             else:
                 status = ImportRowStatus.OK.value
-                if key_value in seen_keys:
+                if dedupe_key in seen_keys:
                     notes.append("Дубликат ключа внутри файла")
                     status = ImportRowStatus.WARN.value
-                seen_keys.add(key_value)
+                seen_keys.add(dedupe_key)
 
-                existing_id = existing_map.get(key_value)
+                existing_id = (
+                    license_existing.get(license_key_tuple)
+                    if is_license
+                    else existing_map.get(key_value)
+                )
                 if existing_id is not None and job.mode == ImportMode.INSERT.value:
                     notes.append("Уже существует — будет пропущена (режим «только создание»)")
                     status = ImportRowStatus.WARN.value
                 elif existing_id is None and job.mode == ImportMode.UPDATE.value:
                     notes.append("Запись для обновления не найдена")
-                    status = ImportRowStatus.ERROR.value
-                if (
-                    existing_id is not None
-                    and job.entity_type == ImportEntityType.LICENSE.value
-                    and str(license_orgs.get(key_value)) != row_data.get("organization_id")
-                ):
-                    # Ключ — только номер договора; без этой проверки upsert переносил лицензию
-                    # чужой организации на организацию из файла.
-                    notes.append("Номер договора уже относится к другой организации")
                     status = ImportRowStatus.ERROR.value
 
                 if row_warnings and status == ImportRowStatus.OK.value:
@@ -531,6 +561,62 @@ class ImportService:
             resolved[kind] = dict(rows_found)
         return resolved
 
+    async def _resolve_license_existing(
+        self,
+        column_map: list[tuple[int, FieldSpec]],
+        fk_lookup: dict[str, dict[str, uuid.UUID]],
+        rows: list[list[str]],
+    ) -> dict[tuple[uuid.UUID, str, str, str], uuid.UUID]:
+        """B3-1 (BUG-9): существующие лицензии по составному ключу (вуз,
+        вендор, ПО, номер договора) для строк файла — тот же ключ, что
+        `_apply_license_row` использует при применении, иначе dry-run и
+        apply расходились бы в том, что считают «уже существует» (ровно
+        это и было причиной бага: один номер договора на несколько ПО
+        молча терял строки)."""
+        idx_by_target = {spec.target: idx for idx, spec in column_map}
+        org_idx = idx_by_target.get("organization_name")
+        vendor_idx = idx_by_target.get("vendor")
+        product_idx = idx_by_target.get("product_name")
+        contract_idx = idx_by_target.get("contract_number")
+        org_by_name = fk_lookup.get("organization_name", {})
+
+        def _cell(row: list[str], idx: int | None) -> str:
+            return row[idx].strip() if idx is not None and idx < len(row) else ""
+
+        keys: set[tuple[uuid.UUID, str, str, str]] = set()
+        for row in rows:
+            org_id = org_by_name.get(_cell(row, org_idx)) if org_idx is not None else None
+            if org_id is None:
+                continue
+            key = LicenseKey.build(
+                org_id,
+                vendor=_cell(row, vendor_idx),
+                product_name=_cell(row, product_idx),
+                contract_number=_cell(row, contract_idx),
+            )
+            keys.add(key.as_tuple())
+        if not keys:
+            return {}
+
+        conditions = [
+            and_(
+                OrganizationLicense.organization_id == org_id,
+                OrganizationLicense.vendor_key == vendor_key,
+                OrganizationLicense.product_key == product_key,
+                OrganizationLicense.contract_key == contract_key,
+            )
+            for org_id, vendor_key, product_key, contract_key in keys
+        ]
+        stmt = select(
+            OrganizationLicense.organization_id,
+            OrganizationLicense.vendor_key,
+            OrganizationLicense.product_key,
+            OrganizationLicense.contract_key,
+            OrganizationLicense.id,
+        ).where(OrganizationLicense.deleted_at.is_(None), or_(*conditions))
+        found = (await self._session.execute(stmt)).all()
+        return {(r[0], r[1], r[2], r[3]): r[4] for r in found}
+
     def _extract_row(
         self,
         row: list[str],
@@ -580,6 +666,25 @@ class ImportService:
                 _known, unknown = parse_contact_methods(raw)
                 if unknown:
                     warnings.append(f"«{spec.label}»: не распознано — {', '.join(unknown)}")
+            if spec.kind in ("license_signed", "license_term") and isinstance(value, dict):
+                # B3-3: эти виды разбирают одну ячейку в несколько колонок
+                # модели сразу (`is_signed`+`license_signed_at`,
+                # `license_term_years`/`license_valid_until`/`is_perpetual`)
+                # — `value` уже словарь из `validate_field`, льём его поля
+                # прямо в `row_data` вместо `spec.target`. Предупреждение
+                # (дата подписания в будущем, год понят как год окончания)
+                # `validate_field` не несёт (её сигнатура — только
+                # значение/ошибка, тот же приём, что уже у
+                # `contact_methods` выше) — получаем его повторным чистым
+                # разбором исходной ячейки.
+                if warnings is not None:
+                    parser = parse_signed if spec.kind == "license_signed" else parse_term
+                    parsed, _err = parser(raw.strip())
+                    if parsed is not None and parsed.warning:
+                        warnings.append(f"«{spec.label}»: {parsed.warning}")
+                for key, part in value.items():
+                    row_data[key] = _json_safe(part)
+                continue
             row_data[spec.target] = _json_safe(value)
         if full_name is not None:
             for key, part in zip(
@@ -786,6 +891,17 @@ class ImportService:
         await self._set_actor(job)
         handler = HANDLERS.get(job.entity_type)
         batch = Batch(self._session, job) if handler is not None else None
+        # B3-2: один `LicenseMatcher` на партию, не на строку — кандидаты (вендоры/ПО) кэшируются
+        # внутри инстанса (докстринг класса), повторный `select()` на каждой из `batch_size`
+        # (по умолчанию 500) строк был бы лишней нагрузкой на БД без выигрыша в точности: каталог
+        # не меняется в процессе применения одной партии. `SAVEPOINT` ниже откатывает только
+        # ЗАПИСИ строки-неудачи, кэш матчера — не часть этой транзакции (только читал, до начала
+        # партии), откат соседней строки его не портит.
+        license_matcher = (
+            LicenseMatcher(self._session)
+            if job.entity_type == ImportEntityType.LICENSE.value
+            else None
+        )
         for row in pending:
             previous_status, previous_errors = row.status, list(row.errors or [])
             try:
@@ -800,8 +916,8 @@ class ImportService:
                         await self._apply_organization_row(job, row)
                     elif job.entity_type == ImportEntityType.PRODUCT.value:
                         await self._apply_product_row(job, row)
-                    else:
-                        await self._apply_license_row(job, row)
+                    elif license_matcher is not None:
+                        await self._apply_license_row(job, row, license_matcher)
             except Exception as exc:  # noqa: BLE001 — любая ошибка строки -> ошибка строки, не задания
                 if batch is not None:
                     batch.invalidate()
@@ -986,6 +1102,7 @@ class ImportService:
                 direction_id=uuid.UUID(data["direction_id"]) if data.get("direction_id") else None,
                 duration_hours=data.get("duration_hours"),
                 format=data.get("format"),
+                kind=data.get("kind") or "course",
                 base_price=Decimal(str(raw_price)) if raw_price is not None else None,
                 currency=data.get("currency") or "RUB",
                 import_job_id=job.id,
@@ -1008,6 +1125,7 @@ class ImportService:
             "direction_id",
             "duration_hours",
             "format",
+            "kind",
             "base_price",
             "currency",
         ):
@@ -1028,24 +1146,91 @@ class ImportService:
         row.entity_id = existing.id
         row.before_snapshot = before or {}
 
-    async def _apply_license_row(self, job: ImportJob, row: ImportRowResult) -> None:
-        """П3 — natural key `contract_number` (см. `catalog.models.
-        OrganizationLicense`, докстринг). Структура — буквальная копия
-        `_apply_product_row`, тот же generic-приём для третьего типа."""
-        data = dict(row.row_data)
-        contract_number = data.get("contract_number")
-        existing = (
-            await self._session.scalar(
-                select(OrganizationLicense).where(
-                    OrganizationLicense.contract_number == contract_number,
-                    OrganizationLicense.deleted_at.is_(None),
+    def _license_term_fields(self, data: dict[str, Any]) -> dict[str, Any]:
+        """B3-3, п.6 задачи: если в строке есть `license_term_years` и
+        `license_signed_at`, а `license_valid_until` не задан явно (год
+        окончания/диапазон/дата уже дали бы его в `data`), досчитать
+        окончание как `signed_at + N лет`. Полноценный `LicenseHandler`
+        (B3-4) считал бы это на этапе проверки; здесь — та же формула
+        прямо при применении, пока лицензии остаются на обычном
+        natural-key пути импорта (composite-key обработчик — отдельная
+        задача, см. отчёт по эпику)."""
+        result: dict[str, Any] = {}
+        if (
+            data.get("license_valid_until") is None
+            and data.get("license_term_years") is not None
+            and data.get("license_signed_at")
+        ):
+            signed_at = dt.date.fromisoformat(data["license_signed_at"])
+            try:
+                result["license_valid_until"] = signed_at.replace(
+                    year=signed_at.year + int(data["license_term_years"])
                 )
+            except ValueError:
+                # 29 февраля + N лет на невисокосный год — сознательно
+                # падаем на последний день февраля, а не роняем применение.
+                result["license_valid_until"] = signed_at.replace(
+                    month=2, day=28, year=signed_at.year + int(data["license_term_years"])
+                )
+        return result
+
+    async def _apply_license_row(
+        self, job: ImportJob, row: ImportRowResult, matcher: LicenseMatcher
+    ) -> None:
+        """B3-1/B3-3/B3-2: ключ строки — составной (вуз, вендор, ПО, номер
+        договора; `catalog.license_keys.LicenseKey`), а не только
+        `contract_number` (BUG-9: один договор на несколько ПО раньше
+        молча терял строки). Вуз (`organization_id`, уже разрешён раньше в конвейере, к этому
+        месту приходит готовым UUID) по-прежнему ищется точным совпадением — поле есть в
+        маппинге наравне с остальными `_FK_TARGETS`, это не относится к B3-4. Вендор/ПО теперь
+        ищутся по каталогу тем же `LicenseMatcher`, что и API лицензий (B3-6,
+        `catalog.service.OrganizationLicenseService._resolve_vendor`/`_resolve_product`) —
+        раньше (B3-4, до этой задачи) `vendor_id`/`product_id` оставались `NULL` для каждой
+        лицензии, заведённой импортом, независимо от того, насколько однозначно текст совпадал
+        с каталогом. Неоднозначное/не найденное совпадение — не ошибка строки: `vendor`/
+        `product_name` (текст) сохраняются всегда, `vendor_id`/`product_id` остаются `NULL`,
+        так же, как API лицензий делает при ручном вводе текстом без выбора из каталога."""
+        data = dict(row.row_data)
+        vendor = data.get("vendor")
+        product_name = data.get("product_name")
+        contract_number = data.get("contract_number")
+        organization_id = uuid.UUID(data["organization_id"])
+        key = LicenseKey.build(
+            organization_id,
+            vendor=vendor,
+            product_name=product_name,
+            contract_number=contract_number,
+        )
+        vendor_match = await matcher.match_vendor(vendor)
+        vendor_id = (
+            vendor_match.entity.id if vendor_match.is_unique and vendor_match.entity else None
+        )
+        product_match = await matcher.match_software(product_name, vendor_id=vendor_id)
+        product_id = (
+            product_match.entity.id if product_match.is_unique and product_match.entity else None
+        )
+        existing = await self._session.scalar(
+            select(OrganizationLicense).where(
+                OrganizationLicense.organization_id == organization_id,
+                OrganizationLicense.vendor_key == key.vendor_key,
+                OrganizationLicense.product_key == key.product_key,
+                OrganizationLicense.contract_key == key.contract_key,
+                OrganizationLicense.deleted_at.is_(None),
             )
-            if contract_number
+        )
+
+        signed_at = (
+            dt.date.fromisoformat(data["license_signed_at"])
+            if data.get("license_signed_at")
             else None
         )
-        if existing is not None and str(existing.organization_id) != data.get("organization_id"):
-            raise AppError(ErrorCode.DUPLICATE, "Номер договора уже относится к другой организации")
+        valid_until_raw = data.get("license_valid_until")
+        term_fields = self._license_term_fields(data)
+        valid_until = (
+            dt.date.fromisoformat(valid_until_raw)
+            if valid_until_raw
+            else term_fields.get("license_valid_until")
+        )
 
         if existing is None:
             if job.mode == ImportMode.UPDATE.value:
@@ -1053,20 +1238,25 @@ class ImportService:
                 row.errors = [*row.errors, "Запись для обновления не найдена"]
                 return
             license_ = OrganizationLicense(
-                organization_id=uuid.UUID(data["organization_id"]),
-                vendor=data.get("vendor"),
-                product_name=data.get("product_name"),
+                organization_id=organization_id,
+                vendor=vendor,
+                vendor_id=vendor_id,
+                product_name=product_name,
+                product_id=product_id,
                 contract_number=contract_number,
-                license_signed_at=(
-                    dt.date.fromisoformat(data["license_signed_at"])
-                    if data.get("license_signed_at")
-                    else None
-                ),
+                vendor_key=key.vendor_key,
+                product_key=key.product_key,
+                contract_key=key.contract_key,
+                license_signed_at=signed_at,
                 license_valid_year=data.get("license_valid_year"),
                 transfer_status=data.get("transfer_status"),
                 manager_full_name=data.get("manager_full_name"),
                 responsible_contacts=data.get("responsible_contacts"),
                 comment=data.get("comment"),
+                is_signed=data.get("is_signed"),
+                license_term_years=data.get("license_term_years"),
+                license_valid_until=valid_until,
+                is_perpetual=bool(data.get("is_perpetual", False)),
                 import_job_id=job.id,
             )
             self._session.add(license_)
@@ -1081,25 +1271,52 @@ class ImportService:
             return
 
         before: dict[str, Any] = {}
-        for field in (
+        # Поля, которые считаются всегда (не только когда они пришли в
+        # `row_data`): составной ключ пересчитывается на каждое применение
+        # строки, иначе переименование вендора/ПО обновило бы текст, но
+        # оставило бы старый `*_key` — `GET.../organization-licenses` (B3-6)
+        # и повторный импорт того же файла перестали бы находить запись.
+        # B3-2: `vendor_id`/`product_id` — туда же: запись каталога могла появиться (или
+        # исчезнуть) между двумя прогонами импорта того же файла, а текст вендора/ПО при этом
+        # мог не измениться вовсе — опираться на наличие ключа в `data` (как обычные поля) было
+        # бы неверно, пересчёт нужен при каждом применении.
+        always_fields = {
             "organization_id",
-            "vendor",
-            "product_name",
             "license_signed_at",
-            "license_valid_year",
-            "transfer_status",
-            "manager_full_name",
-            "responsible_contacts",
-            "comment",
-        ):
-            if field not in data:
+            "license_valid_until",
+            "vendor_key",
+            "product_key",
+            "contract_key",
+            "vendor_id",
+            "product_id",
+        }
+        new_values: dict[str, Any] = {
+            "organization_id": organization_id,
+            "vendor": data.get("vendor"),
+            "vendor_id": vendor_id,
+            "product_name": data.get("product_name"),
+            "product_id": product_id,
+            "license_signed_at": signed_at,
+            "license_valid_year": data.get("license_valid_year"),
+            "transfer_status": data.get("transfer_status"),
+            "manager_full_name": data.get("manager_full_name"),
+            "responsible_contacts": data.get("responsible_contacts"),
+            "comment": data.get("comment"),
+            "vendor_key": key.vendor_key,
+            "product_key": key.product_key,
+            "contract_key": key.contract_key,
+        }
+        if "is_signed" in data:
+            new_values["is_signed"] = data["is_signed"]
+        if "license_term_years" in data:
+            new_values["license_term_years"] = data["license_term_years"]
+        if valid_until is not None or "license_valid_until" in data:
+            new_values["license_valid_until"] = valid_until
+        if "is_perpetual" in data:
+            new_values["is_perpetual"] = bool(data["is_perpetual"])
+        for field, new_value in new_values.items():
+            if field not in data and field not in always_fields:
                 continue
-            if field == "organization_id":
-                new_value: Any = uuid.UUID(data[field])
-            elif field == "license_signed_at":
-                new_value = dt.date.fromisoformat(data[field]) if data[field] else None
-            else:
-                new_value = data[field]
             old_value = getattr(existing, field)
             if _json_safe(old_value) != _json_safe(new_value):
                 before[field] = _json_safe(old_value)
@@ -1235,7 +1452,7 @@ class ImportService:
                     old_value = uuid.UUID(old_value)
                 if field == "base_price" and old_value is not None:
                     old_value = Decimal(str(old_value))
-                if field == "license_signed_at" and old_value is not None:
+                if field in ("license_signed_at", "license_valid_until") and old_value is not None:
                     old_value = dt.date.fromisoformat(old_value)
                 setattr(entity, field, old_value)
             if row.before_snapshot:

@@ -873,6 +873,10 @@ async def list_erasure_requests(
 @router.get(
     "/erasure-requests/{request_id}",
     summary="Карточка запроса на удаление/обезличивание",
+    description=(
+        "Статус, субъект, дедлайн отсрочки (`grace_until`), блокеры и причина отказа, "
+        "если он был. Не существует — 404 CRM-9004. Роль: ADMIN."
+    ),
     response_model=ErasureRequestDetail,
 )
 async def get_erasure_request(

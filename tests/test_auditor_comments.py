@@ -44,9 +44,7 @@ def _add_comment(client, deal: dict[str, Any], *, body: str, is_internal: bool =
 
 
 def _delete_comment(client, comment_id: str) -> None:
-    response = client.request(
-        "DELETE", f"/api/comments/{comment_id}", json={"reason": "тест B4-7"}
-    )
+    response = client.request("DELETE", f"/api/comments/{comment_id}", json={"reason": "тест B4-7"})
     assert response.status_code == 200, response.text
 
 

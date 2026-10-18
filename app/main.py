@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.docs import attach_docs
 from app.api.health import router as health_router
+from app.api.meta import router as meta_router
 from app.core.config import get_settings
 from app.core.db import dispose_engine
 from app.core.logging import configure_logging
@@ -39,8 +40,11 @@ from app.modules.catalog.router import (
     products_router,
     regions_router,
 )
-from app.modules.crm.router import comments_router, deals_router, tasks_router
+from app.modules.crm.router import comments_router, deal_audit_router, deals_router, tasks_router
+from app.modules.files.antivirus import build_scanner
 from app.modules.files.router import attachments_router, files_router
+from app.modules.files.service import register_antivirus_scanner
+from app.modules.identity.router_admin import handover_router
 from app.modules.identity.router_admin import router as admin_users_router
 from app.modules.identity.router_auth import router as auth_router
 from app.modules.identity.router_directory import router as directory_router
@@ -82,6 +86,7 @@ OPENAPI_DESCRIPTION = """
 **Соглашения (раздел 2 спецификации)**
 
 * Все ошибки — RFC 7807 Problem Details с внутренним кодом вида `CRM-XXYY`.
+  Полный справочник кодов — `GET /api/meta/error-codes` (без аутентификации, B9-4).
 * Идентификаторы — UUIDv7, в JSON строками.
 * Даты — ISO 8601 с часовым поясом, внутри хранятся и отдаются в UTC.
 * Деньги — строка `"150000.00"` плюс отдельное поле `currency`.
@@ -89,13 +94,13 @@ OPENAPI_DESCRIPTION = """
   ответ содержит `items` и `next_cursor`.
 * Обновления — оптимистичная блокировка через `If-Match` и поле `version`.
 * `Idempotency-Key` (8–255 символов, действует внутри пользователя, хранится 24 часа)
-  принимают ручки создания сделки, организации, контакта, комментария, задачи и
-  вложения (`POST /api/deals`, `/api/organizations`, `/api/contacts`,
-  `/api/deals/{deal_id}/comments`, `/api/tasks`, `/api/attachments`) и вебхук
-  `POST /api/v1/integrations/cms/leads` (у вебхука обязателен). Повтор с тем же
-  ключом и телом возвращает сохранённый ответ, с другим телом — 409 CRM-1003.
-  Остальные ручки заголовок не читают: переход сделки защищён коротким
-  блокирующим локом, а не ключом.
+  принимают ручки создания сделки, организации, контакта, комментария, задачи,
+  вложения и лицензии (`POST /api/deals`, `/api/organizations`, `/api/contacts`,
+  `/api/deals/{deal_id}/comments`, `/api/tasks`, `/api/attachments`,
+  `/api/organization-licenses`) и вебхук `POST /api/v1/integrations/cms/leads`
+  (у вебхука обязателен). Повтор с тем же ключом и телом возвращает сохранённый
+  ответ, с другим телом — 409 CRM-1003. Остальные ручки заголовок не читают:
+  переход сделки защищён коротким блокирующим локом, а не ключом.
 * `request_id` проходит через логи, аудит и тело ошибки, отдаётся в `X-Request-Id`.
 
 **Аутентификация**
@@ -108,8 +113,92 @@ OPENAPI_DESCRIPTION = """
 
 **Ошибки.** Каждая операция описывает 400/401/403/404/409/422/429/500 как
 `application/problem+json` со схемой `Problem`; 4xx/5xx вне этого списка (413, 503)
-тоже приходят в этом формате.
+тоже приходят в этом формате. Поля (RFC 7807 плюс одно внутреннее):
+`type` (URI вида `https://docs.rtk-crm/errors/CRM-XXYY`), `title` (заголовок кода из
+справочника), `status` (HTTP-код), `detail` (человекочитаемое описание конкретного
+случая), `instance` (путь запроса), `code` (`CRM-XXYY`, `enum` из 51 значения — тот же
+список, что `GET /api/meta/error-codes`); у ошибок валидации (422) — ещё `errors`
+(список `{field, reason}`).
 """
+
+#: B9-3: порядок групп в Swagger UI/`/api/openapi.json` (раздел README «30 групп») — FastAPI
+#: без этого списка сортирует теги по порядку первого появления маршрута (зависит от порядка
+#: `include_router` в `create_app`, легко расползается при рефакторинге); явный список даёт один
+#: источник порядка и короткое описание каждой группы. Порядок — от входа (аутентификация) к
+#: бизнес-сущностям, затем каталоги и справочники, затем административный контур.
+OPENAPI_TAGS: list[dict[str, str]] = [
+    {"name": "auth", "description": "Вход через Keycloak (OIDC), сессия, выход."},
+    {"name": "me", "description": "Профиль текущего пользователя, смена пароля, согласие на ПДн."},
+    {
+        "name": "workflows",
+        "description": "Конструктор воронок: статусы, переходы, публикация, архивация статуса.",
+    },
+    {
+        "name": "deals",
+        "description": "Сделки: карточка, переходы по воронке, участники, комментарии.",
+    },
+    {"name": "comments", "description": "Правка и удаление комментариев сделки (плоские ручки)."},
+    {"name": "tasks", "description": "Задачи по сделкам."},
+    {"name": "organizations", "description": "Вузы и другие организации-клиенты."},
+    {"name": "contacts", "description": "Контактные лица организаций."},
+    {"name": "products", "description": "Каталог ИТ-продуктов (программ обучения)."},
+    {"name": "directions", "description": "Направления обучения, дерево."},
+    {"name": "organization-licenses", "description": "Лицензии/договоры вуз-вендор-ПО."},
+    {"name": "loss-reasons", "description": "Справочник причин отказа."},
+    {
+        "name": "holidays",
+        "description": "Производственный календарь (рабочие/выходные дни для расчёта SLA).",
+    },
+    {
+        "name": "custom-field-defs",
+        "description": "Определения пользовательских полей сделок/организаций/продуктов.",
+    },
+    {"name": "regions", "description": "Справочник регионов РФ."},
+    {"name": "org-lookup", "description": "Автоподстановка реквизитов организации по ИНН (ЕГРЮЛ)."},
+    {"name": "files", "description": "Загрузка файлов (intent/commit), скачивание."},
+    {
+        "name": "attachments",
+        "description": "Привязка файлов к сущностям (сделка, документ на подпись и т.п.).",
+    },
+    {"name": "imports", "description": "Импорт каталогов и организаций из xlsx/xls/csv/json."},
+    {"name": "reporting", "description": "Отчёты и дашборды."},
+    {
+        "name": "signing",
+        "description": (
+            "Простая электронная подпись (ПЭП): документы, запросы, шаблоны, соглашения об ЭДО."
+        ),
+    },
+    {
+        "name": "signing-public",
+        "description": (
+            "ПЭП без сессии: страница подписания и действия внешнего подписанта по токену."
+        ),
+    },
+    {
+        "name": "notifications",
+        "description": "Уведомления пользователя, настройки каналов, шаблоны (администрирование).",
+    },
+    {
+        "name": "integrations-admin",
+        "description": "Администрирование источников интеграций и их событий.",
+    },
+    {
+        "name": "integrations-public",
+        "description": "Входящие вебхуки внешних систем (HMAC-подпись тела).",
+    },
+    {"name": "registry", "description": "Загрузка и версии локального реестра ЕГРЮЛ."},
+    {"name": "admin", "description": "Журнал аудита, системные настройки."},
+    {
+        "name": "admin-users",
+        "description": "Пользователи, роли, команды, запросы на удаление/обезличивание (152-ФЗ).",
+    },
+    {
+        "name": "users",
+        "description": "Справочник сотрудников (имена/роли для выбора в интерфейсе).",
+    },
+    {"name": "meta", "description": "Справочник кодов ошибок (без аутентификации)."},
+    {"name": "health", "description": "Технические проверки живости и готовности (вне /api)."},
+]
 
 
 @asynccontextmanager
@@ -133,7 +222,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # B6-4: `NullAntivirusScanner` (регистрируется по умолчанию в `files.service`) всегда
     # отвечал «чисто» — без явного `CLAMAV_ENABLED=true` остаётся так и здесь (dev/demo без
     # поднятого clamd рядом). `build_scanner` возвращает `None`, когда выключен.
-    clamav_scanner = build_antivirus_scanner(settings)
+    clamav_scanner = build_scanner(settings)
     if clamav_scanner is not None:
         register_antivirus_scanner(clamav_scanner)
 
@@ -177,6 +266,7 @@ def create_app() -> FastAPI:
         title="CRM ИТ Школы Ростелекома — API",
         version=settings.app_version,
         description=OPENAPI_DESCRIPTION,
+        openapi_tags=OPENAPI_TAGS,
         lifespan=lifespan,
         # Схема нужна фронтенду всегда (DoD раздела 21); в prod закрывается
         # только интерактивный Swagger UI.
@@ -211,6 +301,7 @@ def create_app() -> FastAPI:
 
     # Технические ручки вне /api: их опрашивают Docker, Caddy и Prometheus.
     app.include_router(health_router)
+    app.include_router(meta_router, prefix=settings.api_prefix)
 
     app.include_router(auth_router, prefix=settings.api_prefix)
     app.include_router(me_router, prefix=settings.api_prefix)

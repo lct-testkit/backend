@@ -304,9 +304,7 @@ class IntegrationSourceService:
                 ErrorCode.INTEGRATION_SOURCE_INACTIVE, "Источник выключен или адрес не настроен"
             )
         if source.pull_request:
-            raise AppError(
-                ErrorCode.INTEGRATION_PULL_BUSY, "Запрос на забор уже стоит в очереди"
-            )
+            raise AppError(ErrorCode.INTEGRATION_PULL_BUSY, "Запрос на забор уже стоит в очереди")
         pull_request = {
             "requested_at": dt.datetime.now(dt.UTC).isoformat(),
             "requested_by": str(principal.user_id),
