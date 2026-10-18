@@ -67,10 +67,16 @@ def upgrade() -> None:
         sa.Column("created_by", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("version", sa.BigInteger(), nullable=False, server_default=sa.text("1")),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
         ),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
         ),
         sa.ForeignKeyConstraint(["responsible_user_id"], ["users.id"], ondelete="SET NULL"),
         sa.PrimaryKeyConstraint("id"),
@@ -78,9 +84,7 @@ def upgrade() -> None:
             "status IN ('candidate','open','rkn_24_sent','rkn_72_sent','closed','dismissed')",
             name="security_incidents_status_valid",
         ),
-        sa.CheckConstraint(
-            "source IN ('event','manual')", name="security_incidents_source_valid"
-        ),
+        sa.CheckConstraint("source IN ('event','manual')", name="security_incidents_source_valid"),
         sa.CheckConstraint(
             "severity IN ('info','warning','critical')",
             name="security_incidents_severity_valid",
@@ -89,14 +93,10 @@ def upgrade() -> None:
     op.create_index(
         "ix_security_incidents_status_rkn24", "security_incidents", ["status", "rkn_24_due_at"]
     )
-    op.create_index(
-        "uq_security_incidents_number", "security_incidents", ["number"], unique=True
-    )
+    op.create_index("uq_security_incidents_number", "security_incidents", ["number"], unique=True)
     # TimestampMixin.created_at объявлен с index=True — тот же индекс, что у остальных таблиц
     # на этом миксине (audit_log, data_erasure_requests и т.п.).
-    op.create_index(
-        "ix_security_incidents_created_at", "security_incidents", ["created_at"]
-    )
+    op.create_index("ix_security_incidents_created_at", "security_incidents", ["created_at"])
 
 
 def downgrade() -> None:
