@@ -405,6 +405,65 @@
         "title": "AccessRulesPutRequest",
         "type": "object"
       },
+      "AdminWithoutTotpOut": {
+        "properties": {
+          "email_masked": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email Masked"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "role"
+        ],
+        "title": "AdminWithoutTotpOut",
+        "type": "object"
+      },
+      "AntivirusPostureOut": {
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "fail_mode": {
+            "title": "Fail Mode",
+            "type": "string"
+          },
+          "reachable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reachable"
+          }
+        },
+        "required": [
+          "enabled",
+          "fail_mode"
+        ],
+        "title": "AntivirusPostureOut",
+        "type": "object"
+      },
       "ApplyDriftRequest": {
         "properties": {
           "fields": {
@@ -7003,6 +7062,669 @@
         "title": "InboundMessageOut",
         "type": "object"
       },
+      "IncidentCloseRequest": {
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "title": "IncidentCloseRequest",
+        "type": "object"
+      },
+      "IncidentConfirmRequest": {
+        "description": "Кандидат → `open`: отсюда начинается отсчёт сроков РКН (24 и 72 ч).",
+        "properties": {
+          "causes": {
+            "anyOf": [
+              {
+                "maxLength": 5000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Causes"
+          },
+          "data_categories": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Data Categories",
+            "type": "array"
+          },
+          "detected_at": {
+            "format": "date-time",
+            "title": "Detected At",
+            "type": "string"
+          },
+          "harm": {
+            "anyOf": [
+              {
+                "maxLength": 5000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Harm"
+          },
+          "measures": {
+            "anyOf": [
+              {
+                "maxLength": 5000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Measures"
+          },
+          "responsible_user_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Responsible User Id"
+          },
+          "subjects_estimate": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subjects Estimate"
+          }
+        },
+        "required": [
+          "detected_at"
+        ],
+        "title": "IncidentConfirmRequest",
+        "type": "object"
+      },
+      "IncidentCreateRequest": {
+        "description": "Ручное создание инцидента (минуя автоматический кандидат по событию).",
+        "properties": {
+          "data_categories": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Data Categories",
+            "type": "array"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "maxLength": 5000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "severity": {
+            "default": "warning",
+            "enum": [
+              "info",
+              "warning",
+              "critical"
+            ],
+            "title": "Severity",
+            "type": "string"
+          },
+          "subjects_estimate": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subjects Estimate"
+          },
+          "title": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "title": "IncidentCreateRequest",
+        "type": "object"
+      },
+      "IncidentListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/IncidentOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "IncidentListResponse",
+        "type": "object"
+      },
+      "IncidentMarkSentRequest": {
+        "properties": {
+          "reference": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Reference",
+            "type": "string"
+          },
+          "sent_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sent At"
+          }
+        },
+        "required": [
+          "reference"
+        ],
+        "title": "IncidentMarkSentRequest",
+        "type": "object"
+      },
+      "IncidentOut": {
+        "properties": {
+          "causes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Causes"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "data_categories": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Categories"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "detected_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detected At"
+          },
+          "event_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Ids"
+          },
+          "harm": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Harm"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "investigation_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Investigation Summary"
+          },
+          "measures": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Measures"
+          },
+          "number": {
+            "title": "Number",
+            "type": "string"
+          },
+          "responsible_user_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Responsible User Id"
+          },
+          "rkn_24_due_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rkn 24 Due At"
+          },
+          "rkn_24_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rkn 24 Reference"
+          },
+          "rkn_24_sent_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rkn 24 Sent At"
+          },
+          "rkn_72_due_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rkn 72 Due At"
+          },
+          "rkn_72_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rkn 72 Reference"
+          },
+          "rkn_72_sent_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rkn 72 Sent At"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "subjects_estimate": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subjects Estimate"
+          },
+          "subjects_notified_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subjects Notified At"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "number",
+          "title",
+          "status",
+          "severity",
+          "source",
+          "created_at",
+          "updated_at",
+          "version"
+        ],
+        "title": "IncidentOut",
+        "type": "object"
+      },
+      "IncidentPatchRequest": {
+        "properties": {
+          "causes": {
+            "anyOf": [
+              {
+                "maxLength": 5000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Causes"
+          },
+          "data_categories": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 50,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Categories"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "maxLength": 5000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "harm": {
+            "anyOf": [
+              {
+                "maxLength": 5000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Harm"
+          },
+          "investigation_summary": {
+            "anyOf": [
+              {
+                "maxLength": 5000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Investigation Summary"
+          },
+          "measures": {
+            "anyOf": [
+              {
+                "maxLength": 5000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Measures"
+          },
+          "responsible_user_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Responsible User Id"
+          },
+          "severity": {
+            "anyOf": [
+              {
+                "enum": [
+                  "info",
+                  "warning",
+                  "critical"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Severity"
+          },
+          "subjects_estimate": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subjects Estimate"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "title": "IncidentPatchRequest",
+        "type": "object"
+      },
+      "IncidentRknNoticeOut": {
+        "properties": {
+          "due_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Due At"
+          },
+          "fields": {
+            "additionalProperties": true,
+            "title": "Fields",
+            "type": "object"
+          },
+          "file_id": {
+            "format": "uuid",
+            "title": "File Id",
+            "type": "string"
+          },
+          "stage": {
+            "enum": [
+              "24h",
+              "72h"
+            ],
+            "title": "Stage",
+            "type": "string"
+          }
+        },
+        "required": [
+          "stage",
+          "file_id",
+          "fields"
+        ],
+        "title": "IncidentRknNoticeOut",
+        "type": "object"
+      },
+      "IncidentSubjectsNoticeOut": {
+        "properties": {
+          "file_id": {
+            "format": "uuid",
+            "title": "File Id",
+            "type": "string"
+          },
+          "subjects_notified_at": {
+            "format": "date-time",
+            "title": "Subjects Notified At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file_id",
+          "subjects_notified_at"
+        ],
+        "title": "IncidentSubjectsNoticeOut",
+        "type": "object"
+      },
       "IntegrationSourceOut": {
         "properties": {
           "auth_type": {
@@ -11951,6 +12673,53 @@
         "title": "PasswordResetRequest",
         "type": "object"
       },
+      "PasswordResetResponse": {
+        "description": "B6-10: раньше результат письма Keycloak не доходил до ответа — учётка без SMTP\nоставалась без способа сброса. `reset_url` — та же одноразовая ссылка, что у\nприглашения (`purpose=\"reset\"`), отдаётся администратору один раз.",
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "email_sent": {
+            "default": false,
+            "title": "Email Sent",
+            "type": "boolean"
+          },
+          "ok": {
+            "default": true,
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "reset_expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reset Expires At"
+          },
+          "reset_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reset Url"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "PasswordResetResponse",
+        "type": "object"
+      },
       "PolicyResponse": {
         "description": "Действующая редакция политики обработки ПДн (для окна согласия).",
         "properties": {
@@ -12769,6 +13538,56 @@
           "requested_at"
         ],
         "title": "PullRequestResponse",
+        "type": "object"
+      },
+      "RealmPostureOut": {
+        "properties": {
+          "brute_force_protected": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brute Force Protected"
+          },
+          "events_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Events Enabled"
+          },
+          "revoke_refresh_token": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoke Refresh Token"
+          },
+          "ssl_required": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ssl Required"
+          }
+        },
+        "title": "RealmPostureOut",
         "type": "object"
       },
       "ReassignRequest": {
@@ -14019,6 +14838,52 @@
         "title": "SecurityEventTypeCount",
         "type": "object"
       },
+      "SecurityPostureOut": {
+        "description": "`GET /admin/security/posture`: что из декларируемых мер реально включено, одним\nэкраном (B6-11) — три утверждения в сопроводительной документации не подтверждались\nкодом (TOTP, ротация refresh, политика S3), жюри должно увидеть фактическое состояние,\nа не текст README.",
+        "properties": {
+          "admins_without_totp": {
+            "items": {
+              "$ref": "#/components/schemas/AdminWithoutTotpOut"
+            },
+            "title": "Admins Without Totp",
+            "type": "array"
+          },
+          "antivirus": {
+            "$ref": "#/components/schemas/AntivirusPostureOut"
+          },
+          "audit_hmac_key_set": {
+            "title": "Audit Hmac Key Set",
+            "type": "boolean"
+          },
+          "bearer_auth_mode": {
+            "title": "Bearer Auth Mode",
+            "type": "string"
+          },
+          "field_encryption_enabled": {
+            "title": "Field Encryption Enabled",
+            "type": "boolean"
+          },
+          "realm": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RealmPostureOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "admins_without_totp",
+          "bearer_auth_mode",
+          "antivirus",
+          "audit_hmac_key_set",
+          "field_encryption_enabled"
+        ],
+        "title": "SecurityPostureOut",
+        "type": "object"
+      },
       "SessionInfo": {
         "properties": {
           "created_at": {
@@ -14113,6 +14978,47 @@
           "terminated"
         ],
         "title": "SessionsTerminatedResponse",
+        "type": "object"
+      },
+      "SetInvitePasswordRequest": {
+        "description": "B6-10: `POST /api/auth/invite/{token}/password` — пароль по ссылке приглашения или\nсброса (C-18). Пароль не логируется и не попадает в аудит (раздел 6.1).",
+        "properties": {
+          "new_password": {
+            "maxLength": 256,
+            "minLength": 12,
+            "title": "New Password",
+            "type": "string"
+          },
+          "new_password_repeat": {
+            "maxLength": 256,
+            "minLength": 12,
+            "title": "New Password Repeat",
+            "type": "string"
+          }
+        },
+        "required": [
+          "new_password",
+          "new_password_repeat"
+        ],
+        "title": "SetInvitePasswordRequest",
+        "type": "object"
+      },
+      "SetInvitePasswordResponse": {
+        "properties": {
+          "login_url": {
+            "title": "Login Url",
+            "type": "string"
+          },
+          "ok": {
+            "default": true,
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "login_url"
+        ],
+        "title": "SetInvitePasswordResponse",
         "type": "object"
       },
       "SignRequest": {
@@ -19651,6 +20557,871 @@
         ]
       }
     },
+    "/api/admin/incidents": {
+      "get": {
+        "description": "Реестр инцидентов безопасности с фильтром по статусу. Роль: ADMIN, AUDITOR.",
+        "operationId": "list_incidents_api_admin_incidents_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "summary": "Список инцидентов",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "description": "Ручное заведение (минуя автоматический кандидат по событию безопасности). Роль: ADMIN.",
+        "operationId": "create_incident_api_admin_incidents_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IncidentCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Завести инцидент вручную",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/incidents/{incident_id}": {
+      "get": {
+        "description": "Роль: ADMIN, AUDITOR.",
+        "operationId": "get_incident_api_admin_incidents__incident_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "incident_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Incident Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "summary": "Карточка инцидента",
+        "tags": [
+          "admin"
+        ]
+      },
+      "patch": {
+        "description": "Обязателен `If-Match`. Роль: ADMIN.",
+        "operationId": "patch_incident_api_admin_incidents__incident_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "incident_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Incident Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IncidentPatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Править карточку инцидента",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/incidents/{incident_id}/close": {
+      "post": {
+        "description": "Кандидат закрывается как `dismissed`, подтверждённый — как `closed`. Обязателен `If-Match`. Роль: ADMIN.",
+        "operationId": "close_incident_api_admin_incidents__incident_id__close_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "incident_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Incident Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IncidentCloseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Закрыть инцидент",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/incidents/{incident_id}/confirm": {
+      "post": {
+        "description": "Кандидат → `open`: отсюда считаются сроки РКН 24 и 72 часа. Обязателен `If-Match`. Роль: ADMIN.",
+        "operationId": "confirm_incident_api_admin_incidents__incident_id__confirm_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "incident_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Incident Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IncidentConfirmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Подтвердить кандидата",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/incidents/{incident_id}/rkn-notice/{stage}": {
+      "post": {
+        "description": "Генерирует PDF и структурированные поля для портала РКН (stage: 24h или 72h; 72h — после отметки об отправке 24h). Шаблон помечен как проект, требующий утверждения юристом (B6-12/B6-14). Роль: ADMIN.",
+        "operationId": "generate_rkn_notice_api_admin_incidents__incident_id__rkn_notice__stage__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "incident_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Incident Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "stage",
+            "required": true,
+            "schema": {
+              "pattern": "^(24h|72h)$",
+              "title": "Stage",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentRknNoticeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Сформировать текст уведомления РКН",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/incidents/{incident_id}/rkn-notice/{stage}/sent": {
+      "post": {
+        "description": "Фиксирует номер/ссылку подачи (подачу делает человек на портале). Обязателен `If-Match`. Роль: ADMIN.",
+        "operationId": "mark_rkn_notice_sent_api_admin_incidents__incident_id__rkn_notice__stage__sent_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "incident_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Incident Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "stage",
+            "required": true,
+            "schema": {
+              "pattern": "^(24h|72h)$",
+              "title": "Stage",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IncidentMarkSentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Отметить отправку уведомления РКН",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/incidents/{incident_id}/subjects-notice": {
+      "post": {
+        "description": "Решение, уведомлять ли субъектов лично, принимает юрист по обстоятельствам конкретного инцидента — ручка только готовит текст и файл. Роль: ADMIN.",
+        "operationId": "generate_subjects_notice_api_admin_incidents__incident_id__subjects_notice_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "incident_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Incident Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentSubjectsNoticeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Сформировать уведомление субъектам",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/admin/integrations/external-refs": {
       "get": {
         "description": "Соответствие «наша сущность — id во внешней системе», недавно синхронизированные первыми (несинхронизированные — в конце). Фильтры: `source_code`, `entity_type`, период `from`/`to` по `last_synced_at`. Продолжение — `cursor` из заголовка `X-Next-Cursor`.",
@@ -22516,6 +24287,61 @@
         ]
       }
     },
+    "/api/admin/security/posture": {
+      "get": {
+        "description": "Фактическое состояние трёх мер, которые декларирует документация, но код не всегда подтверждает: TOTP у ADMIN и HEAD, режим Bearer, антивирус, HMAC-ключ журнала аудита, шифрование полей, политика realm Keycloak (B6-11). Ответы Keycloak кэшируются на 60 с. Keycloak недоступен — поле `realm` пустое, не 500. Роль: ADMIN, AUDITOR.",
+        "operationId": "security_posture_api_admin_security_posture_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityPostureOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "summary": "Посадочная панель безопасности",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/admin/system-settings": {
       "get": {
         "description": "Возвращает системные настройки. Значения секретных настроек заменяются маркером. Роль: ADMIN.",
@@ -24354,7 +26180,7 @@
     },
     "/api/admin/users/{user_id}/reset-password": {
       "post": {
-        "description": "Инициирует принудительный сброс: обязательное действие в Keycloak, завершение всех сессий, аннулирование незавершённых запросов подписи. Ответ одинаков независимо от существования учётной записи. Роль: ADMIN.",
+        "description": "Инициирует принудительный сброс: обязательное действие в Keycloak, завершение всех сессий, аннулирование незавершённых запросов подписи. Письмо Keycloak не ушло (или SMTP в контуре нет) — ответ содержит одноразовую ссылку `reset_url` на самостоятельную установку пароля (B6-10, `POST /api/auth/invite/{token}/password`), которую администратор передаёт сотруднику сам; это не меняет единый ответ для несуществующей учётки. Роль: ADMIN.",
         "operationId": "reset_password_api_admin_users__user_id__reset_password_post",
         "parameters": [
           {
@@ -24399,7 +26225,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperationResult"
+                  "$ref": "#/components/schemas/PasswordResetResponse"
                 }
               }
             },
@@ -24981,6 +26807,70 @@
         },
         "security": [],
         "summary": "Проверить приглашение",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/invite/{token}/password": {
+      "post": {
+        "description": "Задаёт пароль по одноразовой ссылке приглашения или сброса (B6-10, C-18): работает без письма Keycloak, если в контуре нет SMTP. Неверный, истёкший и уже использованный токен дают одинаковый ответ (404) — ссылка не подсказывает, существовала ли она вообще. Ограничение частоты по IP и по хэшу токена — защита от перебора. Вход после этого всё равно идёт через Keycloak (OIDC). Роль: доступно без аутентификации.",
+        "operationId": "set_invite_password_api_auth_invite__token__password_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 16,
+              "title": "Token",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetInvitePasswordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetInvitePasswordResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [],
+        "summary": "Задать пароль по ссылке",
         "tags": [
           "auth"
         ]
