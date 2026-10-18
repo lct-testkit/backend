@@ -165,6 +165,38 @@ class TestConfirmSetsDeadlines:
         assert (due_24 - detected_at) == dt.timedelta(hours=24)
         assert (due_72 - detected_at) == dt.timedelta(hours=72)
 
+    def test_the_deadlines_follow_the_settings(self, client, monkeypatch) -> None:
+        """`INCIDENT_RKN_24_HOURS`/`INCIDENT_RKN_72_HOURS` раньше существовали только в Settings:
+        `confirm` считал 24 и 72 часа константами, и смена настройки ничего не меняла."""
+        import types
+
+        from app.modules.identity import incident_service as svc
+
+        monkeypatch.setattr(
+            svc,
+            "get_settings",
+            lambda: types.SimpleNamespace(incident_rkn_24_hours=12, incident_rkn_72_hours=36),
+        )
+        admin = run(client, _make_user, "ADMIN")
+        target = run(client, _make_user, "KAM")
+        event_id = run(client, functools.partial(_record_malware_event, target.id))
+        incident = run(client, functools.partial(_incidents_for_event, event_id))[0]
+        _login(client, admin)
+        detected_at = dt.datetime.now(dt.UTC).replace(microsecond=0)
+
+        response = client.post(
+            f"/api/admin/incidents/{incident.id}/confirm",
+            headers={"If-Match": str(incident.version)},
+            json={"detected_at": detected_at.isoformat()},
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        due_24 = dt.datetime.fromisoformat(body["rkn_24_due_at"].replace("Z", "+00:00"))
+        due_72 = dt.datetime.fromisoformat(body["rkn_72_due_at"].replace("Z", "+00:00"))
+        assert (due_24 - detected_at) == dt.timedelta(hours=12)
+        assert (due_72 - detected_at) == dt.timedelta(hours=36)
+
     def test_confirming_twice_is_rejected(self, client) -> None:
         admin = run(client, _make_user, "ADMIN")
         target = run(client, _make_user, "KAM")

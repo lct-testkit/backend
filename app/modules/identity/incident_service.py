@@ -26,6 +26,7 @@ import structlog
 from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.db import run_after_rollback
 from app.core.errors import AppError, ErrorCode, NotFoundError
 from app.core.ids import uuid7
@@ -233,8 +234,9 @@ class IncidentService:
         incident.harm = harm
         incident.measures = measures
         incident.responsible_user_id = responsible_user_id
-        incident.rkn_24_due_at = detected_at + dt.timedelta(hours=24)
-        incident.rkn_72_due_at = detected_at + dt.timedelta(hours=72)
+        settings = get_settings()
+        incident.rkn_24_due_at = detected_at + dt.timedelta(hours=settings.incident_rkn_24_hours)
+        incident.rkn_72_due_at = detected_at + dt.timedelta(hours=settings.incident_rkn_72_hours)
         await claim_version(self._session, incident, expected_version)
         await self._session.flush()
         await self._audit.record(
@@ -454,8 +456,6 @@ class IncidentService:
         """Тот же приём, что `erasure_service._store_pdf` — сервер формирует файл сам, без
         presigned-upload; ключ детерминирован по инциденту и имени, повторная генерация
         перезаписывает тот же объект."""
-        from app.core.config import get_settings
-
         settings = get_settings()
         bucket = settings.s3_bucket_signatures
         await ensure_bucket(bucket)
