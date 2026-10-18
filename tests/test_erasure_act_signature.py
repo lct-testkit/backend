@@ -70,8 +70,14 @@ async def _set_responsible_setting(user_id: uuid.UUID) -> None:
     from app.core.db import session_scope
     from app.modules.admin.models import SystemSetting
 
+    # upsert: тест может быть не единственным в прогоне, который трогает этот ключ
+    # (и может повторно вызываться в рамках параметризации) — повторная вставка не должна падать.
     async with session_scope() as session:
-        session.add(SystemSetting(key="pdn.responsible_user_id", value=str(user_id)))
+        existing = await session.get(SystemSetting, "pdn.responsible_user_id")
+        if existing is not None:
+            existing.value = str(user_id)
+        else:
+            session.add(SystemSetting(key="pdn.responsible_user_id", value=str(user_id)))
 
 
 async def _issue_act_for(request_id: uuid.UUID) -> uuid.UUID:

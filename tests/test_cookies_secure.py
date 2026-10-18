@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import pytest
+from cryptography.fernet import Fernet
 
 from app.core.config import Settings
 
@@ -18,6 +19,10 @@ STRONG = {
     "s3_access_key": "S3-strong-access-key-0123456789",
     "s3_secret_key": "S3-strong-secret-key-0123456789",
     "crm_app_password": "Db-strong-app-password-0123456789",
+    # B6-8: без них prod не стартует вовсе (ключи аудита и шифрования).
+    "audit_hmac_key": "Audit-strong-hmac-key-0123456789abcdef",
+    "settings_encryption_key": Fernet.generate_key().decode(),
+    "field_encryption_key": Fernet.generate_key().decode(),
 }
 
 

@@ -222,8 +222,13 @@ def _worker_settings(port: int) -> SimpleNamespace:
         log_json=False,
         app_profile="dev",
         worker_metrics_port=port,
-        # B6-4: `startup()` зовёт `build_antivirus_scanner(settings)` безусловно.
+        # B6-4: `startup()` зовёт `build_scanner(settings)` безусловно.
         clamav_enabled=False,
+        # B5-1: `startup()` безусловно проверяет наличие токена для источников интеграций.
+        cms_base_url=None,
+        cms_auth_ref=None,
+        lms_base_url=None,
+        lms_auth_ref=None,
     )
 
 

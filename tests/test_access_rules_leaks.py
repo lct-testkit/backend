@@ -343,6 +343,12 @@ class TestRouteCoverage:
         # добавляет нового пути утечки, но и не был здесь прогнан.
         "/contacts/{contact_id}/learner-profile": "наследует contact_scope_clause (не прогнано)",
         "/contacts/{contact_id}/products": "наследует contact_scope_clause (не прогнано)",
+        "/contacts/{contact_id}/channels": (
+            "наследует contact_scope_clause через get_or_404 (B4-9, не прогнано)"
+        ),
+        "/deals/{deal_id}/history/{history_id}/attachments": (
+            "наследует deal_scope_clause через DealService.get_or_404 (B2-7/B2-8, не прогнано)"
+        ),
         # ПЭП, отчёты и дашборды — отдельный сетап (подписанты, очередь
         # генерации, виджеты), не поднятый в этом проходе. Отчёты уже вызывают
         # deal_scope_clause в builders.py (B1), дашборды и ПЭП — открытый вопрос.
