@@ -140,8 +140,6 @@ OPENAPI_TAGS: list[dict[str, str]] = [
         "description": "Сделки: карточка, переходы по воронке, участники, комментарии.",
     },
     {"name": "comments", "description": "Правка и удаление комментариев сделки (плоские ручки)."},
-    # B4-7: AUDITOR читает комментарии сделки без доступа к ней самой (comment:audit_read).
-    {"name": "audit", "description": "Комментарии сделок для роли AUDITOR, в обход самой сделки."},
     {"name": "tasks", "description": "Задачи по сделкам."},
     {"name": "organizations", "description": "Вузы и другие организации-клиенты."},
     {"name": "contacts", "description": "Контактные лица организаций."},
