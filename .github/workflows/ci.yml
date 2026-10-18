@@ -217,7 +217,7 @@ jobs:
     # здесь) и публикация multi-arch (amd64 + arm64) вместо образа под архитектуру раннера — раннер
     # aarch64, прод x86_64. Обновляйте осознанно, прочитав изменения файла:
     # `gh api "repos/lct-testkit/deploy/commits?path=.github/workflows/docker-publish.yml"`.
-    uses: lct-testkit/deploy/.github/workflows/docker-publish.yml@2ad9589e6076b167b635bab23d028483ed8ee548
+    uses: lct-testkit/deploy/.github/workflows/docker-publish.yml@64b19d7188a5fc94445b0d7ca8a73a564745a241
     with:
       image: api
       event-type: backend-image-built
