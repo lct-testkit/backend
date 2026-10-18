@@ -108,6 +108,15 @@ async def test_new_b4_tables_are_writable(app_role: AsyncConnection) -> None:
     # регресс здесь остался бы незамеченным без отдельной проверки под `crm_app`.
     assert await _refused(app_role, "SELECT count(*) FROM user_access_rules") == ""
     assert await _refused(app_role, "DELETE FROM user_access_rules WHERE false") == ""
+    assert await _refused(app_role, "SELECT count(*) FROM access_requests") == ""
+    assert await _refused(app_role, "DELETE FROM access_requests WHERE false") == ""
+
+
+async def test_new_b5_tables_are_writable(app_role: AsyncConnection) -> None:
+    # B5-9/B5-10: то же самое для webhook-подписок, их очереди доставки и API-ключей.
+    for table in ("webhook_subscriptions", "webhook_deliveries", "api_keys"):
+        assert await _refused(app_role, f"SELECT count(*) FROM {table}") == ""  # noqa: S608
+        assert await _refused(app_role, f"DELETE FROM {table} WHERE false") == ""  # noqa: S608
 
 
 async def test_the_audit_log_is_append_only(app_role: AsyncConnection) -> None:

@@ -95,6 +95,9 @@ class ErrorCode(StrEnum):
     INTEGRATION_EVENT_NOT_RETRYABLE = "CRM-1704"
     # B5-5: «Забрать сейчас» — запрос уже стоит в очереди (ещё не разобран тиком cron).
     INTEGRATION_PULL_BUSY = "CRM-1705"
+    # B5-9: создание/ротация секрета webhook-подписки в prod без SETTINGS_ENCRYPTION_KEY —
+    # секрет не должен лежать открытым текстом в проде.
+    WEBHOOK_ENCRYPTION_REQUIRED = "CRM-1706"
 
     # --- Импорт ---
     IMPORT_BAD_FORMAT = "CRM-1801"
@@ -517,6 +520,13 @@ ERROR_CATALOG: dict[ErrorCode, ErrorSpec] = {
         "Для этого источника уже стоит в очереди или выполняется запрос на забор лидов "
         "(POST .../pull) — повторный запуск до завершения предыдущего не ставится.",
         "Подождите завершения текущего забора (GET .../status) и повторите запрос позже.",
+    ),
+    ErrorCode.WEBHOOK_ENCRYPTION_REQUIRED: ErrorSpec(
+        422,
+        "Секрет webhook-подписки нельзя сохранить без шифрования",
+        "В профиле prod секрет подписки хранится только зашифрованным (SETTINGS_ENCRYPTION_KEY), "
+        "а ключ не задан — секрет лежал бы в БД открытым текстом.",
+        "Задайте SETTINGS_ENCRYPTION_KEY в окружении api/worker и повторите запрос.",
     ),
 }
 

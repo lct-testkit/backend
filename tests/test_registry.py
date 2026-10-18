@@ -310,3 +310,70 @@ class TestGetRegistryVersion:
         response = client.get(f"/api/admin/registry/versions/{uuid.uuid4()}")
         assert response.status_code == 404, response.text
         assert response.json()["code"] == "CRM-9004"
+
+
+class TestSuggestOrganizationId:
+    """B4-11 (A-21): `GET /api/org-lookup/suggest` несёт `organization_id`, когда подсказка
+    указывает на уже заведённую у ВЫЗЫВАЮЩЕГО организацию, и прячет чужую (`internal_cache`)
+    вместо того, чтобы отдать её с `organization_id=null`. Настоящая Postgres обязательна —
+    провайдеры и `organization_scope_clause` (B4-5/B4-6) здесь не чистые функции."""
+
+    pytestmark = pytest.mark.skipif(
+        not TEST_DATABASE_URL, reason="нужен TEST_DATABASE_URL с применёнными миграциями"
+    )
+
+    async def _org_owned_by(self, owner_id: uuid.UUID) -> dict[str, object]:
+        from app.core.db import session_scope
+        from app.modules.catalog.models import Organization
+
+        async with session_scope() as session:
+            org = Organization(
+                name=f"Вуз подсказки {uuid.uuid4().hex[:6]}",
+                org_type="university",
+                inn=str(uuid.uuid4().int % 10**10).zfill(10),
+                owner_id=owner_id,
+            )
+            session.add(org)
+            await session.flush()
+            return {"id": org.id, "inn": org.inn}
+
+    def test_owner_sees_organization_id_for_their_own_organization(self, client) -> None:
+        kam = run(client, _make_user, "KAM")
+        authenticate(client, kam)
+        org = run(client, self._org_owned_by, kam.id)
+
+        response = client.get("/api/org-lookup/suggest", params={"q": org["inn"]})
+
+        assert response.status_code == 200, response.text
+        items = response.json()["items"]
+        assert any(item["organization_id"] == str(org["id"]) for item in items)
+
+    def test_a_different_kam_does_not_see_the_item_at_all(self, client) -> None:
+        owner = run(client, _make_user, "KAM")
+        org = run(client, self._org_owned_by, owner.id)
+
+        stranger = run(client, _make_user, "KAM")
+        authenticate(client, stranger)
+
+        response = client.get("/api/org-lookup/suggest", params={"q": org["inn"]})
+
+        assert response.status_code == 200, response.text
+        ids = {item.get("organization_id") for item in response.json()["items"]}
+        inns = {item["inn"] for item in response.json()["items"]}
+        # internal_cache прячет чужой элемент целиком — ни его organization_id, ни его ИНН не
+        # должны просочиться в ответ стороннему КАМу.
+        assert str(org["id"]) not in {str(i) for i in ids if i}
+        assert org["inn"] not in inns
+
+    def test_admin_sees_organization_id_for_any_organization(self, client) -> None:
+        owner = run(client, _make_user, "KAM")
+        org = run(client, self._org_owned_by, owner.id)
+
+        admin = run(client, _make_user, "ADMIN")
+        authenticate(client, admin)
+
+        response = client.get("/api/org-lookup/suggest", params={"q": org["inn"]})
+
+        assert response.status_code == 200, response.text
+        items = response.json()["items"]
+        assert any(item["organization_id"] == str(org["id"]) for item in items)

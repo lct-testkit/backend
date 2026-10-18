@@ -198,6 +198,12 @@ class Organization(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteMixin, B
     manual_overrides: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb")
     )
+    # B4-11 (A-22): поля, по которым менеджер осознанно оставил своё значение — словарь
+    # `{поле: отклонённое_новое_значение}`. Отличие от `manual_overrides`: если в реестре
+    # появится ДРУГОЕ значение, баннер расхождения вернётся (см. `registry.tasks._compute_drift`).
+    drift_dismissed: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
     is_accredited: Mapped[bool | None] = mapped_column(nullable=True)
     accreditation_until: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
 
@@ -643,3 +649,57 @@ class OrganizationLicense(UuidPkMixin, TimestampMixin, VersionMixin, SoftDeleteM
     license_term_years: Mapped[int | None] = mapped_column(Integer, nullable=True)
     license_valid_until: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
     is_perpetual: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
+
+
+class AccessRequestStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+    REVOKED = "revoked"
+
+
+class AccessRequest(UuidPkMixin, Base):
+    """B4-12 (A-18): запрос временного доступа к чужой записи — пока только к организации
+    (`entity_type='organization'`, CHECK оставлен шире на будущее для сделок). Одобрение даёт
+    доступ ДО `expires_at`, без переноса владения (`organizations.owner_id` не меняется) —
+    `catalog.service.organization_scope_clause_for_rules` добавляет отдельную ветку по этой
+    таблице. `app/modules/catalog/access_requests.py` — сервис."""
+
+    __tablename__ = "access_requests"
+    __table_args__ = (
+        Index(
+            "uq_access_requests_pending",
+            "requester_id",
+            "entity_type",
+            "entity_id",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+        ),
+        Index("ix_access_requests_grant", "requester_id", "entity_type", "status", "expires_at"),
+        Index("ix_access_requests_entity", "entity_type", "entity_id", "status"),
+        CheckConstraint(
+            "entity_type IN ('organization','deal')", name="access_requests_entity_type_valid"
+        ),
+        CheckConstraint(
+            "status IN ('pending','approved','rejected','cancelled','revoked')",
+            name="access_requests_status_valid",
+        ),
+    )
+
+    requester_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    entity_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    entity_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(12), nullable=False, server_default=text("'pending'")
+    )
+    decided_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
+    decided_at: Mapped[dt.datetime | None] = mapped_column(nullable=True)
+    decision_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[dt.datetime | None] = mapped_column(nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(server_default=text("now()"), nullable=False)

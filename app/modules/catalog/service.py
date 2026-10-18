@@ -58,6 +58,7 @@ from app.modules.catalog.license_keys import LicenseKey
 from app.modules.catalog.license_matching import LicenseMatcher
 from app.modules.catalog.license_values import parse_transfer_status
 from app.modules.catalog.models import (
+    AccessRequest,
     Contact,
     ContactChannel,
     ContactLearnerProfile,
@@ -141,10 +142,21 @@ async def organization_scope_clause_for_rules(
     linked_orgs = select(Deal.organization_id).where(Deal.organization_id.is_not(None))
     if deal_clause is not None:
         linked_orgs = linked_orgs.where(deal_clause)
-    role_clause = or_(owner_clause, Organization.id.in_(linked_orgs))
+    # B4-12: временный доступ, одобренный владельцем/его руководителем, до expires_at — не
+    # перенос владения (owner_id не трогается), поэтому отдельная ветка, не часть owner_clause.
+    approved_access = select(AccessRequest.entity_id).where(
+        AccessRequest.requester_id == principal.user_id,
+        AccessRequest.entity_type == "organization",
+        AccessRequest.status == "approved",
+        AccessRequest.expires_at > func.now(),
+    )
+    role_clause = or_(
+        owner_clause, Organization.id.in_(linked_orgs), Organization.id.in_(approved_access)
+    )
 
-    # B4-6: ограничение по вузам (B4-5) сужает и эту ветку — без него `allow` на два
-    # вуза не прятал бы третий, которым ограниченный KAM владеет как `owner_id`.
+    # B4-6: ограничение по вузам (B4-5) сужает и эту ветку (в том числе B4-12 выше) — без
+    # него `allow` на два вуза не прятал бы третий, доступ к которому выдан через запрос, а
+    # `deny` не должен отменяться одобренным доступом (ограничение сильнее выданного доступа).
     if rules is None:
         return role_clause
     restriction = organization_restriction(rules)
@@ -1001,6 +1013,14 @@ class OrganizationService:
         if not resolved:
             raise AppError(ErrorCode.VALIDATION, "Указанные поля не найдены в расхождениях")
 
+        # B4-11: принятое поле больше не может быть «ранее отклонённым» — иначе следующая
+        # сверка с ТЕМ ЖЕ значением (принятым только что) молча не показала бы новый дрейф.
+        if organization.drift_dismissed:
+            dismissed = dict(organization.drift_dismissed)
+            for key in resolved:
+                dismissed.pop(key, None)
+            organization.drift_dismissed = dismissed
+
         organization.requisites_drift = remaining or None
         organization.registry_checked_at = dt.datetime.now(dt.UTC)
         organization.version += 1
@@ -1022,6 +1042,66 @@ class OrganizationService:
                 entity_type="organization",
                 entity_id=organization.id,
             )
+        return organization
+
+    async def dismiss_drift(
+        self,
+        organization: Organization,
+        *,
+        fields: list[str],
+        expected_version: int,
+    ) -> Organization:
+        """B4-11 (A-22): «Оставить как есть» — отклонить расхождение без изменения карточки.
+        `fields` пусто — отклонить все текущие. В отличие от `apply_drift`, карточка не
+        меняется — меняется только то, что `_compute_drift` считает «уже увиденным» при
+        следующей сверке (`drift_dismissed`, не `manual_overrides`: другое новое значение
+        дисмисс не держит). Ликвидацию (`registry_status` liquidating/liquidated) отклонить
+        нельзя — это юридически значимое предупреждение, не стилистическое расхождение."""
+        if organization.version != expected_version:
+            raise VersionConflictError(organization.version, {"name": organization.name})
+
+        drift = organization.requisites_drift or {}
+        if not drift:
+            raise AppError(ErrorCode.VALIDATION, "Нет расхождений для отклонения")
+
+        keys = fields or list(drift.keys())
+        remaining = dict(drift)
+        dismissed = dict(organization.drift_dismissed or {})
+        changes: dict[str, dict[str, Any]] = {}
+        resolved: list[str] = []
+        for key in keys:
+            if key not in drift:
+                continue
+            new_value = drift_new_value(drift[key])
+            if key == "registry_status" and new_value in ("liquidating", "liquidated"):
+                raise ValidationError(
+                    "Нельзя отклонить предупреждение о ликвидации организации",
+                    [
+                        FieldError(
+                            field="registry_status",
+                            reason="юридически значимое предупреждение, не стилистическое "
+                            "расхождение",
+                        )
+                    ],
+                )
+            dismissed[key] = new_value
+            changes[key] = {"dismissed": _json_safe(new_value)}
+            remaining.pop(key, None)
+            resolved.append(key)
+
+        if not resolved:
+            raise AppError(ErrorCode.VALIDATION, "Указанные поля не найдены в расхождениях")
+
+        organization.requisites_drift = remaining or None
+        organization.drift_dismissed = dismissed
+        organization.version += 1
+        await self._session.flush()
+        await self._audit.record(
+            AuditAction.ORG_DRIFT_DISMISSED,
+            entity_type="organization",
+            entity_id=organization.id,
+            changes=changes,
+        )
         return organization
 
     async def reveal(self, organization: Organization) -> None:
@@ -1093,6 +1173,11 @@ class OrganizationService:
         organization.actual_address = None
         organization.main_phone = None
         organization.main_email = None
+        # B4-11: адрес ИП — ПДн физлица (dop.md §11.8); `drift_dismissed`/`requisites_drift`
+        # могли хранить именно его текст (адрес из реестра) — обезличивание чистит и их, не
+        # только карточку.
+        organization.drift_dismissed = {}
+        organization.requisites_drift = None
         await claim_version(self._session, organization)
         await self._session.flush()
 

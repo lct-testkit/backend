@@ -188,6 +188,9 @@ class OrganizationOut(BaseModel):
     registry_status: str | None = None
     registry_checked_at: dt.datetime | None = None
     requisites_drift: dict[str, Any] | None = None
+    # B4-11: поля, отклонённые через `dismiss-drift` («Оставить как есть») — UI показывает
+    # «отклонено N полей».
+    drift_dismissed: dict[str, Any] = Field(default_factory=dict)
     manual_overrides: list[str]
     is_accredited: bool | None = None
     accreditation_until: dt.date | None = None
@@ -1014,3 +1017,47 @@ class LearnerProfileUpdateRequest(BaseModel):
     diploma_series: ProfileInput = None
     diploma_reg_number: ProfileInput = None
     diploma_issued_at: ProfileInput = None
+
+
+# =============================================================================
+# B4-12 (A-18): запрос доступа к чужой записи
+# =============================================================================
+
+
+class AccessRequestCreateRequest(BaseModel):
+    entity_type: Literal["organization"] = "organization"
+    entity_id: uuid.UUID
+    reason: NonEmptyStr = Field(max_length=1000)
+
+
+class AccessRequestOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    requester_id: uuid.UUID
+    entity_type: str
+    entity_id: uuid.UUID
+    reason: str
+    status: str
+    decided_by: uuid.UUID | None
+    decided_at: dt.datetime | None
+    decision_comment: str | None
+    expires_at: dt.datetime | None
+    created_at: dt.datetime
+
+
+class AccessRequestListResponse(BaseModel):
+    items: list[AccessRequestOut]
+    next_cursor: str | None = None
+
+
+class AccessRequestDecisionRequest(BaseModel):
+    decision: Literal["approve", "reject"]
+    days: int | None = Field(default=None, ge=1, le=365)
+    comment: str | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def _reject_requires_comment(self) -> AccessRequestDecisionRequest:
+        if self.decision == "reject" and not (self.comment and self.comment.strip()):
+            raise ValueError("отказ требует комментарий")
+        return self

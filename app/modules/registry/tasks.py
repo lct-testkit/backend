@@ -372,16 +372,23 @@ def _compute_drift(organization: Organization, entry: EgrulEntry) -> dict[str, d
         "ogrn": entry.ogrn,
         "legal_address": entry.legal_address,
     }
+    dismissed = organization.drift_dismissed or {}
     drift: dict[str, dict[str, Any]] = {}
     for field, new_value in candidates.items():
         if field in organization.manual_overrides:
             continue
         if not new_value:
             continue
+        # B4-11 (A-22): менеджер уже видел именно ЭТО значение и оставил своё — баннер не
+        # возвращается. Другое новое значение (реестр обновился ещё раз) дисмисс не держит.
+        if dismissed.get(field) == new_value:
+            continue
         old_value = getattr(organization, field, None)
         if old_value != new_value:
             drift[field] = {"old": old_value, "new": new_value}
-    if organization.registry_status != entry.status:
+    if organization.registry_status != entry.status and dismissed.get("registry_status") != (
+        entry.status
+    ):
         drift["registry_status"] = {"old": organization.registry_status, "new": entry.status}
     return drift
 

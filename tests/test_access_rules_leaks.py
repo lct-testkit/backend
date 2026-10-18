@@ -186,6 +186,7 @@ class TestOrganizationBasedRestriction:
         kam = run(client, _make_user, "KAM")
         data = run(client, _make_scene, kam.id, graph["workflow"]["id"], _initial_status_id(graph))
         _restrict_to_organization(client, kam.id, data["org_a"])
+        data["kam_id"] = str(kam.id)
         sign_in(client, kam)
         return data
 
@@ -276,6 +277,40 @@ class TestOrganizationBasedRestriction:
         )
         assert response.status_code == 404, response.text
 
+    def test_an_approved_access_request_does_not_override_the_restriction(
+        self, client, scene
+    ) -> None:
+        """B4-12: `organization_scope_clause_for_rules` AND-ирует одобренный временный
+        доступ с ограничением B4-5/B4-6 — approved-запрос на запрещённый вуз B не должен
+        отменять `allow` на вуз A. Запрос вставлен напрямую в БД (минуя `create()`,
+        которая и так отказала бы по `user_organization_allowed`) — проверяем именно
+        слой видимости, а не создание запроса."""
+
+        async def _insert_approved(org_id: str, requester_id: uuid.UUID) -> None:
+            import datetime as dt
+
+            from app.core.db import session_scope
+            from app.modules.catalog.models import AccessRequest
+
+            async with session_scope() as session:
+                session.add(
+                    AccessRequest(
+                        requester_id=requester_id,
+                        entity_type="organization",
+                        entity_id=uuid.UUID(org_id),
+                        reason="Утечка B4-12 — не должна случиться",
+                        status="approved",
+                        expires_at=dt.datetime.now(dt.UTC) + dt.timedelta(days=30),
+                    )
+                )
+                await session.flush()
+
+        run(client, lambda: _insert_approved(scene["org_b"], uuid.UUID(scene["kam_id"])))
+
+        response = client.get(f"/api/organizations/{scene['org_b']}")
+        assert response.status_code == 404, response.text
+        assert scene["org_b_name"] not in _body_text(response)
+
 
 class TestDirectionBasedRestriction:
     """`deny` на направление Б — сделка вуза Б (единственный продукт этого
@@ -354,11 +389,13 @@ class TestRouteCoverage:
         # добавляет нового пути утечки, но и не был здесь прогнан.
         "/contacts/{contact_id}/learner-profile": "наследует contact_scope_clause (не прогнано)",
         "/contacts/{contact_id}/products": "наследует contact_scope_clause (не прогнано)",
-        "/contacts/{contact_id}/channels": (
-            "наследует contact_scope_clause через get_or_404 (B4-9, не прогнано)"
-        ),
+        # B4-9: каналы связи контакта — тот же ContactService.get_or_404, что уже покрыт для
+        # /contacts/{contact_id}.
+        "/contacts/{contact_id}/channels": "наследует contact_scope_clause (не прогнано)",
+        # B2-7/B2-8: DealService.get_or_404 — тот же deal_scope_clause, что уже покрыт для
+        # /deals/{deal_id} и /deals/{deal_id}/history.
         "/deals/{deal_id}/history/{history_id}/attachments": (
-            "наследует deal_scope_clause через DealService.get_or_404 (B2-7/B2-8, не прогнано)"
+            "наследует deal_scope_clause через DealService.get_or_404 (не прогнано)"
         ),
         # ПЭП, отчёты и дашборды — отдельный сетап (подписанты, очередь
         # генерации, виджеты), не поднятый в этом проходе. Отчёты уже вызывают

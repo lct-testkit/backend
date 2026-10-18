@@ -21,6 +21,7 @@ from app.core.pagination import Page, keyset_before
 from app.core.permissions import Permission, has_permission
 from app.core.security import Principal
 from app.modules.audit.service import defer_denied_audit
+from app.modules.catalog.access_requests import AccessRequestService
 from app.modules.catalog.models import (
     Contact,
     Direction,
@@ -29,6 +30,10 @@ from app.modules.catalog.models import (
     Product,
 )
 from app.modules.catalog.schemas import (
+    AccessRequestCreateRequest,
+    AccessRequestDecisionRequest,
+    AccessRequestListResponse,
+    AccessRequestOut,
     ApplyDriftRequest,
     BulkOrganizationOwnerRequest,
     BulkOrganizationOwnerResponse,
@@ -118,6 +123,9 @@ regions_router = APIRouter(prefix="/regions", tags=["regions"])
 organization_licenses_router = APIRouter(
     prefix="/organization-licenses", tags=["organization-licenses"]
 )
+# B4-12: запрос доступа к чужой записи — отдельный маршрут, решение проверяется объектно
+# (владелец вуза/его руководитель/ADMIN), не правом роли.
+access_requests_router = APIRouter(prefix="/access-requests", tags=["access-requests"])
 
 OrgRead = Annotated[Principal, Depends(require_permission(Permission.ORG_READ))]
 OrgWrite = Annotated[Principal, Depends(require_permission(Permission.ORG_WRITE))]
@@ -458,6 +466,31 @@ async def apply_organization_drift(
     organization = await service.get_or_404(organization_id, principal)
     organization = await service.apply_drift(
         organization, principal, fields=payload.fields, expected_version=if_match
+    )
+    return OrganizationOut.from_model(organization)
+
+
+@organizations_router.post(
+    "/{organization_id}/dismiss-drift",
+    summary="Отклонить расхождения реквизитов («Оставить как есть»)",
+    description=(
+        "B4-11 (A-22): отмечает выбранные (или все) поля из requisites_drift как осознанно "
+        "оставленные — баннер не возвращается, пока в реестре не появится ДРУГОЕ значение. "
+        "Ликвидацию (registry_status=liquidating/liquidated) отклонить нельзя — 422."
+    ),
+    response_model=OrganizationOut,
+)
+async def dismiss_organization_drift(
+    payload: ApplyDriftRequest,
+    session: DbSession,
+    principal: OrgWrite,
+    if_match: IfMatch,
+    organization_id: Annotated[uuid.UUID, Path()],
+) -> OrganizationOut:
+    service = OrganizationService(session)
+    organization = await service.get_or_404(organization_id, principal)
+    organization = await service.dismiss_drift(
+        organization, fields=payload.fields, expected_version=if_match
     )
     return OrganizationOut.from_model(organization)
 
@@ -1527,3 +1560,114 @@ async def delete_organization_license(
     service = OrganizationLicenseService(session)
     license_ = await service.get_or_404(license_id, principal)
     await service.delete(license_)
+
+
+# =============================================================================
+# B4-12 (A-18): запрос доступа к чужой записи
+# =============================================================================
+
+
+@access_requests_router.get(
+    "",
+    summary="Мои запросы или входящие на решение",
+    description=(
+        "`box=mine` (по умолчанию) — запросы, которые создал вызывающий. `box=inbox` — "
+        "запросы, которые он может решить (владелец вуза, руководитель его команды, ADMIN). "
+        "Фильтр `status`. Курсорная пагинация. Роль: organization:read."
+    ),
+    response_model=AccessRequestListResponse,
+)
+async def list_access_requests(
+    session: DbSession,
+    page: Pagination,
+    principal: OrgRead,
+    box: Annotated[Literal["mine", "inbox"], Query()] = "mine",
+    request_status: Annotated[str | None, Query(alias="status")] = None,
+) -> AccessRequestListResponse:
+    service = AccessRequestService(session)
+    if box == "inbox":
+        result = await service.list_inbox(principal, page, status=request_status)
+    else:
+        result = await service.list_mine(principal, page)
+    return AccessRequestListResponse(
+        items=[AccessRequestOut.model_validate(r) for r in result.items],
+        next_cursor=result.next_cursor,
+    )
+
+
+@access_requests_router.post(
+    "",
+    summary="Запросить доступ к чужому вузу",
+    description=(
+        "Вуз уже существует, вне скоупа вызывающего, с ответственным и вне ограничений "
+        "видимости (B4-5) — иначе 422. Второй запрос к тому же вузу в статусе pending — 409. "
+        "Роль: organization:read."
+    ),
+    response_model=AccessRequestOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_access_request(
+    payload: AccessRequestCreateRequest, session: DbSession, principal: OrgRead
+) -> AccessRequestOut:
+    request = await AccessRequestService(session).create(
+        principal, entity_id=payload.entity_id, reason=payload.reason
+    )
+    return AccessRequestOut.model_validate(request)
+
+
+@access_requests_router.post(
+    "/{request_id}/decision",
+    summary="Одобрить или отклонить запрос доступа",
+    description=(
+        "Решает владелец вуза, руководитель его команды или ADMIN — объектная проверка, не "
+        "право роли. `approve`: `days` — срок доступа (1..365, по умолчанию 30). `reject` "
+        "требует `comment` — иначе 422. Роль: organization:read (сама проверка — объектная)."
+    ),
+    response_model=AccessRequestOut,
+)
+async def decide_access_request(
+    payload: AccessRequestDecisionRequest,
+    session: DbSession,
+    principal: OrgRead,
+    request_id: Annotated[uuid.UUID, Path()],
+) -> AccessRequestOut:
+    service = AccessRequestService(session)
+    request = await service.get_or_404(request_id)
+    if payload.decision == "approve":
+        request = await service.approve(
+            request, principal, days=payload.days, comment=payload.comment
+        )
+    else:
+        request = await service.reject(request, principal, comment=payload.comment or "")
+    return AccessRequestOut.model_validate(request)
+
+
+@access_requests_router.post(
+    "/{request_id}/cancel",
+    summary="Отменить свой ожидающий запрос",
+    response_model=AccessRequestOut,
+)
+async def cancel_access_request(
+    session: DbSession, principal: OrgRead, request_id: Annotated[uuid.UUID, Path()]
+) -> AccessRequestOut:
+    service = AccessRequestService(session)
+    request = await service.get_or_404(request_id)
+    request = await service.cancel(request, principal)
+    return AccessRequestOut.model_validate(request)
+
+
+@access_requests_router.post(
+    "/{request_id}/revoke",
+    summary="Снять ранее выданный доступ",
+    description=(
+        "Решает владелец вуза, руководитель его команды или ADMIN. Роль: organization:read."
+    ),
+    response_model=AccessRequestOut,
+)
+async def revoke_access_request(
+    session: DbSession, principal: OrgRead, request_id: Annotated[uuid.UUID, Path()]
+) -> AccessRequestOut:
+    service = AccessRequestService(session)
+    request = await service.get_or_404(request_id)
+    request = await service.revoke(request, principal)
+    return AccessRequestOut.model_validate(request)

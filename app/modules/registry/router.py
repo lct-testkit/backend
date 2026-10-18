@@ -61,6 +61,7 @@ async def suggest_organizations(
                 status=item.status,
                 is_liquidated=item.is_liquidated,
                 provider=item.provider,
+                organization_id=item.organization_id,
             )
             for item in result.items
         ]

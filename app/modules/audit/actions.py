@@ -121,6 +121,16 @@ class AuditAction(StrEnum):
     # B5-4: маршрутизация (воронка/тип сделки на источник, правила по значению поля).
     INTEGRATION_ROUTING_UPDATED = "INTEGRATION_ROUTING_UPDATED"
     INTEGRATION_ROUTING_RESET = "INTEGRATION_ROUTING_RESET"
+    # B5-9: универсальные webhook-подписки на исходящие события. `changes` никогда не несёт
+    # секрет — ни сырой, ни зашифрованный конверт (см. `integration.webhooks`).
+    WEBHOOK_SUBSCRIPTION_CREATED = "WEBHOOK_SUBSCRIPTION_CREATED"
+    WEBHOOK_SUBSCRIPTION_UPDATED = "WEBHOOK_SUBSCRIPTION_UPDATED"
+    WEBHOOK_SUBSCRIPTION_DELETED = "WEBHOOK_SUBSCRIPTION_DELETED"
+    WEBHOOK_SUBSCRIPTION_SECRET_ROTATED = "WEBHOOK_SUBSCRIPTION_SECRET_ROTATED"
+    WEBHOOK_DELIVERY_RETRIED = "WEBHOOK_DELIVERY_RETRIED"
+    # B5-10: API-ключи сервисных учёток роли INTEGRATION.
+    API_KEY_CREATED = "API_KEY_CREATED"
+    API_KEY_REVOKED = "API_KEY_REVOKED"
 
     # --- Отчётность и дашборды (спринт 8, §4.13/§7.9) ---
     DASHBOARD_CREATED = "DASHBOARD_CREATED"
@@ -165,8 +175,15 @@ class AuditAction(StrEnum):
     ORGANIZATION_DELETED = "ORGANIZATION_DELETED"
     DEAL_DELETED = "DEAL_DELETED"
     DEAL_RESTORED = "DEAL_RESTORED"
+    # B4-12 (A-18): запрос временного доступа к чужой организации.
+    ACCESS_REQUESTED = "ACCESS_REQUESTED"
+    ACCESS_GRANTED = "ACCESS_GRANTED"
+    ACCESS_REJECTED = "ACCESS_REJECTED"
+    ACCESS_REVOKED = "ACCESS_REVOKED"
     ORG_REGISTRY_IMPORTED = "ORG_REGISTRY_IMPORTED"
     ORG_DRIFT_APPLIED = "ORG_DRIFT_APPLIED"
+    # B4-11 (A-22): «Оставить как есть» — отклонить расхождение без изменения карточки.
+    ORG_DRIFT_DISMISSED = "ORG_DRIFT_DISMISSED"
     ORG_LIQUIDATION_DETECTED = "ORG_LIQUIDATION_DETECTED"
     # П4: удаление снэпшота/выгрузки ЕГРЮЛ — только не последней активной
     # версии (раздел 4: «систему нельзя оставить без реестра»). См.

@@ -30,6 +30,7 @@ from app.core.security import jwks_cache
 from app.middleware.request_context import RequestContextMiddleware
 from app.modules.admin.router import router as admin_router
 from app.modules.catalog.router import (
+    access_requests_router,
     contacts_router,
     custom_field_defs_router,
     directions_router,
@@ -139,12 +140,18 @@ OPENAPI_TAGS: list[dict[str, str]] = [
         "description": "Сделки: карточка, переходы по воронке, участники, комментарии.",
     },
     {"name": "comments", "description": "Правка и удаление комментариев сделки (плоские ручки)."},
+    # B4-7: AUDITOR читает комментарии сделки без доступа к ней самой (comment:audit_read).
+    {"name": "audit", "description": "Комментарии сделок для роли AUDITOR, в обход самой сделки."},
     {"name": "tasks", "description": "Задачи по сделкам."},
     {"name": "organizations", "description": "Вузы и другие организации-клиенты."},
     {"name": "contacts", "description": "Контактные лица организаций."},
     {"name": "products", "description": "Каталог ИТ-продуктов (программ обучения)."},
     {"name": "directions", "description": "Направления обучения, дерево."},
     {"name": "organization-licenses", "description": "Лицензии/договоры вуз-вендор-ПО."},
+    {
+        "name": "access-requests",
+        "description": "Запрос временного доступа к чужому вузу (B4-12), без переноса владения.",
+    },
     {"name": "loss-reasons", "description": "Справочник причин отказа."},
     {
         "name": "holidays",
@@ -336,6 +343,7 @@ def create_app() -> FastAPI:
     app.include_router(custom_field_defs_router, prefix=settings.api_prefix)
     app.include_router(regions_router, prefix=settings.api_prefix)
     app.include_router(organization_licenses_router, prefix=settings.api_prefix)
+    app.include_router(access_requests_router, prefix=settings.api_prefix)
     app.include_router(files_router, prefix=settings.api_prefix)
     app.include_router(attachments_router, prefix=settings.api_prefix)
     app.include_router(org_lookup_router, prefix=settings.api_prefix)

@@ -22,6 +22,8 @@ from app.modules.audit.models import AuditLog
 
 # --- каталог: организации, контакты, справочники (раздел 5.2/5.3) ---
 from app.modules.catalog.models import (
+    # B4-12: временный доступ к чужой организации без переноса владения.
+    AccessRequest,
     Contact,
     ContactChannel,
     # Три файла заказчика о людях: ответственные за продукты вендоров и данные учащихся LMS.
@@ -73,12 +75,17 @@ from app.modules.imports.models import ImportJob, ImportPreset, ImportRowResult
 
 # --- интеграции: транспортный слой, шесть таблиц раздела 7.8 (спринт 9) ---
 from app.modules.integration.models import (
+    # B5-10: ключи сервисных учёток роли INTEGRATION.
+    ApiKey,
     ExternalRef,
     InboundMessage,
     IntegrationSource,
     LearningProgress,
     OutboxEvent,
     SyncCursor,
+    # B5-9: подписки на исходящие события и их очередь доставки.
+    WebhookDelivery,
+    WebhookSubscription,
 )
 
 # --- уведомления (раздел 5.7, спринт 7) ---
@@ -125,7 +132,9 @@ from app.modules.workflow.models import (
 )
 
 __all__ = [
+    "AccessRequest",
     "AdminApproval",
+    "ApiKey",
     "Attachment",
     "AuditLog",
     "Base",
@@ -192,6 +201,8 @@ __all__ = [
     "UserDelegation",
     "UserInvite",
     "UserNotificationPref",
+    "WebhookDelivery",
+    "WebhookSubscription",
     "Workflow",
     "WorkflowStatus",
     "WorkflowTransition",

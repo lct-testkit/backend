@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -35,6 +36,10 @@ class OrgSuggestion:
     is_liquidated: bool
     provider: str
     source_id: str | None = None  # id организации в нашей БД, если InternalCache
+    # B4-11 (A-21): организация уже заведена и видна вызывающему по скоупу (B4-5/B4-6) —
+    # заполняется постобработкой в `OrgLookupService.suggest`, не самим провайдером (провайдер
+    # не знает о Principal и ограничениях видимости).
+    organization_id: uuid.UUID | None = None
 
 
 @dataclass(slots=True)
