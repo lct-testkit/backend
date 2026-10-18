@@ -7,7 +7,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Query, status
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.core.config import get_settings
 from app.core.deps import DbSession, Pagination, require_permission
@@ -36,9 +36,12 @@ from app.modules.imports.schemas import (
     ImportProfileResponse,
     ImportRowListResponse,
     ImportRowOut,
+    ImportSummaryOut,
+    IssueSummaryOut,
+    RowIssueOut,
     SheetOut,
 )
-from app.modules.imports.service import ImportService
+from app.modules.imports.service import ImportService, entry_to_issue_dict, issue_text
 
 import_jobs_router = APIRouter(prefix="/imports", tags=["imports"])
 import_presets_router = APIRouter(prefix="/import-presets", tags=["imports"])
@@ -193,7 +196,8 @@ async def profile_import_job(
     description=(
         "Построчный итог проверки и применения: статус, причины, разобранные значения. Значения "
         "ПДн (телефон, email, СНИЛС, паспорт) замаскированы. Фильтр `status` — `ok`, `warn`, "
-        "`error`, `skipped`, `rolled_back`, `rollback_blocked`."
+        "`error`, `skipped`, `rolled_back`, `rollback_blocked`. Фильтр `issue` (B3-5) — код "
+        "проблемы строки (см. `issues[].code`), например `org_not_found`."
     ),
     response_model=ImportRowListResponse,
 )
@@ -203,6 +207,7 @@ async def list_import_rows(
     _: ImportRunPerm,
     job_id: Annotated[uuid.UUID, Path()],
     status_filter: Annotated[str | None, Query(alias="status")] = None,
+    issue: Annotated[str | None, Query()] = None,
 ) -> ImportRowListResponse:
     await ImportService(session).get_or_404(job_id)
     stmt = (
@@ -212,18 +217,32 @@ async def list_import_rows(
     )
     if status_filter:
         stmt = stmt.where(ImportRowResult.status == status_filter)
+    if issue:
+        # B3-5: `errors` — JSONB-массив объектов `{code, field, message, hint, severity}` (старые
+        # строки-задания хранят просто текст — `->>'code'` на них даёт NULL, не ошибку, строка
+        # просто не попадёт в фильтр).
+        stmt = stmt.where(
+            text(
+                "EXISTS (SELECT 1 FROM jsonb_array_elements(import_row_results.errors) e "
+                "WHERE e->>'code' = :issue_code)"
+            ).bindparams(issue_code=issue)
+        )
     cursor = page.decoded_cursor
     if cursor:
         stmt = stmt.where(keyset_after(ImportRowResult.row_number, ImportRowResult.id, cursor))
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
 
     def _serialize(row: ImportRowResult) -> ImportRowOut:
+        entries = [entry_to_issue_dict(e) for e in row.errors or []]
         return ImportRowOut(
             id=row.id,
             row_number=row.row_number,
+            source_row=row.source_row,
+            sheet=row.sheet,
             status=row.status,
             entity_id=row.entity_id,
-            errors=[str(e) for e in row.errors or []],
+            errors=[issue_text(e) for e in row.errors or []],
+            issues=[RowIssueOut(**e) for e in entries],
             row_data=mask_mapping(row.row_data or {}),  # type: ignore[arg-type]
         )
 
@@ -231,6 +250,33 @@ async def list_import_rows(
         rows, limit=page.limit, cursor_value=lambda r: r.row_number, serializer=_serialize
     )
     return ImportRowListResponse(items=built.items, next_cursor=built.next_cursor)
+
+
+@import_jobs_router.get(
+    "/{job_id}/summary",
+    summary="Сводка проверки: коды проблем и что будет создано/обновлено",
+    description=(
+        "B3-5: сколько строк с каждым кодом проблемы (до 5 примеров номеров строки файла на код) "
+        "и что будет создано/обновлено/пропущено при применении. Пусто до первого dry-run."
+    ),
+    response_model=ImportSummaryOut,
+)
+async def get_import_summary(
+    session: DbSession, _: ImportRunPerm, job_id: Annotated[uuid.UUID, Path()]
+) -> ImportSummaryOut:
+    job = await ImportService(session).get_or_404(job_id)
+    summary = job.summary or {}
+    return ImportSummaryOut(
+        status=job.status,
+        total_rows=job.total_rows,
+        ok_rows=job.ok_rows,
+        warn_rows=job.warn_rows,
+        error_rows=job.error_rows,
+        by_issue=[IssueSummaryOut(**entry) for entry in summary.get("by_issue", [])],
+        would=summary.get("would", {}),
+        applied=summary.get("applied", {}),
+        result_file_id=job.result_file_id,
+    )
 
 
 @import_jobs_router.put(

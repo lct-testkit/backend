@@ -28,6 +28,10 @@ from typing import Any
 
 import openpyxl
 import structlog
+from openpyxl.cell import WriteOnlyCell
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.worksheet import Worksheet
 from sqlalchemy import Select, and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -61,7 +65,7 @@ from app.modules.imports.fields import (
     natural_key_for,
     validate_field,
 )
-from app.modules.imports.handlers import HANDLERS, Batch, RowCheck, rollback_effects
+from app.modules.imports.handlers import HANDLERS, Batch, RowCheck, RowIssue, rollback_effects
 from app.modules.imports.mapping import suggest_mapping
 from app.modules.imports.models import (
     ImportEntityType,
@@ -126,6 +130,63 @@ def _count_rows(entity_type: str, outcomes: Iterable[str]) -> None:
         import_rows_total.labels(entity_type=entity_type, status=status).inc(count)
 
 
+# B3-5: соответствие вида поля и кода проблемы строки для `_extract_row`/`_dry_run*`. Виды, не
+# упомянутые здесь, получают общий код `field_invalid` — таблица задачи называет явно только эти
+# два (остальные подсказки не предполагались автором задачи как отдельные коды).
+_FIELD_ISSUE_HINTS: dict[str, tuple[str, str]] = {
+    "transfer_status": ("status_unknown", "Допустимо: передано, в работе, не начато, отказ"),
+    "license_term": (
+        "term_invalid",
+        "Укажите срок в годах (1–50) или год окончания (2000–2100)",
+    ),
+}
+
+
+def _field_error_issue(spec: FieldSpec, message: str) -> RowIssue:
+    code, hint = _FIELD_ISSUE_HINTS.get(spec.kind, ("field_invalid", None))
+    return RowIssue(code=code, field=spec.target, message=message, hint=hint)
+
+
+def issue_text(entry: Any) -> str:
+    """`ImportRowResult.errors` хранит и старые строки, и новые объекты `RowIssue` (B3-5) — этот
+    хелпер нормализует обе формы в читаемый текст."""
+    if isinstance(entry, dict):
+        text = str(entry.get("message", ""))
+        hint = entry.get("hint")
+        return f"{text} ({hint})" if hint else text
+    return str(entry)
+
+
+def _issue_dict(issue: RowIssue) -> dict[str, Any]:
+    return {
+        "code": issue.code,
+        "field": issue.field,
+        "message": issue.message,
+        "hint": issue.hint,
+        "severity": issue.severity,
+    }
+
+
+def entry_to_issue_dict(entry: Any) -> dict[str, Any]:
+    """Нормализует одну запись `ImportRowResult.errors` (строка или объект) в форму
+    `RowIssueOut` — для `ImportRowOut.issues` и построения сводки/отчёта."""
+    if isinstance(entry, dict):
+        return {
+            "code": entry.get("code", "other"),
+            "field": entry.get("field"),
+            "message": entry.get("message", ""),
+            "hint": entry.get("hint"),
+            "severity": entry.get("severity", "error"),
+        }
+    return {
+        "code": "other",
+        "field": None,
+        "message": str(entry),
+        "hint": None,
+        "severity": "error",
+    }
+
+
 def _json_safe(value: Any) -> Any:
     if isinstance(value, Decimal):
         return str(value)
@@ -134,6 +195,67 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, uuid.UUID):
         return str(value)
     return value
+
+
+@dataclass(slots=True)
+class _ReportRow:
+    """B3-5: одна проблемная строка для отчёта `_write_error_report` — лист и абсолютный номер
+    строки Excel (не порядковый номер среди обработанных), статус и структурированные причины."""
+
+    source_row: int
+    sheet: str
+    cells: list[str]
+    status_label: str
+    issues: list[RowIssue]
+
+
+# B3-5: не больше 50 кодов и 5 примеров номеров строк на код — таблица задачи ограничивает размер
+# `summary`, иначе файл с тысячами однотипных ошибок разрастит JSONB задания без пользы.
+_SUMMARY_MAX_CODES = 50
+_SUMMARY_MAX_EXAMPLES = 5
+
+
+def _bold_row(sheet: Worksheet, labels: list[str], font: Font) -> list[WriteOnlyCell]:
+    """Шапка листа жирным — в `write_only=True` книге ячейку нельзя стилизовать после `append()`,
+    только передать уже оформленный `WriteOnlyCell`."""
+    cells = []
+    for label in labels:
+        cell = WriteOnlyCell(sheet, value=label)
+        cell.font = font
+        cells.append(cell)
+    return cells
+
+
+def _would_bucket(exists: bool, mode: str) -> str:
+    """Что сделает `apply()` со строкой, по режиму и тому, найдена ли уже запись — для `summary.
+    would`. Строки-ошибки сюда не попадают (`apply()` их не трогает)."""
+    if mode == ImportMode.INSERT.value:
+        return "skip" if exists else "create"
+    if mode == ImportMode.UPDATE.value:
+        return "update" if exists else "skip"
+    return "update" if exists else "create"  # upsert
+
+
+def _accumulate_issues(
+    by_issue: dict[str, dict[str, Any]], issues: list[RowIssue], source_row: int
+) -> None:
+    for issue in issues:
+        entry = by_issue.setdefault(
+            issue.code, {"message": issue.message, "rows": 0, "examples": []}
+        )
+        entry["rows"] += 1
+        if len(entry["examples"]) < _SUMMARY_MAX_EXAMPLES:
+            entry["examples"].append(source_row)
+
+
+def _finalize_summary(
+    by_issue: dict[str, dict[str, Any]], would: dict[str, dict[str, int]]
+) -> dict[str, Any]:
+    ranked = sorted(by_issue.items(), key=lambda kv: kv[1]["rows"], reverse=True)
+    return {
+        "by_issue": [{"code": code, **entry} for code, entry in ranked[:_SUMMARY_MAX_CODES]],
+        "would": would,
+    }
 
 
 @dataclass(slots=True)
@@ -515,15 +637,29 @@ class ImportService:
             delete(ImportRowResult).where(ImportRowResult.import_job_id == job.id)
         )
 
-        seen_keys: set[object] = set()
+        seen_keys: dict[object, int] = {}
         ok = warn = error = 0
-        report_rows: list[tuple[list[str], str]] = []
+        report_rows: list[_ReportRow] = []
+        by_issue: dict[str, dict[str, Any]] = {}
+        would: dict[str, dict[str, int]] = {}
         is_license = job.entity_type == ImportEntityType.LICENSE.value
+        source_rows = table.source_rows or list(range(1, len(table.rows) + 1))
+        sheet_names = table.sheet_names or [""] * len(table.rows)
 
         for row_number, row in enumerate(table.rows, start=1):
+            source_row = (
+                source_rows[row_number - 1] if row_number <= len(source_rows) else row_number
+            )
+            sheet_name = sheet_names[row_number - 1] if row_number <= len(sheet_names) else ""
             row_warnings: list[str] = []
-            row_data, field_errors = self._extract_row(row, column_map, fk_lookup, row_warnings)
+            row_issues: list[RowIssue] = []
+            row_data, field_errors = self._extract_row(
+                row, column_map, fk_lookup, row_warnings, row_issues
+            )
             notes: list[str] = [*field_errors, *row_warnings]
+            row_issues += [
+                RowIssue(code="other", severity="warning", message=w) for w in row_warnings
+            ]
             key_value = row_data.get(natural_key)
             # B3-1: для лицензии дедуп внутри файла и поиск «уже существует»
             # идут по составному ключу (см. `license_existing` выше), а не
@@ -541,15 +677,34 @@ class ImportService:
                 ).as_tuple()
                 dedupe_key = license_key_tuple
 
+            existing_id: uuid.UUID | None = None
             if not key_value:
-                notes.append(f"Не удалось определить ключевое поле «{key_spec.label}»")
+                msg = f"Не удалось определить ключевое поле «{key_spec.label}»"
+                notes.append(msg)
+                row_issues.append(
+                    RowIssue(
+                        code="required_empty",
+                        field=natural_key,
+                        message=msg,
+                        hint="Заполните ячейку",
+                    )
+                )
                 status = ImportRowStatus.ERROR.value
             else:
                 status = ImportRowStatus.OK.value
                 if dedupe_key in seen_keys:
-                    notes.append("Дубликат ключа внутри файла")
+                    dup_text = "Дубликат ключа внутри файла"
+                    notes.append(dup_text)
                     status = ImportRowStatus.WARN.value
-                seen_keys.add(dedupe_key)
+                    row_issues.append(
+                        RowIssue(
+                            code="key_duplicate_in_file",
+                            message=dup_text,
+                            hint=f"Строка заменит строку {seen_keys[dedupe_key]}",
+                        )
+                    )
+                else:
+                    seen_keys[dedupe_key] = source_row
 
                 existing_id = (
                     license_existing.get(license_key_tuple)
@@ -557,11 +712,17 @@ class ImportService:
                     else existing_map.get(key_value)
                 )
                 if existing_id is not None and job.mode == ImportMode.INSERT.value:
-                    notes.append("Уже существует — будет пропущена (режим «только создание»)")
+                    msg = "Уже существует — будет пропущена (режим «только создание»)"
+                    notes.append(msg)
                     status = ImportRowStatus.WARN.value
+                    row_issues.append(
+                        RowIssue(code="exists_insert_skip", severity="warning", message=msg)
+                    )
                 elif existing_id is None and job.mode == ImportMode.UPDATE.value:
-                    notes.append("Запись для обновления не найдена")
+                    msg = "Запись для обновления не найдена"
+                    notes.append(msg)
                     status = ImportRowStatus.ERROR.value
+                    row_issues.append(RowIssue(code="update_not_found", message=msg))
 
                 if row_warnings and status == ImportRowStatus.OK.value:
                     status = ImportRowStatus.WARN.value
@@ -579,24 +740,46 @@ class ImportService:
             else:
                 error += 1
 
+            if status != ImportRowStatus.ERROR.value:
+                bucket = _would_bucket(existing_id is not None, job.mode)
+                counts = would.setdefault(bucket, {})
+                counts[job.entity_type] = counts.get(job.entity_type, 0) + 1
+            _accumulate_issues(by_issue, row_issues, source_row)
+
             self._session.add(
                 ImportRowResult(
                     import_job_id=job.id,
                     row_number=row_number,
+                    source_row=source_row,
+                    sheet=sheet_name or None,
                     status=status,
                     row_data=row_data,
-                    errors=notes,
+                    errors=[_issue_dict(i) for i in row_issues],
                 )
             )
             if status != ImportRowStatus.OK.value:
-                report_rows.append((row, "; ".join(notes)))
+                status_label = (
+                    "Ошибка" if status == ImportRowStatus.ERROR.value else "Предупреждение"
+                )
+                report_rows.append(
+                    _ReportRow(
+                        source_row=source_row,
+                        sheet=sheet_name,
+                        cells=row,
+                        status_label=status_label,
+                        issues=row_issues,
+                    )
+                )
 
         await self._session.flush()
 
         job.total_rows = len(table.rows)
         job.ok_rows, job.warn_rows, job.error_rows = ok, warn, error
         job.status = ImportJobStatus.VALIDATED.value
-        job.result_file_id = await self._write_error_report(job, table.headers, report_rows)
+        job.summary = _finalize_summary(by_issue, would)
+        job.result_file_id = await self._write_error_report(
+            job, table.headers, report_rows, job.summary["by_issue"]
+        )
         await self._session.flush()
 
         await self._audit.record(
@@ -608,6 +791,7 @@ class ImportService:
                 "ok_rows": {"old": None, "new": ok},
                 "warn_rows": {"old": None, "new": warn},
                 "error_rows": {"old": None, "new": error},
+                "would_create": {"old": None, "new": would.get("create", {})},
             },
         )
         return job
@@ -706,7 +890,11 @@ class ImportService:
         column_map: list[tuple[int, FieldSpec]],
         fk_lookup: dict[str, dict[str, uuid.UUID]],
         warnings: list[str] | None = None,
+        issues: list[RowIssue] | None = None,
     ) -> tuple[dict[str, Any], list[str]]:
+        """B3-5: `issues`, если передан, получает структурированную версию `errors` (коды из
+        таблицы задачи) — список-строка `errors` не меняется, старые вызывающие продолжают
+        работать как раньше."""
         row_data: dict[str, Any] = {}
         errors: list[str] = []
         full_name: tuple[str | None, str | None, str | None] | None = None
@@ -718,7 +906,22 @@ class ImportService:
                     _model, target_field, _lookup_column = _FK_TARGETS[spec.kind]
                     resolved_id = fk_lookup[spec.kind].get(stripped)
                     if resolved_id is None:
-                        errors.append(f"«{spec.label}»: значение {stripped!r} не найдено")
+                        msg = f"«{spec.label}»: значение {stripped!r} не найдено"
+                        errors.append(msg)
+                        if issues is not None:
+                            is_org = spec.kind == "organization_name"
+                            issues.append(
+                                RowIssue(
+                                    code="org_not_found" if is_org else "fk_not_found",
+                                    field=spec.target,
+                                    message=msg,
+                                    hint=(
+                                        "Проверьте название или добавьте колонку «ИНН вуза»"
+                                        if is_org
+                                        else None
+                                    ),
+                                )
+                            )
                     else:
                         row_data[target_field] = str(resolved_id)
                 elif spec.required:
@@ -727,12 +930,40 @@ class ImportService:
                     # пропускалась. П3 заводит первый обязательный FK
                     # (`organization_name`) — без этой ветки пустое
                     # «Название ВУЗа» проходило бы строку в `ok` без
-                    # `organization_id` и падало бы уже на `apply()`.
-                    errors.append(f"«{spec.label}» — обязательное поле")
+                    # `organization_id» и падало бы уже на `apply()`.
+                    msg = f"«{spec.label}» — обязательное поле"
+                    errors.append(msg)
+                    if issues is not None:
+                        issues.append(
+                            RowIssue(
+                                code="required_empty",
+                                field=spec.target,
+                                message=msg,
+                                hint="Заполните ячейку",
+                            )
+                        )
+                continue
+            if not raw.strip() and spec.required:
+                # Тот же случай, что `validate_field` обработал бы сам (пустое + required), но
+                # перехваченный раньше — чтобы дать код `required_empty`, а не общий
+                # `field_invalid`.
+                msg = f"«{spec.label}» — обязательное поле"
+                errors.append(msg)
+                if issues is not None:
+                    issues.append(
+                        RowIssue(
+                            code="required_empty",
+                            field=spec.target,
+                            message=msg,
+                            hint="Заполните ячейку",
+                        )
+                    )
                 continue
             value, err = validate_field(spec, raw)
             if err:
                 errors.append(err)
+                if issues is not None:
+                    issues.append(_field_error_issue(spec, err))
                 continue
             if value is None:
                 continue
@@ -741,7 +972,12 @@ class ImportService:
                 # «Отчество» сильнее — см. слияние ниже.
                 last, first, middle = split_full_name(value)
                 if not last or not first:
-                    errors.append(f"«{spec.label}»: укажите фамилию и имя")
+                    msg = f"«{spec.label}»: укажите фамилию и имя"
+                    errors.append(msg)
+                    if issues is not None:
+                        issues.append(
+                            RowIssue(code="field_invalid", field=spec.target, message=msg)
+                        )
                 else:
                     full_name = (last, first, middle)
                 continue
@@ -782,28 +1018,55 @@ class ImportService:
     ) -> ImportJob:
         """Проверка типов, строка которых порождает несколько записей (`imports.handlers`)."""
         handler = HANDLERS[job.entity_type]
-        parsed: list[tuple[dict[str, Any], list[str], list[str]]] = []
+        parsed: list[tuple[dict[str, Any], list[str], list[str], list[RowIssue]]] = []
         for row in table.rows:
             warnings: list[str] = []
-            row_data, field_errors = self._extract_row(row, column_map, {}, warnings)
-            parsed.append((row_data, field_errors, warnings))
-        context = await handler.prepare(self._session, [data for data, _e, _w in parsed])
+            field_issues: list[RowIssue] = []
+            row_data, field_errors = self._extract_row(row, column_map, {}, warnings, field_issues)
+            parsed.append((row_data, field_errors, warnings, field_issues))
+        context = await handler.prepare(self._session, [data for data, *_ in parsed])
 
         await self._session.execute(
             delete(ImportRowResult).where(ImportRowResult.import_job_id == job.id)
         )
         seen_keys: set[str] = set()
         ok = warn = error = 0
-        report_rows: list[tuple[list[str], str]] = []
-        for row_number, (row, (row_data, field_errors, warnings)) in enumerate(
+        report_rows: list[_ReportRow] = []
+        by_issue: dict[str, dict[str, Any]] = {}
+        would: dict[str, dict[str, int]] = {}
+        source_rows = table.source_rows or list(range(1, len(table.rows) + 1))
+        sheet_names = table.sheet_names or [""] * len(table.rows)
+
+        for row_number, (row, (row_data, field_errors, warnings, field_issues)) in enumerate(
             zip(table.rows, parsed, strict=True), start=1
         ):
+            source_row = (
+                source_rows[row_number - 1] if row_number <= len(source_rows) else row_number
+            )
+            sheet_name = sheet_names[row_number - 1] if row_number <= len(sheet_names) else ""
             check: RowCheck = handler.check_row(row_data, context, job.mode)
             errors = [*field_errors, *check.errors]
             notes = [*warnings, *check.warnings]
+            row_issues = [*field_issues, *check.issues]
+            # Предупреждения `_extract_row` (неизвестный способ связи и т.п.) — без своего кода.
+            row_issues += [RowIssue(code="other", severity="warning", message=w) for w in warnings]
+            # Старые обработчики (`VendorContactHandler`/`PaymentHandler`/`LearnerHandler`) пишут
+            # прямо в `check.errors`/`.warnings`, минуя `add_issue` — то, что уже пришло через
+            # `check.issues` (формула текста у `add_issue` та же, что у `issue_text`), не дублируем.
+            known_texts = {issue_text(_issue_dict(i)) for i in check.issues}
+            row_issues += [
+                RowIssue(code="other", message=e) for e in check.errors if e not in known_texts
+            ]
+            row_issues += [
+                RowIssue(code="other", severity="warning", message=w)
+                for w in check.warnings
+                if w not in known_texts
+            ]
             if handler.dedupe_in_file and check.key:
                 if check.key in seen_keys:
-                    notes.append("Повтор внутри файла — применится после предыдущей строки")
+                    dup_text = "Повтор внутри файла — применится после предыдущей строки"
+                    notes.append(dup_text)
+                    row_issues.append(RowIssue(code="key_duplicate_in_file", message=dup_text))
                 seen_keys.add(check.key)
 
             if errors:
@@ -816,24 +1079,46 @@ class ImportService:
                 status = ImportRowStatus.OK.value
                 ok += 1
 
+            if status != ImportRowStatus.ERROR.value:
+                bucket = _would_bucket(check.exists, job.mode)
+                counts = would.setdefault(bucket, {})
+                counts[job.entity_type] = counts.get(job.entity_type, 0) + 1
+            _accumulate_issues(by_issue, row_issues, source_row)
+
             self._session.add(
                 ImportRowResult(
                     import_job_id=job.id,
                     row_number=row_number,
+                    source_row=source_row,
+                    sheet=sheet_name or None,
                     status=status,
                     row_data=row_data,
-                    errors=[*errors, *notes],
+                    errors=[_issue_dict(i) for i in row_issues],
                 )
             )
             if status != ImportRowStatus.OK.value:
-                report_rows.append((row, "; ".join([*errors, *notes])))
+                status_label = (
+                    "Ошибка" if status == ImportRowStatus.ERROR.value else "Предупреждение"
+                )
+                report_rows.append(
+                    _ReportRow(
+                        source_row=source_row,
+                        sheet=sheet_name,
+                        cells=row,
+                        status_label=status_label,
+                        issues=row_issues,
+                    )
+                )
         await self._session.flush()
 
         job.total_rows = len(table.rows)
         job.processed_rows = 0
         job.ok_rows, job.warn_rows, job.error_rows = ok, warn, error
         job.status = ImportJobStatus.VALIDATED.value
-        job.result_file_id = await self._write_error_report(job, table.headers, report_rows)
+        job.summary = _finalize_summary(by_issue, would)
+        job.result_file_id = await self._write_error_report(
+            job, table.headers, report_rows, job.summary["by_issue"]
+        )
         await self._session.flush()
         await self._audit.record(
             AuditAction.IMPORT_VALIDATED,
@@ -844,6 +1129,7 @@ class ImportService:
                 "ok_rows": {"old": None, "new": ok},
                 "warn_rows": {"old": None, "new": warn},
                 "error_rows": {"old": None, "new": error},
+                "would_create": {"old": None, "new": would.get("create", {})},
             },
         )
         return job
@@ -871,17 +1157,63 @@ class ImportService:
         row_data["_registry_status"] = entry.status
 
     async def _write_error_report(
-        self, job: ImportJob, headers: list[str], report_rows: list[tuple[list[str], str]]
+        self,
+        job: ImportJob,
+        headers: list[str],
+        report_rows: list[_ReportRow],
+        by_issue: list[dict[str, Any]],
     ) -> uuid.UUID | None:
+        """B3-5: лист «Ошибки» — лист книги и АБСОЛЮТНЫЙ номер строки Excel (не порядковый среди
+        обработанных), статус, «что не так» и «что сделать» по-русски, затем исходные колонки;
+        лист «Сводка» — то же, что в `job.summary['by_issue']`, но в файле, который можно
+        посмотреть без API. Шапка жирная, первая строка закреплена, автофильтр; формулы
+        обезврежены (`sanitize_formula`, раздел 4.12)."""
         if not report_rows:
             return None
 
+        bold = Font(bold=True)
         buffer = io.BytesIO()
         workbook = openpyxl.Workbook(write_only=True)
-        sheet = workbook.create_sheet("Ошибки импорта")
-        sheet.append([*headers, "Причина ошибки"])
-        for row, reason in report_rows:
-            sheet.append([sanitize_formula(cell) for cell in row] + [reason])
+
+        errors_sheet = workbook.create_sheet("Ошибки")
+        header_labels = ["Лист", "Строка в файле", "Статус", "Что не так", "Что сделать", *headers]
+        errors_sheet.append(_bold_row(errors_sheet, header_labels, bold))
+        for report_row in report_rows:
+            what = "; ".join(i.message for i in report_row.issues) or report_row.status_label
+            how = "; ".join(i.hint for i in report_row.issues if i.hint)
+            errors_sheet.append(
+                [
+                    report_row.sheet or "",
+                    report_row.source_row,
+                    report_row.status_label,
+                    what,
+                    how,
+                    *[sanitize_formula(cell) for cell in report_row.cells],
+                ]
+            )
+        errors_sheet.freeze_panes = "A2"
+        errors_sheet.auto_filter.ref = f"A1:{get_column_letter(len(header_labels))}1"
+        for idx, label in enumerate(header_labels, start=1):
+            errors_sheet.column_dimensions[get_column_letter(idx)].width = max(
+                12, min(40, len(label) + 6)
+            )
+
+        summary_sheet = workbook.create_sheet("Сводка")
+        summary_sheet.append(
+            _bold_row(summary_sheet, ["Код", "Сообщение", "Строк", "Примеры"], bold)
+        )
+        for entry in by_issue:
+            summary_sheet.append(
+                [
+                    entry["code"],
+                    entry["message"],
+                    entry["rows"],
+                    ", ".join(str(n) for n in entry["examples"]),
+                ]
+            )
+        for idx, width in enumerate((16, 48, 8, 24), start=1):
+            summary_sheet.column_dimensions[get_column_letter(idx)].width = width
+
         workbook.save(buffer)
         content = buffer.getvalue()
 
@@ -1409,6 +1741,40 @@ class ImportService:
         row.entity_id = existing.id
         row.before_snapshot = before or {}
 
+    async def _tally_applied(self, job: ImportJob) -> dict[str, dict[str, int]]:
+        """B3-5: факт после применения — сколько строк создали, обновили и пропустили. Для
+        типов без обработчика `before_snapshot is None` отличает создание от обновления
+        (`_apply_organization_row` и соседи пишут `None` только при создании); для типов с
+        обработчиком `before_snapshot` всегда `None` (`_record_outcome`), поэтому там смотрим на
+        `op` в `effects` — эффект с тем же `id`, что и `entity_id` строки."""
+        rows = (
+            await self._session.execute(
+                select(
+                    ImportRowResult.status,
+                    ImportRowResult.entity_id,
+                    ImportRowResult.before_snapshot,
+                    ImportRowResult.effects,
+                ).where(ImportRowResult.import_job_id == job.id)
+            )
+        ).all()
+        created = updated = skipped = 0
+        for status, entity_id, before_snapshot, effects in rows:
+            if status == ImportRowStatus.SKIPPED.value:
+                skipped += 1
+                continue
+            if entity_id is None:
+                continue
+            own_op = next(
+                (e.get("op") for e in effects or [] if e.get("id") == str(entity_id)), None
+            )
+            is_update = before_snapshot is not None or own_op == "update"
+            if is_update:
+                updated += 1
+            else:
+                created += 1
+        key = job.entity_type
+        return {"create": {key: created}, "update": {key: updated}, "skip": {key: skipped}}
+
     async def finalize_apply_if_done(self, job: ImportJob) -> bool:
         """Возвращает `True`, если задание больше не в статусе `applying`."""
         remaining = await self._session.scalar(
@@ -1428,6 +1794,9 @@ class ImportService:
         )
         job.finished_at = dt.datetime.now(dt.UTC)
         job.rollback_available = True
+        # B3-5: `summary.applied` — факт после применения, рядом с `would` (что было ПРЕДСКАЗАНО
+        # на dry-run); `job.summary` может быть `None` у задания, провалидированного до B3-5.
+        job.summary = {**(job.summary or {}), "applied": await self._tally_applied(job)}
         await self._session.flush()
         if job.started_at is not None:
             import_duration_seconds.labels(entity_type=job.entity_type, phase="apply").observe(

@@ -225,11 +225,17 @@ async def load_contacts(session: AsyncSession, rows: list[dict[str, Any]]) -> Co
 
 def _apply_mode_to_check(check: RowCheck, mode: str, what: str) -> None:
     if check.exists and mode == ImportMode.INSERT.value:
-        check.warnings.append(
-            f"{what} уже существует — строка будет пропущена (режим «только создание»)"
+        check.add_issue(
+            RowIssue(
+                code="exists_insert_skip",
+                severity="warning",
+                message=f"{what} уже существует — строка будет пропущена (режим «только создание»)",
+            )
         )
     elif not check.exists and mode == ImportMode.UPDATE.value:
-        check.errors.append(f"{what} для обновления не найден")
+        check.add_issue(
+            RowIssue(code="update_not_found", message=f"{what} для обновления не найден")
+        )
 
 
 # ---------------------------------------------------------------------------
