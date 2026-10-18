@@ -674,23 +674,37 @@ _TEXT_TYPES = {"VARCHAR", "TEXT", "JSONB", "JSON", "INET"}
 
 
 def _orm_pii_pattern_columns() -> set[tuple[str, str]]:
-    os.environ.setdefault("APP_PROFILE", "dev")
+    # `setdefault` только заполняет Settings для импорта `app.db.models` — не должно утекать в
+    # окружение процесса для тестов, собранных после этого (test_config_prod_guard.py и соседи
+    # строят Settings(_env_file=None, ...) и ждут чистое окружение).
+    added_keys: list[str] = []
+
+    def _setdefault(key: str, value: str) -> None:
+        if key not in os.environ:
+            os.environ[key] = value
+            added_keys.append(key)
+
+    _setdefault("APP_PROFILE", "dev")
     for raw in (ROOT / ".env.example").read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip())
+        _setdefault(key.strip(), value.strip())
 
-    from app.db.models import target_metadata
+    try:
+        from app.db.models import target_metadata
 
-    found: set[tuple[str, str]] = set()
-    for table_name, table in target_metadata.tables.items():
-        for column in table.columns:
-            type_name = str(column.type).split("(")[0]
-            if _PII_NAME_PATTERN.search(column.name) and type_name in _TEXT_TYPES:
-                found.add((table_name, column.name))
-    return found
+        found: set[tuple[str, str]] = set()
+        for table_name, table in target_metadata.tables.items():
+            for column in table.columns:
+                type_name = str(column.type).split("(")[0]
+                if _PII_NAME_PATTERN.search(column.name) and type_name in _TEXT_TYPES:
+                    found.add((table_name, column.name))
+        return found
+    finally:
+        for key in added_keys:
+            del os.environ[key]
 
 
 class TestColumnCoverageGuard:
