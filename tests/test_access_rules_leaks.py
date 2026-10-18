@@ -253,6 +253,16 @@ class TestOrganizationBasedRestriction:
         response = client.get(f"/api/contacts/{scene['contact_b']}")
         assert response.status_code == 404, response.text
 
+    def test_contact_channels_is_not_found(self, client, scene) -> None:
+        # `/contacts/{id}/channels` (B4-9) идёт через тот же `ContactService.get_or_404`, что и
+        # карточка контакта, но отдаёт отдельные данные (маскированные каналы связи) — чужой
+        # контакт не должен выдавать их даже по прямой ссылке.
+        response = client.get(f"/api/contacts/{scene['contact_b']}/channels")
+        assert response.status_code == 404, response.text
+
+        allowed = client.get(f"/api/contacts/{scene['contact_a']}/channels")
+        assert allowed.status_code == 200, allowed.text
+
     def test_task_list_hides_the_forbidden_task(self, client, scene) -> None:
         response = client.get("/api/tasks")
         assert response.status_code == 200, response.text
@@ -331,6 +341,7 @@ class TestRouteCoverage:
         "/organizations/check-duplicate",
         "/contacts",
         "/contacts/{contact_id}",
+        "/contacts/{contact_id}/channels",
         "/tasks",
         "/attachments",
     }
