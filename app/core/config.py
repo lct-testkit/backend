@@ -112,6 +112,16 @@ class Settings(BaseSettings):
     # B6-5: карантин заражённых объектов — download_url никогда не выдаётся на этот бакет
     # (требует status=ready, а карантинная запись files удаляется из активных).
     s3_bucket_quarantine: str = "quarantine"
+    # B6-11: true в dev/demo (бакеты создаёт сам API на лету, как раньше — удобно для
+    # быстрого подъёма стенда), false в prod (бакеты заводит init-job инфраструктуры заранее;
+    # у `crm-api` тогда можно снять право Admin в политике S3 — `ensure_bucket` в этом режиме
+    # только проверяет `head_bucket` и честно падает, если бакета нет, а не создаёт его).
+    s3_auto_create_buckets: bool = True
+    # Необязательные отдельные ключи для бакета `signatures`: если заданы, обращения к нему
+    # идут через свой клиент (identity `crm-signatures-writer`, а не общий `crm-api` с правами
+    # на все бакеты) — `core/storage._client_for`. `None` — как раньше, общий клиент на все.
+    s3_signatures_access_key: SecretStr | None = None
+    s3_signatures_secret_key: SecretStr | None = None
 
     # --- Сессии и токены -------------------------------------------------
     session_ttl: int = 43200
@@ -204,6 +214,14 @@ class Settings(BaseSettings):
     retention_pending_upload_hours: int = 24
     retention_deleted_files_days: int = 30
     retention_notifications_days: int = 180
+
+    # --- Инциденты безопасности (B6-12, 152-ФЗ ст. 21 ч. 3.1) -------------
+    # Сроки уведомления Роскомнадзора от момента подтверждения (`confirm`), не от момента
+    # обнаружения кандидата — решение "это инцидент" принимает человек.
+    incident_rkn_24_hours: int = 24
+    incident_rkn_72_hours: int = 72
+    # Как часто сканер `sweep_incident_deadlines` проверяет приближающиеся/просроченные сроки.
+    incident_sweep_interval_minutes: int = 15
 
     # --- Импорт ----------------------------------------------------------
     # new_spec §4.12, фаза 2: «лимит 50 МБ / 100 000 строк» — 5 000 строк
@@ -431,6 +449,10 @@ class Settings(BaseSettings):
             secrets["KEYCLOAK_ADMIN_CLIENT_SECRET"] = (
                 self.keycloak_admin_client_secret.get_secret_value()
             )
+        if self.s3_signatures_access_key is not None:
+            secrets["S3_SIGNATURES_ACCESS_KEY"] = self.s3_signatures_access_key.get_secret_value()
+        if self.s3_signatures_secret_key is not None:
+            secrets["S3_SIGNATURES_SECRET_KEY"] = self.s3_signatures_secret_key.get_secret_value()
         # Пароль роли приложения сидит и в строках подключения: проверялся только отдельный
         # CRM_APP_PASSWORD, и демо-пароль в DATABASE_URL проходил. KC_DATABASE_URL и
         # MIGRATIONS_DATABASE_URL — та же роль суперпользователя в других строках подключения.

@@ -528,6 +528,20 @@ class IdentityService:
             severity=severity.value,
             user_id=str(user_id) if user_id else None,
         )
+        # B6-12: кандидат в реестр инцидентов — внутри SAVEPOINT. Срыв здесь (например,
+        # недоступный Redis для уведомления ADMIN) не должен откатить запись самого события,
+        # которая важнее черновика кандидата.
+        from app.modules.identity.incident_service import (
+            INCIDENT_CANDIDATE_TRIGGERS,
+            IncidentService,
+        )
+
+        if event_type.value in INCIDENT_CANDIDATE_TRIGGERS:
+            try:
+                async with self._session.begin_nested():
+                    await IncidentService(self._session).suggest(event)
+            except Exception:  # noqa: BLE001 — лучше без кандидата, чем без самого события
+                logger.exception("incident_candidate_failed", event_id=str(event.id))
         return event
 
     def security_events_query(self, filters: SecurityEventFilters) -> Select[tuple[SecurityEvent]]:

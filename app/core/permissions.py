@@ -134,6 +134,10 @@ class Permission(StrEnum):
     # B4-5: ограничения видимости по вузам/направлениям — только ADMIN (матрица прав);
     # цель ограничения сама не управляет своими же ограничениями.
     ACCESS_SCOPE_MANAGE = "access_scope:manage"
+    # B6-12: реестр инцидентов (152-ФЗ ст. 21 ч. 3.1, сроки РКН 24/72 ч) — ADMIN ведёт,
+    # AUDITOR читает (разделение обязанностей, тот же приём, что у журнала аудита).
+    INCIDENT_MANAGE = "incident:manage"
+    INCIDENT_READ = "incident:read"
 
 
 # KAM — менеджер по вузам: только свои сделки и связанные с ними сущности.
@@ -195,6 +199,7 @@ _AUDITOR: frozenset[Permission] = frozenset(
         Permission.SIGNATURE_READ,
         Permission.SECURITY_EVENT_READ,
         Permission.COMMENT_AUDIT_READ,
+        Permission.INCIDENT_READ,
     }
 )
 

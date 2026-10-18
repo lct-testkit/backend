@@ -15,8 +15,10 @@
     "en"
   ],
   "accessTokenLifespan": 300,
-  "ssoSessionIdleTimeout": 3600,
+  "ssoSessionIdleTimeout": 1800,
   "ssoSessionMaxLifespan": 43200,
+  "revokeRefreshToken": true,
+  "refreshTokenMaxReuse": 0,
   "bruteForceProtected": true,
   "permanentLockout": false,
   "maxFailureWaitSeconds": 900,

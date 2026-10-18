@@ -66,6 +66,12 @@ def key_jwks() -> str:
     return "cache:jwks"
 
 
+def key_security_posture() -> str:
+    # B6-11: ответы Keycloak (`realm_posture`/`has_otp`) кэшируются на 60 с — панель не
+    # должна бить по Admin API Keycloak на каждое открытие.
+    return "cache:security_posture"
+
+
 # --- TTL по разделу 16 ---------------------------------------------------
 
 TTL_DEAL_CARD = 600

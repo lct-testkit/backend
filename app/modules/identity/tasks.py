@@ -186,3 +186,114 @@ async def sweep_keycloak_events(ctx: dict[str, Any]) -> dict[str, Any]:
             locked=result.locked,
         )
     return {"fetched": result.fetched, "batches": result.batches, "locked": result.locked}
+
+
+# B6-12: пороги напоминаний о сроке РКН (часов до дедлайна); `0` — уже просрочен.
+_INCIDENT_ALERT_THRESHOLDS_HOURS = (6, 1, 0)
+
+
+@track_task
+async def sweep_incident_deadlines(ctx: dict[str, Any]) -> dict[str, int]:
+    """B6-12: напоминания о приближающемся/пропущенном сроке уведомления РКН (24/72 ч).
+
+    Каждый порог (`_INCIDENT_ALERT_THRESHOLDS_HOURS`) отправляется не больше одного раза на
+    инцидент и стадию — отметка в `deadline_alerts_sent` (JSONB-список строк вида
+    `"24h:6h"`/`"24h:overdue"`). Просрочка дополнительно пишет аудит один раз — по тому же
+    отметке-флагу, не по отдельному запросу "писали уже или нет"."""
+    from app.modules.audit.actions import AuditAction
+    from app.modules.audit.service import AuditService
+    from app.modules.identity.incident_service import TPL_SECURITY_INCIDENT_DEADLINE
+    from app.modules.identity.models import IncidentStatus, Role, SecurityIncident
+    from app.modules.notification.service import NotificationPriority, get_notification_service
+
+    now = dt.datetime.now(dt.UTC)
+    async with session_scope() as session:
+        due_ids = list(
+            (
+                await session.execute(
+                    select(SecurityIncident.id).where(
+                        SecurityIncident.status.in_(
+                            [IncidentStatus.OPEN.value, IncidentStatus.RKN_24_SENT.value]
+                        )
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    notified = overdue_count = failed = 0
+    for incident_id in due_ids:
+        try:
+            async with session_scope() as session:
+                incident = await session.get(SecurityIncident, incident_id)
+                if incident is None:
+                    continue
+                stage, due_at = (
+                    ("24h", incident.rkn_24_due_at)
+                    if incident.status == IncidentStatus.OPEN.value
+                    else ("72h", incident.rkn_72_due_at)
+                )
+                if due_at is None:
+                    continue
+                hours_left = (due_at - now).total_seconds() / 3600
+                alerts_sent = set(incident.deadline_alerts_sent or [])
+                for threshold in _INCIDENT_ALERT_THRESHOLDS_HOURS:
+                    marker = f"{stage}:{'overdue' if threshold == 0 else f'{threshold}h'}"
+                    if marker in alerts_sent:
+                        continue
+                    crossed = hours_left <= 0 if threshold == 0 else 0 < hours_left <= threshold
+                    if not crossed:
+                        continue
+                    overdue = threshold == 0
+                    recipients = set(
+                        (
+                            await session.execute(
+                                select(User.id).where(
+                                    User.role == Role.ADMIN.value,
+                                    User.status == UserStatus.ACTIVE.value,
+                                    User.deleted_at.is_(None),
+                                )
+                            )
+                        ).scalars()
+                    )
+                    if incident.responsible_user_id:
+                        recipients.add(incident.responsible_user_id)
+                    for recipient_id in recipients:
+                        await get_notification_service().notify_user(
+                            session,
+                            recipient_id=recipient_id,
+                            template_code=TPL_SECURITY_INCIDENT_DEADLINE,
+                            payload={
+                                "number": incident.number,
+                                "stage": stage,
+                                "overdue": overdue,
+                                "due_at": due_at.isoformat(),
+                            },
+                            priority=NotificationPriority.HIGH,
+                            entity_type="security_incident",
+                            entity_id=incident.id,
+                        )
+                    alerts_sent.add(marker)
+                    incident.deadline_alerts_sent = sorted(alerts_sent)
+                    notified += 1
+                    if overdue:
+                        overdue_count += 1
+                        await AuditService(session).record(
+                            AuditAction.INCIDENT_DEADLINE_OVERDUE,
+                            entity_type="security_incident",
+                            entity_id=incident.id,
+                            changes={"stage": {"old": None, "new": stage}},
+                        )
+                    # Только один порог за тик на инцидент/стадию — следующий тик (15 мин)
+                    # заметит следующий порог, если он тоже уже прошёл.
+                    break
+        except Exception:  # noqa: BLE001 — один проблемный инцидент не должен ронять сборщик
+            failed += 1
+            logger.exception("incident_deadline_sweep_failed", incident_id=str(incident_id))
+
+    if notified or failed:
+        logger.info(
+            "incident_deadlines_swept", notified=notified, overdue=overdue_count, failed=failed
+        )
+    return {"notified": notified, "overdue": overdue_count, "failed": failed}

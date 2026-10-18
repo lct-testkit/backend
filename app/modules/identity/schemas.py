@@ -652,3 +652,109 @@ class ApprovalDecision(BaseModel):
 
 ROLE_VALUES = tuple(role.value for role in Role)
 STATUS_VALUES = tuple(status.value for status in UserStatus)
+
+
+# --- Инциденты безопасности (B6-12) ----------------------------------------
+
+IncidentStatusLiteral = Literal[
+    "candidate", "open", "rkn_24_sent", "rkn_72_sent", "closed", "dismissed"
+]
+IncidentStageLiteral = Literal["24h", "72h"]
+
+
+class IncidentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    number: str
+    title: str
+    status: str
+    severity: str
+    detected_at: dt.datetime | None = None
+    source: str
+    event_ids: list[str] | None = None
+    description: str | None = None
+    data_categories: list[str] | None = None
+    subjects_estimate: int | None = None
+    causes: str | None = None
+    harm: str | None = None
+    measures: str | None = None
+    responsible_user_id: uuid.UUID | None = None
+    rkn_24_due_at: dt.datetime | None = None
+    rkn_72_due_at: dt.datetime | None = None
+    rkn_24_sent_at: dt.datetime | None = None
+    rkn_24_reference: str | None = None
+    rkn_72_sent_at: dt.datetime | None = None
+    rkn_72_reference: str | None = None
+    subjects_notified_at: dt.datetime | None = None
+    investigation_summary: str | None = None
+    created_at: dt.datetime
+    updated_at: dt.datetime
+    version: int
+
+
+class IncidentListResponse(BaseModel):
+    items: list[IncidentOut]
+    next_cursor: str | None = None
+
+
+class IncidentCreateRequest(BaseModel):
+    """Ручное создание инцидента (минуя автоматический кандидат по событию)."""
+
+    title: NonEmptyStr = Field(max_length=255)
+    severity: Literal["info", "warning", "critical"] = "warning"
+    description: str | None = Field(default=None, max_length=5000)
+    data_categories: list[str] = Field(default_factory=list, max_length=50)
+    subjects_estimate: int | None = Field(default=None, ge=0)
+
+
+class IncidentConfirmRequest(BaseModel):
+    """Кандидат → `open`: отсюда начинается отсчёт сроков РКН (24 и 72 ч)."""
+
+    detected_at: dt.datetime
+    data_categories: list[str] = Field(default_factory=list, max_length=50)
+    subjects_estimate: int | None = Field(default=None, ge=0)
+    causes: str | None = Field(default=None, max_length=5000)
+    harm: str | None = Field(default=None, max_length=5000)
+    measures: str | None = Field(default=None, max_length=5000)
+    responsible_user_id: uuid.UUID | None = None
+
+
+class IncidentPatchRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=255)
+    severity: Literal["info", "warning", "critical"] | None = None
+    description: str | None = Field(default=None, max_length=5000)
+    data_categories: list[str] | None = Field(default=None, max_length=50)
+    subjects_estimate: int | None = Field(default=None, ge=0)
+    causes: str | None = Field(default=None, max_length=5000)
+    harm: str | None = Field(default=None, max_length=5000)
+    measures: str | None = Field(default=None, max_length=5000)
+    responsible_user_id: uuid.UUID | None = None
+    investigation_summary: str | None = Field(default=None, max_length=5000)
+
+    @model_validator(mode="after")
+    def _not_empty(self) -> IncidentPatchRequest:
+        if not self.model_fields_set:
+            raise ValueError("Тело запроса не содержит изменяемых полей")
+        return self
+
+
+class IncidentRknNoticeOut(BaseModel):
+    stage: IncidentStageLiteral
+    due_at: dt.datetime | None = None
+    file_id: uuid.UUID
+    fields: dict[str, Any]
+
+
+class IncidentMarkSentRequest(BaseModel):
+    reference: NonEmptyStr = Field(max_length=255)
+    sent_at: dt.datetime | None = None
+
+
+class IncidentSubjectsNoticeOut(BaseModel):
+    file_id: uuid.UUID
+    subjects_notified_at: dt.datetime
+
+
+class IncidentCloseRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)

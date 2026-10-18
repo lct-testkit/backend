@@ -34,6 +34,36 @@ def _keycloak_error_text(response: httpx.Response) -> str | None:
     return str(text)[:300] if text else None
 
 
+class TokenRefreshError(AppError):
+    """B6-11: отказ Keycloak на `grant_type=refresh_token` — несёт `error`/`error_description`
+    из тела ответа, а не общую фразу «не удалось обновить токен». Без них reuse-detection
+    (`revokeRefreshToken`/`refreshTokenMaxReuse` в realm: повторное использование уже
+    обменянного refresh-токена) не отличить от обычного истечения — а это разные события:
+    первое подозрительно (`SecurityEventType.SESSION_HIJACK_SUSPECT`), второе рутинно."""
+
+    def __init__(
+        self, *, keycloak_error: str | None, keycloak_error_description: str | None
+    ) -> None:
+        super().__init__(
+            ErrorCode.UNAUTHENTICATED,
+            "Не удалось обновить токен",
+            extra={
+                "keycloak_error": keycloak_error,
+                "keycloak_error_description": keycloak_error_description,
+            },
+        )
+        self.keycloak_error = keycloak_error
+        self.keycloak_error_description = keycloak_error_description
+
+    @property
+    def is_reuse(self) -> bool:
+        """Keycloak сообщает о повторном использовании разными текстами по версиям —
+        `error_description` вида `Stale token`/`Token reuse detected` при включённом
+        `revokeRefreshToken`; сверено только по тексту, не по отдельному полю (его нет)."""
+        text = f"{self.keycloak_error or ''} {self.keycloak_error_description or ''}".lower()
+        return "reuse" in text or "stale" in text
+
+
 @dataclass(slots=True)
 class TokenResponse:
     access_token: str
@@ -78,7 +108,9 @@ class KeycloakClient:
             "client_id": settings.keycloak_client_id,
             "client_secret": settings.keycloak_client_secret.get_secret_value(),
         }
-        return await self._token_request(data, failure="Не удалось обновить токен")
+        return await self._token_request(
+            data, failure="Не удалось обновить токен", capture_keycloak_error=True
+        )
 
     async def password_grant(self, *, username: str, password: str) -> TokenResponse:
         """Проверка текущего пароля при добровольной смене (POST /api/me/password).
@@ -97,7 +129,9 @@ class KeycloakClient:
         }
         return await self._token_request(data, failure="Текущий пароль неверен")
 
-    async def _token_request(self, data: dict[str, str], *, failure: str) -> TokenResponse:
+    async def _token_request(
+        self, data: dict[str, str], *, failure: str, capture_keycloak_error: bool = False
+    ) -> TokenResponse:
         settings = get_settings()
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
@@ -108,6 +142,20 @@ class KeycloakClient:
         if response.status_code != 200:
             # Тело ответа Keycloak может содержать имя пользователя — в лог не пишем.
             logger.warning("keycloak_token_failed", status=response.status_code)
+            if capture_keycloak_error:
+                # B6-11: `error`/`error_description` сами по себе не содержат ПДн (это код
+                # ошибки OAuth2, не тело пользователя) — в отличие от прочего тела ответа,
+                # их можно нести дальше вызывающему коду для reuse-detection.
+                try:
+                    body = response.json()
+                except ValueError:
+                    body = {}
+                raise TokenRefreshError(
+                    keycloak_error=body.get("error") if isinstance(body, dict) else None,
+                    keycloak_error_description=(
+                        body.get("error_description") if isinstance(body, dict) else None
+                    ),
+                )
             raise AppError(ErrorCode.UNAUTHENTICATED, failure)
         payload = response.json()
         return TokenResponse(
@@ -441,6 +489,37 @@ class KeycloakClient:
         if response.status_code == 404:
             return None
         response.raise_for_status()
+        found = response.json()
+        return found if isinstance(found, dict) else None
+
+    # --- Посадочная панель безопасности (B6-11) -----------------------------
+
+    async def has_otp(self, keycloak_id: str) -> bool:
+        """`GET /users/{id}/credentials` — хотя бы один credential типа `otp` настроен.
+
+        Список "кто повышен до ADMIN/HEAD, но так и не настроил TOTP" (`admins_without_totp`
+        в `GET /api/admin/security/posture`) строится по этому признаку, не по
+        `requiredActions`: последнее значит «обязан настроить», а не «настроил»."""
+        response = await self.admin_request("GET", f"/users/{keycloak_id}/credentials")
+        if response.status_code == 404:
+            return False
+        response.raise_for_status()
+        found = response.json()
+        if not isinstance(found, list):
+            return False
+        return any(isinstance(item, dict) and item.get("type") == "otp" for item in found)
+
+    async def realm_posture(self) -> dict[str, Any] | None:
+        """`GET /admin/realms/{realm}` — состояние политики realm для панели (brute force,
+        ротация refresh, события, требование TLS). `None`, если Keycloak недоступен целиком:
+        панель должна показать «неизвестно», а не поднять 500 на пользователя, который просто
+        хотел увидеть состояние защиты."""
+        try:
+            response = await self.admin_request("GET", "")
+        except Exception:  # noqa: BLE001 — Keycloak может быть недоступен целиком
+            return None
+        if response.status_code != 200:
+            return None
         found = response.json()
         return found if isinstance(found, dict) else None
 

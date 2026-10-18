@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import hashlib
 import json
@@ -31,6 +32,7 @@ from app.core.dependents import restrict_dependents
 from app.core.errors import AppError, ErrorCode, FieldError, NotFoundError, VersionConflictError
 from app.core.masking import mask_email
 from app.core.optimistic import claim_version
+from app.core.redis_client import key_security_posture, require_redis
 from app.core.security import Principal
 from app.modules.admin.models import AdminApproval
 from app.modules.audit.actions import AuditAction
@@ -546,6 +548,15 @@ class AdminUserService:
                 await keycloak_client.set_realm_role(
                     user.keycloak_id, role=new_role, known_roles=ROLE_NAMES
                 )
+                if new_role in (Role.ADMIN.value, Role.HEAD.value):
+                    # B6-11: при заведении это требование ставит `create_user`; повышение
+                    # существующей учётки до того же уровня раньше его не добавляло — учётка
+                    # KAM, повышенная до HEAD, оставалась без обязательного TOTP. Понижение
+                    # обратно это требование не снимает (осознанно: уже настроенный TOTP не
+                    # повод для каждого нового повышения проходить настройку заново).
+                    await keycloak_client.update_required_actions(
+                        user.keycloak_id, add=[TOTP_ACTION]
+                    )
             await self._identity.bump_perm_epoch(user)
             if user.keycloak_id:
                 await keycloak_client.set_attribute(user.keycloak_id, "perm_epoch", user.perm_epoch)
@@ -1099,6 +1110,99 @@ class AdminUserService:
                 }
             )
         return blockers
+
+
+# --- Посадочная панель безопасности (B6-11) -------------------------------
+
+_POSTURE_CACHE_TTL_SECONDS = 60
+
+
+async def get_security_posture(session: AsyncSession) -> dict[str, Any]:
+    """`GET /admin/security/posture`: три утверждения сопроводительной документации не
+    подтверждались кодом (TOTP для привилегированных, ротация refresh, политика S3) —
+    здесь честное фактическое состояние вместо текста README. Ответы Keycloak
+    (`has_otp`/`realm_posture`) кэшируются в Redis на минуту: панель не должна бить по
+    Admin API на каждое открытие."""
+    try:
+        redis = await require_redis()
+        cached = await redis.get(key_security_posture())
+        if cached:
+            return json.loads(cached)
+    except Exception:  # noqa: BLE001 — кэш — оптимизация, не обязательное условие ответа
+        redis = None
+
+    settings = get_settings()
+    admins_and_heads = (
+        (
+            await session.execute(
+                select(User).where(
+                    User.role.in_((Role.ADMIN.value, Role.HEAD.value)),
+                    User.status == UserStatus.ACTIVE.value,
+                    User.deleted_at.is_(None),
+                    User.keycloak_id.is_not(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    otp_flags = await asyncio.gather(
+        *(keycloak_client.has_otp(user.keycloak_id) for user in admins_and_heads),  # type: ignore[arg-type]
+        return_exceptions=True,
+    )
+    admins_without_totp = [
+        {
+            "user_id": str(user.id),
+            "email_masked": mask_email(user.email) if user.email else None,
+            "role": user.role,
+        }
+        for user, has_otp in zip(admins_and_heads, otp_flags, strict=True)
+        if has_otp is False  # True -> настроен; Exception -> Keycloak недоступен, не считаем
+    ]
+
+    from app.modules.files.service import get_antivirus_scanner
+
+    antivirus_reachable: bool | None = None
+    if settings.clamav_enabled:
+        ping = getattr(get_antivirus_scanner(), "ping", None)
+        if callable(ping):
+            try:
+                antivirus_reachable = await ping()
+            except Exception:  # noqa: BLE001 — недоступность — это и есть ответ
+                antivirus_reachable = False
+
+    realm = await keycloak_client.realm_posture()
+    realm_out = (
+        {
+            "brute_force_protected": realm.get("bruteForceProtected"),
+            "revoke_refresh_token": realm.get("revokeRefreshToken"),
+            "events_enabled": realm.get("eventsEnabled"),
+            "ssl_required": realm.get("sslRequired"),
+        }
+        if realm is not None
+        else None
+    )
+
+    posture = {
+        "admins_without_totp": admins_without_totp,
+        "bearer_auth_mode": settings.bearer_auth_mode,
+        "antivirus": {
+            "enabled": settings.clamav_enabled,
+            "fail_mode": settings.clamav_fail_mode,
+            "reachable": antivirus_reachable,
+        },
+        "audit_hmac_key_set": settings.audit_hmac_key is not None,
+        "field_encryption_enabled": settings.field_encryption_key is not None,
+        "realm": realm_out,
+    }
+    if redis is not None:
+        try:
+            await redis.set(
+                key_security_posture(), json.dumps(posture), ex=_POSTURE_CACHE_TTL_SECONDS
+            )
+        except Exception:  # noqa: BLE001 — тот же принцип: кэш необязателен
+            pass
+    return posture
 
 
 def _iso(value: dt.datetime | None) -> str | None:

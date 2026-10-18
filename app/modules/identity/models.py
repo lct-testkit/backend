@@ -18,6 +18,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     text,
@@ -465,3 +466,87 @@ class DataErasureRequest(UuidPkMixin, TimestampMixin, Base):
     act_document_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("signature_documents.id", ondelete="RESTRICT"), nullable=True
     )
+
+
+class IncidentStatus(StrEnum):
+    """B6-12: цикл реестра инцидентов. `candidate` — создан автоматически по событию
+    безопасности, срок РКН ещё не идёт (его запускает подтверждение человеком)."""
+
+    CANDIDATE = "candidate"
+    OPEN = "open"
+    RKN_24_SENT = "rkn_24_sent"
+    RKN_72_SENT = "rkn_72_sent"
+    CLOSED = "closed"
+    DISMISSED = "dismissed"
+
+
+class SecurityIncident(UuidPkMixin, TimestampMixin, VersionMixin, Base):
+    """Реестр инцидентов безопасности (B6-12, 152-ФЗ ст. 21 ч. 3.1, сроки РКН 24/72 ч).
+
+    Кандидаты создаются автоматически из событий `security_events` (`MALWARE_DETECTED`,
+    `BRUTE_FORCE_LOCK`, `SESSION_HIJACK_SUSPECT`, `SIGNATURE_KEY_COMPROMISED`) —
+    `IncidentService.suggest`, вызывается из `IdentityService.record_security_event` внутри
+    SAVEPOINT (сбой создания кандидата не должен ронять запись самого события). Сроки РКН
+    считаются от `confirm` (решение человека, что это инцидент), не от момента создания
+    кандидата. `number` (`INC-{год}-{NNNN}`) строится в Python из `nextval('security_
+    incident_seq')` перед вставкой — тот же приём, что `crm.service.DealService._next_
+    number` уже использует для номеров сделок (`deal_number_seq`)."""
+
+    __tablename__ = "security_incidents"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('candidate','open','rkn_24_sent','rkn_72_sent','closed','dismissed')",
+            name="security_incidents_status_valid",
+        ),
+        CheckConstraint("source IN ('event','manual')", name="security_incidents_source_valid"),
+        CheckConstraint(
+            "severity IN ('info','warning','critical')", name="security_incidents_severity_valid"
+        ),
+        Index("ix_security_incidents_status_rkn24", "status", "rkn_24_due_at"),
+        Index("uq_security_incidents_number", "number", unique=True),
+    )
+
+    number: Mapped[str] = mapped_column(String(32), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=IncidentStatus.CANDIDATE.value
+    )
+    severity: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=Severity.WARNING.value
+    )
+    detected_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    # id событий security_events, из которых собран кандидат (один или несколько — пачка).
+    event_ids: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Категории ПДн, затронутые инцидентом (ст. 21 ч. 3.1 требует указать это РКН).
+    data_categories: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    subjects_estimate: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    causes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    harm: Mapped[str | None] = mapped_column(Text, nullable=True)
+    measures: Mapped[str | None] = mapped_column(Text, nullable=True)
+    responsible_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    rkn_24_due_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    rkn_72_due_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    rkn_24_sent_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    rkn_24_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    rkn_72_sent_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    rkn_72_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    subjects_notified_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    investigation_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Сканер напоминаний (`sweep_incident_deadlines`) не должен слать повторные
+    # напоминания об одном и том же пороге — отметка, какие уже отправлены.
+    deadline_alerts_sent: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)

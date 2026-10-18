@@ -284,6 +284,25 @@ _DEFAULT_TEMPLATES: list[tuple[str, str, str | None, str]] = [
         None,
         "Событие по сделке — подробности в карточке сделки.",
     ),
+    (
+        # B6-12: событие безопасности предполагает утечку/инцидент (MALWARE_DETECTED,
+        # BRUTE_FORCE_LOCK, SESSION_HIJACK_SUSPECT, SIGNATURE_KEY_COMPROMISED) — заведён
+        # кандидат в реестр инцидентов, срок РКН не запущен (его подтверждает человек).
+        "SECURITY_INCIDENT_CANDIDATE",
+        "in_app",
+        None,
+        "Новый кандидат в инцидент {{ number }} ({{ event_type }}). Подтвердите или "
+        "отклоните в разделе «Инциденты».",
+    ),
+    (
+        # B6-12: дедлайн 24ч/72ч (152-ФЗ ст. 21 ч. 3.1) приближается или пропущен —
+        # уведомление отвечающему и всем ADMIN.
+        "SECURITY_INCIDENT_DEADLINE",
+        "in_app",
+        None,
+        "Инцидент {{ number }}: срок уведомления РКН ({{ stage }}) "
+        "{% if overdue %}пропущен{% else %}истекает {{ due_at }}{% endif %}.",
+    ),
 ]
 
 

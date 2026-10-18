@@ -65,6 +65,7 @@ forbidden_modules =
     app.modules.identity.router_admin
     app.modules.identity.router_auth
     app.modules.identity.router_directory
+    app.modules.identity.router_incidents
     app.modules.identity.router_me
     app.modules.identity.tasks
     app.modules.imports.router
@@ -98,6 +99,7 @@ forbidden_modules =
     app.modules.identity.router_admin
     app.modules.identity.router_auth
     app.modules.identity.router_directory
+    app.modules.identity.router_incidents
     app.modules.identity.router_me
     app.modules.identity.tasks
     app.modules.imports.router
@@ -130,6 +132,7 @@ forbidden_modules =
     app.modules.identity.router_admin
     app.modules.identity.router_auth
     app.modules.identity.router_directory
+    app.modules.identity.router_incidents
     app.modules.identity.router_me
     app.modules.identity.tasks
     app.modules.imports.router
@@ -161,6 +164,7 @@ forbidden_modules =
     app.modules.identity.router_admin
     app.modules.identity.router_auth
     app.modules.identity.router_directory
+    app.modules.identity.router_incidents
     app.modules.identity.router_me
     app.modules.identity.tasks
     app.modules.imports.router
@@ -193,6 +197,7 @@ forbidden_modules =
     app.modules.identity.router_admin
     app.modules.identity.router_auth
     app.modules.identity.router_directory
+    app.modules.identity.router_incidents
     app.modules.identity.router_me
     app.modules.identity.tasks
     app.modules.imports.router
@@ -254,6 +259,7 @@ forbidden_modules =
     app.modules.identity.router_admin
     app.modules.identity.router_auth
     app.modules.identity.router_directory
+    app.modules.identity.router_incidents
     app.modules.identity.router_me
     app.modules.identity.tasks
     app.modules.integration.public_router
@@ -285,6 +291,7 @@ forbidden_modules =
     app.modules.identity.router_admin
     app.modules.identity.router_auth
     app.modules.identity.router_directory
+    app.modules.identity.router_incidents
     app.modules.identity.router_me
     app.modules.identity.tasks
     app.modules.imports.router
@@ -315,6 +322,7 @@ forbidden_modules =
     app.modules.identity.router_admin
     app.modules.identity.router_auth
     app.modules.identity.router_directory
+    app.modules.identity.router_incidents
     app.modules.identity.router_me
     app.modules.identity.tasks
     app.modules.imports.router
@@ -346,6 +354,7 @@ forbidden_modules =
     app.modules.identity.router_admin
     app.modules.identity.router_auth
     app.modules.identity.router_directory
+    app.modules.identity.router_incidents
     app.modules.identity.router_me
     app.modules.identity.tasks
     app.modules.imports.router
@@ -377,6 +386,7 @@ forbidden_modules =
     app.modules.identity.router_admin
     app.modules.identity.router_auth
     app.modules.identity.router_directory
+    app.modules.identity.router_incidents
     app.modules.identity.router_me
     app.modules.identity.tasks
     app.modules.imports.router
@@ -408,6 +418,7 @@ forbidden_modules =
     app.modules.identity.router_admin
     app.modules.identity.router_auth
     app.modules.identity.router_directory
+    app.modules.identity.router_incidents
     app.modules.identity.router_me
     app.modules.identity.tasks
     app.modules.imports.router
@@ -438,6 +449,7 @@ forbidden_modules =
     app.modules.identity.router_admin
     app.modules.identity.router_auth
     app.modules.identity.router_directory
+    app.modules.identity.router_incidents
     app.modules.identity.router_me
     app.modules.identity.tasks
     app.modules.imports.router

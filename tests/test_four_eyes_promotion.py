@@ -22,7 +22,7 @@ def _login(client, user) -> None:
     client.headers["X-CSRF-Token"] = authenticate(client, user)
 
 
-def _stub_keycloak(monkeypatch) -> None:
+def _stub_keycloak(monkeypatch) -> list[tuple]:
     from app.modules.identity.keycloak import keycloak_client
 
     async def _noop(*_args: object, **_kwargs: object) -> bool:
@@ -30,6 +30,16 @@ def _stub_keycloak(monkeypatch) -> None:
 
     for name in ("set_realm_role", "set_attribute"):
         monkeypatch.setattr(keycloak_client, name, _noop)
+
+    # B6-11: при повышении до ADMIN/HEAD TOTP становится обязательным — записываем вызовы,
+    # не только заглушаем, чтобы тесты этого файла могли проверить (или не проверять) их.
+    required_actions_calls: list[tuple] = []
+
+    async def _update_required_actions(keycloak_id: str, *, add=(), remove=()) -> None:
+        required_actions_calls.append((keycloak_id, tuple(add), tuple(remove)))
+
+    monkeypatch.setattr(keycloak_client, "update_required_actions", _update_required_actions)
+    return required_actions_calls
 
 
 async def _load(user_id: uuid.UUID):
@@ -171,3 +181,54 @@ class TestInitiatorWithdrawsTheRequest:
         approval = run(client, _approval, approval_id)
         assert approval.approved_by == approver.id
         assert approval.reason == "не согласовано"
+
+
+class TestTotpOnPromotion:
+    """B6-11: TOTP при заведении ADMIN/HEAD уже был обязателен (`create_user`); повышение
+    существующей учётки до того же уровня — отдельный путь, который раньше это требование
+    не добавлял (учётка оставалась без TOTP, хотя формально уже «привилегированная»)."""
+
+    def test_promoting_to_head_adds_the_totp_requirement(self, client, monkeypatch) -> None:
+        from tests.crm_helpers import create_team
+
+        calls = _stub_keycloak(monkeypatch)
+        admin = run(client, _make_user, "ADMIN")
+        target = run(client, _make_user, "KAM")
+        team_id = create_team(client)
+        _login(client, admin)
+
+        response = _patch(client, target, {"role": "HEAD", "team_id": str(team_id)})
+
+        assert response.status_code == 200, response.text
+        totp_calls = [c for c in calls if c[1] == ("CONFIGURE_TOTP",)]
+        assert len(totp_calls) == 1
+        assert totp_calls[0][0] == target.keycloak_id
+
+    def test_demoting_back_does_not_remove_the_totp_requirement(self, client, monkeypatch) -> None:
+        calls = _stub_keycloak(monkeypatch)
+        admin = run(client, _make_user, "ADMIN")
+        head = run(client, _make_user, "HEAD")
+        _login(client, admin)
+
+        response = _patch(client, head, {"role": "KAM"})
+
+        assert response.status_code == 200, response.text
+        # Понижение не трогает requiredActions вовсе — ни добавляет, ни снимает TOTP.
+        assert calls == []
+
+    def test_promoting_to_admin_via_four_eyes_also_requests_totp(self, client, monkeypatch) -> None:
+        calls = _stub_keycloak(monkeypatch)
+        requester = run(client, _make_user, "ADMIN")
+        approver = run(client, _make_user, "ADMIN")
+        target = run(client, _make_user, "KAM")
+        _login(client, requester)
+        approval_id = _patch(client, target, {"role": "ADMIN"}).json()["approval_id"]
+        _login(client, approver)
+        client.post(f"/api/admin/approvals/{approval_id}/approve")
+        _login(client, requester)
+
+        response = _patch(client, target, {"role": "ADMIN", "approval_id": approval_id})
+
+        assert response.status_code == 200, response.text
+        totp_calls = [c for c in calls if c[1] == ("CONFIGURE_TOTP",)]
+        assert len(totp_calls) == 1

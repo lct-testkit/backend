@@ -28,6 +28,7 @@ from app.modules.files.antivirus import build_scanner
 from app.modules.files.service import register_antivirus_scanner
 from app.modules.identity.tasks import (
     sweep_erasure_requests,
+    sweep_incident_deadlines,
     sweep_keycloak_events,
     sweep_user_lifecycle,
 )
@@ -169,6 +170,7 @@ class WorkerSettings:
         sweep_erasure_requests,
         sweep_user_lifecycle,
         sweep_keycloak_events,
+        sweep_incident_deadlines,
     ]
     cron_jobs = [
         # Раз в сутки, до партиций аудита: очистка по сроку хранения (B6-6, 152-ФЗ ст. 5 ч. 7).
@@ -239,6 +241,11 @@ class WorkerSettings:
         # BRUTE_FORCE_LOCK (B6-3, группа АУД). Нет-оп, пока KEYCLOAK_EVENTS_POLL_ENABLED=false
         # (дефолт, до включения событий в realm — спринт D1).
         cron(sweep_keycloak_events, minute=set(range(60))),
+        # Раз в 15 минут (B6-12): напоминания о сроке уведомления РКН (24/72 ч, 152-ФЗ
+        # ст. 21 ч. 3.1) для подтверждённых инцидентов — та же периодичность, что задаёт
+        # `incident_sweep_interval_minutes` в конфиге (значение здесь зашито явно: `arq`
+        # не читает `Settings` в объявлении cron-слотов).
+        cron(sweep_incident_deadlines, minute={0, 15, 30, 45}),
     ]
     on_startup = startup
     on_shutdown = shutdown

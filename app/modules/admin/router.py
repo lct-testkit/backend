@@ -38,6 +38,7 @@ from app.modules.admin.schemas import (
     SecurityEventOut,
     SecurityEventSummaryOut,
     SecurityEventTypeCount,
+    SecurityPostureOut,
     SystemSettingListResponse,
     SystemSettingOut,
     SystemSettingPut,
@@ -46,6 +47,7 @@ from app.modules.admin.setting_crypto import decrypt_value, encrypt_value
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.models import AuditLog
 from app.modules.audit.service import AuditFilters, AuditService, diff_changes
+from app.modules.identity.admin_service import get_security_posture
 from app.modules.identity.models import Role, SecurityEvent, SecurityEventType, Severity, User
 from app.modules.identity.service import IdentityService, SecurityEventFilters
 
@@ -618,6 +620,23 @@ async def export_security_events(
         media_type="application/x-ndjson",
         headers={"Content-Disposition": 'attachment; filename="security-events-export.ndjson"'},
     )
+
+
+@router.get(
+    "/security/posture",
+    summary="Посадочная панель безопасности",
+    description=(
+        "Фактическое состояние трёх мер, которые декларирует документация, но код не "
+        "всегда подтверждает: TOTP у ADMIN и HEAD, режим Bearer, антивирус, HMAC-ключ "
+        "журнала аудита, шифрование полей, политика realm Keycloak (B6-11). Ответы "
+        "Keycloak кэшируются на 60 с. Keycloak недоступен — поле `realm` пустое, не 500. "
+        "Роль: ADMIN, AUDITOR."
+    ),
+    response_model=SecurityPostureOut,
+)
+async def security_posture(session: DbSession, _: SecurityEventReadPerm) -> SecurityPostureOut:
+    posture = await get_security_posture(session)
+    return SecurityPostureOut.model_validate(posture)
 
 
 # =============================================================================

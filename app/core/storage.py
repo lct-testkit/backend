@@ -27,7 +27,7 @@ from botocore.client import Config as BotoConfig
 from botocore.exceptions import ClientError
 
 from app.core.config import get_settings
-from app.core.errors import DependencyStatus
+from app.core.errors import AppError, DependencyStatus, ErrorCode
 
 # Сколько байт объекта скачивать за один потоковый чанк при подсчёте sha256.
 _HASH_CHUNK_SIZE = 1024 * 1024
@@ -85,18 +85,62 @@ def _public_client():
     )
 
 
+@lru_cache(maxsize=1)
+def _signatures_client():
+    """B6-11: identity `crm-signatures-writer` — доступ только к бакету `signatures`, а не
+    Admin на все бакеты, как у общего `crm-api` (`deploy/seaweedfs/s3.json`). Используется,
+    только если оба ключа заданы (`_client_for`); иначе этот клиент не создаётся вовсе."""
+    settings = get_settings()
+    assert settings.s3_signatures_access_key is not None  # noqa: S101 — проверено вызывающим
+    assert settings.s3_signatures_secret_key is not None  # noqa: S101
+    return boto3.client(
+        "s3",
+        endpoint_url=settings.s3_endpoint_url,
+        aws_access_key_id=settings.s3_signatures_access_key.get_secret_value(),
+        aws_secret_access_key=settings.s3_signatures_secret_key.get_secret_value(),
+        region_name=settings.s3_region,
+        config=BotoConfig(signature_version="s3v4", s3={"addressing_style": "path"}),
+    )
+
+
+def _client_for(bucket: str):
+    """Серверные вызовы для конкретного бакета: `signatures` — через отдельный клиент на
+    выделенных ключах (`S3_SIGNATURES_ACCESS_KEY`/`SECRET_KEY`), если они заданы; иначе —
+    общий клиент на все бакеты, как было до B6-11."""
+    settings = get_settings()
+    if (
+        bucket == settings.s3_bucket_signatures
+        and settings.s3_signatures_access_key is not None
+        and settings.s3_signatures_secret_key is not None
+    ):
+        return _signatures_client()
+    return _client()
+
+
 async def ensure_bucket(bucket: str) -> None:
-    """Идемпотентно создаёт бакет. SeaweedFS не создаёт бакеты на лету."""
+    """Идемпотентно создаёт бакет. SeaweedFS не создаёт бакеты на лету.
+
+    B6-11: `s3_auto_create_buckets=False` (prod с init-job инфраструктуры) — только
+    проверка; бакета нет — явная ошибка, а не молчаливое создание правом Admin, которого
+    у `crm-api` в этом режиме больше нет."""
 
     def _ensure() -> None:
-        client = _client()
+        client = _client_for(bucket)
+        settings = get_settings()
         try:
             client.head_bucket(Bucket=bucket)
+            return
         except ClientError:
-            try:
-                client.create_bucket(Bucket=bucket)
-            except ClientError:
-                pass  # гонка параллельных запросов — бакет уже создан
+            if not settings.s3_auto_create_buckets:
+                raise AppError(
+                    ErrorCode.DEPENDENCY_UNAVAILABLE,
+                    f"Бакет {bucket!r} не существует: ожидается, что его создаст "
+                    "инициализирующее задание инфраструктуры (S3_AUTO_CREATE_BUCKETS=false)",
+                ) from None
+        try:
+            client.create_bucket(Bucket=bucket)
+        except ClientError:
+            pass  # гонка параллельных запросов — бакет уже создан
 
     await asyncio.to_thread(_ensure)
 
@@ -164,7 +208,7 @@ async def inspect_object(*, bucket: str, key: str, keep_up_to: int = 0) -> Objec
     не нужен второй проход `download_object_bytes` ни в одном случае."""
 
     def _inspect() -> ObjectInspection:
-        client = _client()
+        client = _client_for(bucket)
         try:
             response = client.get_object(Bucket=bucket, Key=key)
         except ClientError as exc:
@@ -216,7 +260,7 @@ async def download_object_bytes(*, bucket: str, key: str) -> bytes:
     подсчёта `sha256` при `commit`."""
 
     def _download() -> bytes:
-        response = _client().get_object(Bucket=bucket, Key=key)
+        response = _client_for(bucket).get_object(Bucket=bucket, Key=key)
         body = response["Body"]
         try:
             return body.read()
@@ -234,7 +278,7 @@ async def download_object_to_file(*, bucket: str, key: str, path: str) -> str:
     import hashlib
 
     def _download() -> str:
-        response = _client().get_object(Bucket=bucket, Key=key)
+        response = _client_for(bucket).get_object(Bucket=bucket, Key=key)
         body = response["Body"]
         digest = hashlib.sha256()
         try:
@@ -255,7 +299,7 @@ async def upload_object_bytes(*, bucket: str, key: str, body: bytes, content_typ
     (раздел 4.12), сгенерированные фоновой задачей на сервере."""
 
     def _upload() -> None:
-        _client().put_object(Bucket=bucket, Key=key, Body=body, ContentType=content_type)
+        _client_for(bucket).put_object(Bucket=bucket, Key=key, Body=body, ContentType=content_type)
 
     await asyncio.to_thread(_upload)
 
@@ -268,7 +312,7 @@ async def iter_object_chunks(*, bucket: str, key: str, chunk_size: int = 262144)
     `inspect_object`/`download_object_to_file`, только без накопления в один буфер."""
 
     def _open():
-        response = _client().get_object(Bucket=bucket, Key=key)
+        response = _client_for(bucket).get_object(Bucket=bucket, Key=key)
         return response["Body"]
 
     body = await asyncio.to_thread(_open)
@@ -287,7 +331,10 @@ async def copy_object(*, src_bucket: str, src_key: str, dst_bucket: str, dst_key
     скачивания на клиент, `CopySource` остаётся на стороне S3-совместимого хранилища."""
 
     def _copy() -> None:
-        _client().copy_object(
+        # B6-11: клиент бакета-назначения — туда нужно писать; у общего клиента и у
+        # signatures-клиента (если задан) обе стороны видны в любом случае (signatures не
+        # участвует в сегодняшних вызовах `copy_object` — только карантин файлов, B6-5).
+        _client_for(dst_bucket).copy_object(
             Bucket=dst_bucket,
             Key=dst_key,
             CopySource={"Bucket": src_bucket, "Key": src_key},
@@ -299,7 +346,7 @@ async def copy_object(*, src_bucket: str, src_key: str, dst_bucket: str, dst_key
 async def delete_object(*, bucket: str, key: str) -> None:
     def _delete() -> None:
         try:
-            _client().delete_object(Bucket=bucket, Key=key)
+            _client_for(bucket).delete_object(Bucket=bucket, Key=key)
         except ClientError:
             pass
 
@@ -320,7 +367,7 @@ async def list_objects(*, bucket: str, prefix: str = "") -> list[ObjectSummary]:
     эксплуатационным задачам (уборка сирот) — обычные пути приложения объекты не перечисляют."""
 
     def _list() -> list[ObjectSummary]:
-        client = _client()
+        client = _client_for(bucket)
         items: list[ObjectSummary] = []
         continuation: dict[str, str] = {}
         while True:

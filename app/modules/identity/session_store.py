@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import hashlib
 import json
@@ -28,6 +29,11 @@ from app.core.redis_client import (
     key_user_sessions,
     require_redis,
 )
+
+# B6-11: сколько ждать победителя гонки обновления, если лок занят, прежде чем сдаться на
+# просроченный токен — шаг и общий бюджет (п.5 задачи: "ждать до 2 секунд, шаг 150 мс").
+_REFRESH_WAIT_STEP_SECONDS = 0.15
+_REFRESH_WAIT_BUDGET_SECONDS = 2.0
 
 logger = structlog.get_logger(__name__)
 
@@ -292,7 +298,7 @@ async def ensure_fresh_access_token(session: SessionData) -> str:
     две параллельные попытки обновления убили бы сессию срабатыванием
     reuse-detection.
     """
-    from app.modules.identity.keycloak import keycloak_client
+    from app.modules.identity.keycloak import TokenRefreshError, keycloak_client
 
     if not _needs_refresh(session):
         return session.access_token
@@ -303,6 +309,15 @@ async def ensure_fresh_access_token(session: SessionData) -> str:
 
     async with distributed_lock(f"session:{session.sid}:refresh", ttl=15) as acquired:
         if not acquired:
+            # Лок занят другим запросом той же сессии: ждём недолго, пока победитель запишет
+            # новый токен в Redis, и возвращаем его — иначе соседний запрос получил бы токен,
+            # который уже истёк к моменту ответа (B6-11 п.5).
+            deadline = time.monotonic() + _REFRESH_WAIT_BUDGET_SECONDS
+            while time.monotonic() < deadline:
+                await asyncio.sleep(_REFRESH_WAIT_STEP_SECONDS)
+                waited = await session_store.get(session.sid)
+                if waited is not None and not _needs_refresh(waited):
+                    return waited.access_token
             return session.access_token
 
         # Победитель гонки уже мог обновить токен, пока мы ждали лок.
@@ -317,6 +332,19 @@ async def ensure_fresh_access_token(session: SessionData) -> str:
 
         try:
             tokens = await keycloak_client.refresh(current.refresh_token or "")
+        except TokenRefreshError as exc:
+            # Отозван/просрочен — рутинное истечение, событие не пишем. Повторное
+            # использование уже обменянного refresh-токена (`revokeRefreshToken`/
+            # `refreshTokenMaxReuse` в realm) — подозрение на кражу сессии: событие пишется
+            # и коммитится немедленно (сессия удаляется следом, транзакции запроса на этом
+            # пути больше нет — тем же приёмом, что `router_me.change_password`).
+            logger.info(
+                "session_refresh_failed", keycloak_error=exc.keycloak_error, **current.log_view()
+            )
+            if exc.is_reuse:
+                await _record_refresh_reuse(current)
+            await session_store.delete(current.sid)
+            raise UnauthenticatedError("Сессия истекла: требуется повторный вход") from None
         except AppError:
             # Refresh отозван или просрочен: сессия больше не действительна.
             logger.info("session_refresh_failed", **current.log_view())
@@ -342,6 +370,27 @@ def _needs_refresh(session: SessionData) -> bool:
         return False
     leeway = get_settings().access_token_refresh_leeway
     return time.time() >= (session.access_expires_at - leeway)
+
+
+async def _record_refresh_reuse(session: SessionData) -> None:
+    """B6-11: повторное использование уже обменянного refresh-токена — событие пишется в
+    своей, немедленно закоммиченной транзакции: `ensure_fresh_access_token` вызывается из
+    зависимости аутентификации до открытия транзакции обработчика, а сессия удаляется сразу
+    после — следа в аудите/событиях не должно требовать, чтобы запрос дошёл до хендлера."""
+    from app.core.db import session_scope
+    from app.modules.identity.models import SecurityEventType, Severity
+    from app.modules.identity.service import IdentityService
+
+    try:
+        async with session_scope() as db_session:
+            await IdentityService(db_session).record_security_event(
+                SecurityEventType.SESSION_HIJACK_SUSPECT,
+                user_id=uuid.UUID(session.user_id),
+                severity=Severity.WARNING,
+                details={"reason": "refresh_reuse", "sid_masked": mask_token(session.sid)},
+            )
+    except Exception:  # noqa: BLE001 — сессия всё равно будет удалена следующей строкой
+        logger.exception("session_hijack_event_failed", **session.log_view())
 
 
 def _device_from_user_agent(user_agent: str | None) -> str | None:

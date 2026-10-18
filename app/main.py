@@ -48,6 +48,7 @@ from app.modules.identity.router_admin import handover_router
 from app.modules.identity.router_admin import router as admin_users_router
 from app.modules.identity.router_auth import router as auth_router
 from app.modules.identity.router_directory import router as directory_router
+from app.modules.identity.router_incidents import router as incidents_router
 from app.modules.identity.router_me import router as me_router
 from app.modules.imports.router import import_jobs_router, import_presets_router
 from app.modules.integration.public_router import integrations_public_router
@@ -320,6 +321,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_users_router, prefix=settings.api_prefix)
     app.include_router(handover_router, prefix=settings.api_prefix)
     app.include_router(admin_router, prefix=settings.api_prefix)
+    app.include_router(incidents_router, prefix=settings.api_prefix)
     app.include_router(deal_audit_router, prefix=settings.api_prefix)
     app.include_router(workflow_router, prefix=settings.api_prefix)
     app.include_router(deals_router, prefix=settings.api_prefix)
