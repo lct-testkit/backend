@@ -381,10 +381,12 @@ async def _savepoint() -> AsyncIterator[None]:
 
 
 def _import_session(rows: list[ImportRowResult]) -> SimpleNamespace:
+    # `.all()` напрямую — для `_tally_applied` (B3-5), который выбирает отдельные колонки, а не
+    # сущности (`select(ImportRowResult.status, ...)`), поэтому `Result.all()`, а не
+    # `.scalars().all()`.
+    result = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: rows), all=lambda: rows)
     return SimpleNamespace(
-        execute=AsyncMock(
-            return_value=SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: rows))
-        ),
+        execute=AsyncMock(return_value=result),
         begin_nested=_savepoint,
         flush=AsyncMock(),
         scalar=AsyncMock(return_value=0),
