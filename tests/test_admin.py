@@ -22,15 +22,24 @@ def _admin(client) -> None:
 
 
 async def _stored_value(key: str) -> object:
+    """Значение настройки, как его видит приложение: расшифрованное.
+
+    Если задан `SETTINGS_ENCRYPTION_KEY` (в `.env` разработчика или в окружении), секрет лежит в
+    таблице конвертом `{"__enc": "fernet:v1", "ct": ...}` — `decrypt_value` отдаёт исходное
+    значение и в этом случае, и когда ключа нет (значение хранится открытым). Что именно секрет
+    лежит зашифрованным, проверяет `tests/test_settings_encryption.py`; здесь важно только, ЧТО
+    записано."""
     from sqlalchemy import select
 
     from app.core.db import session_scope
     from app.modules.admin.models import SystemSetting
+    from app.modules.admin.setting_crypto import decrypt_value
 
     async with session_scope() as session:
-        return (
+        stored = (
             await session.execute(select(SystemSetting.value).where(SystemSetting.key == key))
         ).scalar_one_or_none()
+    return decrypt_value(stored)
 
 
 class TestSecretPlaceholderSchema:
