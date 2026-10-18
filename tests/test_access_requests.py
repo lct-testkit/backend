@@ -288,6 +288,25 @@ class TestDecisionPermissions:
         response = _decide(client, request_id, decision="approve")
         assert response.status_code == 403, response.text
 
+    def test_a_stranger_gets_403_not_the_state_of_an_already_decided_request(self, client) -> None:
+        owner = create_user(client, "KAM")
+        requester = create_user(client, "KAM")
+        stranger = create_user(client, "KAM")
+        org_id = create_organization(client)
+        run(client, lambda: _set_owner(org_id, owner.id))
+        sign_in(client, requester)
+        request_id = _create(client, org_id).json()["id"]
+        sign_in(client, owner)
+        assert _decide(client, request_id, decision="approve").status_code == 200
+
+        sign_in(client, stranger)
+        for body in ({"decision": "approve"}, {"decision": "reject", "comment": "нет"}):
+            response = _decide(client, request_id, **body)
+            assert response.status_code == 403, response.text
+            assert "status" not in (response.json().get("extra") or {}), response.text
+        revoked = client.post(f"/api/access-requests/{request_id}/revoke")
+        assert revoked.status_code == 403, revoked.text
+
     def test_reject_without_comment_is_422(self, client) -> None:
         owner = create_user(client, "KAM")
         requester = create_user(client, "KAM")

@@ -61,6 +61,9 @@ class AccessRequestService:
             raise NotFoundError("Запрос доступа", request_id)
         return request
 
+    # Порядок проверок в решениях: блокировка → объектное право → статус. Статус раньше права
+    # отдавал бы чужому менеджеру состояние запроса (`extra.status`) по одному его id.
+
     async def _lock(self, request: AccessRequest) -> None:
         """Строка запроса под `FOR UPDATE` перед любым переходом статуса. Решение — переход
         `pending → …`, и без блокировки два одновременных (два одобряющих, одобрение и отмена
@@ -241,9 +244,9 @@ class AccessRequestService:
         self, request: AccessRequest, principal: Principal, *, days: int | None, comment: str | None
     ) -> AccessRequest:
         await self._lock(request)
-        self._ensure_pending(request)
         organization = await self._get_entity_or_404(request)
         await self._ensure_can_decide(principal, organization)
+        self._ensure_pending(request)
         ttl_days = min(days or _DEFAULT_GRANT_DAYS, _MAX_GRANT_DAYS)
         request.status = AccessRequestStatus.APPROVED.value
         request.decided_by = principal.user_id
@@ -277,9 +280,9 @@ class AccessRequestService:
         self, request: AccessRequest, principal: Principal, *, comment: str
     ) -> AccessRequest:
         await self._lock(request)
-        self._ensure_pending(request)
         organization = await self._get_entity_or_404(request)
         await self._ensure_can_decide(principal, organization)
+        self._ensure_pending(request)
         request.status = AccessRequestStatus.REJECTED.value
         request.decided_by = principal.user_id
         request.decided_at = dt.datetime.now(dt.UTC)
@@ -309,12 +312,12 @@ class AccessRequestService:
 
     async def revoke(self, request: AccessRequest, principal: Principal) -> AccessRequest:
         await self._lock(request)
+        organization = await self._get_entity_or_404(request)
+        await self._ensure_can_decide(principal, organization)
         if request.status != AccessRequestStatus.APPROVED.value:
             raise AppError(
                 ErrorCode.VALIDATION, "Отозвать можно только одобренный и действующий доступ"
             )
-        organization = await self._get_entity_or_404(request)
-        await self._ensure_can_decide(principal, organization)
         request.status = AccessRequestStatus.REVOKED.value
         await self._session.flush()
         await self._audit.record(
