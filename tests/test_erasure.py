@@ -54,6 +54,8 @@ def _fake_request(**overrides: object) -> SimpleNamespace:
         "rejection_reason": None,
         "executed_at": None,
         "act_file_id": None,
+        # B6-9: акт уничтожения — документ на подпись ответственного лица.
+        "act_document_id": None,
     }
     base.update(overrides)
     return SimpleNamespace(**base)

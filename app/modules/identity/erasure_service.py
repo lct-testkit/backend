@@ -774,12 +774,13 @@ class ErasureExecutionService:
         )
         file_id = await self._store_pdf(pdf_bytes, filename="act.pdf", request_id=request.id)
         if signer_id is not None:
-            await get_signing_service().create_erasure_act_document(
+            document_id = await get_signing_service().create_erasure_act_document(
                 self._session,
                 erasure_request_id=request.id,
                 file_id=file_id,
                 signer_user_ids=[signer_id],
             )
+            request.act_document_id = document_id
         else:
             admin_ids = list(
                 (
