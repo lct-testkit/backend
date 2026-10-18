@@ -206,6 +206,19 @@ async def get_principal(
             extra={"token_epoch": int(token_epoch), "current_epoch": principal.perm_epoch},
         )
 
+    # B6-10: ранняя проверка выше смотрит на роль из JWT (до обращения к БД). Роль в БД/кэше
+    # могла измениться уже после выпуска токена — токен с устаревшим `INTEGRATION` и без claim
+    # `perm_epoch` пропускает ту проверку, а действует как фактическая роль. Раньше проверка шла
+    # только по фактической роли; в prod Bearer остаётся доступен именно ей.
+    if (
+        settings.bearer_auth_mode == "integration_only"
+        and sid is None
+        and principal.role != Role.INTEGRATION.value
+    ):
+        raise UnauthenticatedError(
+            "В этом профиле Bearer-доступ разрешён только сервисной роли INTEGRATION"
+        )
+
     set_actor(ActorContext(user_id=principal.user_id, role=principal.role, session_id=sid))
 
     if stored is not None:
