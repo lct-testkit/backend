@@ -146,13 +146,22 @@ class ObjectInspection:
     size_bytes: int = 0
     sha256: str = ""
     magic_bytes: bytes = b""
+    # B2-9: содержимое объекта, если его размер не больше `keep_up_to` — нужно
+    # для глубокой проверки office-файлов (OLE/zip) без второго скачивания.
+    # `None`, если `keep_up_to` не задан или объект оказался больше.
+    content: bytes | None = None
 
 
-async def inspect_object(*, bucket: str, key: str) -> ObjectInspection:
+async def inspect_object(*, bucket: str, key: str, keep_up_to: int = 0) -> ObjectInspection:
     """Скачивает объект целиком потоково, считает `sha256` и снимает первые
     байты для проверки сигнатуры формата (magic bytes, раздел 9: «расширение
     врёт»). Для файлов до `deal_files_max_size_bytes` (по умолчанию 500 МБ)
-    это секунды, не минуты — сеть внутри контура."""
+    это секунды, не минуты — сеть внутри контура.
+
+    `keep_up_to` (B2-9): пока суммарный размер не превысил это число байт,
+    чанки копятся в `content` для глубокой проверки doc/xls/docx/xlsx
+    (`files.service.office_kind`); при превышении буфер сбрасывается — так
+    не нужен второй проход `download_object_bytes` ни в одном случае."""
 
     def _inspect() -> ObjectInspection:
         client = _client()
@@ -167,6 +176,7 @@ async def inspect_object(*, bucket: str, key: str) -> ObjectInspection:
         digest = hashlib.sha256()
         size = 0
         magic = b""
+        buffer: bytearray | None = bytearray() if keep_up_to > 0 else None
         body = response["Body"]
         try:
             while True:
@@ -177,11 +187,20 @@ async def inspect_object(*, bucket: str, key: str) -> ObjectInspection:
                     magic = chunk[:_MAGIC_BYTES_LEN]
                 digest.update(chunk)
                 size += len(chunk)
+                if buffer is not None:
+                    if size <= keep_up_to:
+                        buffer.extend(chunk)
+                    else:
+                        buffer = None
         finally:
             body.close()
 
         return ObjectInspection(
-            exists=True, size_bytes=size, sha256=digest.hexdigest(), magic_bytes=magic
+            exists=True,
+            size_bytes=size,
+            sha256=digest.hexdigest(),
+            magic_bytes=magic,
+            content=bytes(buffer) if buffer is not None else None,
         )
 
     return await asyncio.to_thread(_inspect)

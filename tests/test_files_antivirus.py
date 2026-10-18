@@ -51,13 +51,14 @@ class TestCommitDecisions:
         ) -> None:
             self.copied.append((src_bucket, src_key, dst_bucket, dst_key))
 
-        async def fake_inspect(*, bucket: str, key: str) -> ObjectInspection:
+        async def fake_inspect(*, bucket: str, key: str, keep_up_to: int = 0) -> ObjectInspection:
             content = self.stored[key]
             return ObjectInspection(
                 exists=True,
                 size_bytes=len(content),
                 sha256=hashlib.sha256(content).hexdigest(),
                 magic_bytes=content[:_MAGIC_BYTES_LEN],
+                content=content if keep_up_to and len(content) <= keep_up_to else None,
             )
 
         monkeypatch.setattr(files_service, "ensure_bucket", fake_ensure_bucket)

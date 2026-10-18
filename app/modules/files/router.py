@@ -68,7 +68,12 @@ FileDownloadOrEdmPerm = Annotated[Principal, Depends(_download_permission)]
 async def upload_intent(
     payload: UploadIntentRequest, session: DbSession, principal: FileUploadPerm
 ) -> UploadIntentResponse:
-    file, upload_url, expires_at = await FileService(session).upload_intent(principal, payload)
+    # B2-9: `purpose="deal_attachment"` (фронтенд при загрузке в сделку) включает больший
+    # лимит размера (`deal_files_max_size_bytes`, 500 МБ) вместо общего (50 МБ).
+    deal_scope = payload.purpose == "deal_attachment"
+    file, upload_url, expires_at = await FileService(session).upload_intent(
+        principal, payload, deal_scope=deal_scope
+    )
     return UploadIntentResponse(file_id=file.id, upload_url=upload_url, expires_at=expires_at)
 
 

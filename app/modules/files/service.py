@@ -12,16 +12,20 @@ PUT, клиент грузит объект напрямую в SeaweedFS, `comm
 from __future__ import annotations
 
 import datetime as dt
+import io
 import re
 import unicodedata
 import uuid
+import zipfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from struct import error as struct_error
 from typing import Any, NoReturn, Protocol, runtime_checkable
 
 import structlog
 from sqlalchemy import Select, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from xlrd.compdoc import CompDoc, CompDocError
 
 from app.core.config import get_settings
 from app.core.errors import AppError, ErrorCode, ForbiddenError, NotFoundError
@@ -135,7 +139,42 @@ _VERIFIED_MIME: dict[str, str] = {
     "gzip": "application/gzip",
     "doc": "application/msword",
     "xls": "application/vnd.ms-excel",
+    # B2-9: RAR не имел проверенного MIME — в базе оставалось заявление клиента.
+    "rar": "application/vnd.rar",
 }
+
+# B2-9: расширения, для которых сигнатуры недостаточно (OLE и zip — общий контейнер для
+# нескольких форматов), и нужна глубокая проверка содержимого (`office_kind`).
+_OFFICE_EXTENSIONS = frozenset({"doc", "xls", "docx", "xlsx"})
+
+
+def office_kind(content: bytes) -> str | None:
+    """Определяет настоящий office-формат по содержимому контейнера, а не по расширению
+    (раздел 9: «расширение врёт»). OLE2 (`doc`/`xls`) — по именам потоков в каталоге
+    (`xlrd.compdoc.CompDoc`, тот же разбор, что использует сам `xlrd` для чтения `.xls`);
+    zip-контейнер (`docx`/`xlsx`) — по именам файлов внутри архива. Любое исключение при
+    разборе (повреждённый файл) — `None`: решение «не удалось определить», а не отказ."""
+    if content[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+        try:
+            doc = CompDoc(content, logfile=io.StringIO())
+        except (CompDocError, AssertionError, struct_error, IndexError, ValueError):
+            return None
+        names = {node.name for node in doc.dirlist}
+        if "WordDocument" in names:
+            return "doc"
+        if "Workbook" in names or "Book" in names:
+            return "xls"
+        return None
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            names = set(archive.namelist())
+    except (zipfile.BadZipFile, OSError):
+        return None
+    if "word/document.xml" in names:
+        return "docx"
+    if "xl/workbook.xml" in names:
+        return "xlsx"
+    return None
 
 
 async def lock_storage_key(session: AsyncSession, bucket: str, key: str) -> None:
@@ -414,6 +453,7 @@ class FileService:
         raise error
 
     async def commit(self, file: File, *, expected_sha256: str | None = None) -> File:
+        settings = get_settings()
         # Строка файла под замком: два одновременных `commit` одного файла не должны оба
         # дойти до дедупликации и удаления объекта.
         await self._session.refresh(file, with_for_update=True)
@@ -426,7 +466,11 @@ class FileService:
         if file.status != FileStatus.PENDING.value:
             return file
 
-        inspection = await inspect_object(bucket=file.bucket, key=file.storage_key)
+        inspection = await inspect_object(
+            bucket=file.bucket,
+            key=file.storage_key,
+            keep_up_to=settings.files_deep_check_max_bytes,
+        )
         if not inspection.exists:
             raise AppError(
                 ErrorCode.VALIDATION, "Объект не найден в хранилище: загрузка не завершена"
@@ -444,7 +488,6 @@ class FileService:
         # `files`, поэтому какой из двух лимитов применялся при выдаче
         # ссылки, отсюда не видно; берём больший как потолок — меньше него
         # объект не может оказаться ни при одном сценарии `upload_intent`.
-        settings = get_settings()
         max_size = max(settings.files_max_size_bytes, settings.deal_files_max_size_bytes)
         if inspection.size_bytes > max_size:
             file.status = FileStatus.INFECTED.value
@@ -500,6 +543,44 @@ class FileService:
                     "Содержимое файла не соответствует заявленному формату",
                 )
             )
+
+        # B2-9: сигнатура OLE/zip общая для нескольких форматов (doc=xls, docx=xlsx=zip) —
+        # расширение может «врать» внутри одной сигнатуры. Глубокая проверка — по именам
+        # потоков/файлов внутри контейнера, тем же путём отказа, что неверная сигнатура выше.
+        # `detected != extension` — в том числе когда `detected is None` (обычный zip без
+        # office-содержимого под именем `.docx`/`.xlsx`, повреждённый OLE под `.doc`/`.xls`):
+        # контейнер того же семейства сигнатур, но не тот формат, что заявлен — тоже отказ.
+        if extension in _OFFICE_EXTENSIONS:
+            if inspection.content is not None:
+                detected = office_kind(inspection.content)
+                if detected != extension:
+                    file.status = FileStatus.INFECTED.value
+                    file.scan_result = f"format_mismatch:{detected or 'unknown'}"
+                    file.scanned_at = dt.datetime.now(dt.UTC)
+                    await self._session.flush()
+                    mismatch_reason = f"format_mismatch:{detected or 'unknown'}"
+                    await self._audit.record(
+                        AuditAction.FILE_INFECTED,
+                        entity_type="file",
+                        entity_id=file.id,
+                        changes={"reason": {"old": None, "new": mismatch_reason}},
+                    )
+                    hint = f"похоже на .{detected}" if detected else "формат не распознан"
+                    await self._reject_commit(
+                        AppError(
+                            ErrorCode.FILE_INFECTED,
+                            f"Расширение .{extension} не соответствует содержимому ({hint})",
+                        )
+                    )
+            else:
+                # Объект крупнее `files_deep_check_max_bytes`: глубокая проверка пропущена,
+                # файл принят по сигнатуре (откат без деплоя — `FILES_DEEP_CHECK_MAX_BYTES=0`).
+                logger.warning(
+                    "file_deep_check_skipped",
+                    file_id=str(file.id),
+                    extension=extension,
+                    size_bytes=inspection.size_bytes,
+                )
 
         # B6-4: файлы крупнее синхронного лимита не держат HTTP-запрос на скане — остаются
         # `quarantined` до проверки воркером. Воркер `sweep_quarantined_files` НЕ реализован в

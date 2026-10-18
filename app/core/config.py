@@ -143,6 +143,11 @@ class Settings(BaseSettings):
     # оплат: без него файл нельзя было бы загрузить вовсе (проверка содержимого
     # json — `files.service._check_magic_bytes`).
     allowed_file_extensions: str = "png,jpeg,jpg,pdf,zip,gz,gzip,rar,doc,docx,xls,xlsx,xml,csv,json"
+    # B2-9: сколько байт объекта `commit` готов удержать в памяти для глубокой проверки
+    # office-файлов (`files.service.office_kind` — каталог OLE через `xlrd.compdoc`,
+    # `zipfile.namelist()` для docx/xlsx). Больше этого — только сигнатура, без второго
+    # скачивания объекта. `0` отключает глубокую проверку целиком (откат без деплоя).
+    files_deep_check_max_bytes: int = 33554432
 
     # --- Антивирус (B6-4) -------------------------------------------------
     # Выключен по умолчанию (dev/demo без clamd поднятого рядом): `FileService.commit`
