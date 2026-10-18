@@ -16,7 +16,7 @@ import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Protocol, TypeVar
+from typing import Any, TypeVar
 
 from sqlalchemy import ColumnElement, Select, and_, delete, exists, false, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
@@ -1872,16 +1872,11 @@ class ContactService:
         return channels
 
 
-class _HierarchicalNode(Protocol):
-    """Минимум, нужный `ensure_no_cycle` ниже: самоссылающаяся модель с мягким
-    удалением. `Direction` и `OrganizationBranch` (B4-10) обе подходят."""
-
-    id: uuid.UUID
-    parent_id: uuid.UUID | None
-    deleted_at: dt.datetime | None
-
-
-_NodeT = TypeVar("_NodeT", bound=_HierarchicalNode)
+# Самоссылающиеся модели с мягким удалением, для которых работает `ensure_no_cycle` ниже.
+# Ограниченный TypeVar, а не Protocol: атрибуты моделей объявлены как `Mapped[...]`, и mypy не
+# считает их совместимыми с протоколом `id: uuid.UUID` (при этом `catalog.service` в списке
+# `ignore_errors` — расхождение раньше было просто не видно).
+_NodeT = TypeVar("_NodeT", Direction, OrganizationBranch)
 
 
 async def ensure_no_cycle(
