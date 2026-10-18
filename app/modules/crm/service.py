@@ -2343,7 +2343,12 @@ class DealService:
             (statuses_by_id[sid]["sort_order"] for sid in visits if sid in statuses_by_id),
             default=-1,
         )
-        deal_is_won = deal.closed_at is not None and current_id not in statuses_by_id
+        # Только выигранная сделка «проскочила» непосещённые этапы (их закрыл переход в won).
+        # Проигранная (`lost`) просто не дошла до них — это `pending`, а не `skipped`: раньше
+        # условие было «закрыта и не на этапе пайплайна», и все этапы проигранной сделки после
+        # места отказа попадали в `skipped`.
+        current_status = all_statuses_by_id.get(current_id)
+        deal_is_won = current_status is not None and current_status["type"] == StatusType.WON.value
 
         items: list[dict[str, Any]] = []
         counts = {"done": 0, "skipped": 0, "pending": 0, "current": 0, "sla_breached": 0}

@@ -211,6 +211,40 @@ class TestStageSummaryAcceptanceScenario:
         assert response.status_code == 404, response.text
 
 
+class TestClosedDeals:
+    """Выигранная сделка «пропустила» непосещённые этапы, проигранная — просто не дошла до них."""
+
+    def _states_of_a_deal_closed_as(self, client, closing_code: str) -> dict[str, str]:
+        _login(client, run(client, _make_user, "ADMIN"))
+        workflow_id = run(client, _v2_id)
+        deal = create_deal(client, str(workflow_id))
+        deal_id = uuid.UUID(deal["id"])
+        closing = run(client, _status_id, workflow_id, closing_code)
+        run(
+            client,
+            _set_deal,
+            deal_id,
+            {"status_id": closing, "closed_at": dt.datetime.now(dt.UTC)},
+        )
+
+        page = client.get(f"/api/deals/{deal_id}/stages")
+
+        assert page.status_code == 200, page.text
+        return {item["code"]: item["state"] for item in page.json()["items"]}
+
+    def test_a_lost_deal_does_not_mark_the_unreached_stages_as_skipped(self, client) -> None:
+        states = self._states_of_a_deal_closed_as(client, "lost")
+
+        assert states.pop("contact_search") == "done"
+        assert set(states.values()) == {"pending"}
+
+    def test_a_won_deal_marks_every_unvisited_stage_as_skipped(self, client) -> None:
+        states = self._states_of_a_deal_closed_as(client, "won")
+
+        assert states.pop("contact_search") == "done"
+        assert set(states.values()) == {"skipped"}
+
+
 class TestSlaStateAtChange:
     """Состояние покидаемого (не нового) статуса, см. докстринг модуля."""
 
