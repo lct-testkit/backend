@@ -120,6 +120,17 @@
 		reverse_proxy keycloak:8080
 	}
 
+	# Выключенный профиль (monitoring, site): контейнера нет, Docker-DNS его имя не знает, и reverse_proxy отвечал бы 502.
+	# Для посетителя это «такой страницы нет», поэтому на недоступный upstream /grafana/* и /site/* отвечаем 404.
+	# Только эти пути и только 502/503: ошибки API и остального остаются как есть.
+	handle_errors {
+		@optional_down {
+			path /grafana /grafana/* /site /site/*
+			expression `{err.status_code} in [502, 503]`
+		}
+		respond @optional_down "Not Found" 404
+	}
+
 	# Метрики наружу не выставляются: их собирает Prometheus внутри сети.
 	handle /metrics {
 		respond "Not Found" 404
@@ -153,7 +164,8 @@
 	}
 	redir @mail_bare /mail/ 308
 	# /api/v1/info отдаёт строку подключения к БД Mailpit (при rqlite — с паролем) и пути на диске: наружу не выдаём.
-	@mail_info path /mail/api/v1/info
+	# /api/v1/webui тоже: настройки веб-интерфейса (MP_*), в частности параметры отправки/релея и пути, посторонним не нужны.
+	@mail_info path /mail/api/v1/info /mail/api/v1/webui
 	handle @mail_info {
 		respond "Not Found" 404
 	}
