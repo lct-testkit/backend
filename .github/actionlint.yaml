@@ -6,3 +6,5 @@ self-hosted-runner:
   # (repo Settings -> Actions -> Runners) rather than assuming from this comment.
   labels:
     - lct
+    # раннер на n3 (Казань, x86_64): закреплён за pytest (ci.yml, job test)
+    - lct-kzn
