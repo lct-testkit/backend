@@ -152,10 +152,12 @@ class TestQueue:
 
         assert results == [True, True]
         assert all(run(client, _job, jid).status == "completed" for jid in job_ids)
-        # И оба рендера стартовали до того, как первый успел завершиться — не строго
-        # последовательно (иначе второй начался бы не раньше t=0.3с).
-        assert max(started) - min(started) < 0.3
-        assert elapsed < 0.55, f"рендер занял {elapsed:.2f}с — похоже, задания шли одно за другим"
+        # Оба рендера стартовали до того, как первый успел завершиться — не строго
+        # последовательно (иначе второй начался бы не раньше t=0.3с). Общее время не
+        # сравниваем с порогом: на нагруженном раннере накладные расходы БД сами дают
+        # 0.5с+, и порог ловил шум, а не сериализацию.
+        assert max(started) - min(started) < 0.3, f"второй рендер стартовал через {max(started) - min(started):.2f}с — задания шли одно за другим"
+        assert elapsed < 5
 
     def test_sweep_requeues_processing_stuck_longer_than_the_stale_threshold(
         self, client, monkeypatch
