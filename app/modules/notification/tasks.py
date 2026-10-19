@@ -44,8 +44,10 @@ from app.modules.notification.models import (
     NotificationTemplate,
     UserNotificationPref,
 )
+from app.modules.notification.notice import build_notice_mail
 from app.modules.notification.service import (
     ChannelDeliveryError,
+    SmtpEmailGateway,
     _in_quiet_hours,
     get_channel_gateway,
     render_template,
@@ -53,6 +55,7 @@ from app.modules.notification.service import (
 
 logger = structlog.get_logger(__name__)
 
+_DEFAULT_SUBJECT = "Уведомление CRM"
 _QUIET_NOTE = "Тихие часы получателя: отправка отложена"
 _EMAIL = "email"
 
@@ -177,12 +180,29 @@ async def dispatch_pending_notifications(ctx: dict[str, Any]) -> dict[str, int]:
                 skipped += 1
                 continue
 
+            extra: dict[str, Any] = {}
+            if isinstance(gateway, SmtpEmailGateway):
+                # HTML по макету: тема — заголовок, текст шаблона — абзац, к ним кнопка и детали.
+                try:
+                    extra["mail"] = await build_notice_mail(
+                        session,
+                        code=notification.template_code,
+                        subject=subject or _DEFAULT_SUBJECT,
+                        body=body,
+                        payload=notification.payload or {},
+                        entity_type=notification.entity_type,
+                        entity_id=notification.entity_id,
+                    )
+                except Exception:  # noqa: BLE001 — без HTML письмо уйдёт текстом шаблона
+                    logger.warning("notice_render_failed", code=notification.template_code)
+
             try:
                 await gateway.send(
                     address_masked=delivery.address_masked,
                     subject=subject,
                     body=body,
                     address=address,
+                    **extra,
                 )
             except ChannelDeliveryError as exc:
                 if exc.retryable and delivery.attempt < settings.notification_max_delivery_attempts:
