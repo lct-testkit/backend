@@ -108,7 +108,7 @@ class TestPartyDisplayRespectsPersonalDataAccess:
     """ФИО физлица — ПДн: AUDITOR читает список ЭДО (`edm:read`), но не `contact:read` и не
     `user:read`; `DealService.party_names` в таком случае имён не отдаёт — и здесь тоже."""
 
-    def test_an_auditor_does_not_get_contact_or_employee_names(self, client) -> None:
+    def test_an_auditor_gets_masked_names_not_full_ones(self, client) -> None:
         _login(client, run(client, _make_user, "ADMIN"))
         org_id = run(client, _organization, "Вуз для аудитора Б7-8")
         contact_id = run(client, _contact, "Закрытов", "Иван")
@@ -123,8 +123,9 @@ class TestPartyDisplayRespectsPersonalDataAccess:
         assert response.status_code == 200, response.text
         displays = {i["party_id"]: i["party_display"] for i in response.json()["items"]}
         assert displays[str(org_id)] == "Вуз для аудитора Б7-8"
-        assert displays[str(contact_id)] is None
-        assert displays[str(employee_id)] is None
+        # E-1: инициалы вместо пустоты — экран не ходит за контактом (403 в консоли).
+        assert displays[str(contact_id)] == "Закрытов И."
+        assert displays[str(employee_id)] == "Закрытова А."
 
     def test_an_employee_is_shown_by_the_display_name_when_it_is_set(self, client) -> None:
         _login(client, run(client, _make_user, "ADMIN"))
