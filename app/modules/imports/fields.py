@@ -25,7 +25,13 @@ from typing import Literal
 from pydantic import EmailStr, TypeAdapter
 from pydantic import ValidationError as PydanticValidationError
 
-from app.core.normalize import normalize_phone, parse_contact_methods, split_list
+from app.core.normalize import (
+    CATALOG_CODE_MESSAGE,
+    is_valid_catalog_code,
+    normalize_phone,
+    parse_contact_methods,
+    split_list,
+)
 from app.modules.catalog import learner
 from app.modules.catalog.license_values import parse_signed, parse_term, parse_transfer_status
 from app.modules.catalog.validators import validate_requisite
@@ -89,6 +95,8 @@ class FieldSpec:
     # Длина колонки в БД: слишком длинное значение — ошибка строки при проверке, а не падение
     # применения на «отравленной» строке.
     max_length: int | None = None
+    #: Код справочника (продукт, направление): латиница, цифры, «_», «-», «.» (C-3).
+    catalog_code: bool = False
 
 
 ORGANIZATION_FIELDS: tuple[FieldSpec, ...] = (
@@ -108,7 +116,7 @@ ORGANIZATION_FIELDS: tuple[FieldSpec, ...] = (
 )
 
 PRODUCT_FIELDS: tuple[FieldSpec, ...] = (
-    FieldSpec("code", "Код", "text", required=True, max_length=64),
+    FieldSpec("code", "Код", "text", required=True, max_length=64, catalog_code=True),
     FieldSpec("name", "Наименование", "text", required=True, max_length=255),
     FieldSpec("description", "Описание", "text"),
     FieldSpec("direction_code", "Код направления", "direction_code"),
@@ -173,7 +181,7 @@ PAYMENT_FIELDS: tuple[FieldSpec, ...] = (
 # B3-8: «ИТ-направления» (ТЗ §4 п.1). Код необязателен — `DirectionHandler` строит его из
 # названия (`core.normalize.slugify_code`), если колонки кода нет или ячейка пуста.
 DIRECTION_FIELDS: tuple[FieldSpec, ...] = (
-    FieldSpec("code", "Код", "text", max_length=64),
+    FieldSpec("code", "Код", "text", max_length=64, catalog_code=True),
     FieldSpec("name", "Название", "text", required=True, max_length=255),
     FieldSpec("parent_code", "Родительское направление", "text", max_length=255),
 )
@@ -335,6 +343,8 @@ def validate_field(spec: FieldSpec, raw: str) -> tuple[object | None, str | None
     if spec.max_length is not None and len(value) > spec.max_length:
         return None, f"«{spec.label}»: не больше {spec.max_length} символов"
 
+    if spec.catalog_code and not is_valid_catalog_code(value):
+        return None, f"«{spec.label}»: {CATALOG_CODE_MESSAGE[0].lower()}{CATALOG_CODE_MESSAGE[1:]}"
     if spec.kind == "text":
         return value, None
     if spec.kind == "person_name":
@@ -454,7 +464,11 @@ def validate_field(spec: FieldSpec, raw: str) -> tuple[object | None, str | None
         try:
             return learner.parse_profile_value(spec.target, value), None
         except ValueError as exc:
-            return None, f"«{spec.label}»: {exc}"
+            # Сообщения разбора начинаются с названия поля («СНИЛС — 11 цифр») или, у дат и
+            # справочников, не называют его — тогда добавляем заголовок колонки.
+            message = str(exc)
+            known = ("СНИЛС", "Серия", "Номер", "Код", "Индекс")
+            return None, message if message.startswith(known) else f"«{spec.label}»: {message}"
     if spec.kind in ("region_code", "direction_code", "organization_name"):
         # Существование проверяется в сервисе (нужен доступ к БД) — здесь
         # только формат непустой строки. `imports.service._extract_row`

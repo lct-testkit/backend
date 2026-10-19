@@ -28,7 +28,13 @@ from app.core.masking import (
     mask_tail,
     mask_year,
 )
-from app.core.normalize import clean_text, normalize_email, normalize_phone
+from app.core.normalize import (
+    CATALOG_CODE_MESSAGE,
+    clean_text,
+    is_valid_catalog_code,
+    normalize_email,
+    normalize_phone,
+)
 from app.modules.catalog import learner
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -141,6 +147,20 @@ def _valid_website(value: str | None) -> str | None:
     if len(normalized) > 255:
         raise PydanticCustomError("website_too_long", "Сайт: адрес длиннее 255 символов")
     return normalized
+
+
+def _catalog_code(value: str) -> str:
+    """Код продукта/направления (C-3): одно правило для справочников и импорта."""
+    if not is_valid_catalog_code(value):
+        raise PydanticCustomError("invalid_code", CATALOG_CODE_MESSAGE)
+    return value
+
+
+CatalogCode = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=64),
+    AfterValidator(_catalog_code),
+]
 
 
 def _unique_methods(value: list[ContactMethodLiteral]) -> list[ContactMethodLiteral]:
@@ -606,7 +626,7 @@ class ContactListResponse(BaseModel):
 
 
 class DirectionCreateRequest(BaseModel):
-    code: NonEmptyStr = Field(max_length=64)
+    code: CatalogCode
     name: NonEmptyStr = Field(max_length=255)
     parent_id: uuid.UUID | None = None
 
@@ -634,7 +654,7 @@ class DirectionListResponse(BaseModel):
 
 
 class ProductCreateRequest(BaseModel):
-    code: NonEmptyStr = Field(max_length=64)
+    code: CatalogCode
     name: NonEmptyStr = Field(max_length=255)
     description: str | None = None
     direction_id: uuid.UUID | None = None

@@ -267,6 +267,19 @@ def split_list(value: object) -> list[str]:
     return result
 
 
+#: C-3: код продукта и направления — латиница, цифры, «_», «-» и «.», начинается с буквы или цифры.
+#: Ровно то, что выдаёт `slugify_code` и что встречается в сидах (`rt-datalake`, `qa-auto`,
+#: `RT.CRM`); пробелы, кириллица и знаки ломали поиск по коду в импорте.
+CATALOG_CODE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+CATALOG_CODE_MESSAGE = (
+    "Код — латиница, цифры, «_», «-» и «.» без пробелов, не длиннее 64 знаков (например, py-basic)"
+)
+
+
+def is_valid_catalog_code(value: str) -> bool:
+    return CATALOG_CODE_PATTERN.fullmatch(value) is not None
+
+
 def slugify_code(value: str, *, max_length: int = 48) -> str:
     """Латинский слаг из названия: `«Базис Dynamix»` -> `bazis-dynamix`, `RT.DataLake` ->
     `rt-datalake`. Для кода автоматически заводимого продукта (код обязателен и уникален)."""
