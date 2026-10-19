@@ -89,8 +89,33 @@ def client(monkeypatch):
         redis_client, "_client", fakeredis.aioredis.FakeRedis(decode_responses=True)
     )
 
-    with TestClient(create_app()) as test_client:
-        yield test_client
+    app = _cached_app(create_app)
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        # Тест мог подменить зависимости у общего приложения — следующему они не нужны.
+        app.dependency_overrides.clear()
+
+
+# Приложение на ~280 маршрутов собирается заметно дольше самого теста: FastAPI при первом
+# запросе строит зависимости и pydantic-схемы каждого маршрута. Новое приложение на каждый
+# тест (было) делало прогон в разы медленнее и раздувало память процесса до гигабайтов —
+# сборщик мусора обходил всё растущую кучу, и каждый следующий тест шёл дольше предыдущего.
+# Теперь приложение переиспользуется, пока не изменилось окружение: настройки читаются из
+# переменных при сборке (`create_app`), поэтому ключ кэша — снимок `os.environ`.
+_APP_CACHE: dict[tuple[tuple[str, str], ...], Any] = {}
+
+
+def _cached_app(factory):
+    # PYTEST_CURRENT_TEST pytest меняет на каждый тест — в ключ не входит, иначе кэш бесполезен.
+    key = tuple(sorted((k, v) for k, v in os.environ.items() if not k.startswith("PYTEST_")))
+    app = _APP_CACHE.get(key)
+    if app is None:
+        if len(_APP_CACHE) >= 8:
+            _APP_CACHE.clear()
+        app = _APP_CACHE[key] = factory()
+    return app
 
 
 async def _make_user(role: str = "KAM", status: str = "active"):
