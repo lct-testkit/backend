@@ -30,6 +30,7 @@ from app.core.rate_limit import enforce as rate_limit_enforce
 from app.core.security import Principal
 from app.modules.catalog.lookup import ProductIndex
 from app.modules.integration.api_keys import ApiKeyService
+from app.modules.integration.check import check_source_connection
 from app.modules.integration.cms_client import CmsClient
 from app.modules.integration.field_mapping import TARGETS, FieldMapping, apply_mapping
 from app.modules.integration.lead_payload import parse_lead_payload
@@ -57,6 +58,7 @@ from app.modules.integration.schemas import (
     PullRequestBody,
     PullRequestResponse,
     RoutingGetResponse,
+    SourceCheckOut,
     TargetOut,
     WebhookDeliveryOut,
     WebhookSubscriptionCreatedOut,
@@ -370,6 +372,53 @@ async def request_source_pull(
     )
     return PullRequestResponse(
         status="queued", requested_at=dt.datetime.fromisoformat(pull_request["requested_at"])
+    )
+
+
+_CHECK_RATE_LIMIT_ROUTE = "integration_check"
+_CHECK_RATE_LIMIT_PER_MIN = 20
+
+
+@integration_admin_router.post(
+    "/sources/{code}/check",
+    summary="Проверить соединение с источником",
+    description=(
+        "Один безопасный запрос к внешней системе (чтение одной записи; у Bitrix24 — "
+        "`server.time`) тем же способом, каким её опрашивают рабочие задачи. Отвечает 200, "
+        "если проверка состоялась: `ok=true` — система ответила и приняла запрос, "
+        "`ok=false` — причина в `message` по-русски (таймаут, нет соединения, отказ в "
+        "доступе, неверный адрес), `duration_ms` — время проверки, `http_status` — ответ "
+        "системы, если он был. Адрес и секрет в ответ не попадают. Ничего не меняет у "
+        "источника и в журнале синхронизации. Источник выключен — 409 (CRM-1703), "
+        "источника с таким кодом нет — 404 (CRM-9004). Лимит 20 проверок в минуту на "
+        "пользователя. Роль: ADMIN."
+    ),
+    response_model=SourceCheckOut,
+)
+async def check_source(
+    session: DbSession, principal: IntegrationAdminPerm, code: Annotated[str, Path()]
+) -> SourceCheckOut:
+    await rate_limit_enforce(
+        str(principal.user_id),
+        _CHECK_RATE_LIMIT_ROUTE,
+        limit=_CHECK_RATE_LIMIT_PER_MIN,
+        window_seconds=_PULL_RATE_WINDOW_SECONDS,
+        detail="Слишком много проверок соединения, повторите позже",
+    )
+    source = await IntegrationSourceService(session).get_by_code(code)
+    if not source.is_active:
+        raise AppError(
+            ErrorCode.INTEGRATION_SOURCE_INACTIVE,
+            "Источник выключен: включите его, чтобы проверить соединение",
+        )
+    result = await check_source_connection(source, get_settings())
+    return SourceCheckOut(
+        code=source.code,
+        ok=result.ok,
+        message=result.message,
+        duration_ms=result.duration_ms,
+        http_status=result.http_status,
+        checked_at=dt.datetime.now(dt.UTC),
     )
 
 
