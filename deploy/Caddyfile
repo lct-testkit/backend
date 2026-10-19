@@ -192,6 +192,16 @@
 		respond "Not Found" 404
 	}
 
+	# Сайт школы (профиль compose `site`) на пути /site — запасной вариант, когда отдельное имя хоста (SITE_HOST) не задано.
+	# `handle_path` срезает префикс, а X-Forwarded-Prefix сообщает Laravel, под каким путём он опубликован: ссылки, формы,
+	# редиректы и ассеты строятся с /site. Контейнер site доступен и напрямую (http://site:8080) — так забирает заявки CRM.
+	redir /site /site/ 308
+	handle_path /site/* {
+		reverse_proxy site:8080 {
+			header_up X-Forwarded-Prefix /site
+		}
+	}
+
 	# API, публичные ручки подписания/проверки, health и статика Swagger UI (`/static/swagger/*`, `app/api/docs.py`,
 	# смонтирована на самом FastAPI-приложении абсолютным путём, не под `/api`) — в FastAPI.
 	@backend path /api/* /public/* /health/* /static/*
@@ -253,6 +263,52 @@
 {$CRM_TLS_HOST:localhost}:{$CRM_TLS_PORT:8443} {
 	import {$CRM_TLS_SNIPPET:tls_internal}
 	import crm_routes
+}
+
+# --- Сайты по имени хоста (необязательные) ----------------------------------------------------------------------
+# Ключ блока = SITE_ADDRESSES/LMS_ADDRESSES из compose («имя:порт, » или пусто) + заведомо недоступный http-адрес внутри
+# контейнера: при пустой переменной блок остаётся без рабочих адресов (наружу не публикуется), при заданной — обычный
+# HTTPS-сайт с тем же режимом TLS (CRM_TLS_SNIPPET), что и основной: Let's Encrypt, самоподписанный или (off) без хоста.
+# Сертификаты лежат в томе caddy_data вместе с остальными.
+(host_headers) {
+	import common_headers
+	@no_request_id not header X-Request-Id *
+	request_header @no_request_id X-Request-Id {http.request.uuid}
+}
+
+{$SITE_ADDRESSES}http://127.0.0.1:65530 {
+	import {$CRM_TLS_SNIPPET:tls_internal}
+	import host_headers
+	# Политика только для сайта школы: свои скрипты и стили, шрифт Rostelecom Basis — с этого же хоста (/fonts/*).
+	header >Content-Security-Policy "default-src 'self'; img-src 'self' data:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+	header >X-Frame-Options "DENY"
+	handle /fonts/* {
+		route {
+			header Cache-Control "no-cache"
+			root * /srv
+			file_server
+		}
+	}
+	handle {
+		reverse_proxy site:8080
+	}
+}
+
+# Почта стенда по отдельному имени (MAIL_HOST, напр. mail.example.ru): переход на /mail/ основного адреса CRM —
+# сама почта живёт под CRM-хостом (в режиме MAILPIT_UI=crm ей нужна кука сессии этого хоста).
+{$MAIL_ADDRESSES}http://127.0.0.1:65532 {
+	import {$CRM_TLS_SNIPPET:tls_internal}
+	import host_headers
+	redir https://{$CRM_TLS_HOST:localhost}/mail/ 302
+}
+
+{$LMS_ADDRESSES}http://127.0.0.1:65531 {
+	import {$CRM_TLS_SNIPPET:tls_internal}
+	import host_headers
+	# Мок LMS (профиль compose `integrations`): Prism из OpenAPI, без собственной авторизации.
+	handle {
+		reverse_proxy mock-lms:4010
+	}
 }
 
 # Presigned PUT/GET к SeaweedFS (раздел 9): API подписывает ссылки на этот
