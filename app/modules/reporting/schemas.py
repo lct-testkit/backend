@@ -86,6 +86,32 @@ class ReportJobCreateRequest(BaseModel):
     )
 
 
+class ReportPreviewRequest(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {"template_code": "license_register", "params": {"date_from": "2026-10-01"}}
+        }
+    )
+
+    template_code: NonEmptyStr = Field(max_length=64)
+    params: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Те же параметры, что у `POST /reports`, поверх `default_params` шаблона.",
+    )
+
+
+class ReportPreviewOut(BaseModel):
+    row_count: int = Field(
+        description="Сколько строк будет в отчёте с этими параметрами (до лимита `limit`)."
+    )
+    exact: bool = Field(
+        description=(
+            "true — строки посчитаны тем же запросом, что строит отчёт; false — у тяжёлого "
+            "отчёта это оценка (сам отчёт строится в очереди)."
+        )
+    )
+
+
 class ReportJobOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

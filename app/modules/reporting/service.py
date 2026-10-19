@@ -363,6 +363,38 @@ class ReportJobService:
         # Иначе (REPORTS_ENQUEUE=false) остаётся `queued` — заберёт cron-добор как раньше.
         return job
 
+    async def preview(self, principal: Principal, payload: Any) -> tuple[int, bool]:
+        """Сколько строк даст отчёт с этими параметрами — без задания, файла и аудита.
+
+        Форма запуска показывает число до нажатия «Запустить», чтобы пустой отчёт был виден
+        сразу. Проверки те же, что у `create` (шаблон, роль, параметры); лёгкий отчёт
+        считается тем же построителем, тяжёлый (оценка выше `SYNC_ROW_THRESHOLD`) — оценкой.
+        """
+        template = await ReportTemplateService(self._session).get_or_404(payload.template_code)
+        if not template.is_active:
+            raise NotFoundError("Шаблон отчёта", payload.template_code)
+        self._ensure_role_allowed(template, principal)
+        kind = template.query_def.get("kind", template.code)
+        if kind not in REPORT_BUILDERS:
+            raise AppError(ErrorCode.VALIDATION, f"Неизвестный вид отчёта: {kind!r}")
+        params = {**template.default_params, **(payload.params or {})}
+        spec = REPORT_SPECS.get(kind)
+        if spec is not None:
+            validate_params(spec, params)
+        # Форма зовёт ручку при каждой правке параметров (с задержкой): потолок выше, чем у
+        # синхронных отчётов, но скрипт в цикле всё равно упрётся в 429.
+        await rate_limit.enforce(
+            str(principal.user_id), "report:preview", limit=120, window_seconds=60
+        )
+        estimator = REPORT_ESTIMATORS.get(kind)
+        if estimator is not None:
+            estimate = await estimator(self._session, principal, params)
+            if estimate > SYNC_ROW_THRESHOLD:
+                return estimate, False
+        dataset = await REPORT_BUILDERS[kind](self._session, principal, params)
+        total = dataset.total_rows if dataset.total_rows is not None else len(dataset.rows)
+        return total, True
+
     async def generate(self, job: ReportJob, principal: Principal) -> None:
         template = await ReportTemplateService(self._session).get_or_404(job.template_code)
         kind = template.query_def.get("kind", template.code)

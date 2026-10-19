@@ -893,6 +893,41 @@ class TestReportJobs:
         filtered = client.get("/api/reports", params={"template_code": "loss_reasons"}).json()
         assert [job["template_code"] for job in filtered["items"]] == ["loss_reasons"]
 
+    def test_preview_counts_rows_without_creating_a_job(self, client, monkeypatch) -> None:
+        """Форма запуска показывает число строк до «Запустить»: ручка считает тем же
+        построителем, что и отчёт, и ничего не создаёт (ни задания, ни файла)."""
+        self._stub_s3(monkeypatch)
+        self._ensure_templates(client, "sla_compliance")
+        self._kam(client)
+        before = client.get("/api/reports").json()["items"]
+
+        preview = client.post("/api/reports/preview", json={"template_code": "sla_compliance"})
+        assert preview.status_code == 200, preview.text
+        body = preview.json()
+        assert body["exact"] is True
+        assert isinstance(body["row_count"], int) and body["row_count"] >= 0
+        assert client.get("/api/reports").json()["items"] == before
+
+        created = client.post(
+            "/api/reports", json={"template_code": "sla_compliance", "format": "xlsx"}
+        )
+        assert created.status_code == 201, created.text
+        assert created.json()["row_count"] == body["row_count"]
+
+    def test_preview_rejects_unknown_param_like_create(self, client) -> None:
+        self._ensure_templates(client, "sla_compliance")
+        self._kam(client)
+        refused = client.post(
+            "/api/reports/preview",
+            json={"template_code": "sla_compliance", "params": {"no_such_param": 1}},
+        )
+        assert refused.status_code == 422, refused.text
+
+    def test_preview_unknown_template_is_404(self, client) -> None:
+        self._kam(client)
+        missing = client.post("/api/reports/preview", json={"template_code": "no_such_report"})
+        assert missing.status_code == 404, missing.text
+
 
 class TestTemplateTexts:
     """Тексты, которые видит пользователь, не ссылаются на внутренние документы."""
