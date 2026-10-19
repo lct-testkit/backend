@@ -41,7 +41,7 @@ _EXAMPLE_ROWS: dict[str, list[list[str]]] = {
             "Д-12/2024",
             "15.03.2024",
             "3",
-            "передано",
+            "Передана",
             "Иванов Иван Иванович",
             "Петров П.П.",
             "",
@@ -53,10 +53,108 @@ _EXAMPLE_ROWS: dict[str, list[list[str]]] = {
             "",
             "да",
             "бессрочно",
-            "в работе",
+            "В процессе",
             "",
             "",
             "Пример без номера договора",
+        ],
+    ],
+    "organization": [
+        [
+            "Пермский государственный университет (пример)",
+            "ПГУ",
+            "university",
+            "",
+            "",
+            "",
+            "г. Пермь, ул. Букирева, 15",
+            "",
+            "",
+            "https://psu.example",
+            "+7 342 239-61-00",
+            "info@psu.example",
+            "12000",
+        ],
+        [
+            "Колледж информационных технологий (пример)",
+            "КИТ",
+            "college",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "800",
+        ],
+    ],
+    "product": [
+        [
+            "py-basic",
+            "Python: базовый курс",
+            "Основы Python для начинающих",
+            "",
+            "72",
+            "online",
+            "курс",
+            "25000",
+            "RUB",
+        ],
+        ["erp-1c", "1С:Предприятие (лицензия)", "", "", "", "", "ПО", "", "RUB"],
+    ],
+    "vendor_contact": [
+        [
+            "ООО «Базис»",
+            "RT.DataLake",
+            "Иванов Иван Иванович",
+            "",
+            "",
+            "",
+            "+7 999 123-45-67",
+            "ivanov@example.com",
+            "Почта, Чат в ТГ",
+        ],
+        [
+            "ПАО «Ростелеком»",
+            "RT.CRM",
+            "",
+            "Петров",
+            "Пётр",
+            "Петрович",
+            "8 (495) 000-11-22",
+            "",
+            "Звонок",
+        ],
+    ],
+    "payment": [
+        [
+            "Z-1001",
+            "Python: базовый курс",
+            "Сидорова Анна Сергеевна",
+            "",
+            "",
+            "",
+            "+7 912 345-67-89",
+            "sidorova@example.com",
+            "3",
+            "25000",
+            "RUB",
+        ],
+        [
+            "Z-1002",
+            "Python: базовый курс",
+            "",
+            "Кузнецов",
+            "Дмитрий",
+            "",
+            "",
+            "kuznetsov@example.com",
+            "3",
+            "25000",
+            "RUB",
         ],
     ],
     "direction": [
@@ -68,6 +166,60 @@ _EXAMPLE_ROWS: dict[str, list[list[str]]] = {
         ["СПбГУ", "", "", "Петров Пётр Петрович"],
     ],
 }
+
+# Учебные строки шаблона «Загрузка пользователей» (LMS): значения по ключу колонки, остальное —
+# пусто. Данные выдуманные; СНИЛС с верным контрольным числом, паспорт и диплом — условные.
+_LEARNER_EXAMPLES: list[dict[str, str]] = [
+    {
+        "last_name": "Сидорова",
+        "first_name": "Анна",
+        "middle_name": "Сергеевна",
+        "phone": "+7 912 345-67-89",
+        "email": "sidorova@example.com",
+        "snils": "112-233-445 95",
+        "passport_series": "4510",
+        "passport_number": "123456",
+        "passport_issued_by": "ОУФМС России по г. Перми",
+        "passport_issued_at": "15.03.2016",
+        "passport_dept_code": "590-001",
+        "sex": "Ж",
+        "birth_date": "02.08.1996",
+        "reg_region": "Пермский край",
+        "reg_city": "Пермь",
+        "reg_street": "ул. Ленина",
+        "reg_house": "10",
+        "reg_apartment": "25",
+        "reg_zip": "614000",
+        "first_name_dative": "Анне",
+        "last_name_dative": "Сидоровой",
+        "middle_name_dative": "Сергеевне",
+        "education": "Высшее образование – бакалавриат",
+        "diploma_profession": "Прикладная информатика",
+        "diploma_institution": "Пермский государственный университет",
+        "diploma_surname": "Сидорова",
+        "diploma_number": "1234567",
+        "diploma_series": "105905",
+        "diploma_reg_number": "ПГУ-2018/045",
+        "diploma_issued_at": "30.06.2018",
+    },
+    {
+        "last_name": "Кузнецов",
+        "first_name": "Дмитрий",
+        "email": "kuznetsov@example.com",
+        "sex": "М",
+        "birth_date": "11.11.1990",
+        "education": "Среднее профессиональное образование",
+    },
+]
+
+
+def _example_rows(entity_type: str, fields: tuple[FieldSpec, ...]) -> list[list[str]]:
+    """Две учебные строки в порядке колонок. M-3: раньше у типов без образца была одна пустая
+    строка, а мастер обещал «две учебные строки»."""
+    if entity_type == "learner":
+        return [[row.get(spec.target, "") for spec in fields] for row in _LEARNER_EXAMPLES]
+    return _EXAMPLE_ROWS.get(entity_type, [[""] * len(fields)])
+
 
 # Колонки (по индексу, 0 с начала) с выпадающим списком в xlsx — удобство, не строгая проверка
 # (поле «Подписание лицензии» принимает и дату, которую список не перечислит).
@@ -140,7 +292,7 @@ def _allowed_values_hint(spec: FieldSpec) -> str:
 
 def _build_xlsx(entity_type: str, fields: tuple[FieldSpec, ...]) -> bytes:
     headers = [f.label for f in fields]
-    examples = _EXAMPLE_ROWS.get(entity_type, [[""] * len(fields)])
+    examples = _example_rows(entity_type, fields)
 
     workbook = openpyxl.Workbook()
     sheet = workbook.active
@@ -201,7 +353,7 @@ def _build_xls(entity_type: str, fields: tuple[FieldSpec, ...]) -> bytes:
     """`xlwt`: тот же набор данных, без выпадающих списков (BIFF их не поддерживает) и без
     текстового формата (xlrd читает значение как строку независимо от формата ячейки)."""
     headers = [f.label for f in fields]
-    examples = _EXAMPLE_ROWS.get(entity_type, [[""] * len(fields)])
+    examples = _example_rows(entity_type, fields)
 
     workbook = xlwt.Workbook(encoding="utf-8")
     bold_style = xlwt.easyxf("font: bold on")
