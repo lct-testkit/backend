@@ -74,14 +74,14 @@
 	# И не для /grafana/*: интерфейс Grafana грузит inline-скрипты (grafanaBootData, тема), правит <base href>
 	# и использует eval — наши script-src 'self' и base-uri 'none' оставляли страницу пустой («Failed to
 	# start Grafana»). У Grafana свои заголовки (X-Frame-Options: deny), поэтому политику сюда не ставим.
-	@app_csp not path /auth/* /grafana/*
+	@app_csp not path /auth/* /grafana/* /mail/*
 	header @app_csp >Content-Security-Policy "default-src 'self'; img-src 'self' data: blob: {$S3_ORIGIN}; connect-src 'self' {$S3_ORIGIN}; style-src 'self' 'unsafe-inline'; script-src {$CSP_SCRIPT_SRC:'self'}; worker-src 'self' blob:; object-src 'self' blob:; frame-src 'self' blob: {$S3_ORIGIN}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 
 	# X-Frame-Options по той же причине не для /auth/*: консоль администратора Keycloak сама
 	# встраивает свои страницы (3p-cookies/step1.html, login-status-iframe.html) в iframe, и наш
 	# DENY блокировал их — консоль вечно крутила индикатор загрузки. Keycloak отдаёт там свой
 	# SAMEORIGIN вместе с frame-ancestors 'self'.
-	@app_frame not path /auth/* /grafana/*
+	@app_frame not path /auth/* /grafana/* /mail/*
 	header @app_frame >X-Frame-Options "DENY"
 
 	# Прокидываем идентификатор запроса или создаём новый.
@@ -135,6 +135,30 @@
 	redir /grafana /grafana/ 308
 	handle /grafana/* {
 		reverse_proxy grafana:3000
+	}
+
+	# Mailpit (профиль compose `mail`, для demo включён) — ловушка писем: приглашения, сброс пароля, ссылки
+	# подписантам. Письма содержат рабочие ссылки и ПДн, поэтому маршрут открывается ТОЛЬКО при заданном
+	# MAILPIT_UI_PASSWORD (compose передаёт флаг MAILPIT_UI_PASSWORD_SET); без пароля /mail отвечает 404.
+	# Авторизацию (basic) требует сам Mailpit (MP_UI_AUTH): bcrypt-хэш для basic_auth Caddy генератор .env
+	# сделать не может (нет ни python, ни openssl). `handle`, не `handle_path`: Mailpit знает свой префикс
+	# (MP_WEBROOT=/mail). Заголовок Authorization в журнале Caddy скрыт. Ни CSP, ни X-Frame-Options (см. выше) тут
+	# не ставим: интерфейс показывает письмо во фрейме того же origin.
+	@mail_bare {
+		path /mail
+		expression `"{$MAILPIT_UI_PASSWORD_SET:}" == "1"`
+	}
+	redir @mail_bare /mail/ 308
+	@mail {
+		path /mail/*
+		expression `"{$MAILPIT_UI_PASSWORD_SET:}" == "1"`
+	}
+	handle @mail {
+		reverse_proxy mailpit:8025
+	}
+	@mail_off path /mail /mail/*
+	handle @mail_off {
+		respond "Not Found" 404
 	}
 
 	# API, публичные ручки подписания/проверки, health и статика Swagger UI (`/static/swagger/*`, `app/api/docs.py`,
