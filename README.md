@@ -7,7 +7,7 @@
 <sub>Команда **«Тесткит»** — [github.com/lct-testkit](https://github.com/lct-testkit)</sub>
 
 <!--STATS-->
-**249** операций API &nbsp;·&nbsp; **13** модулей &nbsp;·&nbsp; **87** таблиц &nbsp;·&nbsp; **45** миграций &nbsp;·&nbsp; **2317** тестов &nbsp;·&nbsp; **11** сервисов Compose
+**284** операции API &nbsp;·&nbsp; **13** модулей &nbsp;·&nbsp; **76** таблиц &nbsp;·&nbsp; **53** миграции &nbsp;·&nbsp; **3527** тестов &nbsp;·&nbsp; **11** сервисов Compose
 <!--/STATS-->
 
 [Быстрый старт](#быстрый-старт) · [Примеры](#примеры-использования) · [Приём данных](#приём-данных-вендоры-оплаты-учащиеся) · [Как устроено](#как-устроено) · [Модули](#что-внутри) · [Настройка](#настройка) · [Разработка](#разработка) · [Безопасность](#безопасность) · [Ограничения](#ограничения-и-известные-проблемы)
@@ -25,20 +25,20 @@
 * **Закрытый контур, запуск одной командой.** `docker compose up -d --build` поднимает 11 сервисов; интернет нужен только на сборке образов. Swagger UI отдаётся из локального пакета, шрифт с кириллицей для PDF вложен в образ — CDN не нужны.
 * **BFF: токены Keycloak не покидают Redis.** Браузер получает только httpOnly-cookie сессии (`Secure` — по фактической схеме `BASE_URL`, `SameSite=Lax`) и CSRF-cookie. Вход — OIDC с `state`, `nonce` и PKCE S256, `id_token` проверяется полностью, обновление токена идёт под локом.
 * **Идемпотентность и оптимистичные блокировки.** `Idempotency-Key` (8–255 символов, ключ живёт внутри актора) на создании сделок, организаций и контактов и на вебхуке сайта (`POST /api/v1/integrations/cms/leads`): тот же ключ с другим телом — `409 CRM-1003`. Изменения требуют `If-Match` с `version`, конфликт — `409 CRM-1002` с актуальными значениями.
-* **RFC 7807 везде.** Любая ошибка — `application/problem+json` с кодом из каталога `CRM-XXYY` (50 кодов) и `request_id`; стектрейсы наружу не уходят.
+* **RFC 7807 везде.** Любая ошибка — `application/problem+json` с кодом из каталога `CRM-XXYY` (55 кодов, `GET /api/meta/error-codes`) и `request_id`; стектрейсы наружу не уходят.
 * **Неизменяемый аудит с цепочкой хэшей.** `audit_log` партиционирован по месяцам, триггеры на каждой партиции запрещают `UPDATE`, `DELETE` и `TRUNCATE`, каждая запись хранит `prev_hash` и SHA-256 `hash`; `GET /api/admin/audit/verify-chain` пересчитывает хвост цепочки. Запись идёт в той же транзакции, что и бизнес-изменение; отказы в доступе тоже попадают в журнал.
 * **ПЭП с проверкой.** Одноразовый код (6 цифр, в базе только bcrypt-хэш, 3 попытки, 5 минут), HMAC-SHA256 метка целостности, цепочка хэшей подписей, неизменяемая таблица `signatures`, доверенное время из контейнера `ntp` (рассинхрон больше 5 с блокирует подписание), публичная проверка `/public/verify/{id}` и проверка файла по хэшу.
 * **152-ФЗ и обезличивание.** Согласие на обработку ПДн хранится с версией политики и SHA-256 её текста (до принятия бизнес-ручки отвечают `403 CRM-1105`); маскирование телефонов и email; запросы на удаление или обезличивание с блокерами, отсрочкой 30 дней, подтверждением второго администратора и актом об уничтожении.
 * **Воронки — граф с публикацией и мастером сопоставления.** Статусы и переходы с DSL условий (белый список полей), валидация графа, публикация со снимком и `graph_hash`: сделки живут по опубликованному снимку. Архивирование статуса — мастер сопоставления, который переносит сделки батчами в фоне.
-* **RBAC, иерархия команд и «четыре глаза».** Пять ролей, 51 право и три уровня проверки: маршрут, объект, SQL-скоуп списка (свои сделки, команда рекурсивно по дереву `teams`, все, только созданные источником). Необратимые админ-операции подтверждает второй администратор (`CRM-1902`).
+* **RBAC, иерархия команд и «четыре глаза».** Пять ролей, 53 права и три уровня проверки: маршрут, объект, SQL-скоуп списка (свои сделки, команда рекурсивно по дереву `teams`, все, только созданные источником). Необратимые админ-операции подтверждает второй администратор (`CRM-1902`).
 
 ## Как это выглядит
 
 > Картинки этого файла — `docs/img/swagger.png` и `docs/img/keycloak-login.png`: оба экрана открываются на http://localhost:8080 после запуска стека.
 
-<img src="docs/img/swagger.png" width="720" alt="Swagger UI: 30 групп ручек, кнопка Authorize для Bearer-токена">
+<img src="docs/img/swagger.png" width="720" alt="Swagger UI: группы ручек, кнопка Authorize для Bearer-токена">
 
-*Swagger UI на `/api/docs`: число операций и групп — командой из «Проверка чисел» ниже (три параллельные ветки меняют схему, фиксировать здесь цифру бессмысленно), схемы безопасности `BearerAuth` (вставьте access-токен Keycloak в Authorize), `SessionCookie` и `CsrfToken`. В `prod` интерактивный UI закрыт, схема `/api/openapi.json` остаётся.*
+*Swagger UI на `/api/docs`: число операций и групп — командой из «Проверка чисел» ниже, схемы безопасности `BearerAuth` (вставьте access-токен Keycloak в Authorize), `SessionCookie` и `CsrfToken`. В `prod` интерактивный UI закрыт, схема `/api/openapi.json` остаётся.*
 
 <img src="docs/img/keycloak-login.png" width="410" alt="Форма входа Keycloak, realm crm">
 
@@ -70,7 +70,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Поднимутся 11 сервисов: `postgres`, `redis`, `seaweedfs`, `keycloak`, `ntp`, `sms-gateway-mock`, разовые `migrate` (миграции) и `seed` (три воронки: `b2b_university_v2` на 14 шагов задания — основная, по умолчанию; `b2b_university_v1` — дополнительная продажная воронка с ПЭП-согласованием КП, не по умолчанию; `b2c_individual_v1` на 6), затем `api`, `worker` и `caddy`. `migrate` и `seed` после завершения видны только в `docker compose ps -a` (`Exited (0)`); `api` и `worker` стартуют после успешного `seed`, `api` дополнительно ждёт готовности Keycloak. На чистой машине это около минуты, дольше всего поднимается Keycloak.
+Поднимутся 11 сервисов: `postgres`, `redis`, `seaweedfs`, `keycloak`, `ntp`, `sms-gateway-mock`, разовые `migrate` (миграции) и `seed` (воронки, шаблоны отчётов и уведомлений, источники интеграций; воронки: `b2b_university_v2` на 14 шагов задания — основная, по умолчанию; `b2b_university_v1` — дополнительная продажная воронка с ПЭП-согласованием КП, не по умолчанию; `b2c_individual_v1` на 6), затем `api`, `worker` и `caddy`. `migrate` и `seed` после завершения видны только в `docker compose ps -a` (`Exited (0)`); `api` и `worker` стартуют после успешного `seed`, `api` дополнительно ждёт готовности Keycloak. На чистой машине это около минуты, дольше всего поднимается Keycloak.
 
 ```bash
 curl http://localhost:8080/health/ready
@@ -195,7 +195,7 @@ curl -s http://localhost:8080/api/openapi.json -o openapi.json
 
 ### Проверка чисел
 
-Число путей/операций/схем, миграций и тестов в этом README раньше были голыми цифрами (203 против 210 операций в разных местах, 45 миграций, «107 файлов, 2317 тестов») и расходились между собой даже до слияния трёх параллельных веток эпиков — после слияния они снова изменятся. Вместо очередной цифры, которая устареет за один PR, — команды, которыми её проверить на своём чекауте:
+Число операций, миграций и тестов в этом README — голые цифры, которые устаревают с каждым PR, поэтому ниже команды, которыми их проверить на своём чекауте. Блок `STATS` в начале файла обновляется вручную по этим же командам (таблицы — `len(Base.metadata.tables)` после `import app.db.models`, без партиций `audit_log_*`):
 
 ```bash
 # Операции, пути и схемы — по актуальному openapi.json (см. "Скачать контракт OpenAPI" выше)
@@ -209,7 +209,7 @@ ls tests/*.py | wc -l
 ls migrations/versions/*.py | wc -l
 ```
 
-На коммите `be6c0ca` (эта ветка, до слияния с остальными эпиками): 251 операция, 46 миграций, 3123 теста в 170 файлах — числа приведены как ориентир на момент написания, не как контракт; после слияния пересчитайте.
+На `main` (0e01ec8, 19.10.2026): 284 операции, 219 путей, 347 схем, 53 миграции (до `0053_mail_template_texts`), 3527 тестов в 196 файлах — на момент написания, не контракт; после изменений пересчитайте.
 
 ### Автоподстановка и проверка ИНН
 
@@ -347,12 +347,12 @@ flowchart LR
 | `catalog` | организации, контакты, продукты, справочники (направления, причины отказа, календарь, пользовательские поля, регионы), лицензии/договоры вуз-вендор-ПО | `GET/POST /api/organizations`, `/contacts`, `/products` + 5 справочников + `GET /api/organization-licenses` (раздел 4, Треб.1), `DELETE` у направлений и причин отказа, связи контакт — продукт (`/contacts/{id}/products`, `/products/{id}/contacts`) и профиль учащегося (`/contacts/{id}/learner-profile`, `/reveal`) · 13 таблиц (`organizations`, `contacts`, `products`, `directions`, `regions`, `organization_licenses`, …) |
 | `crm` | сделки, переходы по воронке, комментарии, задачи, участники | `GET/POST /api/deals`, `/{id}/transition`, `/reassign`, `/comments`, `/tasks`, `PUT /api/deals/{id}/products` · 8 таблиц (`deals`, `deal_status_history`, `deal_comments`, `tasks`, …) |
 | `files` | загрузка через presigned-URL, magic-bytes и антивирус-заглушка, вложения к сущностям | `POST /api/files/upload-intent`, `/{id}/commit`, `GET /api/attachments` · `files`, `attachments` |
-| `identity` | аутентификация BFF/OIDC, администрирование пользователей и команд, приглашения, согласие, обезличивание | `GET/POST /api/auth/*`, `GET /api/me`, `GET/POST /api/admin/users`, `/teams`, `/approvals`, `PATCH /api/me` · 7 таблиц (`users`, `teams`, `consents`, `data_erasure_requests`, …) |
+| `identity` | аутентификация BFF/OIDC, администрирование пользователей и команд, приглашения и сброс пароля (письмо шлёт сам backend, ссылка `/invite/{token}`, а не Keycloak), согласие, обезличивание | `GET/POST /api/auth/*`, `GET /api/me`, `GET/POST /api/admin/users`, `/teams`, `/approvals`, `PATCH /api/me` · 7 таблиц (`users`, `teams`, `consents`, `data_erasure_requests`, …) |
 | `imports` | импорт из xlsx/xls/csv/json: профилирование, автоподбор маппинга под тип данных (организации, продукты, лицензии, вендоры, оплаты, учащиеся LMS), dry-run, применение по строкам, откат по эффектам | `POST /api/imports`, `GET /entity-types`, `/{id}/rows`, `/{id}/dry-run`, `/apply`, `/rollback`, `PUT /{id}/mapping` · `import_jobs`, `import_row_results`, `import_presets` |
 | `integration` | вебхуки CMS/LMS/Bitrix24 с HMAC-подписью, исходящий outbox с backoff, административный контур источников | `POST /api/v1/integrations/{cms,lms,bitrix}/*`, `GET/PATCH /api/admin/integrations/sources`, `POST /api/admin/integrations/outbox-events/{id}/retry` · 6 таблиц (`integration_sources`, `inbound_messages`, `outbox_events`, …) |
-| `notification` | уведомления (in-app, заглушки email/telegram), шаблоны Jinja2, настройки получателя | `GET /api/notifications`, `/read`, `GET/PUT /api/me/notification-prefs`, `GET/POST/DELETE /api/admin/notification-templates`, `GET /api/notifications/unread-count`, `/event-codes`, `POST /api/admin/notification-templates/preview` · 4 таблицы |
+| `notification` | уведомления (in-app, e-mail по SMTP — HTML и текст; telegram — заглушка с записью в лог), шаблоны Jinja2, настройки получателя | `GET /api/notifications`, `/read`, `GET/PUT /api/me/notification-prefs`, `GET/POST/DELETE /api/admin/notification-templates`, `GET /api/notifications/unread-count`, `/event-codes`, `POST /api/admin/notification-templates/preview` · 4 таблицы |
 | `registry` | автоподстановка и проверка ИНН/ОГРН, локальный реестр ЕГРЮЛ, сверка реквизитов (drift) | `GET /api/org-lookup/suggest`, `POST /validate`, `POST /api/admin/registry/import`, `DELETE /api/admin/registry/versions/{id}` · 4 таблицы (`registry_versions`, `egrul_entries`, …) |
-| `reporting` | виды отчётов (xlsx/pdf/png через matplotlib и xhtml2pdf; `lms_users_upload` — выгрузка учащихся по шаблону LMS; число видов — `len(_DEFAULT_TEMPLATES)` в `app/modules/reporting/seed.py`, тест `test_reporting.py`), дашборды с виджетами | `GET/POST /api/reports`, `/report-templates`, `GET /{id}/data` (датасет в JSON без файла), `GET/POST /api/dashboards`, `/widgets` · `report_templates`, `report_jobs`, `dashboards`, `dashboard_widgets` |
+| `reporting` | виды отчётов (xlsx/xls/pdf/png/json через matplotlib и xhtml2pdf; `lms_users_upload` — выгрузка учащихся по шаблону LMS; число видов — `len(_DEFAULT_TEMPLATES)` в `app/modules/reporting/seed.py`, тест `test_reporting.py`), дашборды с виджетами | `GET/POST /api/reports`, `/report-templates`, `GET /{id}/data` (датасет в JSON без файла), `GET/POST /api/dashboards`, `/widgets` · `report_templates`, `report_jobs`, `dashboards`, `dashboard_widgets` |
 | `signing` | ПЭП: документы и запросы на подпись, OTP-код, публичная страница подписания и проверки, соглашения об ЭДО | `POST /api/signature-documents`, `/send`, `POST /api/signature-requests/{id}/{challenge,sign}`, `GET /public/sign/{token}`, `POST /api/signatures/verify`, `GET /public/sign/{token}/file`, `POST /api/signature-requests/{id}/reissue-link` · 6 таблиц |
 | `workflow` | конструктор воронок: статусы, переходы, DSL условий, валидация, публикация со снимком, архивирование статуса, удаление черновика | `GET/POST /api/workflows`, `PUT /{id}/graph`, `POST /{id}/publish`, `POST /{id}/statuses/{sid}/archive`, `DELETE /api/workflows/{id}`, `PATCH /api/workflows/{id}`, `GET /{id}/mapping-jobs/{job_id}` · `workflows`, `workflow_statuses`, `workflow_transitions`, `sla_rules`, `status_mapping_jobs` |
 
@@ -370,10 +370,10 @@ app/
 │                        integration, notification, registry, reporting, signing, workflow
 ├── assets/fonts/        DejaVu Sans — кириллица в PDF (xhtml2pdf) и графиках (matplotlib)
 └── worker/main.py       arq: воркер и планировщик периодических задач
-migrations/versions/     миграции Alembic: 0001_baseline … (число и верхняя граница растут —
-                         команда в «Проверка чисел», на `be6c0ca` было 46, до 0046_import_sheets_types)
-tests/                   файлы и тесты (офлайн + сквозные с TEST_DATABASE_URL) — число там же,
-                         на `be6c0ca` было 170 файлов, 3123 теста
+migrations/versions/     миграции Alembic: 0001_baseline … 0053_mail_template_texts (53 ревизии;
+                         актуальное число — команда в «Проверка чисел»)
+tests/                   файлы и тесты (офлайн + сквозные с TEST_DATABASE_URL) — 196 файлов,
+                         3527 тестов на 0e01ec8; команда — в «Проверка чисел»
 loadtest/                Locust: provision.py + 2 locustfile, README со своими результатами
 deploy/                  Caddyfile, entrypoint.sh, keycloak/ (realm-crm.json, themes/rtk-crm — русская email-тема), postgres/, seaweedfs/
 ```
@@ -382,7 +382,7 @@ deploy/                  Caddyfile, entrypoint.sh, keycloak/ (realm-crm.json, th
 
 Полный список переменных — `.env.example`; код читает их в `app/core/config.py` (`Settings`, pydantic-settings) и в `docker-compose.yml`. Приложение не стартует без `APP_PROFILE` и строк подключения — падение на старте лучше, чем работа с половиной конфига.
 
-**Важная оговорка про Docker.** В контейнеры `api`, `worker`, `migrate` и `seed` попадают только переменные из явного списка `x-api-env` в `docker-compose.yml` (42 имени) — `env_file` не используется совсем. Значения `.env`, которых нет в этом списке (лимиты файлов, TTL сессии/CSRF/идемпотентности, параметры ПЭП, импорта, приглашений, 152-ФЗ и другие), в контейнерах не действуют: работает дефолт из `Settings`, даже если в `.env` записано другое.
+**Важная оговорка про Docker.** В контейнеры `api`, `worker`, `migrate` и `seed` попадают только переменные из явного списка `x-api-env` в `docker-compose.yml` (57 имён) — `env_file` не используется совсем. Значения `.env`, которых нет в этом списке (лимиты файлов, TTL сессии/CSRF/идемпотентности, параметры ПЭП, импорта, приглашений, 152-ФЗ и другие), в контейнерах не действуют: работает дефолт из `Settings`, даже если в `.env` записано другое.
 
 | Переменная | Значение по умолчанию | Зачем |
 |---|---|---|
@@ -407,9 +407,14 @@ deploy/                  Caddyfile, entrypoint.sh, keycloak/ (realm-crm.json, th
 | `WEB_UPSTREAM` | `web:3000` | куда Caddy отдаёт всё, что не `/api`, `/public`, `/health`, `/static`, `/auth` |
 | `CSP_SCRIPT_SRC` | `'self'` | `script-src` в CSP; ослабляется для Vite в разработке |
 | `APP_MODE` | `demo` | режим клиента `web`: выбор демо-роли или одна кнопка входа; читает только образ `web`, не `Settings` |
-| `AUDIT_HMAC_KEY` | пусто | ключ HMAC цепочки аудита (хэш v3); пусто — цепочка без ключа (v2); в prod задать вместе с `SETTINGS_ENCRYPTION_KEY` |
+| `AUDIT_HMAC_KEY` | пусто | ключ HMAC цепочки аудита (хэш v3, не короче 32 символов); пусто — цепочка без ключа (v2); в prod обязателен вместе с `SETTINGS_ENCRYPTION_KEY` и `FIELD_ENCRYPTION_KEY` |
 | `SETTINGS_ENCRYPTION_KEY` | пусто | ключ шифрования секретных системных настроек (`PUT /api/admin/system-settings/{key}`) |
-| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` / `SMTP_STARTTLS` | пусто / 587 / пусто / пусто / пусто / `true` | почтовый сервер: без `SMTP_HOST` письма (в том числе ссылки подписантам) остаются в очереди |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` / `SMTP_STARTTLS` | пусто / 587 / пусто / пусто / пусто / `true` | почтовый сервер: без `SMTP_HOST` письма (приглашения, сброс пароля, ссылки подписантам, уведомления) остаются в очереди |
+| `FIELD_ENCRYPTION_KEY` / `FIELD_ENCRYPTION_KEY_PREV` | пусто | ключ Fernet для СНИЛС, паспорта и адреса учащегося (отдельный от `SETTINGS_ENCRYPTION_KEY`); пусто — не шифруются, в prod обязателен; `_PREV` — прежний ключ на время ротации (`tools/encrypt_learner_profiles.py rotate`). Ключей нет в `.env.example`: их выдаёт `deploy/scripts/gen_env.sh` |
+| `HEALTH_DETAILS_TOKEN` | пусто | токен заголовка `X-Health-Token` для `GET /health/details` (не короче 24 символов); пусто — ручка отвечает `404` |
+| `API_KEYS_ENABLED` / `API_KEY_DEFAULT_TTL_DAYS` | `true` / 90 | API-ключи (`X-API-Key`, только роль `INTEGRATION`); `false` выключает проверку заголовка |
+| `CMS_BASE_URL` / `CMS_AUTH_REF` / `CMS_AUTH_TOKEN`, `LMS_BASE_URL` / `LMS_AUTH_REF` / `LMS_AUTH_TOKEN` | пусто / `CMS_AUTH_TOKEN` / пусто (для LMS аналогично) | забор заявок с сайта и из LMS по API: корень API и имя переменной с Bearer-токеном; пустой `*_BASE_URL` — забор выключен. `INTEGRATION_PULL_PAGE_SIZE` (100) и `INTEGRATION_PULL_MAX_PAGES` (20) — размер страницы и предел страниц за проход |
+| `DEMO_LOCKED_PASSWORD_EMAILS` | пусто | e-mail общих демо-учёток, пароль которых нельзя сменить (`403 CRM-1108`); только при `APP_PROFILE=demo` |
 | `SMTP_FROM_NAME` | `РТК Школа CRM` | имя отправителя в `From` («РТК Школа CRM <crm@…>»); пустое — только адрес |
 | `SIGNATURE_EXPOSE_DEBUG_OTP` | `false` | отдавать код подтверждения в ответе (только для демо и тестов) |
 | `BITRIX_SOURCE_ID` | `OTHER` | код источника сделки при передаче в Битрикс24 |
@@ -417,7 +422,7 @@ deploy/                  Caddyfile, entrypoint.sh, keycloak/ (realm-crm.json, th
 | `CRM_TLS_HOST` | `localhost` | имя TLS-сайта в Caddyfile (SNI сертификата `tls internal`); смените, если стенд открывается не по `localhost` |
 | `ALLOW_BEARER_AUTH` | `false` (B6-10) | разрешить вход по `Authorization: Bearer` в обход серверной сессии (нужен Swagger UI и сервисным учёткам); `false` выключает его полностью, иначе в `prod` доступен только роли `INTEGRATION`. Дефолт изменён с `true`: локальный вход через Swagger UI без явного `ALLOW_BEARER_AUTH=true` в `.env` теперь не работает — это осознанный выбор безопасности, не забытая настройка |
 | `SESSION_TTL`, `SESSION_IDLE_TIMEOUT`, `CSRF_*`, лимиты файлов, `PASSWORD_CHANGE_*`, `ERASURE_*`, `INVITE_*` и другие | см. `.env.example` | объявлены в `Settings` и документированы в `.env.example`, но **не входят в `x-api-env`** — в контейнерах всегда действует дефолт `config.py`, значение из `.env` игнорируется |
-| `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_ECHO`, `SESSION_COOKIE_NAME`, `PAGINATION_MAX_LIMIT`, `APP_NAME`, `APP_VERSION`, `API_PREFIX`, `PUBLIC_PREFIX`, `LLM_*` | см. `config.py` | есть в `Settings`, но ❌ отсутствуют в `.env.example`; `LLM_*` дополнительно не используется ни в одном модуле кода |
+| `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_ECHO`, `SESSION_COOKIE_NAME`, `PAGINATION_MAX_LIMIT`, `APP_NAME`, `APP_VERSION`, `API_PREFIX`, `PUBLIC_PREFIX` | см. `config.py` | есть в `Settings`, но ❌ отсутствуют в `.env.example` (`LLM_*` в нём есть, но не используется ни в одном модуле кода) |
 
 Секреты демо-стенда (`POSTGRES_PASSWORD`, `CRM_APP_PASSWORD`, `KEYCLOAK_CLIENT_SECRET`, `KEYCLOAK_ADMIN_CLIENT_SECRET`, `SIGNATURE_SERVER_SECRET`, `S3_SECRET_KEY`) — только для демо, в `.env.example` подставлены заглушками (`crm`, `change-me-in-prod`); для настоящей эксплуатации заменить все сразу, они не связаны друг с другом.
 
@@ -448,6 +453,8 @@ DATABASE_URL=postgresql+asyncpg://crm@127.0.0.1:5432/crm_test alembic upgrade he
 TEST_DATABASE_URL=postgresql+asyncpg://crm@127.0.0.1:5432/crm_test pytest -q
 ```
 
+Полный прогон (с Postgres, как в CI) занимает около 17 минут.
+
 **Статические проверки** (все обязательны в CI, `.github/workflows/ci.yml`, джоб `lint`):
 
 ```bash
@@ -458,12 +465,12 @@ lint-imports                                      # границы модуле�
 python tools/export_openapi.py --check            # контракт API: openapi.json не разошёлся с кодом
 ```
 
-* `mypy` проверяет всю кодовую базу, кроме модулей из `[[tool.mypy.overrides]]` (накопленный долг, 93 ошибки на момент включения; из 26 модулей в списке осталось 20) — список не должен расти; исправили модуль — удалите его из списка.
+* `mypy` проверяет всю кодовую базу, кроме модулей из `[[tool.mypy.overrides]]` (накопленный долг, 93 ошибки на момент включения; из 26 модулей в списке осталось 12) — список не должен расти; исправили модуль — удалите его из списка.
 * `import-linter` держит слои внутри модулей (`router`/`tasks` → `service` → `models`) и запрещает импортировать роутеры/`tasks` чужих модулей (спека §2.2).
 * `openapi.json` в корне — контракт с фронтендом (`frontend/tools/gen-api.mjs` строит из него типы). Изменили API — перегенерируйте: `python tools/export_openapi.py`.
 * Исключения ruff (кириллица, `S105/S106` на константы-коды и т.п.) и их причины — в `[tool.ruff.lint]`.
 
-**Миграции.** Alembic, `migrations/env.py` берёт URL из `Settings().database_url` (или `MIGRATIONS_DATABASE_URL` при локальном запуске вне Docker — та же ограниченная роль `crm_app` не имеет DDL-прав, см. «Аудит»). 24 линейные ревизии, от `0001_baseline` до `0024_audit_chain_head_autovacuum`. В CI проверяются: ровно одна голова, `upgrade head`, **`alembic check`** (модели не разошлись со схемой) и round-trip последней ревизии (`downgrade -1` → `upgrade head`). Все таблицы, включая шесть таблиц интеграций, описаны моделями: `alembic check` не исключает ни одной; в `migrations/env.py` пропускаются только партиции `audit_log_*` и два служебных индекса (`_MIGRATION_ONLY_INDEXES`) — новые таблицы описывайте моделью.
+**Миграции.** Alembic, `migrations/env.py` берёт URL из `Settings().database_url` (или `MIGRATIONS_DATABASE_URL` при локальном запуске вне Docker — та же ограниченная роль `crm_app` не имеет DDL-прав, см. «Аудит»). 53 линейные ревизии, от `0001_baseline` до `0053_mail_template_texts`. В CI проверяются: ровно одна голова, `upgrade head`, **`alembic check`** (модели не разошлись со схемой) и round-trip последней ревизии (`downgrade -1` → `upgrade head`). Все таблицы, включая шесть таблиц интеграций, описаны моделями: `alembic check` не исключает ни одной; в `migrations/env.py` пропускаются только партиции `audit_log_*` и два служебных индекса (`_MIGRATION_ONLY_INDEXES`) — новые таблицы описывайте моделью.
 
 ```bash
 alembic upgrade head
@@ -473,15 +480,15 @@ alembic revision --autogenerate -m "описание"
 
 Новая модель добавляется в `app/modules/<module>/models.py` и обязательно импортируется в `app/db/models.py` — иначе Alembic не увидит её при автогенерации.
 
-**Сидинг.** Единая точка входа контейнера — `deploy/entrypoint.sh` (`api`\|`worker`\|`migrate`\|`seed`\|`sms-gateway-mock`\|`shell`). Режим `seed` запускает только `python -m app.modules.workflow.seed` (три воронки — см. выше); сиды отчётов, уведомлений и интеграций в контейнер не входят и запускаются вручную (все идемпотентны):
+**Сидинг.** Единая точка входа контейнера — `deploy/entrypoint.sh` (`api`\|`worker`\|`migrate`\|`seed`\|`sms-gateway-mock`\|`shell`). Режим `seed` запускает по очереди четыре сида: `app.modules.workflow.seed` (три воронки — см. выше), `reporting.seed`, `notification.seed` и `integration.seed`; все идемпотентны, поэтому любой из них можно запустить повторно вручную:
 
 ```bash
-docker compose exec api python -m app.modules.reporting.seed       # 10 шаблонов отчётов
-docker compose exec api python -m app.modules.notification.seed    # 28 шаблонов уведомлений
+docker compose exec api python -m app.modules.reporting.seed       # шаблоны отчётов (13)
+docker compose exec api python -m app.modules.notification.seed    # шаблоны уведомлений (41)
 docker compose exec api python -m app.modules.integration.seed     # источники интеграций (заведены is_active=false)
 ```
 
-На чистой базе сиды дают 10 шаблонов отчётов, 28 шаблонов уведомлений и 3 источника интеграций (`is_active: false`, кроме `cms` при заданном `CMS_WEBHOOK_SECRET_REF`).
+На чистой базе сиды дают 13 шаблонов отчётов, 41 шаблон уведомлений и 3 источника интеграций (`is_active: false`, кроме `cms` при заданном `CMS_WEBHOOK_SECRET_REF`).
 
 **Нагрузочные тесты.** `loadtest/` — Locust: `provision.py` создаёт в БД напрямую (минуя API, через опубликованный порт `5433`) организацию-фикстуру и пул сделок; `locustfile_transition.py` и `locustfile_comment.py` гоняют `POST /api/deals/{id}/transition` и `POST /api/deals/{id}/comments` под прямым password-grant токеном Keycloak. Цель — `new_spec §0`: p95 ≤ 300 мс при 50 RPS; `loadtest/README.md` содержит зафиксированный прогон (p95 79 мс на переходах, 49 мс на комментариях, 3 реплики `api`). Спека называет инструмент k6, в репозитории Locust — осознанное отклонение (сценарии на Python уже написаны и отлажены); критерий и пороги те же.
 
@@ -495,7 +502,7 @@ python loadtest/provision.py --count 4000 --comment-pool-size 100
 locust -f loadtest/locustfile_transition.py --headless -u 50 -r 25 -t 60s --host=http://localhost:8080
 ```
 
-**Очередь arq.** `app/worker/main.py`: 17 функций, все — периодические задачи по cron (партиции аудита раз в сутки, чистка идемпотентных ключей раз в час, эскалация SLA и просроченные подписи раз в 15 минут, доставка outbox и уведомлений раз в минуту, обновление материализованных представлений отчётов раз в 5 минут, и другие — расписание закомментировано построчно в коде). Healthcheck воркера — не HTTP, а `arq app.worker.main.WorkerSettings --check` (heartbeat в Redis).
+**Очередь arq.** `app/worker/main.py`: 25 функций, из них 23 — периодические задачи по cron, ещё две (`run_import_job`, `render_report_job`) API ставит в очередь сразу после коммита (партиции аудита раз в сутки, чистка идемпотентных ключей раз в час, эскалация SLA и просроченные подписи раз в 15 минут, доставка outbox и уведомлений раз в минуту, обновление материализованных представлений отчётов раз в 5 минут, и другие — расписание закомментировано построчно в коде). Healthcheck воркера — не HTTP, а `arq app.worker.main.WorkerSettings --check` (heartbeat в Redis).
 
 **Логи.** `structlog` + stdlib в одном конвейере (`app/core/logging.py`), JSON по умолчанию (`LOG_JSON=true`); `request_id` попадает в каждую запись через contextvars.
 
@@ -517,7 +524,7 @@ locust -f loadtest/locustfile_transition.py --headless -u 50 -r 25 -t 60s --host
 |---|---|---|
 | `ci.yml` | PR, push в `main` | Три параллельных гейта — `lint · types · architecture · contract` (ruff, mypy, import-linter, `openapi.json`, lock-файлы), `pytest + миграции (Postgres)` (одна голова, `upgrade`, `alembic check`, round-trip, тесты с покрытием ≥ 70% и **без пропусков**, в том числе права роли `crm_app` отдельным соединением под ней — `tests/test_app_role_grants.py`), `зависимости · секреты · Dockerfile` (`pip-audit`, Trivy fs: уязвимости+секреты+misconfig, hadolint). На PR дополнительно собирается образ без публикации (job `image`, кэш GHA). С `main` после зелёных гейтов — публикация образа. Все джобы — на self-hosted раннере (`runs-on: [self-hosted, lct]`), отсюда динамический порт Postgres в test-job и раздвинутый порог теста параллельности переходов (общий хост, не изолированный GitHub-hosted) |
 | публикация образа | `ci.yml`, только `main` | Общий конвейер из `lct-testkit/deploy`, закреплённый по SHA коммита, а не по `@main`: сборка → **Trivy до push** → push в GHCR → SBOM + provenance → подпись cosign → dispatch в `deploy` (без токена — падает, а не молчит) |
-| `loadtest.yml` | ночью, вручную, PR с меткой `perf` | Locust против стека из исходников, SLO p95 ≤ 300 мс при 50 RPS |
+| `loadtest.yml` | вручную, PR с меткой `perf` (ночной cron приостановлен: у организации нет GitHub-hosted раннера) | Locust против стека из исходников, SLO p95 ≤ 300 мс при 50 RPS |
 
 Образ собирается multi-stage из `requirements.lock` (`pip --require-hashes`), базовый образ закреплён по digest, в рантайме нет pip/setuptools; `.trivyignore` пуст намеренно. Настройки репозитория (защита `main`, обязательные проверки) — [`docs/REPO-SETTINGS.md`](https://github.com/lct-testkit/deploy/blob/main/docs/REPO-SETTINGS.md) в репозитории `deploy`.
 
@@ -550,7 +557,7 @@ DAST (ZAP/nuclei) и проверка заголовков в `deploy/scripts/sm
 * **CSRF.** Double-submit токен на мутирующих запросах с сессионной cookie: cookie `crm_csrf` (читаемая JS — вторая половина приёма) плюс заголовок `X-CSRF-Token`, сверка `hmac.compare_digest` (`app/core/csrf.py`, `CRM-1107` при расхождении). Запросы с `Authorization: Bearer` не проверяются — у них нет cookie, значит нет и вектора CSRF.
 * **CSP, HSTS и остальные заголовки — на каждом ответе Caddy** (проверено `curl -i`): `Content-Security-Policy` со списком `connect-src`/`img-src`/`frame-src`, ограниченным собственным origin и портом SeaweedFS; `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy`, заголовок `Server` скрыт (`deploy/Caddyfile`).
 * **Redirect-safe `next`.** Адрес возврата после входа принимается только как путь внутри сайта (`app/modules/identity/redirects.py::safe_next_path`; 17 тестов в `tests/test_redirects.py`, проверено и живым запросом с `next=https://evil.example`) — раньше `GET /api/auth/login?next=…` работал как открытый редирект, исправлено.
-* **RBAC на трёх уровнях.** 5 ролей (`KAM`, `HEAD`, `ADMIN`, `AUDITOR`, `INTEGRATION`), 51 право (матрица «роль → права» — `ROLE_PERMISSIONS` в `app/core/permissions.py`, права вошедшего пользователя отдаёт `GET /api/me`, поле `scopes`; отдельной таблицы в README нет намеренно: рукописная копия расходилась бы с кодом); маршрут (`require_permission`), объект (проверка в сервисах) и SQL-скоуп списка (`deal_scope_clause`: свои сделки / команда рекурсивно по `teams.parent_id` через `WITH RECURSIVE` / всё / только источник / пусто для AUDITOR).
+* **RBAC на трёх уровнях.** 5 ролей (`KAM`, `HEAD`, `ADMIN`, `AUDITOR`, `INTEGRATION`), 53 права (матрица «роль → права» — `ROLE_PERMISSIONS` в `app/core/permissions.py`, права вошедшего пользователя отдаёт `GET /api/me`, поле `scopes`; отдельной таблицы в README нет намеренно: рукописная копия расходилась бы с кодом); маршрут (`require_permission`), объект (проверка в сервисах) и SQL-скоуп списка (`deal_scope_clause`: свои сделки / команда рекурсивно по `teams.parent_id` через `WITH RECURSIVE` / всё / только источник / пусто для AUDITOR).
 * **«Четыре глаза».** Создание администратора и исполнение запроса на обезличивание требуют подтверждения вторым администратором (`ApprovalService.require`, отказ — `CRM-1902`); подтверждающий не может быть тем же администратором, что инициировал операцию, подтверждение привязано к хэшу конкретных параметров операции.
 * **Лимиты и проверка загрузок.** По умолчанию 50 МБ на обычный файл, 500 МБ на вложение сделки (проверено: запрос на 100 МБ PDF отклонён `413 CRM-1402`); SVG запрещён жёстко, независимо от списка расширений (XSS-вектор, проверено `415 CRM-1401`); реальное содержимое сверяется по magic bytes с заявленным расширением — расхождение переводит файл в статус `infected` и блокирует скачивание. Отдельного карантинного потока нет: статус `quarantined` объявлен в модели, но код его не присваивает — антивирус — заглушка `NullAntivirusScanner`, всегда возвращающая «чисто».
 * **Блокировка после неудачных попыток.** Keycloak: `bruteForceProtected`, 5 попыток, ожидание до 900 с (`deploy/keycloak/realm-crm.json`). Собственная защита — rate-limit на смену пароля (5 попыток → блок 15 минут), на попытки OTP ПЭП (3 на запрос, плюс лимит частоты отправки кода), на публичные страницы подписания (10 запросов/мин на токен подписи плюс мягкий общий лимит по IP) и на проверку токена приглашения.
@@ -590,11 +597,10 @@ bash tools/anonymized_dump.sh --backup ./backups/rtk-crm-20261018.dump --out ./c
 | `GET /api/admin/audit/verify-chain` находил разрывы цепочки при параллельных записях | причина найдена и исправлена: время записи бралось как начало транзакции (`now()`), а не момент захвата замка цепочки; теперь `clock_timestamp()` под замком, порядок хэшей и времени совпадает (тест `test_audit_chain_concurrency.py` падал на старом коде); хэш версионирован (`audit_log.hash_version`: v2 покрывает роль, подмену личности, IP и User-Agent), старые записи проверяются по-старому |
 | `PUT /workflows/{id}/graph` раньше удалял и создавал заново все статусы и переходы → `500`, как только по переходу прошла хотя бы одна сделка (внешний ключ истории) | исправлено: переходы обновляются по `id`; исчезнувший, но использованный в истории — `409 CRM-1209`, статус со сделками — `409 CRM-1208`, а не `500` (тесты `TestSaveGraphWithDeals`) |
 | `GET /api/auth/login?next=…` был открытым редиректом | исправлено: `safe_next_path` принимает только путь внутри сайта, проверено тестами и живым запросом (см. «Безопасность») |
-| Сиды `reporting`/`notification`/`integration` не входят в `entrypoint.sh seed` (только воронки) | запускаются вручную, идемпотентны (см. «Разработка»); на этом стенде уже применены |
 | Автоподстановка по ИНН не имеет реального внешнего провайдера | цепочка «локальный реестр → подтверждённые организации → мок» — мок работает только вне `prod`; в `prod` доступен только локальный реестр и уже подтверждённые организации |
 | Мастер передачи дел (offboard) принимает только одного преемника, «по-сделочно» нет | точечное распределение — через отдельную массовую ручку `POST /deals/bulk/reassign` |
 
-Открытыми остаются: вход по приглашению в закрытом контуре (оценка — около дня работы бэкенда), удаление сделки, отдельная ручка архивации воронки целиком — в [`frontend/docs/backend-issues.md`](https://github.com/lct-testkit/frontend/blob/main/docs/backend-issues.md), с привязкой к файлу и строке.
+Открытыми остаются: удаление сделки и отдельная ручка архивации воронки целиком (архивируется статус, воронка — нет) — в [`frontend/docs/backend-issues.md`](https://github.com/lct-testkit/frontend/blob/main/docs/backend-issues.md), с привязкой к файлу и строке.
 
 | Документ | Что внутри |
 |---|---|
@@ -606,5 +612,5 @@ bash tools/anonymized_dump.sh --backup ./backups/rtk-crm-20261018.dump --out ./c
 | [`frontend/docs/api-endpoints.md`](https://github.com/lct-testkit/frontend/blob/main/docs/api-endpoints.md) | тот же API, сгенерированный список по тегам (число операций — см. «Проверка чисел»; этот файл в репозитории `frontend`, пересоздаётся после изменения схемы) |
 | [`frontend/docs/backend-issues.md`](https://github.com/lct-testkit/frontend/blob/main/docs/backend-issues.md) | 101 несоответствие бэкенда, найденных на живом стенде, с привязкой к файлу и строке |
 | [`loadtest/README.md`](loadtest/README.md) | нагрузочное тестирование: методика, зафиксированный прогон, интерпретация результатов |
-| [`deploy/README.md`](https://github.com/lct-testkit/deploy#readme) | инфраструктурный репозиторий: манифест образов, CI/CD, состояние по фазам |
+| [`deploy/README.md`](https://github.com/lct-testkit/deploy#readme) | инфраструктурный репозиторий: манифест образов, CI/CD, установка и офлайн-поставка, HA |
 
