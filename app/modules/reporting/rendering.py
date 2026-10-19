@@ -347,7 +347,7 @@ def render_xlsx(
     chart_kind = _chart_kind_for(template_code)
     if chart_kind is not None:
         try:
-            png_bytes = charts.render_png(dataset, chart_kind=chart_kind)
+            png_bytes = charts.render_png(dataset, chart_kind=chart_kind, compact=True)
         except charts.RenderNotSupportedError:
             png_bytes = None
         if png_bytes is not None:

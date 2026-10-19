@@ -40,6 +40,7 @@ import matplotlib
 # случай, если какой-то будущий код модуля всё же импортирует `pyplot`.
 matplotlib.use("Agg")
 from matplotlib.figure import Figure  # noqa: E402 — backend должен быть выбран до этого импорта
+from PIL import Image  # noqa: E402
 
 from app.modules.reporting.builders import ReportDataset
 
@@ -165,14 +166,28 @@ def _no_data_figure(title: str, *, figsize: tuple[float, float] = (8.5, 3.2)) ->
     return fig
 
 
-def figure_to_png(fig: Figure) -> bytes:
+def figure_to_png(fig: Figure, *, compact: bool = False) -> bytes:
     """`Figure.savefig` работает без глобального состояния `pyplot` — фигура не регистрируется
     ни в каком реестре и не требует `plt.close()` (в отличие от `pyplot.subplots()`, который
-    был здесь раньше, до выноса в этот модуль)."""
+    был здесь раньше, до выноса в этот модуль).
+
+    `compact=True` — 256-цветная палитра вместо RGBA: у плоских диаграмм (заливки + сглаженный
+    текст) файл втрое меньше при неотличимой картинке. Нужно там, где PNG потом едет по сети
+    (лист «График» xlsx кладётся в SeaweedFS: на стенде реплика через WireGuard и время `PUT`
+    растёт с размером тела почти линейно, секунды на сотнях килобайт)."""
     buffer = io.BytesIO()
     fig.patch.set_facecolor(_SURFACE)
     fig.savefig(buffer, format="png", dpi=130, bbox_inches="tight", facecolor=_SURFACE)
-    return buffer.getvalue()
+    if not compact:
+        return buffer.getvalue()
+    buffer.seek(0)
+    with Image.open(buffer) as image:
+        palette = image.convert("RGB").quantize(
+            colors=256, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE
+        )
+    packed = io.BytesIO()
+    palette.save(packed, format="PNG", optimize=True)
+    return packed.getvalue()
 
 
 # =============================================================================
@@ -563,8 +578,8 @@ CHART_BUILDERS: dict[str, Callable[[ReportDataset], Figure]] = {
 }
 
 
-def render_png(dataset: ReportDataset, *, chart_kind: str) -> bytes:
+def render_png(dataset: ReportDataset, *, chart_kind: str, compact: bool = False) -> bytes:
     builder = CHART_BUILDERS.get(chart_kind)
     if builder is None:
         raise RenderNotSupportedError(f"Для вида графика {chart_kind!r} функция не определена")
-    return figure_to_png(builder(dataset))
+    return figure_to_png(builder(dataset), compact=compact)

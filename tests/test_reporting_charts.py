@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 
 import pytest
+from PIL import Image
 from openpyxl import load_workbook
 from pypdf import PdfReader
 
@@ -330,3 +331,33 @@ class TestXlsxChartSheet:
         content = render_xlsx(dataset, template_code="kam_summary")
         workbook = load_workbook(io.BytesIO(content))
         assert "График" not in workbook.sheetnames
+
+
+class TestChartPayloadAndState:
+    """Рендер графика не копит состояние и не раздувает тело, которое потом едет в S3 (на стенде
+    время `PUT` в SeaweedFS растёт с размером тела — см. `figure_to_png(compact=True)`)."""
+
+    def test_compact_png_is_palette_png_and_much_smaller(self) -> None:
+        dataset = _funnel_dataset()
+        full = charts_render_png(_funnel_dataset(), chart_kind="deal_funnel")
+        compact = charts_render_png(dataset, chart_kind="deal_funnel", compact=True)
+        assert compact.startswith(b"\x89PNG\r\n\x1a\n")
+        with Image.open(io.BytesIO(compact)) as image:
+            assert image.mode == "P"
+            image.load()
+        assert len(compact) < len(full) * 0.7
+
+    def test_xlsx_chart_image_is_compact(self) -> None:
+        content = render_xlsx(_funnel_dataset(), template_code="deal_funnel")
+        image = load_workbook(io.BytesIO(content))["График"]._images[0]
+        assert Image.open(io.BytesIO(image._data())).mode == "P"
+
+    def test_repeated_render_keeps_no_pyplot_state_and_size_is_stable(self) -> None:
+        import sys
+
+        sizes = [
+            len(render_xlsx(_funnel_dataset(), template_code="deal_funnel")) for _ in range(4)
+        ]
+        assert len(set(sizes)) == 1
+        pyplot = sys.modules.get("matplotlib.pyplot")
+        assert pyplot is None or pyplot.get_fignums() == []
