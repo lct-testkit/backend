@@ -71,6 +71,10 @@ class DealProductsReplaceRequest(BaseModel):
 # --- Сделка ------------------------------------------------------------------
 
 
+#: Предел колонки `deals.amount` (`Numeric(14, 2)`): больше — ошибка БД, а не понятный 422.
+MAX_DEAL_AMOUNT = Decimal("999999999999.99")
+
+
 class DealCreateRequest(BaseModel):
     title: NonEmptyStr = Field(max_length=255)
     deal_type: DealTypeLiteral
@@ -78,7 +82,7 @@ class DealCreateRequest(BaseModel):
     organization_id: uuid.UUID | None = None
     contact_id: uuid.UUID | None = None
     owner_id: uuid.UUID | None = None
-    amount: Decimal | None = None
+    amount: Decimal | None = Field(default=None, ge=0, le=MAX_DEAL_AMOUNT, allow_inf_nan=False)
     currency: str = Field(default="RUB", min_length=3, max_length=3)
     students_planned: int | None = Field(default=None, ge=0)
     expected_close_date: dt.date | None = None
@@ -106,7 +110,7 @@ class DealUpdateRequest(BaseModel):
     `/transition`, у которых собственные права и побочные эффекты."""
 
     title: NonEmptyStr | None = Field(default=None, max_length=255)
-    amount: Decimal | None = None
+    amount: Decimal | None = Field(default=None, ge=0, le=MAX_DEAL_AMOUNT, allow_inf_nan=False)
     currency: str | None = Field(default=None, min_length=3, max_length=3)
     students_planned: int | None = Field(default=None, ge=0)
     expected_close_date: dt.date | None = None

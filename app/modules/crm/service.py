@@ -106,6 +106,7 @@ from app.modules.crm.models import (
 from app.modules.crm.models import (
     SignatureStatus as DealSignatureStatus,
 )
+from app.modules.crm.schemas import MAX_DEAL_AMOUNT
 from app.modules.files.models import Attachment, File, FileStatus
 from app.modules.identity.models import Role, Team, User, UserStatus
 from app.modules.identity.service import IdentityService
@@ -2445,7 +2446,18 @@ class DealService:
             elif key == "expected_close_date" and isinstance(value, str):
                 value = dt.date.fromisoformat(value)
             elif key == "amount":
-                value = Decimal(str(value))
+                try:
+                    value = Decimal(str(value))
+                except ArithmeticError:
+                    raise ValidationError(
+                        "Сумма должна быть числом",
+                        [FieldError(field=key, reason="сумма должна быть числом")],
+                    ) from None
+                if not value.is_finite() or value < 0 or value > MAX_DEAL_AMOUNT:
+                    raise ValidationError(
+                        "Сумма должна быть неотрицательным числом",
+                        [FieldError(field=key, reason="сумма не может быть отрицательной")],
+                    )
         setattr(deal, key, value)
 
     async def transition(
