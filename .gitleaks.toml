@@ -32,4 +32,7 @@ regexes = [
   # что это не настоящий секрет.
   '''Zx9-strong-signature-secret-0123456789''',
   '''S3-strong-secret-key-0123456789''',
+  # tests/test_mail_render.py: образец токена приглашения в ссылке /invite/{token}
+  # (только рендер шаблона письма, в БД не пишется и ни к чему не даёт доступа).
+  '''Q7x2mP9aLk3VtR8nZc4wYb1HjD6sFe0u''',
 ]
