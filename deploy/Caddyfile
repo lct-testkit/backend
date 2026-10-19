@@ -152,6 +152,11 @@
 		expression `"{$MAILPIT_UI:}" in ["public", "crm"]`
 	}
 	redir @mail_bare /mail/ 308
+	# /api/v1/info отдаёт строку подключения к БД Mailpit (при rqlite — с паролем) и пути на диске: наружу не выдаём.
+	@mail_info path /mail/api/v1/info
+	handle @mail_info {
+		respond "Not Found" 404
+	}
 	@mail_write {
 		path /mail/*
 		expression `"{$MAILPIT_UI:}" in ["public", "crm"]`
