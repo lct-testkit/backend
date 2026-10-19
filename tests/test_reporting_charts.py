@@ -339,8 +339,8 @@ class TestChartPayloadAndState:
 
     def test_compact_png_is_palette_png_and_much_smaller(self) -> None:
         dataset = _funnel_dataset()
-        full = charts_render_png(_funnel_dataset(), chart_kind="deal_funnel")
-        compact = charts_render_png(dataset, chart_kind="deal_funnel", compact=True)
+        full = charts_render_png(_funnel_dataset(), chart_kind="funnel")
+        compact = charts_render_png(dataset, chart_kind="funnel", compact=True)
         assert compact.startswith(b"\x89PNG\r\n\x1a\n")
         with Image.open(io.BytesIO(compact)) as image:
             assert image.mode == "P"
@@ -356,6 +356,8 @@ class TestChartPayloadAndState:
         import sys
 
         sizes = [len(render_xlsx(_funnel_dataset(), template_code="deal_funnel")) for _ in range(4)]
-        assert len(set(sizes)) == 1
+        # В xlsx пишется время создания (docProps), поэтому размер может отличаться на единицы байт;
+        # утечка фигур дала бы рост на килобайты от рендера к рендеру.
+        assert max(sizes) - min(sizes) < 256
         pyplot = sys.modules.get("matplotlib.pyplot")
         assert pyplot is None or pyplot.get_fignums() == []
