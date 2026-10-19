@@ -1012,6 +1012,20 @@ async def build_monthly_dynamics(
 # =============================================================================
 
 
+def format_overdue(delta: dt.timedelta) -> str:
+    """D-8: просрочка SLA словами, как в карточке сделки («20 д 9 ч»), а не дробным числом дней
+    (20,4): в отчёте и в интерфейсе один и тот же срок читается одинаково."""
+    total_hours = max(int(delta.total_seconds() // 3600), 0)
+    days, hours = divmod(total_hours, 24)
+    if days and hours:
+        return f"{days} д {hours} ч"
+    if days:
+        return f"{days} д"
+    if hours:
+        return f"{hours} ч"
+    return "меньше часа"
+
+
 async def _stuck_deals_query(session: AsyncSession, principal: Principal, params: dict[str, Any]):
     filters = await _load_filters(session, principal, params)
     clause = await deal_scope_clause(session, principal)
@@ -1066,7 +1080,7 @@ async def build_stuck_deals(
             owner_name,
             status_name,
             org_name or "—",
-            round((now - sla_due_at).total_seconds() / 86400, 1) if sla_due_at else None,
+            format_overdue(now - sla_due_at) if sla_due_at else None,
         ]
         for number, title, owner_name, status_name, org_name, sla_due_at in result
     ]
@@ -1084,11 +1098,11 @@ async def build_stuck_deals(
 
     return ReportDataset(
         title="Зависшие сделки",
-        columns=["Номер", "Название", "Ответственный", "Статус", "Организация", "Дней просрочки"],
+        columns=["Номер", "Название", "Ответственный", "Статус", "Организация", "Просрочка"],
         rows=rows,
         note=note,
-        keys=["number", "title", "owner", "status", "organization", "days_overdue"],
-        kinds=["text", "text", "text", "text", "text", "days"],
+        keys=["number", "title", "owner", "status", "organization", "overdue"],
+        kinds=["text", "text", "text", "text", "text", "text"],
         total_rows=total_rows,
         truncated=truncated,
     )
