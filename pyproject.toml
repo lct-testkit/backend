@@ -2,6 +2,8 @@
 name = "rtk-crm-api"
 version = "0.1.0"
 description = "CRM ИТ Школы Ростелекома — бэкенд (модульный монолит)"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.12,<3.15"
 dependencies = [
     # Trivy: CVE-2025-62727/CVE-2026-48818/CVE-2026-54283 в starlette
@@ -120,7 +122,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["setuptools>=75"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

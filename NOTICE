@@ -1,0 +1,15 @@
+RTK School CRM
+Copyright 2026 Команда «Тесткит» (lct-testkit)
+
+Исходный код этого репозитория распространяется по лицензии Apache License 2.0 (файл LICENSE).
+The source code in this repository is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Материалы третьих лиц не входят в эту лицензию и принадлежат их правообладателям:
+шрифт Rostelecom Basis, товарные знаки, логотипы и фирменные ассеты ПАО «Ростелеком»,
+эталонные стили и материалы дизайн-системы Ростелекома; на сторонние зависимости
+действуют их собственные лицензии.
+
+Third-party materials are not covered by the Apache License 2.0 and remain the property of
+their owners: the Rostelecom Basis font, trademarks, logos and brand assets of Rostelecom,
+reference styles and materials of the Rostelecom design system; third-party dependencies are
+licensed under their own terms.

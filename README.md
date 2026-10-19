@@ -614,3 +614,6 @@ bash tools/anonymized_dump.sh --backup ./backups/rtk-crm-20261018.dump --out ./c
 | [`loadtest/README.md`](loadtest/README.md) | нагрузочное тестирование: методика, зафиксированный прогон, интерпретация результатов |
 | [`deploy/README.md`](https://github.com/lct-testkit/deploy#readme) | инфраструктурный репозиторий: манифест образов, CI/CD, установка и офлайн-поставка, HA |
 
+## Лицензия
+
+Apache-2.0 — файл [`LICENSE`](LICENSE). Материалы третьих лиц (шрифт Rostelecom Basis, товарные знаки и фирменные ассеты Ростелекома, сторонние зависимости) в лицензию не входят — [`NOTICE`](NOTICE).
