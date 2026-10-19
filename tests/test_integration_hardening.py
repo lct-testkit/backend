@@ -234,6 +234,9 @@ async def _configure(code: str, *, ref: str, config: dict | None = None) -> None
             source = IntegrationSource(code=code, name=code)
             session.add(source)
         source.is_active = True
+        source.auth_type = (
+            source.auth_type or "hmac"
+        )  # G-3: включённому источнику нужен способ входа
         source.credentials_ref = ref
         source.config = config or {}
 
@@ -528,8 +531,9 @@ class TestSourceUpdate:
 
         assert response.status_code == 422, response.text
 
-    def test_clearing_the_url_is_allowed(self) -> None:
-        assert self._patch(base_url=None).status_code == 200
+    def test_clearing_the_url_is_allowed_for_a_disabled_source(self) -> None:
+        # G-3: у включённого источника без адреса из окружения очистить адрес нельзя.
+        assert self._patch(base_url=None, is_active=False).status_code == 200
 
     @pytest.mark.parametrize("ref", ["bad name!", "1STARTS_WITH_DIGIT", "with-dash", "x" * 129])
     def test_credentials_ref_must_be_an_environment_variable_name(self, ref: str) -> None:

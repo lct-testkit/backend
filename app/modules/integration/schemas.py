@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -42,7 +42,7 @@ class IntegrationSourceUpdateRequest(BaseModel):
     # Длины — как у колонок: длиннее значение давало ошибку БД (500), а не 422. Проверка самого
     # адреса (схема, учётные данные, внутренние сети) — в `IntegrationSourceService.update`.
     base_url: str | None = Field(default=None, max_length=512)
-    auth_type: str | None = Field(default=None, max_length=16)
+    auth_type: Literal["hmac", "bearer", "basic", "none"] | None = None
     # Имя переменной окружения, не значение и не произвольная строка.
     credentials_ref: str | None = Field(
         default=None, max_length=128, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$"
