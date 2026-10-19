@@ -3711,6 +3711,8 @@
           "amount": {
             "anyOf": [
               {
+                "maximum": 999999999999.99,
+                "minimum": 0.0,
                 "type": "number"
               },
               {
@@ -4915,6 +4917,8 @@
           "amount": {
             "anyOf": [
               {
+                "maximum": 999999999999.99,
+                "minimum": 0.0,
                 "type": "number"
               },
               {
@@ -12181,7 +12185,7 @@
           "website": {
             "anyOf": [
               {
-                "maxLength": 255,
+                "maxLength": 300,
                 "type": "string"
               },
               {
@@ -13285,7 +13289,7 @@
           "website": {
             "anyOf": [
               {
-                "maxLength": 255,
+                "maxLength": 300,
                 "type": "string"
               },
               {
@@ -17087,6 +17091,58 @@
           "is_active"
         ],
         "title": "SlaRuleOut",
+        "type": "object"
+      },
+      "SourceCheckOut": {
+        "description": "Итог проверки соединения с источником («Проверить сейчас»).",
+        "properties": {
+          "checked_at": {
+            "description": "Когда проверено (UTC).",
+            "format": "date-time",
+            "title": "Checked At",
+            "type": "string"
+          },
+          "code": {
+            "description": "Код источника (`cms`, `lms`, `bitrix24`).",
+            "title": "Code",
+            "type": "string"
+          },
+          "duration_ms": {
+            "description": "Сколько заняла проверка, мс.",
+            "title": "Duration Ms",
+            "type": "integer"
+          },
+          "http_status": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "HTTP-статус ответа системы; пусто, если ответа не было.",
+            "title": "Http Status"
+          },
+          "message": {
+            "description": "Что произошло, по-русски: «Отвечает» или причина отказа.",
+            "title": "Message",
+            "type": "string"
+          },
+          "ok": {
+            "description": "Система ответила и приняла запрос.",
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "ok",
+          "message",
+          "duration_ms",
+          "checked_at"
+        ],
+        "title": "SourceCheckOut",
         "type": "object"
       },
       "StageEvidenceOut": {
@@ -25151,6 +25207,101 @@
           }
         ],
         "summary": "Изменить источник интеграции",
+        "tags": [
+          "integrations-admin"
+        ]
+      }
+    },
+    "/api/admin/integrations/sources/{code}/check": {
+      "post": {
+        "description": "Один безопасный запрос к внешней системе (чтение одной записи; у Bitrix24 — `server.time`) тем же способом, каким её опрашивают рабочие задачи. Отвечает 200, если проверка состоялась: `ok=true` — система ответила и приняла запрос, `ok=false` — причина в `message` по-русски (таймаут, нет соединения, отказ в доступе, неверный адрес), `duration_ms` — время проверки, `http_status` — ответ системы, если он был. Адрес и секрет в ответ не попадают. Ничего не меняет у источника и в журнале синхронизации. Источник выключен — 409 (CRM-1703), источника с таким кодом нет — 404 (CRM-9004). Лимит 20 проверок в минуту на пользователя. Роль: ADMIN.",
+        "operationId": "check_source_api_admin_integrations_sources__code__check_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "required": true,
+            "schema": {
+              "title": "Code",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceCheckOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Проверить соединение с источником",
         "tags": [
           "integrations-admin"
         ]
