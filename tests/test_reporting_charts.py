@@ -13,8 +13,8 @@ from __future__ import annotations
 import io
 
 import pytest
-from PIL import Image
 from openpyxl import load_workbook
+from PIL import Image
 from pypdf import PdfReader
 
 from app.modules.reporting.builders import ReportDataset
