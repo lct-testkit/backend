@@ -375,7 +375,7 @@ migrations/versions/     миграции Alembic: 0001_baseline … (число
 tests/                   файлы и тесты (офлайн + сквозные с TEST_DATABASE_URL) — число там же,
                          на `be6c0ca` было 170 файлов, 3123 теста
 loadtest/                Locust: provision.py + 2 locustfile, README со своими результатами
-deploy/                  Caddyfile, entrypoint.sh, keycloak/realm-crm.json, postgres/, seaweedfs/
+deploy/                  Caddyfile, entrypoint.sh, keycloak/ (realm-crm.json, themes/rtk-crm — русская email-тема), postgres/, seaweedfs/
 ```
 
 ## Настройка
