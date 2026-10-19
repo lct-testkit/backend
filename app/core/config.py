@@ -293,6 +293,9 @@ class Settings(BaseSettings):
     smtp_user: str = ""
     smtp_password: SecretStr | None = None
     smtp_from: str = ""
+    # Имя отправителя в `From` («РТК Школа CRM <crm@…>»): письмо в списке почтового клиента
+    # подписано названием системы, а не голым адресом. Пустое — только адрес.
+    smtp_from_name: str = "РТК Школа CRM"
     smtp_starttls: bool = True
     # dop.md §13 добавляет `ntp`/`sms-gateway-mock` в контейнерную карту
     # (§2.2) как инфраструктурные сервисы этого же стека, а не опциональную

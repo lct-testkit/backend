@@ -410,6 +410,7 @@ deploy/                  Caddyfile, entrypoint.sh, keycloak/ (realm-crm.json, th
 | `AUDIT_HMAC_KEY` | пусто | ключ HMAC цепочки аудита (хэш v3); пусто — цепочка без ключа (v2); в prod задать вместе с `SETTINGS_ENCRYPTION_KEY` |
 | `SETTINGS_ENCRYPTION_KEY` | пусто | ключ шифрования секретных системных настроек (`PUT /api/admin/system-settings/{key}`) |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` / `SMTP_STARTTLS` | пусто / 587 / пусто / пусто / пусто / `true` | почтовый сервер: без `SMTP_HOST` письма (в том числе ссылки подписантам) остаются в очереди |
+| `SMTP_FROM_NAME` | `РТК Школа CRM` | имя отправителя в `From` («РТК Школа CRM <crm@…>»); пустое — только адрес |
 | `SIGNATURE_EXPOSE_DEBUG_OTP` | `false` | отдавать код подтверждения в ответе (только для демо и тестов) |
 | `BITRIX_SOURCE_ID` | `OTHER` | код источника сделки при передаче в Битрикс24 |
 | `FNS_LOOKUP_BASE_URL` / `FNS_LOOKUP_TIMEOUT_SECONDS` | `https://egrul.nalog.ru` / 8 | внешний источник автоподстановки по ИНН (публичный поиск ФНС); включается флагом `external_org_lookup` в админке |

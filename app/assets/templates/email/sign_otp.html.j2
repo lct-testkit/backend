@@ -1,0 +1,10 @@
+{% extends "layout.html.j2" %}
+{% block title %}Код подтверждения подписи{% endblock %}
+{% block preheader %}Ваш код: {{ code }}. Действует {{ ttl }}.{% endblock %}
+{% block heading %}Код подтверждения подписи{% endblock %}
+{% block content %}
+<p style="margin:0 0 12px 0;">Введите этот код на странице подписания документа:</p>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td class="bg-soft code" align="center" style="background-color:#fff6f3;border-radius:8px;padding:16px;font-family:Consolas,'Courier New',monospace;font-size:32px;line-height:40px;letter-spacing:8px;font-weight:bold;color:#d9430f;">{{ code }}</td></tr></table>
+<p style="margin:12px 0 0 0;">Код действует {{ ttl }}.</p>
+{% endblock %}
+{% block note %}Никому не сообщайте код, даже сотрудникам школы. Если вы не запрашивали код, проигнорируйте письмо.{% endblock %}

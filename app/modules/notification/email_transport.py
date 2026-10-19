@@ -20,8 +20,9 @@ from __future__ import annotations
 import asyncio
 import smtplib
 import ssl
+from collections.abc import Mapping
 from email.message import EmailMessage
-from email.utils import formatdate, make_msgid
+from email.utils import formataddr, formatdate, make_msgid, parseaddr
 
 import structlog
 
@@ -48,8 +49,21 @@ class EmailSendError(Exception):
 
 
 def _sender() -> str:
+    """Адрес отправителя (без имени): им же подписан конверт и строится домен `Message-ID`."""
     settings = get_settings()
-    return (settings.smtp_from or "").strip() or (settings.smtp_user or "").strip()
+    configured = (settings.smtp_from or "").strip() or (settings.smtp_user or "").strip()
+    return parseaddr(configured)[1] or configured
+
+
+def _from_header() -> str:
+    """`From` с именем: «РТК Школа CRM <crm@…>». Если в `SMTP_FROM` имя уже есть, оно главнее
+    настройки `SMTP_FROM_NAME`; пустое имя даёт голый адрес. Кириллица кодируется по RFC 2047."""
+    settings = get_settings()
+    configured = (settings.smtp_from or "").strip()
+    name, address = parseaddr(configured)
+    address = address or _sender()
+    name = name or (settings.smtp_from_name or "").strip()
+    return formataddr((name, address)) if name else address
 
 
 def smtp_configured() -> bool:
@@ -57,17 +71,51 @@ def smtp_configured() -> bool:
     return bool((get_settings().smtp_host or "").strip() and _sender())
 
 
-def _build_message(*, sender: str, to: str, subject: str, body: str) -> EmailMessage:
+# Тип вложения `cid`: (MIME-тип, содержимое). Встроенные картинки едут внутри HTML-части
+# (`multipart/related`), а не отдельным вложением, поэтому клиент показывает их в самом письме.
+InlineImages = Mapping[str, tuple[str, bytes]]
+
+
+def _build_message(
+    *,
+    sender: str,
+    to: str,
+    subject: str,
+    text: str,
+    html: str | None = None,
+    inline: InlineImages | None = None,
+    headers: Mapping[str, str] | None = None,
+) -> EmailMessage:
     message = EmailMessage()
     message["From"] = sender
     message["To"] = to
     message["Subject"] = subject
     message["Date"] = formatdate(localtime=False)
-    message["Message-ID"] = make_msgid(domain=sender.rpartition("@")[2] or None)
+    message["Message-ID"] = make_msgid(domain=_sender().rpartition("@")[2] or None)
     # Автоответы и «отпуск» на служебные письма не нужны.
     message["Auto-Submitted"] = "auto-generated"
+    for name, value in (headers or {}).items():
+        # Значение с переводом строки — попытка вписать заголовок.
+        message[name] = value.replace("\r", " ").replace("\n", " ")
     # base64: тело по-русски, а не каждый сервер принимает 8bit.
-    message.set_content(body, charset="utf-8", cte="base64")
+    message.set_content(text, charset="utf-8", cte="base64")
+    # После `set_content`: он стирает все заголовки `Content-*`.
+    message["Content-Language"] = "ru"
+    if html is not None:
+        # multipart/alternative: клиент без HTML (и поисковик по почте) читает текстовую часть.
+        message.add_alternative(html, subtype="html", charset="utf-8", cte="base64")
+        if inline:
+            html_part = list(message.iter_parts())[-1]
+            for cid, (content_type, data) in inline.items():
+                maintype, _, subtype = content_type.partition("/")
+                html_part.add_related(
+                    data,
+                    maintype=maintype,
+                    subtype=subtype,
+                    cid=f"<{cid}>",
+                    filename=f"{cid}.{subtype}",
+                    disposition="inline",
+                )
     return message
 
 
@@ -106,8 +154,22 @@ def _classify(exc: BaseException) -> EmailSendError:
     return EmailSendError(f"SMTP: {type(exc).__name__}", retryable=True)
 
 
-async def send_email(*, to: str, subject: str, body: str) -> None:
+async def send_email(
+    *,
+    to: str,
+    subject: str,
+    text: str | None = None,
+    html: str | None = None,
+    inline: InlineImages | None = None,
+    headers: Mapping[str, str] | None = None,
+    body: str | None = None,
+) -> None:
     """Отправляет письмо. Бросает `EmailSendError`, ничего другого наружу не выпускает.
+
+    `text` — текстовая часть (обязательна: её читают клиенты без HTML); `body` — прежнее имя
+    того же аргумента. `html` добавляет вторую часть `multipart/alternative`, `inline` —
+    картинки `cid:` для неё (`{"logo": ("image/png", байты)}`), `headers` — дополнительные
+    заголовки (например, `List-Unsubscribe`).
 
     Вызывающий обязан сам проверить `smtp_configured()`: без настроек отправлять некуда."""
     sender = _sender()
@@ -116,8 +178,19 @@ async def send_email(*, to: str, subject: str, body: str) -> None:
     if not to or "@" not in to or any(ch in to for ch in "\r\n"):
         # Перевод строки в адресе — попытка вписать заголовок; такого получателя не бывает.
         raise EmailSendError("у получателя нет корректного адреса", retryable=False)
+    text_part = text if text is not None else body
+    if text_part is None:
+        raise EmailSendError("у письма нет текста", retryable=False)
 
-    message = _build_message(sender=sender, to=to, subject=subject.replace("\n", " "), body=body)
+    message = _build_message(
+        sender=_from_header(),
+        to=to,
+        subject=subject.replace("\n", " "),
+        text=text_part,
+        html=html,
+        inline=inline,
+        headers=headers,
+    )
     try:
         await asyncio.wait_for(asyncio.to_thread(_send_blocking, message), _TOTAL_TIMEOUT_SECONDS)
     except EmailSendError:
