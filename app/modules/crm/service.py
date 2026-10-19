@@ -1524,6 +1524,11 @@ _PATCHABLE_FIELDS = frozenset(
 #: Колонки сделки NOT NULL, которые PATCH принимает: очищать их нельзя.
 _DEAL_NOT_NULL_FIELDS = ("title", "currency", "priority")
 
+#: Поля заморозки в `custom_fields` сделки (условие «Заморозить» в сид-воронках: дата возобновления
+#: или причина); при выходе из `parked` они очищаются (D-4).
+_FREEZE_CUSTOM_FIELDS = ("park_reason", "resume_at")
+
+#: Поля сделки, которые можно задать через `fields` перехода.
 _TRANSITION_DIRECT_FIELDS = frozenset(
     {"amount", "currency", "expected_close_date", "loss_reason_id", "students_planned", "title"}
 )
@@ -2612,6 +2617,22 @@ class DealService:
             deal.closed_at = now
         elif from_parked:
             deal.closed_at = None  # возобновление: сделка снова открыта
+
+        if from_parked and to_status["type"] != StatusType.PARKED.value:
+            # D-4: причина и дата возобновления описывают ТЕКУЩУЮ заморозку. Оставшись в карточке
+            # после выхода из неё, они показывались у незамороженной сделки («Причина заморозки»
+            # на шаге «Юридическое согласование»). История переходов и аудит их помнят.
+            for freeze_key in _FREEZE_CUSTOM_FIELDS:
+                if freeze_key in (deal.custom_fields or {}):
+                    field_changes[f"custom_fields.{freeze_key}"] = {
+                        "old": _json_safe(deal.custom_fields[freeze_key]),
+                        "new": None,
+                    }
+            deal.custom_fields = {
+                key: value
+                for key, value in (deal.custom_fields or {}).items()
+                if key not in _FREEZE_CUSTOM_FIELDS
+            }
 
         # Подпись относится к этапу, на котором её запросили: подписанное КП («Согласование
         # КП») не должно засчитываться как подписанный договор на следующем этапе — из-за этого
