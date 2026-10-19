@@ -1013,9 +1013,33 @@ class TestStuckDealsTruncation:
             "owner",
             "status",
             "organization",
-            "days_overdue",
+            "overdue",
         ]
-        assert dataset.kinds == ["text", "text", "text", "text", "text", "days"]
+        assert dataset.kinds == ["text", "text", "text", "text", "text", "text"]
+
+    def test_overdue_is_whole_days_and_hours_not_a_fraction(self, client) -> None:
+        # D-8: раньше «20,4» дней в файле и «20 д 9 ч» в интерфейсе.
+        owner_id = run(client, self._make_breached_deals, 2)
+        dataset = self._build(client, owner_id, {"limit": 5000})
+        overdue = {row[1]: row[5] for row in dataset.rows}
+        assert overdue["Просроченная сделка 0"].startswith("1 д")
+        assert overdue["Просроченная сделка 1"].startswith("2 д")
+        assert all("," not in str(value) and "." not in str(value) for value in overdue.values())
+
+    @pytest.mark.parametrize(
+        ("delta", "expected"),
+        [
+            (dt.timedelta(days=20, hours=9, minutes=40), "20 д 9 ч"),
+            (dt.timedelta(days=3), "3 д"),
+            (dt.timedelta(hours=5, minutes=59), "5 ч"),
+            (dt.timedelta(minutes=10), "меньше часа"),
+            (dt.timedelta(minutes=-3), "меньше часа"),
+        ],
+    )
+    def test_format_overdue(self, delta: dt.timedelta, expected: str) -> None:
+        from app.modules.reporting.builders import format_overdue
+
+        assert format_overdue(delta) == expected
 
     def test_limit_above_the_total_skips_the_estimate(self, client) -> None:
         owner_id = run(client, self._make_breached_deals, 2)
