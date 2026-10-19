@@ -8709,7 +8709,12 @@
           "auth_type": {
             "anyOf": [
               {
-                "maxLength": 16,
+                "enum": [
+                  "hmac",
+                  "bearer",
+                  "basic",
+                  "none"
+                ],
                 "type": "string"
               },
               {

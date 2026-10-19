@@ -670,6 +670,8 @@ class AdminUserService:
             recipient_id=user.id,
             template_code=TPL_ACCOUNT_BLOCKED,
             priority=NotificationPriority.HIGH,
+            entity_type="user",
+            entity_id=user.id,
             payload={"reason": reason},
         )
         await self._audit.record(
