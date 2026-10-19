@@ -11,3 +11,6 @@ Caddyfile text eol=lf
 *.md text eol=lf
 *.toml text eol=lf
 *.ini text eol=lf
+*.ftl text eol=lf
+*.properties text eol=lf
+*.png binary

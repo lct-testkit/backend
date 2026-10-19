@@ -279,16 +279,21 @@ services:
       KC_HTTP_ENABLED: "true"
       # Keycloak живёт под /auth, чтобы весь контур был на одном порту Caddy.
       KC_HTTP_RELATIVE_PATH: /auth
-      # Фиксируем публичный frontend-URL: иначе issuer токена зависел бы от
-      # того, обратились к Keycloak через Caddy или напрямую из docker-сети.
-      KC_HOSTNAME_URL: ${KEYCLOAK_PUBLIC_URL:-http://localhost:8080/auth}
-      KC_HOSTNAME_STRICT: "false"
-      KC_HOSTNAME_STRICT_HTTPS: "false"
+      # Публичный адрес Keycloak (hostname v2, Keycloak 25): полный URL вместе с /auth. Он попадает в issuer
+      # токенов, в ссылки писем (сброс пароля, подтверждение почты) и в редиректы формы входа. Прежний
+      # KC_HOSTNAME_URL относится к hostname v1 и в Keycloak 25 молча не действует (в логе: «Available only when
+      # hostname:v1 feature is enabled»), из-за чего письма получали ссылку на внутренний `http://keycloak:8080`.
+      KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL:-http://localhost:8080/auth}
+      # Backchannel (token, JWKS, Admin API) остаётся динамическим: api ходит по внутреннему
+      # http://keycloak:8080/auth, а issuer в токене при этом публичный (frontend URL).
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
       KC_PROXY_HEADERS: xforwarded
       KC_HEALTH_ENABLED: "true"
       KC_METRICS_ENABLED: "true"
     volumes:
       - ./deploy/keycloak:/opt/keycloak/data/import:ro
+      # Русская email-тема rtk-crm (письма «забыли пароль», подтверждение почты, executeActions).
+      - ./deploy/keycloak/themes/rtk-crm:/opt/keycloak/themes/rtk-crm:ro
     # В образе нет ни curl, ни wget, поэтому стучимся по /dev/tcp из bash.
     # KC_HEALTH_ENABLED поднимает health на management-порту 9000, причём
     # KC_HTTP_RELATIVE_PATH действует и там: путь именно /auth/health/ready.
