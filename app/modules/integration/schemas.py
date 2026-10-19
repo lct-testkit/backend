@@ -241,6 +241,19 @@ class PullRequestResponse(BaseModel):
     requested_at: dt.datetime
 
 
+class SourceCheckOut(BaseModel):
+    """Итог проверки соединения с источником («Проверить сейчас»)."""
+
+    code: str = Field(description="Код источника (`cms`, `lms`, `bitrix24`).")
+    ok: bool = Field(description="Система ответила и приняла запрос.")
+    message: str = Field(description="Что произошло, по-русски: «Отвечает» или причина отказа.")
+    duration_ms: int = Field(description="Сколько заняла проверка, мс.")
+    http_status: int | None = Field(
+        default=None, description="HTTP-статус ответа системы; пусто, если ответа не было."
+    )
+    checked_at: dt.datetime = Field(description="Когда проверено (UTC).")
+
+
 # =============================================================================
 # B5-9: webhook-подписки
 # =============================================================================
