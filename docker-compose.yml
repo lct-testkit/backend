@@ -78,6 +78,7 @@ x-api-env: &api-env
   SMTP_USER: ${SMTP_USER:-}
   SMTP_PASSWORD: ${SMTP_PASSWORD:-}
   SMTP_FROM: ${SMTP_FROM:-}
+  SMTP_FROM_NAME: ${SMTP_FROM_NAME:-РТК Школа CRM}
   SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
   # Без явного списка контейнер берёт дефолт из кода; значение из .env перекрывало его и без json загрузка оплат не работала.
   ALLOWED_FILE_EXTENSIONS: ${ALLOWED_FILE_EXTENSIONS:-png,jpeg,jpg,pdf,zip,gz,gzip,rar,doc,docx,xls,xlsx,xml,csv,json}

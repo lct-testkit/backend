@@ -1,0 +1,23 @@
+{#- Блоки писем. button: одна главная кнопка плюс запасная ссылка текстом (для клиентов, где кнопка не работает).
+    facts: таблица «ключ — значение», пустые значения не показываются (ни «None», ни строки без значения).
+    paragraphs: текст из админского шаблона уведомления: пустая строка делит абзацы, перевод строки — <br>. -#}
+{% macro button(url, label) -%}
+<tr><td class="pad" style="padding:16px 32px 16px 32px;">
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+    <td class="btn" align="center" bgcolor="#d9430f" style="background-color:#d9430f;border-radius:8px;">
+      <a class="btn-a" href="{{ url }}" target="_blank" style="display:inline-block;padding:14px 28px;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:20px;font-weight:bold;color:#ffffff;text-decoration:none;border-radius:8px;">{{ label }}</a>
+    </td>
+  </tr></table>
+  <div class="t-muted" style="padding-top:12px;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:18px;color:#6d7686;">Кнопка не работает? Скопируйте ссылку в браузер:<br><a class="a-link" href="{{ url }}" style="color:#d9430f;word-break:break-all;">{{ url }}</a></div>
+</td></tr>
+{%- endmacro %}
+{% macro facts(rows) -%}
+{%- set shown = rows | selectattr(1) | list -%}
+{% if shown %}<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="bg-soft" style="background-color:#f9f9fa;border-radius:8px;margin:12px 0;">
+{% for k, v in shown %}<tr><td class="t-muted" style="padding:10px 16px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#6d7686;width:38%;vertical-align:top;">{{ k }}</td><td class="t-main" style="padding:10px 16px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#101828;font-weight:bold;vertical-align:top;word-break:break-word;">{{ v }}</td></tr>{% endfor %}
+</table>{% endif %}
+{%- endmacro %}
+{% macro paragraphs(text) -%}
+{% for part in text.split("\n\n") if part.strip() %}<p style="margin:0 0 12px 0;">{{ part.strip() | br }}</p>
+{% endfor %}
+{%- endmacro %}

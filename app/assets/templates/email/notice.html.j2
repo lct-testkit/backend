@@ -1,0 +1,10 @@
+{% extends "layout.html.j2" %}{% from "_macros.j2" import button, facts, paragraphs %}
+{% block title %}{{ subject }}{% endblock %}
+{% block preheader %}{{ lead }}{% endblock %}
+{% block heading %}{{ subject }}{% endblock %}
+{% block content %}
+{{ paragraphs(body) }}
+{{ facts(rows) }}
+{% endblock %}
+{% block button %}{% if url %}{{ button(url, button_label) }}{% endif %}{% endblock %}
+{% block note %}Какие уведомления приходят на почту, настраивается в CRM: <a class="a-link" href="{{ settings_url }}" style="color:#d9430f;">Уведомления, Настройки</a>.{% endblock %}

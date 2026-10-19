@@ -1,0 +1,16 @@
+{{ subject }}
+
+{{ body }}
+{% if rows %}
+
+{% for k, v in rows %}
+{{ k }}: {{ v }}
+{% endfor %}
+{% endif %}
+{% if url %}
+
+{{ button_label }}: {{ url }}
+{% endif %}
+
+Какие уведомления приходят на почту, настраивается в CRM: {{ settings_url }}
+{% include "_footer.txt.j2" %}
