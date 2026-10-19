@@ -182,6 +182,7 @@ class IntegrationSourceService:
                     "Адрес внешней системы не принят",
                     [FieldError(field="base_url", reason=str(exc))],
                 ) from exc
+        self._require_connection_details(source, updates)
         changes: dict[str, Any] = {}
         for field, new_value in updates.items():
             old_value = getattr(source, field)
@@ -197,6 +198,43 @@ class IntegrationSourceService:
                 changes=changes,
             )
         return source
+
+    @staticmethod
+    def _require_connection_details(source: IntegrationSource, updates: dict[str, Any]) -> None:
+        """G-3: включённому источнику (или с забором по расписанию) нужны адрес и способ входа,
+        иначе включатель ничего не включает, а ошибка всплывает только в журнале воркера.
+        Проверяется итоговое состояние и только когда запрос трогает эти поля — сохранение
+        одного названия у ранее настроенного источника не блокируется."""
+        if not {"is_active", "pull_enabled", "base_url", "auth_type", "credentials_ref"} & set(
+            updates
+        ):
+            return
+
+        def final(name: str) -> Any:
+            return updates[name] if name in updates else getattr(source, name)
+
+        if not (final("is_active") or final("pull_enabled")):
+            return
+        settings = get_settings()
+        errors: list[FieldError] = []
+        if source.code == "bitrix24":
+            # Адрес Bitrix24 — секрет целиком (URL входящего вебхука), в карточке его нет.
+            if not (final("credentials_ref") or settings.bitrix_webhook_url_ref):
+                errors.append(
+                    FieldError(
+                        field="credentials_ref",
+                        reason="укажите ссылку на секрет с адресом входящего вебхука Bitrix24",
+                    )
+                )
+        else:
+            default_attr = IntegrationSourceService._DEFAULT_BASE_URL_SETTING.get(source.code)
+            default_url = getattr(settings, default_attr, None) if default_attr else None
+            if not (final("base_url") or default_url):
+                errors.append(FieldError(field="base_url", reason="укажите адрес системы"))
+        if not final("auth_type"):
+            errors.append(FieldError(field="auth_type", reason="выберите способ входа"))
+        if errors:
+            raise ValidationError("Для включённого источника нужны адрес и способ входа", errors)
 
     # --- B5-3: настраиваемый маппинг «утверждённых полей» ------------------------------
 

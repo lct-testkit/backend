@@ -225,6 +225,7 @@ async def _configure_demo_sources(session: AsyncSession) -> int:
         source.is_active = True
         source.pull_enabled = True
         source.pull_interval_seconds = 60
+        source.auth_type = source.auth_type or "bearer"  # токен — из окружения (`*_AUTH_REF`)
         if code == IntegrationSourceCode.CMS.value:
             source.base_url = settings.cms_base_url
             source.field_mapping = _demo_cms_mapping().model_dump(mode="json")
