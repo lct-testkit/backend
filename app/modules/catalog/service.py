@@ -44,6 +44,7 @@ from app.core.normalize import (
     company_key,
     escape_like,
     name_key,
+    names_share_distinctive_word,
     normalize_email,
     normalize_phone,
 )
@@ -710,6 +711,9 @@ class OrganizationService:
         return await self._session.scalar(select(Organization).where(Organization.inn == inn))
 
     async def find_similar(self, name: str) -> list[Organization]:
+        """Похожие по названию: триграммы отбирают кандидатов, затем остаются только те, у кого
+        с запросом есть общее ЗНАЧИМОЕ слово (O-4): «университет», «институт», «государственный»
+        и подобные слова сами по себе сходства не дают."""
         stmt = (
             select(Organization)
             .where(
@@ -717,9 +721,11 @@ class OrganizationService:
                 func.similarity(Organization.name, name) > _SIMILARITY_THRESHOLD,
             )
             .order_by(func.similarity(Organization.name, name).desc())
-            .limit(_SIMILARITY_LIMIT)
+            .limit(_SIMILARITY_LIMIT * 4)
         )
-        return list((await self._session.execute(stmt)).scalars().all())
+        candidates = (await self._session.execute(stmt)).scalars().all()
+        meaningful = [org for org in candidates if names_share_distinctive_word(name, org.name)]
+        return meaningful[:_SIMILARITY_LIMIT]
 
     async def find_same_name(self, name: str) -> list[Organization]:
         """Неудалённые организации с тем же названием: `ООО «Базис»`, `ооо "Базис"` и `ООО  Базис` —

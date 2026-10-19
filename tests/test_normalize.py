@@ -13,6 +13,7 @@ from app.core.normalize import (
     clean_text,
     company_key,
     name_key,
+    names_share_distinctive_word,
     normalize_email,
     normalize_phone,
     parse_contact_methods,
@@ -163,3 +164,33 @@ class TestContactMethods:
 
     def test_empty(self) -> None:
         assert parse_contact_methods("") == ([], [])
+
+
+class TestSimilarOrganizationNames:
+    """O-4: «университет», «институт», «государственный»… не делают названия похожими."""
+
+    @pytest.mark.parametrize(
+        ("left", "right"),
+        [
+            ("QA Университет", "Пермский политехнический университет"),
+            ("Московский государственный университет", "Томский государственный университет"),
+            ("Технический колледж", "Политехнический колледж"),
+            ("Университет", "Пермский политехнический университет"),
+            ('ФГБОУ ВО «Уральский федеральный университет»', "Сибирский федеральный университет"),
+        ],
+    )
+    def test_generic_words_alone_are_not_similarity(self, left: str, right: str) -> None:
+        assert names_share_distinctive_word(left, right) is False
+
+    @pytest.mark.parametrize(
+        ("left", "right"),
+        [
+            ("Пермский политехнический университет", "Пермский государственный университет"),
+            ("Пермский университет", "Университет Пермского края"),
+            ("Омский институт ИТ", "ООО Омский Институт ИТ"),
+            ("МФТИ", "мфти"),
+            ("Уральский университет", "Уральскй университет"),
+        ],
+    )
+    def test_a_shared_distinctive_word_is_kept(self, left: str, right: str) -> None:
+        assert names_share_distinctive_word(left, right) is True
