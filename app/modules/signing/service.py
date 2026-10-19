@@ -61,7 +61,7 @@ from app.core.errors import (
     ValidationError,
 )
 from app.core.ids import uuid7
-from app.core.masking import mask_email, mask_phone
+from app.core.masking import mask_email, mask_name, mask_phone
 from app.core.metrics import signature_complete_seconds
 from app.core.permissions import Permission, has_permission
 from app.core.rate_limit import enforce as rate_limit_enforce
@@ -360,8 +360,10 @@ class EdmAgreementService:
         """Название вуза, ФИО контакта или сотрудника — по запросу на каждый `party_type`,
         встретившийся на СТРАНИЦЕ, а не на каждое соглашение (раздел 6: запрет N+1; тот же
         приём, что `DealService.party_names`, и то же правило доступа: ФИО физлица — ПДн, без
-        права `contact:read`/`user:read` его нет. Список ЭДО читает и AUDITOR, у которого этих
-        прав нет; для него `party_display` остаётся пустым, `party_type`/`party_id` — как были).
+        права `contact:read`/`user:read` полное ФИО не отдаётся. Список ЭДО читает и AUDITOR, у
+        которого этих прав нет: он получает ФИО с инициалами (`Иванов И. И.`, как в отчётах и
+        журнале), а не пустое значение — иначе экран соглашений сам шёл бы за контактом и
+        получал 403 (E-1).
         Название вуза — не ПДн физлица и отдаётся всем, кто видит само соглашение."""
         ids_by_type: dict[str, set[uuid.UUID]] = {
             "organization": set(),
@@ -381,17 +383,18 @@ class EdmAgreementService:
             )
             for row in rows:
                 displays[("organization", row.id)] = row.name
-        if ids_by_type["contact"] and has_permission(principal.role, Permission.CONTACT_READ):
+        if ids_by_type["contact"]:
+            full_names = has_permission(principal.role, Permission.CONTACT_READ)
             rows = await self._session.execute(
                 select(
                     Contact.id, Contact.last_name, Contact.first_name, Contact.middle_name
                 ).where(Contact.id.in_(ids_by_type["contact"]))
             )
             for row in rows:
-                displays[("contact", row.id)] = " ".join(
-                    p for p in (row.last_name, row.first_name, row.middle_name) if p
-                )
-        if ids_by_type["user"] and has_permission(principal.role, Permission.USER_READ):
+                name = " ".join(p for p in (row.last_name, row.first_name, row.middle_name) if p)
+                displays[("contact", row.id)] = name if full_names else (mask_name(name) or "")
+        if ids_by_type["user"]:
+            full_names = has_permission(principal.role, Permission.USER_READ)
             rows = await self._session.execute(
                 select(User.id, User.display_name, User.full_name).where(
                     User.id.in_(ids_by_type["user"])
@@ -399,7 +402,8 @@ class EdmAgreementService:
             )
             for row in rows:
                 # Как `User.effective_name`: отображаемое имя, если задано, иначе ФИО.
-                displays[("user", row.id)] = row.display_name or row.full_name
+                name = row.display_name or row.full_name
+                displays[("user", row.id)] = name if full_names else (mask_name(name) or "")
         return displays
 
     async def find_active_for_contact(self, contact: Contact) -> EdmAgreement | None:
@@ -511,6 +515,8 @@ async def suspend_requests_of_agreement(
                 recipient_id=document.created_by,
                 template_code=TPL_EDM_AGREEMENT_MISSING,
                 priority=NotificationPriority.HIGH,
+                entity_type="signature_document",
+                entity_id=document.id,
                 payload={"document_id": str(document.id), "reason": reason},
             )
     return len(requests)
@@ -1174,6 +1180,8 @@ class SignatureDocumentService:
                         recipient_id=document.created_by,
                         template_code=TPL_EDM_AGREEMENT_MISSING,
                         priority=NotificationPriority.HIGH,
+                        entity_type="signature_document",
+                        entity_id=document.id,
                         payload={
                             "document_id": str(document.id),
                             "contact_id": str(contact.id) if contact else None,
@@ -1422,8 +1430,9 @@ class SignatureDocumentService:
                     recipient_id=document.created_by,
                     template_code=TPL_SIGNATURE_REMINDER_MANUAL,
                     priority=NotificationPriority.NORMAL,
-                    entity_type="signature_request",
-                    entity_id=request.id,
+                    # Инициатору открывается документ (запрос подписанта ему недоступен: 404).
+                    entity_type="signature_document",
+                    entity_id=document.id,
                     payload={"title": document.title},
                 )
         elif request.signer_user_id:
@@ -2004,8 +2013,8 @@ class SignatureRequestService:
                 recipient_id=document.created_by,
                 template_code=TPL_SIGNATURE_OTP_LOCKED,
                 priority=NotificationPriority.HIGH,
-                entity_type="signature_request",
-                entity_id=request.id,
+                entity_type="signature_document",
+                entity_id=document.id,
             )
 
     async def sign(
