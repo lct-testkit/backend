@@ -74,12 +74,84 @@ def _valid_phone(value: str | None) -> str | None:
     return normalized
 
 
+def _org_email(value: str | None) -> str | None:
+    """Основной e-mail организации: те же правила, что у контакта, но сообщение называет поле —
+    форма организации показывает его под полем «Email»."""
+    try:
+        return _valid_email(value)
+    except PydanticCustomError:
+        raise PydanticCustomError(
+            "invalid_email", "Основной e-mail: некорректный адрес электронной почты"
+        ) from None
+
+
+def _org_phone(value: str | None) -> str | None:
+    """Основной телефон организации: правила `ContactPhone`, сообщение называет поле."""
+    try:
+        return _valid_phone(value)
+    except PydanticCustomError:
+        raise PydanticCustomError(
+            "invalid_phone", "Основной телефон: некорректный номер телефона"
+        ) from None
+
+
+_WEBSITE_HTTP = re.compile(r"^(https?)://", re.IGNORECASE)
+# Любая другая схема: `ftp://`, `mailto:`, `javascript:`. `example.ru:8080` схемой не считается.
+_WEBSITE_OTHER_SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*:(//|(?!\d))", re.IGNORECASE)
+_WEBSITE_LABEL = r"[a-z0-9Ѐ-ӿ](?:[a-z0-9Ѐ-ӿ-]{0,61}[a-z0-9Ѐ-ӿ])?"
+_WEBSITE_HOST = re.compile(rf"^(?:{_WEBSITE_LABEL}\.)+[a-zЀ-ӿ0-9-]{{2,63}}$", re.IGNORECASE)
+
+
+def normalize_website(value: str | None) -> str | None:
+    """Адрес сайта: `http(s)://домен.зона/…` оставляем, голый `домен.зона[/путь]` превращаем
+    в `https://домен.зона[/путь]`. Пусто или не адрес («сайт», `ftp://…`, пробелы внутри, домен
+    без точки) — `None`; отличить «пусто» от «не адрес» вызывающая сторона может по входу
+    (`_valid_website`)."""
+    text = clean_text(value)
+    if text is None:
+        return None
+    match = _WEBSITE_HTTP.match(text)
+    if match:
+        scheme, rest = match.group(1).lower(), text[match.end() :]
+    elif _WEBSITE_OTHER_SCHEME.match(text):
+        return None
+    else:
+        scheme, rest = "https", text
+    if not rest or any(ch.isspace() for ch in rest):
+        return None
+    host = re.split(r"[/?#]", rest, maxsplit=1)[0].rsplit("@", 1)[-1]
+    if ":" in host:
+        host, _, port = host.rpartition(":")
+        if not port.isdigit() or not 0 < int(port) < 65536:
+            return None
+    if len(host) > 253 or not _WEBSITE_HOST.match(host):
+        return None
+    return f"{scheme}://{rest}"
+
+
+def _valid_website(value: str | None) -> str | None:
+    """Сайт организации; пустая строка -> `None` (так поле очищают в PATCH)."""
+    if value is None or clean_text(value) is None:
+        return None
+    normalized = normalize_website(value)
+    if normalized is None:
+        raise PydanticCustomError(
+            "invalid_website", "Сайт: укажите адрес вида https://example.ru или example.ru"
+        )
+    if len(normalized) > 255:
+        raise PydanticCustomError("website_too_long", "Сайт: адрес длиннее 255 символов")
+    return normalized
+
+
 def _unique_methods(value: list[ContactMethodLiteral]) -> list[ContactMethodLiteral]:
     return list(dict.fromkeys(value))
 
 
 ContactEmail = Annotated[str | None, Field(max_length=255), AfterValidator(_valid_email)]
 ContactPhone = Annotated[str | None, Field(max_length=32), AfterValidator(_valid_phone)]
+OrgEmail = Annotated[str | None, Field(max_length=255), AfterValidator(_org_email)]
+OrgPhone = Annotated[str | None, Field(max_length=32), AfterValidator(_org_phone)]
+OrgWebsite = Annotated[str | None, Field(max_length=300), AfterValidator(_valid_website)]
 ContactMethods = Annotated[list[ContactMethodLiteral], AfterValidator(_unique_methods)]
 
 
@@ -120,9 +192,9 @@ class OrganizationCreateRequest(BaseModel):
     legal_address: str | None = None
     actual_address: str | None = None
     region_id: uuid.UUID | None = None
-    website: str | None = Field(default=None, max_length=255)
-    main_phone: str | None = Field(default=None, max_length=32)
-    main_email: str | None = Field(default=None, max_length=255)
+    website: OrgWebsite = None
+    main_phone: OrgPhone = None
+    main_email: OrgEmail = None
     students_count: int | None = Field(default=None, ge=0)
     owner_id: uuid.UUID | None = None
     source: str | None = Field(default=None, max_length=32)
@@ -145,9 +217,9 @@ class OrganizationUpdateRequest(BaseModel):
     legal_address: str | None = None
     actual_address: str | None = None
     region_id: uuid.UUID | None = None
-    website: str | None = Field(default=None, max_length=255)
-    main_phone: str | None = Field(default=None, max_length=32)
-    main_email: str | None = Field(default=None, max_length=255)
+    website: OrgWebsite = None
+    main_phone: OrgPhone = None
+    main_email: OrgEmail = None
     students_count: int | None = Field(default=None, ge=0)
     owner_id: uuid.UUID | None = None
     custom_fields: dict[str, Any] | None = None
