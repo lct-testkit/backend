@@ -156,7 +156,8 @@ class TestQueue:
         # последовательно (иначе второй начался бы не раньше t=0.3с). Общее время не
         # сравниваем с порогом: на нагруженном раннере накладные расходы БД сами дают
         # 0.5с+, и порог ловил шум, а не сериализацию.
-        assert max(started) - min(started) < 0.3, f"второй рендер стартовал через {max(started) - min(started):.2f}с — задания шли одно за другим"
+        gap = max(started) - min(started)
+        assert gap < 0.3, f"второй рендер стартовал через {gap:.2f}с — задания шли одно за другим"
         assert elapsed < 5
 
     def test_sweep_requeues_processing_stuck_longer_than_the_stale_threshold(
