@@ -299,10 +299,16 @@ class TestSlaStateAtChange:
         assert response.status_code == 200, response.text
         deal = response.json()["deal"]
 
+        assert deal["custom_fields"]["park_reason"] == "ждём бюджет"
+
         response = transition_deal(client, deal, str(contact_search), comment="Возобновили работу")
 
         assert response.status_code == 200, response.text
         assert run(client, _last_history_sla_state, deal_id) == "paused"
+        # D-4: причина заморозки не остаётся в карточке после возобновления.
+        resumed = response.json()["deal"]
+        assert "park_reason" not in resumed["custom_fields"]
+        assert "resume_at" not in resumed["custom_fields"]
 
 
 class TestStageSummaryQueryBudget:
