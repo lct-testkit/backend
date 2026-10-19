@@ -138,23 +138,54 @@
 	}
 
 	# Mailpit (профиль compose `mail`, для demo включён) — ловушка писем: приглашения, сброс пароля, ссылки
-	# подписантам. Письма содержат рабочие ссылки и ПДн, поэтому маршрут открывается ТОЛЬКО при заданном
-	# MAILPIT_UI_PASSWORD (compose передаёт флаг MAILPIT_UI_PASSWORD_SET); без пароля /mail отвечает 404.
-	# Авторизацию (basic) требует сам Mailpit (MP_UI_AUTH): bcrypt-хэш для basic_auth Caddy генератор .env
-	# сделать не может (нет ни python, ни openssl). `handle`, не `handle_path`: Mailpit знает свой префикс
-	# (MP_WEBROOT=/mail). Заголовок Authorization в журнале Caddy скрыт. Ни CSP, ни X-Frame-Options (см. выше) тут
-	# не ставим: интерфейс показывает письмо во фрейме того же origin.
+	# подписантам. Режим интерфейса — MAILPIT_UI (compose передаёт как есть):
+	#   public — открыт всем без входа (demo: учётки стенда и так публичные, вход в любую роль в один клик);
+	#   crm    — только вошедшим в CRM через сессию BFF (prod, вход через Keycloak): Caddy спрашивает у api
+	#            `GET /api/me` с куками запроса (forward_auth), 401/403 — на вход CRM с возвратом на /mail/;
+	#   пусто  — 404.
+	# В обоих режимах только чтение: из меняющих запросов пропускается лишь отметка «прочитано»
+	# (PUT /mail/api/v1/messages); удаление, теги, повторная отправка — 403. `handle`, не `handle_path`: Mailpit
+	# знает свой префикс (MP_WEBROOT=/mail). Ни CSP, ни X-Frame-Options (см. выше) тут не ставим: интерфейс
+	# показывает письмо во фрейме того же origin.
 	@mail_bare {
 		path /mail
-		expression `"{$MAILPIT_UI_PASSWORD_SET:}" == "1"`
+		expression `"{$MAILPIT_UI:}" in ["public", "crm"]`
 	}
 	redir @mail_bare /mail/ 308
-	@mail {
+	@mail_write {
 		path /mail/*
-		expression `"{$MAILPIT_UI_PASSWORD_SET:}" == "1"`
+		expression `"{$MAILPIT_UI:}" in ["public", "crm"]`
+		not method GET HEAD
+		not {
+			method PUT
+			path /mail/api/v1/messages
+		}
 	}
-	handle @mail {
+	handle @mail_write {
+		respond "Почта открыта только для чтения" 403
+	}
+	@mail_public {
+		path /mail/*
+		expression `"{$MAILPIT_UI:}" == "public"`
+	}
+	handle @mail_public {
 		reverse_proxy mailpit:8025
+	}
+	@mail_crm {
+		path /mail/*
+		expression `"{$MAILPIT_UI:}" == "crm"`
+	}
+	handle @mail_crm {
+		route {
+			forward_auth api:8000 {
+				uri /api/me
+				@mail_login status 401 403
+				handle_response @mail_login {
+					redir * /login?next=/mail/ 302
+				}
+			}
+			reverse_proxy mailpit:8025
+		}
 	}
 	@mail_off path /mail /mail/*
 	handle @mail_off {
