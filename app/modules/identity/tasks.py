@@ -34,6 +34,7 @@ from app.modules.identity.erasure_service import ErasureExecutionService
 from app.modules.identity.keycloak import keycloak_client
 from app.modules.identity.keycloak_events import KeycloakEventSync
 from app.modules.identity.models import DataErasureRequest, ErasureStatus, User, UserStatus
+from app.modules.notification.mail_render import msk_datetime
 
 logger = structlog.get_logger(__name__)
 
@@ -268,7 +269,7 @@ async def sweep_incident_deadlines(ctx: dict[str, Any]) -> dict[str, int]:
                                 "number": incident.number,
                                 "stage": stage,
                                 "overdue": overdue,
-                                "due_at": due_at.isoformat(),
+                                "due_at": msk_datetime(due_at),
                             },
                             priority=NotificationPriority.HIGH,
                             entity_type="security_incident",

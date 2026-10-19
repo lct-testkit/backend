@@ -52,7 +52,10 @@ from app.modules.identity.models import (
 )
 from app.modules.identity.service import IdentityService
 from app.modules.identity.session_store import session_store
+from app.modules.notification.email_transport import EmailSendError, send_email, smtp_configured
+from app.modules.notification.mail_render import render_invite, render_password_reset
 from app.modules.notification.service import (
+    SUPPRESS_CHANNELS_KEY,
     TPL_ACCOUNT_BLOCKED,
     TPL_ACCOUNT_UNBLOCKED,
     TPL_ERASURE_BLOCKED,
@@ -388,11 +391,6 @@ class AdminUserService:
             await self._session.flush()
 
             token = await self._identity.issue_invite(user, created_by=principal.user_id)
-            email_sent = await keycloak_client.execute_actions_email(
-                keycloak_id,
-                required_actions,
-                lifespan_seconds=settings.invite_ttl_hours * 3600,
-            )
 
             await self._audit.record(
                 AuditAction.USER_CREATED,
@@ -417,7 +415,44 @@ class AdminUserService:
 
         expires_at = dt.datetime.now(dt.UTC) + dt.timedelta(hours=settings.invite_ttl_hours)
         invite_url = f"{base_url.rstrip('/')}/invite/{token}"
+        # Приглашение шлёт сам backend (ссылка `/invite/{token}` ведёт на страницу задания пароля),
+        # а не Keycloak: его письмо вело на внутренний адрес `keycloak:8080` и не открывалось.
+        email_sent = await self.send_invite_email(user, invite_url)
         return user, invite_url, expires_at, email_sent
+
+    async def send_invite_email(self, user: User, url: str) -> bool:
+        """Письмо-приглашение со ссылкой. `True` — SMTP принял письмо; без SMTP или при сбое
+        отправки `False`, и ссылку администратору отдаёт ответ API (как раньше без почты)."""
+        if not smtp_configured() or not user.email:
+            return False
+        mail = render_invite(
+            name=user.full_name,
+            email=user.email,
+            role=user.role,
+            url=url,
+            ttl=dt.timedelta(hours=get_settings().invite_ttl_hours),
+        )
+        try:
+            await send_email(to=user.email, **mail.send_kwargs())
+        except EmailSendError:
+            return False
+        return True
+
+    async def send_reset_email(self, user: User, url: str, *, reason: str | None) -> bool:
+        """Письмо о сбросе пароля: ссылка задать новый пароль и причина (если она есть)."""
+        if not smtp_configured() or not user.email:
+            return False
+        mail = render_password_reset(
+            name=user.full_name,
+            url=url,
+            ttl=dt.timedelta(minutes=get_settings().reset_link_ttl_minutes),
+            reason=reason,
+        )
+        try:
+            await send_email(to=user.email, **mail.send_kwargs())
+        except EmailSendError:
+            return False
+        return True
 
     async def _validate_team_and_manager(
         self, *, role: str, team_id: uuid.UUID | None, manager_id: uuid.UUID | None
@@ -764,10 +799,10 @@ class AdminUserService:
     ) -> dict[str, Any]:
         """Принудительный сброс: все сессии завершаются без исключений.
 
-        B6-10: раньше результат письма Keycloak (`execute_actions_email`) игнорировался —
-        без SMTP пользователь оставался без способа войти. Письмо не ушло (или SMTP нет) —
-        выпускается одноразовая ссылка `purpose="reset"` (та же таблица `user_invites`, что
-        приглашение), которую администратор передаёт сотруднику сам."""
+        Письмо со ссылкой на новый пароль и причиной шлёт сам backend (ссылка `/invite/{token}`,
+        `purpose="reset"`, та же таблица `user_invites`, что у приглашения): письмо Keycloak вело на
+        внутренний адрес контейнера. Письмо не ушло (или SMTP нет) — ссылку в ответе получает
+        администратор и передаёт сотруднику сам (B6-10)."""
         # B4-13 (C-21): тот же замок, что у самостоятельной смены — администратор не должен
         # «сбросить» общий пароль демо-учётки и оставить следующего эксперта без входа.
         if user.email and user.email.lower() in get_settings().demo_locked_emails:
@@ -775,17 +810,11 @@ class AdminUserService:
                 ErrorCode.DEMO_PASSWORD_LOCKED,
                 "Пароль демо-учётки нельзя сбросить: он общий для всех участников демо",
             )
-        email_sent = False
         if user.keycloak_id:
             # Добавляем `UPDATE_PASSWORD`, не заменяя список: иначе пропадало бы, например,
             # требование настроить TOTP.
             await keycloak_client.update_required_actions(
                 user.keycloak_id, add=INVITE_REQUIRED_ACTIONS[:1]
-            )
-            email_sent = await keycloak_client.execute_actions_email(
-                user.keycloak_id,
-                INVITE_REQUIRED_ACTIONS[:1],
-                lifespan_seconds=900,
             )
             await keycloak_client.logout_all_sessions(user.keycloak_id)
 
@@ -819,11 +848,30 @@ class AdminUserService:
             severity=Severity.WARNING,
             details={"reason": reason, "sessions_terminated": terminated},
         )
+        # Ссылка одноразовая, `purpose="reset"` (та же таблица `user_invites`, что у приглашения);
+        # письмо шлёт сам backend: одно письмо со ссылкой и причиной вместо двух (ссылка Keycloak
+        # плюс уведомление CRM).
+        settings = get_settings()
+        await self._identity.revoke_invites(user.id, purpose="reset")
+        token = await self._identity.issue_invite(user, created_by=None, purpose="reset")
+        reset_expires_at = dt.datetime.now(dt.UTC) + dt.timedelta(
+            minutes=settings.reset_link_ttl_minutes
+        )
+        reset_link = f"{base_url.rstrip('/')}/invite/{token}"
+        email_sent = await self.send_reset_email(user, reset_link, reason=reason.strip() or None)
+
+        payload: dict[str, Any] = {}
+        if reason.strip():
+            payload["reason"] = reason.strip()
+        if email_sent:
+            # Письмо уже ушло: email-канал уведомления продублировал бы его, остаётся лента.
+            payload[SUPPRESS_CHANNELS_KEY] = ["email"]
         await get_notification_service().notify_user(
             self._session,
             recipient_id=user.id,
             template_code=TPL_PASSWORD_RESET,
             priority=NotificationPriority.HIGH,
+            payload=payload,
         )
         await self._audit.record(
             AuditAction.PASSWORD_RESET,
@@ -837,19 +885,8 @@ class AdminUserService:
             },
         )
 
-        reset_url: str | None = None
-        reset_expires_at: dt.datetime | None = None
-        if not email_sent:
-            # Письмо не ушло (или SMTP в контуре нет): та же ссылка, что у приглашения,
-            # только `purpose="reset"` и короче сроком — её передаёт сотруднику сам
-            # администратор (канал вне почты, тот же приём, что `create_user`).
-            await self._identity.revoke_invites(user.id, purpose="reset")
-            settings = get_settings()
-            token = await self._identity.issue_invite(user, created_by=None, purpose="reset")
-            reset_expires_at = dt.datetime.now(dt.UTC) + dt.timedelta(
-                minutes=settings.reset_link_ttl_minutes
-            )
-            reset_url = f"{base_url.rstrip('/')}/invite/{token}"
+        # Ссылку в ответе видит только администратор и только когда письмо не ушло (нет SMTP).
+        reset_url: str | None = None if email_sent else reset_link
 
         return {
             "sessions_terminated": terminated,
@@ -857,7 +894,7 @@ class AdminUserService:
             "signatures_disputed": disputed,
             "email_sent": email_sent,
             "reset_url": reset_url,
-            "reset_expires_at": reset_expires_at,
+            "reset_expires_at": None if email_sent else reset_expires_at,
         }
 
     # --- Увольнение ------------------------------------------------------
