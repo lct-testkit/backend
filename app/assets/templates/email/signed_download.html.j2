@@ -1,0 +1,11 @@
+{% extends "layout.html.j2" %}{% from "_macros.j2" import button, facts %}
+{% block title %}{{ subject }}{% endblock %}
+{% block preheader %}«{{ title }}» подписан всеми сторонами. Скачайте подписанный файл.{% endblock %}
+{% block heading %}Документ подписан{% endblock %}
+{% block content %}
+<p style="margin:0 0 12px 0;">Здравствуйте!</p>
+<p style="margin:0 0 12px 0;">Документ подписан всеми сторонами. Подписанный файл можно скачать по ссылке ниже.</p>
+{{ facts([("Документ", title), ("Ссылка действует", ("до " ~ until) if until else none)]) }}
+{% endblock %}
+{% block button %}{{ button(url, "Скачать подписанный файл") }}{% endblock %}
+{% block note %}Ссылка личная: не пересылайте её другим людям. По ней можно только скачать файл, подписать документ нельзя.{% endblock %}

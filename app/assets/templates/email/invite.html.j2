@@ -1,0 +1,11 @@
+{% extends "layout.html.j2" %}{% from "_macros.j2" import button, facts %}
+{% block title %}Вас пригласили в RTK School CRM{% endblock %}
+{% block preheader %}Задайте пароль, чтобы войти. Ссылка действует {{ ttl }}.{% endblock %}
+{% block heading %}Вас пригласили в CRM{% endblock %}
+{% block content %}
+<p style="margin:0 0 12px 0;">Здравствуйте, {{ name }}!</p>
+<p style="margin:0 0 12px 0;">Для вас создана учётная запись в RTK School CRM. Задайте пароль, чтобы войти в систему.</p>
+{{ facts([("Логин", email), ("Роль", role)]) }}
+{% endblock %}
+{% block button %}{{ button(url, "Задать пароль") }}{% endblock %}
+{% block note %}Ссылка личная и действует {{ ttl }}. Если срок истёк, попросите администратора выслать приглашение повторно. Если вы не ждали это письмо, просто проигнорируйте его.{% endblock %}
