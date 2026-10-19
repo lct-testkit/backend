@@ -11,9 +11,9 @@
   "defaultLocale": "ru",
   "internationalizationEnabled": true,
   "supportedLocales": [
-    "ru",
-    "en"
+    "ru"
   ],
+  "emailTheme": "rtk-crm",
   "accessTokenLifespan": 300,
   "ssoSessionIdleTimeout": 1800,
   "ssoSessionMaxLifespan": 43200,
