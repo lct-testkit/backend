@@ -561,7 +561,7 @@ async def build_deal_funnel(
         stats = {row[0]: (row[3], row[4], row[5], row[6]) for row in mv_rows}
         as_of_values = [row[7] for row in mv_rows if row[7] is not None]
         data_as_of = max(as_of_values) if as_of_values else None
-        note = "Источник: материализованное представление (обновляется раз в 5 минут)"
+        note = "Данные обновляются раз в 5 минут"
     else:
         clause = await deal_scope_clause(session, principal)
         current_stmt = (
@@ -613,6 +613,7 @@ async def build_deal_funnel(
     rows: list[list[Any]] = []
     prev_reached: int | None = None
     reached_first: int | None = None
+    skipped_steps: list[str] = []
     for status in statuses:
         currently_in, entered, avg_dur, reached = stats.get(status.id, (0, 0, None, None))
         entered = entered or 0
@@ -621,6 +622,22 @@ async def build_deal_funnel(
         if status.is_archived and currently_in == 0 and entered == 0:
             continue
         avg_days = round(avg_dur.total_seconds() / 86400, 1) if avg_dur is not None else None
+
+        # R-11: необязательный шаг, через который не прошла ни одна сделка (никто в нём не был и
+        # не сидит сейчас), а до следующих дошли: «Всего прошло 0» рядом с конверсией 81,8 % и
+        # «Дошли до шага 9» противоречат друг другу. Конверсию и «Дошли до шага» у него не
+        # показываем, а следующий шаг считаем от предыдущего ПРОЙДЕННОГО (`prev_reached` не
+        # трогаем) — сделки просто шли мимо этого шага.
+        is_skipped = (
+            status.type == StatusType.INTERMEDIATE.value
+            and entered == 0
+            and currently_in == 0
+            and (reached or 0) > 0
+        )
+        if is_skipped:
+            skipped_steps.append(status.name)
+            rows.append([status.name, currently_in, entered, None, avg_days, None, None])
+            continue
 
         if status.type in _MAIN_STATUS_TYPES:
             if reached_first is None:
@@ -646,6 +663,17 @@ async def build_deal_funnel(
         rows.append(
             [status.name, currently_in, entered, conversion, avg_days, reached_out, from_start]
         )
+
+    if skipped_steps:
+        names = ", ".join(f"«{name}»" for name in skipped_steps)
+        skipped_note = (
+            f"Шаг {names} пропускали: сделки шли мимо него, поэтому его конверсия не считается, "
+            "а следующий шаг — от предыдущего пройденного"
+            if len(skipped_steps) == 1
+            else f"Шаги {names} пропускали: сделки шли мимо них, поэтому их конверсия не "
+            "считается, а следующий шаг — от предыдущего пройденного"
+        )
+        note = f"{note}. {skipped_note}" if note else skipped_note
 
     return ReportDataset(
         title="Воронка по статусам",
@@ -1663,8 +1691,8 @@ async def build_learning_progress(
         any_rows_exist = await session.scalar(select(func.count(LearningProgress.id))) or 0
         if any_rows_exist == 0:
             notes.append(
-                "Данные о прогрессе из LMS не поступали: проверьте источник lms в разделе "
-                "интеграций и LMS_BASE_URL"
+                "Данные о прогрессе из LMS ещё не приходили. Администратору: раздел "
+                "«Интеграции» → LMS"
             )
 
     total_rows: int | None = None
@@ -2170,7 +2198,7 @@ async def build_product_demand(
 #: Каталог колонок `license_register` (B1-11) — все десять полей ТЗ §4 п.1 по умолчанию, в
 #: порядке таблицы задачи; «Срок» (не по умолчанию) — производная колонка, расчёт в builder'е.
 LICENSE_REGISTER_COLUMNS: tuple[ColumnDef, ...] = (
-    ColumnDef("organization", "Вуз"),
+    ColumnDef("organization", "Организация"),
     ColumnDef("vendor", "Вендор"),
     ColumnDef("product_name", "ПО"),
     ColumnDef("contract_number", "Номер договора"),
@@ -2334,6 +2362,15 @@ async def _license_register_query(
     return stmt, tz
 
 
+def _license_signed_label(license_: Any) -> str:
+    """R-14: как в интерфейсе — дата подписания; без даты — «Подписана» / «Не подписана»."""
+    if license_.license_signed_at is not None:
+        return license_.license_signed_at.strftime("%d.%m.%Y")
+    if license_.is_signed is None:
+        return "—"
+    return "Подписана" if license_.is_signed else "Не подписана"
+
+
 async def build_license_register(
     session: AsyncSession, principal: Principal, params: dict[str, Any]
 ) -> ReportDataset:
@@ -2371,16 +2408,13 @@ async def build_license_register(
         )
         year_counts[year_label] = year_counts.get(year_label, 0) + 1
         full_row = {
-            # `Organization.name` — то же поле, что показывают остальные отчёты этого модуля
-            # (deal_register и т.п.), не `short_name` (B3-6 вводит его только для API списка
-            # лицензий, где короче удобнее в таблице интерфейса).
-            "organization": organization_name or organization_short_name or "—",
+            # R-15: краткое название (в ЕГРЮЛ полное — «ЗАКРЫТОЕ АКЦИОНЕРНОЕ ОБЩЕСТВО …» капсом),
+            # как в таблице лицензий интерфейса.
+            "organization": organization_short_name or organization_name or "—",
             "vendor": license_.vendor,
             "product_name": license_.product_name,
             "contract_number": license_.contract_number or "",
-            "is_signed": (
-                "—" if license_.is_signed is None else ("Да" if license_.is_signed else "Нет")
-            ),
+            "is_signed": _license_signed_label(license_),
             "license_valid_year": license_.license_valid_year,
             "transfer_status": status_label,
             "manager_full_name": manager_name or "",
