@@ -41,6 +41,24 @@ async def _request_reminder_state(request_id: uuid.UUID) -> dict[str, object]:
         }
 
 
+async def _entity_of_notification(recipient_id: uuid.UUID, template_code: str):
+    from sqlalchemy import select
+
+    from app.core.db import session_scope
+    from app.modules.notification.models import Notification
+
+    async with session_scope() as session:
+        row = (
+            await session.execute(
+                select(Notification.entity_type, Notification.entity_id).where(
+                    Notification.recipient_id == recipient_id,
+                    Notification.template_code == template_code,
+                )
+            )
+        ).first()
+        return None if row is None else (row[0], row[1])
+
+
 async def _notifications_for(recipient_id: uuid.UUID, template_code: str) -> int:
     from sqlalchemy import select
 
@@ -186,6 +204,12 @@ class TestExternalSigner:
             )
             == 1
         )
+        # Уведомление ведёт к документу: запрос подписанта инициатору недоступен (404).
+        entity = run(
+            client,
+            functools.partial(_entity_of_notification, kam_user.id, TPL_SIGNATURE_REMINDER_MANUAL),
+        )
+        assert entity == ("signature_document", built.document_id)
 
 
 @pytest.fixture
