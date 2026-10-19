@@ -168,3 +168,28 @@ class TestOrganizationsWithInnKeepTheInnRules:
         second = _create(client, f"ООО «Вторая {_marker()}»", inn=inn)
         assert second.status_code == 409, second.text
         assert second.json()["code"] == "CRM-1302"
+
+
+class TestSimilarNamesIgnoreGenericWords:
+    """O-4: «QA Университет» не похож на «Пермский политехнический университет»."""
+
+    def test_only_a_shared_distinctive_word_makes_names_similar(self, client) -> None:
+        login(client, "KAM")
+        token = "".join(random.choice("бвгджзклмнпрст") for _ in range(8)).capitalize()
+        other = _create(client, f"{token}ский политехнический университет", org_type="university")
+        assert other.status_code == 201, other.text
+
+        generic = client.get(
+            "/api/organizations/check-duplicate", params={"name": "QA Политехнический университет"}
+        )
+        assert generic.status_code == 200, generic.text
+        assert all(
+            candidate["id"] != other.json()["id"] for candidate in generic.json()["candidates"]
+        ), generic.json()
+
+        shared = client.get(
+            "/api/organizations/check-duplicate",
+            params={"name": f"{token}ский государственный университет"},
+        )
+        assert shared.status_code == 200, shared.text
+        assert other.json()["id"] in [c["id"] for c in shared.json()["candidates"]]

@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import difflib
+import os
 import re
 import unicodedata
 
@@ -148,6 +150,58 @@ def company_key(value: object) -> str:
         text = text.replace(quote, " ")
     text = text.replace("—", "-").replace("–", "-")
     return _SPACES.sub(" ", text).strip(" .,;:-")
+
+
+# O-4: слова, которые есть в названии почти любого вуза и сами по себе ничего не говорят о
+# конкретной организации: вид учреждения, статус, отрасль, правовая форма. «QA Университет» и
+# «Пермский политехнический университет» не похожи только потому, что оба — «университет».
+_GENERIC_NAME_WORDS = frozenset(
+    {
+        "университет", "институт", "колледж", "техникум", "академия", "училище", "школа",
+        "лицей", "гимназия", "центр", "филиал", "учреждение", "организация", "образование",
+        "образования", "образовательное", "образовательный", "образовательная", "высшего",
+        "высшее", "профессионального", "профессиональное", "среднего", "дополнительного",
+        "государственный", "государственное", "государственная", "федеральный", "федеральное",
+        "федеральная", "национальный", "национальное", "исследовательский", "технический",
+        "техническое", "политехнический", "технологический", "педагогический", "медицинский",
+        "экономический", "гуманитарный", "аграрный", "инженерный", "бюджетное", "автономное",
+        "казенное", "казённое", "негосударственное", "частное", "российский", "российская",
+        "россии", "российской", "федерации", "рф", "имени", "им", "ооо", "ао", "пао", "зао",
+        "ип", "нко", "фгбоу", "фгаоу", "гбоу", "гаоу", "мбоу", "во", "спо", "и", "в", "по",
+        "г", "города", "республики", "области", "края", "of", "the", "university", "institute",
+        "college",
+    }
+)  # fmt: skip
+_NAME_WORD = re.compile(r"[^\W_]+", re.UNICODE)
+#: Порог сходства слов: «Пермский» и «Пермского» — одно слово, «Пермский» и «Томский» — нет.
+_WORD_SIMILARITY = 0.8
+
+
+def distinctive_name_words(value: object) -> list[str]:
+    """Значимые слова названия организации без «университет/институт/государственный…»."""
+    key = company_key(value)
+    words = _NAME_WORD.findall(key.replace("-", " "))
+    return [w for w in words if w not in _GENERIC_NAME_WORDS and len(w) > 1 or w.isdigit()]
+
+
+def names_share_distinctive_word(left: object, right: object) -> bool:
+    """Есть ли в двух названиях общее значимое слово (с учётом окончаний и опечаток). Если у
+    одного из названий значимых слов нет вовсе («Университет»), похожим оно не считается."""
+    left_words = distinctive_name_words(left)
+    right_words = distinctive_name_words(right)
+    for a in left_words:
+        for b in right_words:
+            if a == b:
+                return True
+            if min(len(a), len(b)) < 4:
+                continue
+            # Окончания («Пермский» / «Пермского») и опечатки: общее начало или близкая строка.
+            prefix = len(os.path.commonprefix([a, b]))
+            if prefix >= 5 and prefix >= 0.7 * min(len(a), len(b)):
+                return True
+            if difflib.SequenceMatcher(None, a, b).ratio() >= _WORD_SIMILARITY:
+                return True
+    return False
 
 
 def split_full_name(value: object) -> tuple[str | None, str | None, str | None]:
