@@ -42,6 +42,7 @@ from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
 from app.modules.identity.models import User, UserStatus
 from app.modules.notification.email_transport import EmailSendError, send_email, smtp_configured
+from app.modules.notification.mail_render import RenderedMail
 from app.modules.notification.models import (
     DeliveryStatus,
     Notification,
@@ -69,6 +70,11 @@ TPL_ERASURE_BLOCKED = "ERASURE_REQUEST_BLOCKED"
 # шаг 7) — уведомляется инициатор запроса, а не сам субъект (для режима B
 # уже некому: e-mail затёрт до того, как уведомление успело бы уйти).
 TPL_ERASURE_COMPLETED = "ERASURE_COMPLETED"
+
+# Ключ payload: каналы, по которым это уведомление не отправляется (остаётся лента `in_app`).
+# Админский сброс пароля шлёт одно письмо со ссылкой и причиной — второе, из шаблона уведомления,
+# было бы дублем.
+SUPPRESS_CHANNELS_KEY = "suppress_channels"
 
 # Только `blocked` — дословно spec.txt §4.5: «Уведомления, адресованные
 # заблокированному, не доставляются ему, а эскалируются руководителю».
@@ -260,6 +266,8 @@ class RealNotificationService:
             target_user = manager
             target_id = manager.id
             payload["escalated_from"] = str(recipient_id)
+            # Менеджер читает «Сотрудник Иван Петров заблокирован», а не «Ваша учётная запись…».
+            payload["escalated_from_name"] = recipient.full_name
 
         # Настройки получателя решают до создания записи: раньше уведомление сохранялось, а
         # потом проверялась настройка — «отключённое» событие всё равно копилось в ленте и в
@@ -345,6 +353,9 @@ class RealNotificationService:
             # `skipped` и не отправлялась никогда, даже когда окно заканчивалось. Запись остаётся
             # `pending`, а задача доставки сама не трогает её, пока окно получателя открыто
             # (`dispatch_pending_notifications`, `deferred_by_quiet_hours`).
+            if template.channel in (notification.payload or {}).get(SUPPRESS_CHANNELS_KEY, ()):
+                # Канал уже закрыт другим письмом (сброс пароля: ссылка и причина в одном письме).
+                continue
             address = user.email if template.channel == NotificationChannel.EMAIL.value else None
             session.add(
                 NotificationDelivery(
@@ -448,7 +459,10 @@ class SmtpEmailGateway:
         subject: str | None,
         body: str,
         address: str | None = None,
+        mail: RenderedMail | None = None,
     ) -> None:
+        """`mail` — то же письмо в HTML по макету (его собирает задача доставки, у неё есть
+        сессия БД для деталей сущности); без него уходит только текст шаблона."""
         if not smtp_configured():
             await self._fallback.send(
                 address_masked=address_masked, subject=subject, body=body, address=address
@@ -457,7 +471,10 @@ class SmtpEmailGateway:
         if not address:
             raise ChannelDeliveryError("У получателя нет адреса электронной почты", retryable=False)
         try:
-            await send_email(to=address, subject=subject or _DEFAULT_EMAIL_SUBJECT, body=body)
+            if mail is not None:
+                await send_email(to=address, **mail.send_kwargs())
+            else:
+                await send_email(to=address, subject=subject or _DEFAULT_EMAIL_SUBJECT, text=body)
         except EmailSendError as exc:
             raise ChannelDeliveryError(str(exc), retryable=exc.retryable) from exc
 
