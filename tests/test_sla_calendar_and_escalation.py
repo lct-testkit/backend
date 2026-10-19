@@ -299,6 +299,30 @@ class TestSweepEscalation:
 
         assert len(self._notifications(client, head.id, moved["id"])) == 1
 
+    def test_a_manager_who_is_also_the_escalation_target_gets_one_message(self, client) -> None:
+        # N-5: руководитель — и «менеджер» владельца (уведомление о нарушении), и глава его команды
+        # (эскалация по роли HEAD). За один проход он получал два одинаковых письма.
+        from app.modules.crm.tasks import sweep_sla_breaches
+
+        boss = create_user(client, "HEAD")
+        deal = self._deal_in_work(client, warn=50, escalate=120, to_user=boss)
+        owner_id = uuid.UUID(deal["owner_id"])
+
+        async def _make_boss_the_manager() -> None:
+            from app.core.db import session_scope
+            from app.modules.identity.models import User
+
+            async with session_scope() as session:
+                (await session.get(User, owner_id)).manager_id = boss.id  # type: ignore[union-attr]
+
+        run(client, _make_boss_the_manager)
+        self._rewind(client, deal["id"], 1.4)
+
+        run(client, sweep_sla_breaches, {})
+
+        got = self._notifications(client, boss.id, deal["id"])
+        assert len(got) == 1, got
+
     def test_empty_channels_mean_no_notifications(self, client) -> None:
         from app.modules.crm.tasks import sweep_sla_breaches
 
