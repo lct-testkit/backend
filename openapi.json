@@ -15190,6 +15190,53 @@
         "title": "ReportJobOut",
         "type": "object"
       },
+      "ReportPreviewOut": {
+        "properties": {
+          "exact": {
+            "description": "true — строки посчитаны тем же запросом, что строит отчёт; false — у тяжёлого отчёта это оценка (сам отчёт строится в очереди).",
+            "title": "Exact",
+            "type": "boolean"
+          },
+          "row_count": {
+            "description": "Сколько строк будет в отчёте с этими параметрами (до лимита `limit`).",
+            "title": "Row Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "row_count",
+          "exact"
+        ],
+        "title": "ReportPreviewOut",
+        "type": "object"
+      },
+      "ReportPreviewRequest": {
+        "example": {
+          "params": {
+            "date_from": "2026-10-01"
+          },
+          "template_code": "license_register"
+        },
+        "properties": {
+          "params": {
+            "additionalProperties": true,
+            "description": "Те же параметры, что у `POST /reports`, поверх `default_params` шаблона.",
+            "title": "Params",
+            "type": "object"
+          },
+          "template_code": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Template Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "template_code"
+        ],
+        "title": "ReportPreviewRequest",
+        "type": "object"
+      },
       "ReportTemplateListResponse": {
         "properties": {
           "items": {
@@ -45404,6 +45451,105 @@
           }
         ],
         "summary": "Запустить отчёт",
+        "tags": [
+          "reporting"
+        ]
+      }
+    },
+    "/api/reports/preview": {
+      "post": {
+        "description": "Считает строки отчёта с этими параметрами, ничего не создавая: ни задания, ни файла. Форма запуска показывает число до нажатия «Запустить». Проверки параметров — как у `POST /reports` (422 на неизвестный параметр); у тяжёлого отчёта `exact=false` — это оценка. Не чаще 120 раз в минуту на сотрудника (429). Роль: создание отчётов.",
+        "operationId": "preview_report_api_reports_preview_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReportPreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReportPreviewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Сколько строк будет в отчёте",
         "tags": [
           "reporting"
         ]

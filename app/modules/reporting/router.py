@@ -27,6 +27,8 @@ from app.modules.reporting.schemas import (
     ReportJobCreateRequest,
     ReportJobListResponse,
     ReportJobOut,
+    ReportPreviewOut,
+    ReportPreviewRequest,
     ReportTemplateListResponse,
 )
 from app.modules.reporting.service import (
@@ -97,6 +99,24 @@ async def create_report(
 ) -> ReportJobOut:
     job = await ReportJobService(session).create(principal, payload)
     return ReportJobOut.model_validate(job)
+
+
+@reports_router.post(
+    "/preview",
+    summary="Сколько строк будет в отчёте",
+    description=(
+        "Считает строки отчёта с этими параметрами, ничего не создавая: ни задания, ни файла. "
+        "Форма запуска показывает число до нажатия «Запустить». Проверки параметров — как у "
+        "`POST /reports` (422 на неизвестный параметр); у тяжёлого отчёта `exact=false` — "
+        "это оценка. Не чаще 120 раз в минуту на сотрудника (429). Роль: создание отчётов."
+    ),
+    response_model=ReportPreviewOut,
+)
+async def preview_report(
+    payload: ReportPreviewRequest, session: DbSession, principal: ReportCreate
+) -> ReportPreviewOut:
+    row_count, exact = await ReportJobService(session).preview(principal, payload)
+    return ReportPreviewOut(row_count=row_count, exact=exact)
 
 
 @reports_router.get(
