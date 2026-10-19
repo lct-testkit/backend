@@ -97,6 +97,12 @@ from app.modules.notification.email_transport import (
     send_email,
     smtp_configured,
 )
+from app.modules.notification.mail_render import (
+    msk_datetime,
+    render_sign_link,
+    render_sign_otp,
+    render_signed_download,
+)
 from app.modules.notification.service import NotificationPriority, get_notification_service
 from app.modules.signing.models import (
     OPEN_DOCUMENT_STATUSES,
@@ -216,62 +222,12 @@ def build_sign_url(token: str) -> str:
     return f"{get_settings().base_url.rstrip('/')}/sign/{token}"
 
 
-_SIGN_LINK_SUBJECT = "Вам направлен документ на подписание"
-
-
-def render_sign_link_email(
-    *,
-    title: str,
-    url: str,
-    token_expires_at: dt.datetime | None,
-    deadline_at: dt.datetime | None,
-) -> tuple[str, str]:
-    """Тема и текст письма со ссылкой подписания. Только то, что нужно получателю: название
-    документа, ссылка и сроки; имён и реквизитов подписанта в письме нет."""
-    lines = [
-        "Здравствуйте!",
-        "",
-        f"Вам направлен документ «{title}» на подписание простой электронной подписью.",
-        "",
-        f"Открыть документ и подписать: {url}",
-        "",
-        "Ссылка личная: не пересылайте её другим людям.",
-    ]
-    if token_expires_at is not None:
-        until = token_expires_at.astimezone(dt.UTC)
-        lines.append(f"Ссылка действует до {until:%d.%m.%Y %H:%M} UTC.")
-    if deadline_at is not None:
-        lines.append(f"Срок подписания: до {deadline_at.astimezone(dt.UTC):%d.%m.%Y %H:%M} UTC.")
-    lines += ["", "Если вы не ожидали это письмо, просто проигнорируйте его."]
-    return _SIGN_LINK_SUBJECT, "\n".join(lines)
-
-
 def build_download_url(token: str, *, variant: Literal["signed", "protocol"] = "signed") -> str:
     """Ссылка «только скачать» (B7-3): `/public/signed/{token}` или `.../protocol`. Отдельная
     от `build_sign_url` — этот токен не даёт права подписывать."""
     base = get_settings().base_url.rstrip("/")
     suffix = "/protocol" if variant == "protocol" else ""
     return f"{base}{get_settings().public_prefix}/signed/{token}{suffix}"
-
-
-_DOWNLOAD_LINK_SUBJECT = "Документ подписан: скачайте копию"
-
-
-def render_signed_document_email(
-    *, title: str, url: str, expires_at: dt.datetime
-) -> tuple[str, str]:
-    """Тема и текст письма со ссылкой на подписанный файл (B7-3) — после последней подписи."""
-    until = expires_at.astimezone(dt.UTC)
-    lines = [
-        "Здравствуйте!",
-        "",
-        f"Документ «{title}» подписан всеми сторонами.",
-        "",
-        f"Скачать подписанный файл: {url}",
-        "",
-        f"Ссылка действует до {until:%d.%m.%Y %H:%M} UTC и личная: не пересылайте её другим людям.",
-    ]
-    return _DOWNLOAD_LINK_SUBJECT, "\n".join(lines)
 
 
 def _agreement_is_effective(agreement: EdmAgreement | None, today: dt.date | None = None) -> bool:
@@ -1311,7 +1267,12 @@ class SignatureDocumentService:
         return revealed
 
     async def _queue_link_email(
-        self, document: SignatureDocument, request: SignatureRequest, token: str
+        self,
+        document: SignatureDocument,
+        request: SignatureRequest,
+        token: str,
+        *,
+        reminder: bool = False,
     ) -> None:
         """Ссылка внешнему подписанту письмом — если настроен SMTP; иначе ничего не делается, и
         ссылку, как раньше, выдаёт инициатору ответ `/send` или `/reissue-link`.
@@ -1331,16 +1292,17 @@ class SignatureDocumentService:
         if not address:
             logger.warning("signature_link_email_no_address", request_id=str(request.id))
             return
-        subject, body = render_sign_link_email(
+        mail = render_sign_link(
             title=document.title,
             url=build_sign_url(token),
-            token_expires_at=request.token_expires_at,
+            link_expires_at=request.token_expires_at,
             deadline_at=document.deadline_at,
+            reminder=reminder,
         )
 
         async def _send() -> None:
             try:
-                await send_email(to=address, subject=subject, body=body)
+                await send_email(to=address, **mail.send_kwargs())
             except EmailSendError:
                 # Причина и маскированный адрес уже в журнале транспорта.
                 logger.warning("signature_link_email_failed", request_id=str(request.id))
@@ -1370,13 +1332,13 @@ class SignatureDocumentService:
         if not address:
             logger.warning("signature_download_email_no_address", request_id=str(request.id))
             return
-        subject, body = render_signed_document_email(
+        mail = render_signed_download(
             title=document.title, url=build_download_url(token), expires_at=expires_at
         )
 
         async def _send() -> None:
             try:
-                await send_email(to=address, subject=subject, body=body)
+                await send_email(to=address, **mail.send_kwargs())
             except EmailSendError:
                 logger.warning("signature_download_email_failed", request_id=str(request.id))
 
@@ -1453,7 +1415,7 @@ class SignatureDocumentService:
             # вместо тихо погашенной ссылки без замены.
             if smtp_configured():
                 token = self._issue_token(request, now)
-                await self._queue_link_email(document, request, token)
+                await self._queue_link_email(document, request, token, reminder=True)
             elif document.created_by:
                 await get_notification_service().notify_user(
                     self._session,
@@ -1474,7 +1436,7 @@ class SignatureDocumentService:
                 entity_id=request.id,
                 payload={
                     "title": document.title,
-                    "deadline_at": document.deadline_at.isoformat(),
+                    "deadline_at": msk_datetime(document.deadline_at),
                 },
             )
 
@@ -1899,17 +1861,9 @@ class SignatureRequestService:
             message_id = await send_sms(to=destination, message=f"Код подтверждения: {code}")
             return message_id is not None
         if channel == "email" and smtp_configured():
-            minutes = max(self._settings.signature_otp_ttl_seconds // 60, 1)
+            mail = render_sign_otp(code=code, ttl=self._settings.signature_otp_ttl_seconds)
             try:
-                await send_email(
-                    to=destination,
-                    subject="Код подтверждения подписи",
-                    body=(
-                        f"Код подтверждения для подписания документа: {code}\n\n"
-                        f"Код действует {minutes} мин. Никому его не сообщайте.\n"
-                        "Если вы не запрашивали код, проигнорируйте это письмо."
-                    ),
-                )
+                await send_email(to=destination, **mail.send_kwargs())
             except EmailSendError:
                 return False
             return True
