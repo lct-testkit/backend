@@ -181,7 +181,7 @@ def distinctive_name_words(value: object) -> list[str]:
     """Значимые слова названия организации без «университет/институт/государственный…»."""
     key = company_key(value)
     words = _NAME_WORD.findall(key.replace("-", " "))
-    return [w for w in words if w not in _GENERIC_NAME_WORDS and len(w) > 1 or w.isdigit()]
+    return [w for w in words if (w not in _GENERIC_NAME_WORDS and len(w) > 1) or w.isdigit()]
 
 
 def names_share_distinctive_word(left: object, right: object) -> bool:
