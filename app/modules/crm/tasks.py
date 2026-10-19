@@ -162,6 +162,9 @@ async def _process_deal(
     warn_threshold = effective["warn_threshold_pct"] / 100
     escalate_threshold = effective["escalate_threshold_pct"] / 100
     channels: list[str] = list(effective.get("channels") or [])
+    # N-5: один получатель — одно письмо за проход. Руководитель владельца бывает и «менеджером»
+    # (получает уведомление о нарушении), и адресатом эскалации — раньше он получал оба.
+    notified: set[uuid.UUID] = set()
 
     if fraction >= BREACH_THRESHOLD:
         new_state = SlaState.BREACHED.value
@@ -198,6 +201,7 @@ async def _process_deal(
                 recipients.add(owner.manager_id)
             if channels:
                 for recipient_id in recipients:
+                    notified.add(recipient_id)
                     await _notify(
                         session,
                         recipient_id,
@@ -219,6 +223,8 @@ async def _process_deal(
         counters["escalated"] += 1
         if channels:
             for recipient_id in await _escalation_recipients(session, deal, effective):
+                if recipient_id in notified:
+                    continue
                 await _notify(
                     session,
                     recipient_id,
