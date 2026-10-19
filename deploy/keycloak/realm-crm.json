@@ -14,6 +14,7 @@
     "ru"
   ],
   "emailTheme": "rtk-crm",
+  "actionTokenGeneratedByUserLifespan": 900,
   "accessTokenLifespan": 300,
   "ssoSessionIdleTimeout": 1800,
   "ssoSessionMaxLifespan": 43200,
