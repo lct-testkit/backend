@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import structlog
-from sqlalchemy import Select, func, select, text
+from sqlalchemy import Select, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import invalidate_principal_after_commit
@@ -278,6 +278,36 @@ class IdentityService:
     async def mark_login(self, user: User) -> None:
         user.last_login_at = dt.datetime.now(dt.UTC)
         await self._session.flush()
+
+    async def note_bearer_login(self, user_id: uuid.UUID, claims: TokenClaims) -> None:
+        """P-1: вход «паролем напрямую» (Bearer, демо-стенд и интеграции) не проходит через
+        OIDC-callback, и `last_login_at` не двигался — профиль показывал «Последний вход»
+        недельной давности. Отметка ставится ОДИН раз на сессию Keycloak (claim `sid`/
+        `session_state`, иначе `jti`), а не на каждый запрос: ключ в Redis живёт до конца
+        срока токена. Сбой Redis вход не ломает (отметка просто пропускается).
+
+        Пишем только колонку `last_login_at` и оставляем `updated_at`: по нему
+        `_token_predates_local_change` решает, не устарел ли токен относительно правок записи."""
+        session_key = (
+            claims.raw.get("sid") or claims.session_state or claims.raw.get("jti") or claims.subject
+        )
+        now = dt.datetime.now(dt.UTC)
+        exp = claims.expires_at or claims.raw.get("exp")
+        ttl = max(60, min(int(exp) - int(now.timestamp()), 86_400)) if exp else 3_600
+        try:
+            first_seen = await get_redis().set(
+                f"login:seen:{user_id}:{session_key}", "1", nx=True, ex=ttl
+            )
+        except Exception:  # noqa: BLE001 — отметка входа не источник истины
+            return
+        if not first_seen:
+            return
+        await self._session.execute(
+            update(User)
+            .where(User.id == user_id)
+            .values(last_login_at=now, updated_at=User.updated_at)
+            .execution_options(synchronize_session=False)
+        )
 
     async def update_profile(self, user: User, updates: dict[str, Any]) -> None:
         """Самообслуживание: отображаемое имя, часовой пояс, телефон.

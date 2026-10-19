@@ -279,6 +279,10 @@ async def get_principal(
 
     set_actor(ActorContext(user_id=principal.user_id, role=principal.role, session_id=sid))
 
+    if sid is None:
+        # P-1: прямой Bearer не проходит через OIDC-callback, где «Последний вход» обновляется.
+        await IdentityService(session).note_bearer_login(principal.user_id, claims)
+
     if stored is not None:
         # Продлевает сессию и двигает idle-таймаут (new_spec §3.1).
         await session_store.touch(stored)
