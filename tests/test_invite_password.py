@@ -262,7 +262,7 @@ class TestResetPasswordLink:
         async def noop(*_args: object, **_kwargs: object) -> None:
             return None
 
-        monkeypatch.setattr(admin_service.keycloak_client, "execute_actions_email", no_email)
+        monkeypatch.setattr(admin_service.AdminUserService, "send_reset_email", no_email)
         monkeypatch.setattr(admin_service.keycloak_client, "update_required_actions", noop)
         monkeypatch.setattr(admin_service.keycloak_client, "logout_all_sessions", noop)
         self._admin(client)
@@ -288,7 +288,8 @@ class TestResetPasswordLink:
         async def noop(*_args: object, **_kwargs: object) -> None:
             return None
 
-        monkeypatch.setattr(admin_service.keycloak_client, "execute_actions_email", yes_email)
+        # Письмо шлёт сам backend (`send_reset_email`), а не Keycloak.
+        monkeypatch.setattr(admin_service.AdminUserService, "send_reset_email", yes_email)
         monkeypatch.setattr(admin_service.keycloak_client, "update_required_actions", noop)
         monkeypatch.setattr(admin_service.keycloak_client, "logout_all_sessions", noop)
         self._admin(client)
@@ -324,8 +325,8 @@ class TestResendInviteEmailResult:
         # `_make_user` уже заводит случайный `keycloak_id`.
         return run(client, _make_user, "KAM", "invited")
 
-    def test_invite_email_sent_reflects_the_actual_keycloak_result(self, client, monkeypatch):
-        from app.modules.identity import router_admin
+    def test_invite_email_sent_reflects_the_actual_smtp_result(self, client, monkeypatch):
+        from app.modules.identity import admin_service
 
         admin = run(client, _make_user, "ADMIN")
         client.headers["X-CSRF-Token"] = authenticate(client, admin)
@@ -334,7 +335,7 @@ class TestResendInviteEmailResult:
         async def yes_email(*_args: object, **_kwargs: object) -> bool:
             return True
 
-        monkeypatch.setattr(router_admin.keycloak_client, "execute_actions_email", yes_email)
+        monkeypatch.setattr(admin_service.AdminUserService, "send_invite_email", yes_email)
 
         response = client.post(f"/api/admin/users/{target.id}/invite")
 
