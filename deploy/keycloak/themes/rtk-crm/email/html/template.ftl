@@ -28,7 +28,7 @@
     .line    { border-color: #323a49 !important; }
     .btn     { background-color: #ffa789 !important; }
     .btn-a   { color: #591c06 !important; }
-    .a-link  { color: #ffa789 !important; }
+    .a-link  { color: #9da1ac !important; }
   }
   @media only screen and (max-width: 620px) {
     .wrap { width: 100% !important; }
@@ -67,7 +67,7 @@
               <a class="btn-a" href="${link}" target="_blank" style="display:inline-block;padding:14px 28px;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:20px;font-weight:bold;color:#ffffff;text-decoration:none;border-radius:8px;">${label}</a>
             </td>
           </tr></table>
-          <div class="t-muted" style="padding-top:12px;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:18px;color:#6d7686;">${msg("fallbackLinkLead")}<br><a class="a-link" href="${link}" style="color:#d9430f;word-break:break-all;">${link}</a></div>
+          <div class="t-muted" style="padding-top:12px;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:16px;color:#6d7686;">${msg("fallbackLinkLead")}<br><a class="a-link" href="${link}" style="color:#6d7686;text-decoration:none;font-size:12px;line-height:16px;word-break:break-all;">${link}</a></div>
         </td></tr>
         </#if>
         <tr><td class="pad t-muted" style="padding:8px 32px 32px 32px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#6d7686;">
