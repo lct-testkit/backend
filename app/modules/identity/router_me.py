@@ -46,6 +46,7 @@ from app.modules.identity.schemas import (
 )
 from app.modules.identity.service import IdentityService
 from app.modules.identity.session_store import session_store
+from app.modules.notification.mail_render import msk_datetime, public_ip
 from app.modules.notification.service import (
     TPL_PASSWORD_CHANGED,
     NotificationPriority,
@@ -503,8 +504,9 @@ async def change_password(
         template_code=TPL_PASSWORD_CHANGED,
         priority=NotificationPriority.HIGH,
         payload={
-            "changed_at": user.password_changed_at.isoformat(),
-            "ip": request.headers.get("X-Real-Ip"),
+            # Время по Москве, а внутренний адрес прокси (docker-сеть) пользователю не показывается.
+            "changed_at": msk_datetime(user.password_changed_at),
+            "ip": public_ip(request.headers.get("X-Real-Ip")),
         },
     )
     await AuditService(session).record(

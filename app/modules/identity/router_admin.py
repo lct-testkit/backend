@@ -45,13 +45,11 @@ from app.modules.identity.access_rules import (
 )
 from app.modules.identity.admin_service import (
     INVITE_EXPIRED_REASON,
-    INVITE_REQUIRED_ACTIONS,
     AdminUserService,
     ApprovalService,
     UserFilters,
 )
 from app.modules.identity.erasure_service import ErasureExecutionService
-from app.modules.identity.keycloak import keycloak_client
 from app.modules.identity.models import DataErasureRequest, Role, Team, User, UserStatus
 from app.modules.identity.schemas import (
     AccessRuleDimensionOut,
@@ -429,18 +427,13 @@ async def resend_invite(
     await identity.revoke_invites(user.id, purpose="invite")
     token = await identity.issue_invite(user, created_by=principal.user_id, purpose="invite")
     expires_at = dt.datetime.now(dt.UTC) + dt.timedelta(hours=settings.invite_ttl_hours)
-    # B6-10: раньше письмо не отправлялось вовсе (`invite_email_sent` было захардкожено в
-    # `False`) — те же действия, что при создании пользователя (`create_user`).
-    email_sent = False
-    if user.keycloak_id:
-        email_sent = await keycloak_client.execute_actions_email(
-            user.keycloak_id,
-            INVITE_REQUIRED_ACTIONS,
-            lifespan_seconds=settings.invite_ttl_hours * 3600,
-        )
+    # Письмо шлёт сам backend (ссылка `/invite/{token}`), не Keycloak: его письмо вело на внутренний
+    # адрес контейнера. Без SMTP (или при сбое) ссылку получает администратор в ответе.
+    invite_url = f"{settings.base_url.rstrip('/')}/invite/{token}"
+    email_sent = await service.send_invite_email(user, invite_url)
     return UserCreateResponse(
         user=UserOut.model_validate(user),
-        invite_url=None if email_sent else f"{settings.base_url.rstrip('/')}/invite/{token}",
+        invite_url=None if email_sent else invite_url,
         invite_expires_at=expires_at,
         invite_email_sent=email_sent,
     )
