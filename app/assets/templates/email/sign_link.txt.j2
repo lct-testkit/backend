@@ -3,11 +3,9 @@
 {% if reminder %}Напоминаем: документ ещё не подписан. {% endif %}Вас просят подписать документ простой электронной подписью: {{ title }}.
 {% if deadline or link_until %}
 
-{% if deadline %}
-Срок подписания: до {{ deadline }}
-{% endif %}
-{% if link_until %}
-Ссылка действует: до {{ link_until }}
+Подписать до: {{ deadline or link_until }}
+{% if deadline and link_until and link_until != deadline %}
+Ссылка работает до {{ link_until }}, но подписать документ нужно до {{ deadline }}.
 {% endif %}
 {% endif %}
 

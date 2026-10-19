@@ -344,6 +344,35 @@ class TestNotice:
         assert "Напоминаем" in mail.text
 
 
+class TestSignLinkDates:
+    """N-6: одна понятная дата «Подписать до», а не две («Срок подписания» и «Ссылка действует»)."""
+
+    def test_one_date_and_an_explanation_when_the_link_outlives_the_deadline(self) -> None:
+        mail = _sign_link()
+
+        assert "Подписать до" in mail.html and "Подписать до:" in mail.text
+        assert "Срок подписания" not in mail.html and "Срок подписания" not in mail.text
+        assert "Ссылка действует" not in mail.html and "Ссылка действует" not in mail.text
+        assert "Ссылка работает до 26.10.2026" in mail.text
+        assert "подписать документ нужно до 21.10.2026" in mail.text
+
+    def test_without_a_deadline_the_link_date_is_the_date(self) -> None:
+        mail = mail_render.render_sign_link(
+            title="Договор",
+            url=f"{BASE}/sign/{TOKEN}",
+            link_expires_at=dt.datetime(2026, 10, 26, 9, 9, tzinfo=UTC),
+        )
+
+        assert "Подписать до: до" not in mail.text
+        assert "26.10.2026" in mail.text
+        assert "Ссылка работает" not in mail.text
+
+    def test_no_dates_no_line(self) -> None:
+        mail = mail_render.render_sign_link(title="Договор", url=f"{BASE}/sign/{TOKEN}")
+
+        assert "Подписать до" not in mail.text
+
+
 class TestSubjects:
     def test_subjects_follow_the_catalogue(self) -> None:
         assert _sign_link().subject == "Документ на подпись: КП по сделке D-2026-000039"
