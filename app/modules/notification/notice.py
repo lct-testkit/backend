@@ -50,6 +50,7 @@ _ROUTES: dict[str, tuple[str, str]] = {
 }
 
 _SLA_CODES = frozenset({"DEAL_SLA_WARNING", "DEAL_SLA_BREACHED"})
+_EDUCATIONAL_ORG_TYPES = frozenset({"university", "college"})
 
 Rows = list[tuple[str, Any]]
 
@@ -76,7 +77,13 @@ async def _deal_rows(session: AsyncSession, deal_id: uuid.UUID, code: str) -> Ro
     rows: Rows = [
         ("Сделка", deal.number),
         ("Название", deal.title),
-        ("Вуз", organization.short_name or organization.name if organization else None),
+        (
+            # N-7: «Вуз: Цифровые кадры» у компании — подпись по типу организации.
+            "Вуз"
+            if organization and organization.org_type in _EDUCATIONAL_ORG_TYPES
+            else "Организация",
+            organization.short_name or organization.name if organization else None,
+        ),
         ("Статус", status.name if status else None),
     ]
     if code in _SLA_CODES and deal.sla_due_at is not None:
