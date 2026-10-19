@@ -297,7 +297,7 @@ class TestLicenseRegisterColumns:
         scene = run(client, _make_scene)
         dataset = run(client, _dataset, scene, "head", {})
         assert dataset.columns == [
-            "Вуз",
+            "Организация",
             "Вендор",
             "ПО",
             "Номер договора",
@@ -317,7 +317,7 @@ class TestLicenseRegisterColumns:
     def test_columns_subset_works(self, client) -> None:
         scene = run(client, _make_scene)
         dataset = run(client, _dataset, scene, "head", {"columns": ["organization", "vendor"]})
-        assert dataset.columns == ["Вуз", "Вендор"]
+        assert dataset.columns == ["Организация", "Вендор"]
 
     def test_product_ids_is_rejected_by_spec_validation(self) -> None:
         from app.core.errors import ValidationError

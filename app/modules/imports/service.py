@@ -140,7 +140,10 @@ def _count_rows(entity_type: str, outcomes: Iterable[str]) -> None:
 # упомянутые здесь, получают общий код `field_invalid` — таблица задачи называет явно только эти
 # два (остальные подсказки не предполагались автором задачи как отдельные коды).
 _FIELD_ISSUE_HINTS: dict[str, tuple[str, str]] = {
-    "transfer_status": ("status_unknown", "Допустимо: передано, в работе, не начато, отказ"),
+    "transfer_status": (
+        "status_unknown",
+        "Допустимо: передана, в процессе, не начата, не состоялась",
+    ),
     "license_term": (
         "term_invalid",
         "Укажите срок в годах (1–50) или год окончания (2000–2100)",
