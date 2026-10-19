@@ -1,13 +1,12 @@
 # Доступ внешних систем (B5-10)
 
 Два способа получить доступ к API от имени роли `INTEGRATION` — сервисной учётки без
-браузерной сессии. Выбор между ними — вопрос владельцу/организаторам (см. README, раздел
-«Открытые вопросы»): OAuth2 подходит системе, умеющей `client_credentials`; API-ключ — любой
+браузерной сессии. Выбор между ними — вопрос владельцу/организаторам: OAuth2 подходит системе, умеющей `client_credentials`; API-ключ — любой
 системе, умеющей только добавить заголовок.
 
 ## Вариант A: OAuth2 client_credentials (Keycloak)
 
-Требует клиента `crm-integration` в realm (заводится в спринте D1, confidential,
+Требует клиента `crm-integration` в realm (в поставляемом `deploy/keycloak/realm-crm.json` его нет — заводится отдельно, confidential,
 `serviceAccountsEnabled: true`, роль `INTEGRATION` у сервисной учётки, audience-маппер на
 `crm-bff` — без него токен не пройдёт проверку аудитории, см. `core/security.py`). Без этого
 клиента в вашем realm раздел ниже не сработает — доступны только API-ключи (вариант B).
@@ -41,7 +40,7 @@ curl -H "Authorization: Bearer $TOKEN" "$CRM/api/deals?limit=10"
 ```bash
 # 1. ADMIN создаёт служебную учётку роли INTEGRATION (если она ещё не создана сидом —
 #    integration.seed.seed_integration_account), затем выпускает ей ключ. $ADMIN_SESSION —
-#    cookie+CSRF вошедшего администратора (см. README, раздел «Аутентификация»).
+#    cookie+CSRF вошедшего администратора (см. README, «Как это выглядит»: вход BFF).
 curl -s -X POST "$CRM/api/admin/integrations/api-keys" \
   -H "Content-Type: application/json" \
   -H "X-CSRF-Token: $ADMIN_CSRF" \
