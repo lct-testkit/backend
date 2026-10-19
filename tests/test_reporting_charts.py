@@ -355,9 +355,7 @@ class TestChartPayloadAndState:
     def test_repeated_render_keeps_no_pyplot_state_and_size_is_stable(self) -> None:
         import sys
 
-        sizes = [
-            len(render_xlsx(_funnel_dataset(), template_code="deal_funnel")) for _ in range(4)
-        ]
+        sizes = [len(render_xlsx(_funnel_dataset(), template_code="deal_funnel")) for _ in range(4)]
         assert len(set(sizes)) == 1
         pyplot = sys.modules.get("matplotlib.pyplot")
         assert pyplot is None or pyplot.get_fignums() == []
