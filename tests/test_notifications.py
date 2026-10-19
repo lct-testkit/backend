@@ -62,6 +62,25 @@ class TestRenderTemplate:
         )
         assert body_with == "Причина. истёк срок"
 
+    def test_trailing_dot_of_user_text_is_not_doubled(self) -> None:
+        # N-3: «Причина: {{ reason }}.» + причина, уже оканчивающаяся точкой, давала «..».
+        template = "Подписание отклонено.{% if reason %} Причина: {{ reason }}.{% endif %}"
+        assert (
+            render_template(template, {"reason": "Нужно пересчитать стоимость."})
+            == "Подписание отклонено. Причина: Нужно пересчитать стоимость."
+        )
+        assert (
+            render_template(template, {"reason": "Нужно пересчитать"})
+            == "Подписание отклонено. Причина: Нужно пересчитать."
+        )
+        assert render_template(template, {"reason": "Почему?"}) == (
+            "Подписание отклонено. Причина: Почему?"
+        )
+
+    def test_ellipsis_is_left_alone(self) -> None:
+        assert render_template("Причина: {{ r }}.", {"r": "ждём..."}) == "Причина: ждём..."
+        assert render_template("Причина: {{ r }}", {"r": "ждём…"}) == "Причина: ждём…"
+
 
 class TestQuietHours:
     def _pref(self, start: dt.time | None, end: dt.time | None) -> UserNotificationPref:
