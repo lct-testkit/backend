@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 import uuid
 from typing import Any, Protocol, runtime_checkable
 from zoneinfo import ZoneInfo
@@ -161,13 +162,25 @@ class _LimitedSandbox(jinja2.sandbox.SandboxedEnvironment):
 _JINJA = _LimitedSandbox()
 
 
+_DOUBLE_DOT = re.compile(r"(?<!\.)\.\.(?!\.)")
+_DOT_AFTER_MARK = re.compile(r"([!?…])\.(?=\s|$)|(?<=\.\.\.)\.+")
+
+
+def _dedupe_terminal_punctuation(text: str) -> str:
+    """N-3: шаблон дописывает точку после подставленного текста («Причина: {{ reason }}.»), а
+    пользовательский текст уже заканчивается точкой («…скидки.») — выходило «скидки..». Лишняя
+    точка убирается после рендера, поэтому чинятся и шаблоны, уже сохранённые в БД (сид их не
+    перезаписывает). Многоточие («...», «…») не трогаем."""
+    return _DOT_AFTER_MARK.sub(lambda m: m.group(1) or "", _DOUBLE_DOT.sub(".", text))
+
+
 def render_template(template_str: str, payload: dict[str, Any]) -> str:
     """Простая текстовая подстановка (не HTML-документ, поэтому без
     `autoescape` — тело уведомления возвращается как обычная строка JSON-поля,
     экранирование при показе в HTML — забота фронтенда, как и для любого
     другого текстового поля этого API (комментарии сделок, названия
     организаций и т.д. тоже не экранируются на бэкенде)."""
-    return _JINJA.from_string(template_str).render(**payload)
+    return _dedupe_terminal_punctuation(_JINJA.from_string(template_str).render(**payload))
 
 
 def preview_template(
