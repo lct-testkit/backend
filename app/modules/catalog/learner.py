@@ -148,25 +148,25 @@ def parse_date(raw: str) -> dt.date:
             return dt.datetime.strptime(text, fmt).date()
         except ValueError:
             continue
-    raise ValueError("нераспознанный формат даты (ожидается ДД.ММ.ГГГГ или ГГГГ-ММ-ДД)")
+    raise ValueError("Неверная дата — укажите в формате ДД.ММ.ГГГГ")
 
 
 def parse_birth_date(raw: str) -> dt.date:
     value = parse_date(raw)
     today = dt.date.today()
     if value > today:
-        raise ValueError("дата рождения в будущем")
+        raise ValueError("Дата рождения не может быть в будущем")
     if value.year < 1900:
-        raise ValueError("дата рождения раньше 1900 года")
+        raise ValueError("Дата рождения не может быть раньше 1900 года")
     return value
 
 
 def parse_past_date(raw: str) -> dt.date:
     value = parse_date(raw)
     if value > dt.date.today():
-        raise ValueError("дата в будущем")
+        raise ValueError("Дата не может быть в будущем")
     if value.year < 1900:
-        raise ValueError("дата раньше 1900 года")
+        raise ValueError("Дата не может быть раньше 1900 года")
     return value
 
 
@@ -176,7 +176,7 @@ def parse_sex(raw: str) -> str:
         return "M"
     if key in {"ж", "жен", "женский", "женщина", "f", "female"}:
         return "F"
-    raise ValueError("допустимые значения — М или Ж")
+    raise ValueError("Пол — «М» или «Ж»")
 
 
 def parse_education(raw: str) -> str:
@@ -187,21 +187,21 @@ def parse_education(raw: str) -> str:
     for code, label in EDUCATION_LEVELS:
         if wanted in (_key(label), code):
             return code
-    raise ValueError("значение не из справочника «Образование» (лист «Лист2» шаблона)")
+    raise ValueError("Выберите значение из справочника «Образование» (лист «Лист2» шаблона)")
 
 
 def normalize_snils(raw: str) -> str:
     """11 цифр без разделителей; контрольное число проверяется для номеров выше 001-001-998."""
     digits = _NON_DIGITS.sub("", raw)
     if len(digits) != 11:
-        raise ValueError("СНИЛС должен содержать 11 цифр")
+        raise ValueError("СНИЛС — 11 цифр")
     if int(digits[:9]) > 1_001_998:
         total = sum(int(d) * w for d, w in zip(digits[:9], range(9, 0, -1), strict=True))
         expected = total if total < 100 else (0 if total in (100, 101) else total % 101)
         if expected == 100:
             expected = 0
         if expected != int(digits[9:]):
-            raise ValueError("неверное контрольное число СНИЛС")
+            raise ValueError("СНИЛС — неверное контрольное число")
     return digits
 
 
@@ -212,35 +212,46 @@ def format_snils(digits: str) -> str:
     return f"{digits[0:3]}-{digits[3:6]}-{digits[6:9]} {digits[9:]}"
 
 
+def _digits_word(count: int) -> str:
+    """«4 цифры», «6 цифр», «11 цифр»."""
+    if count % 10 == 1 and count % 100 != 11:
+        return f"{count} цифра"
+    if 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14:
+        return f"{count} цифры"
+    return f"{count} цифр"
+
+
 def _fixed_digits(raw: str, length: int, what: str) -> str:
+    """LP-2: «Серия паспорта — 4 цифры» (раньше «серия паспорта должен содержать 4 цифр»:
+    ошибка рода и падежа, строчная буква). `what` — название поля с заглавной буквы."""
     digits = _NON_DIGITS.sub("", raw)
     if len(digits) != length:
-        raise ValueError(f"{what} должен содержать {length} цифр")
+        raise ValueError(f"{what} — {_digits_word(length)}")
     return digits
 
 
 def normalize_passport_series(raw: str) -> str:
-    return _fixed_digits(raw, 4, "серия паспорта")
+    return _fixed_digits(raw, 4, "Серия паспорта")
 
 
 def normalize_passport_number(raw: str) -> str:
-    return _fixed_digits(raw, 6, "номер паспорта")
+    return _fixed_digits(raw, 6, "Номер паспорта")
 
 
 def normalize_dept_code(raw: str) -> str:
-    digits = _fixed_digits(raw, 6, "код подразделения")
+    digits = _fixed_digits(raw, 6, "Код подразделения")
     return f"{digits[:3]}-{digits[3:]}"
 
 
 def normalize_zip(raw: str) -> str:
-    return _fixed_digits(raw, 6, "индекс")
+    return _fixed_digits(raw, 6, "Индекс")
 
 
 def normalize_text(field: str, raw: str) -> str:
     text = " ".join(raw.split())
     limit = PROFILE_MAX_LENGTH.get(field)
     if limit is not None and len(text) > limit:
-        raise ValueError(f"слишком длинное значение (не больше {limit} символов)")
+        raise ValueError(f"Слишком длинное значение — не больше {limit} символов")
     return text
 
 
