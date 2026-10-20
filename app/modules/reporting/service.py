@@ -77,6 +77,10 @@ from app.modules.reporting.spec import REPORT_SPECS, derived_data_categories, va
 #: Раздел 4.13: «< 1 000 строк, < 2 с» — граница между sync- и async-путём.
 SYNC_ROW_THRESHOLD = 1000
 
+#: Предпросмотр числа строк зовётся формой запуска при каждой правке параметров (с задержкой):
+#: потолок выше, чем у синхронных отчётов (30/мин), но скрипт в цикле всё равно упрётся в 429.
+PREVIEW_RATE_LIMIT_PER_MIN = 120
+
 # new_spec §4.13: «каждая генерация — событие REPORT_EXPORTED в аудите с указанием количества
 # строк и категорий данных». Код отчёта, которого нет в словаре, трактуется как содержащий ПДн
 # (безопасный отказ, а не молчаливое «пусто») — см. `assert` в `reporting.spec`, который не даёт
@@ -381,10 +385,11 @@ class ReportJobService:
         spec = REPORT_SPECS.get(kind)
         if spec is not None:
             validate_params(spec, params)
-        # Форма зовёт ручку при каждой правке параметров (с задержкой): потолок выше, чем у
-        # синхронных отчётов, но скрипт в цикле всё равно упрётся в 429.
         await rate_limit.enforce(
-            str(principal.user_id), "report:preview", limit=120, window_seconds=60
+            str(principal.user_id),
+            "report:preview",
+            limit=PREVIEW_RATE_LIMIT_PER_MIN,
+            window_seconds=60,
         )
         estimator = REPORT_ESTIMATORS.get(kind)
         if estimator is not None:
