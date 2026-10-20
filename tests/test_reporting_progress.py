@@ -321,4 +321,6 @@ class TestLearningProgressEmptySource:
         assert dataset.rows == []
         assert dataset.note is not None
         assert "не реализована" not in dataset.note
-        assert "lms" in dataset.note
+        # R-16: без жаргона (LMS_BASE_URL), с понятным адресом настройки.
+        assert "LMS" in dataset.note and "«Интеграции»" in dataset.note
+        assert "LMS_BASE_URL" not in dataset.note

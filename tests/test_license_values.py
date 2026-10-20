@@ -59,13 +59,15 @@ class TestParseTransferStatus:
         value, error = parse_transfer_status("как-то так")
         assert value is None
         assert error is not None
-        assert "передано" in error
+        # Подсказка называет те же статусы, что интерфейс и отчёт (R-14/M-5).
+        for label in ("передана", "в процессе", "не начата", "не состоялась"):
+            assert label in error
 
     def test_typo_suggests_closest_match(self) -> None:
         value, error = parse_transfer_status("передоно")
         assert value is None
         assert error is not None
-        assert "передано" in error
+        assert "возможно «передана»" in error
 
     def test_empty_gives_no_value_and_no_error(self) -> None:
         assert parse_transfer_status("") == (None, None)
