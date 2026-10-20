@@ -2285,9 +2285,37 @@ def _parse_transfer_statuses(params: dict[str, Any]) -> list[str] | None:
     return raw
 
 
-def _license_validity_label(valid_year: int | None, *, current_year: int) -> str:
+def _license_end_year(license_: Any) -> int | None:
+    """Год окончания лицензии для отчёта. Старые записи хранят только `license_valid_year`, а форма
+    лицензии (F2) пишет дату окончания (`license_valid_until`) или срок в годах от даты подписания —
+    без этого «Срок действия, год» и «Срок» в реестре были пустыми у лицензий из интерфейса."""
+    if license_.license_valid_year:
+        return int(license_.license_valid_year)
+    if license_.license_valid_until is not None:
+        return license_.license_valid_until.year
+    if license_.license_signed_at is not None and license_.license_term_years:
+        return license_.license_signed_at.year + int(license_.license_term_years)
+    return None
+
+
+def _license_end_year_sql() -> Any:
+    """То же, что `_license_end_year`, выражением SQL: для фильтров «Год окончания» и
+    «Только с истёкшим сроком»."""
+    return func.coalesce(
+        OrganizationLicense.license_valid_year,
+        func.extract("year", OrganizationLicense.license_valid_until),
+        func.extract("year", OrganizationLicense.license_signed_at)
+        + OrganizationLicense.license_term_years,
+    )
+
+
+def _license_validity_label(
+    valid_year: int | None, *, current_year: int, perpetual: bool = False
+) -> str:
     """«Срок» (B1-11, доп. колонка): по `license_valid_year` и текущему году в поясе
     пользователя — сам по себе год ничего не говорит о статусе лицензии без сравнения с «сейчас»."""
+    if perpetual:
+        return "Бессрочная"
     if valid_year is None:
         return "—"
     if valid_year < current_year:
@@ -2340,10 +2368,10 @@ async def _license_register_query(
     if transfer_statuses:
         stmt = stmt.where(OrganizationLicense.transfer_status.in_(transfer_statuses))
     if valid_year is not None:
-        stmt = stmt.where(OrganizationLicense.license_valid_year == valid_year)
+        stmt = stmt.where(_license_end_year_sql() == valid_year)
     if expired:
         current_year = dt.datetime.now(tz).year
-        stmt = stmt.where(OrganizationLicense.license_valid_year < current_year)
+        stmt = stmt.where(_license_end_year_sql() < current_year)
     # `license_signed_at` — `Date`, без часового пояса (день подписания, не момент времени);
     # `created_at` — `DateTime(timezone=True)`, границы суток считаются в поясе пользователя
     # (тот же приём, что `_apply_deal_filters`/`_day_start`, B1-3).
@@ -2403,9 +2431,9 @@ async def build_license_register(
             else "—"
         )
         status_counts[status_label] = status_counts.get(status_label, 0) + 1
-        year_label = (
-            str(license_.license_valid_year) if license_.license_valid_year else "Без срока"
-        )
+        end_year = _license_end_year(license_)
+        perpetual = bool(getattr(license_, "is_perpetual", False))
+        year_label = "Бессрочно" if perpetual else (str(end_year) if end_year else "Без срока")
         year_counts[year_label] = year_counts.get(year_label, 0) + 1
         full_row = {
             # R-15: краткое название (в ЕГРЮЛ полное — «ЗАКРЫТОЕ АКЦИОНЕРНОЕ ОБЩЕСТВО …» капсом),
@@ -2415,13 +2443,13 @@ async def build_license_register(
             "product_name": license_.product_name,
             "contract_number": license_.contract_number or "",
             "is_signed": _license_signed_label(license_),
-            "license_valid_year": license_.license_valid_year,
+            "license_valid_year": end_year,
             "transfer_status": status_label,
             "manager_full_name": manager_name or "",
             "responsible_contacts": responsible or "",
             "comment": license_.comment or "",
             "validity": _license_validity_label(
-                license_.license_valid_year, current_year=current_year
+                end_year, current_year=current_year, perpetual=perpetual
             ),
         }
         rows.append([full_row[key] for key in columns])

@@ -35,6 +35,7 @@ from typing import Any
 import structlog
 from sqlalchemy import func, select
 
+import app.db.models  # noqa: F401 — регистрирует все таблицы для внешних ключей (CLI вне приложения)
 from app.core.config import get_settings
 from app.core.db import session_scope
 from app.core.logging import configure_logging
