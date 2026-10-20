@@ -591,9 +591,22 @@ class ValidationError(AppError):
         super().__init__(ErrorCode.VALIDATION, detail, errors=errors)
 
 
+def _not_found_phrase(entity: str) -> str:
+    """«не найден / найдена / найдено» по роду главного (первого) слова названия сущности:
+    «Организация не найдена», «Контакт не найден», «Соглашение об ЭДО не найдено»."""
+    head = entity.split(maxsplit=1)[0].lower().rstrip(",:")
+    if head.endswith(("а", "я")):
+        return "не найдена"
+    if head.endswith(("о", "е", "ё")):
+        return "не найдено"
+    return "не найден"
+
+
 class NotFoundError(AppError):
     def __init__(self, entity: str, entity_id: object = None) -> None:
-        detail = f"{entity} не найден" + (f": {entity_id}" if entity_id is not None else "")
+        detail = f"{entity} {_not_found_phrase(entity)}" + (
+            f": {entity_id}" if entity_id is not None else ""
+        )
         super().__init__(ErrorCode.NOT_FOUND, detail, extra={"entity_type": entity})
 
 

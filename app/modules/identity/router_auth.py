@@ -169,7 +169,10 @@ async def _complete_login(
         # `state` обязателен всегда. Раньше его отсутствие прощалось, если
         # клиент сам прислал `code_verifier`, — и это был готовый login-CSRF:
         # жертву можно было посадить в чужую сессию, подсунув свой код.
-        raise AppError(ErrorCode.UNAUTHENTICATED, "Некорректный или истёкший state")
+        raise AppError(
+            ErrorCode.UNAUTHENTICATED,
+            "Ссылка для входа недействительна или устарела — войдите заново",
+        )
 
     # Верификатор из Redis — источник истины; параметр принимается только
     # если BFF хранит его у себя и в Redis его нет.
@@ -183,13 +186,19 @@ async def _complete_login(
     # id_token проверяется полностью: подпись, iss, aud, exp и nonce. Без
     # сверки nonce ответ авторизации можно переиграть (new_spec §3.1 п.4).
     if not tokens.id_token:
-        raise AppError(ErrorCode.UNAUTHENTICATED, "Keycloak не вернул id_token")
+        raise AppError(
+            ErrorCode.UNAUTHENTICATED,
+            "Вход не удался: Keycloak не подтвердил личность — войдите заново",
+        )
     id_claims = await decode_id_token(tokens.id_token, nonce=stored_state.get("nonce"))
 
     claims = await decode_access_token(tokens.access_token)
     if id_claims.get("sub") != claims.subject:
         # Токены обязаны описывать одного субъекта.
-        raise AppError(ErrorCode.UNAUTHENTICATED, "id_token и access_token выданы разным субъектам")
+        raise AppError(
+            ErrorCode.UNAUTHENTICATED,
+            "Вход не удался: подтверждение личности относится к другому пользователю",
+        )
 
     identity = IdentityService(session)
     audit = AuditService(session)

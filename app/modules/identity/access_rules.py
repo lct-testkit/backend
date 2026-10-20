@@ -58,22 +58,30 @@ class AccessRulesView:
     directions: DimensionView
 
 
+_DIMENSION_LABELS = {"organizations": "вузы", "directions": "направления"}
+
+
+def _label(name: str) -> str:
+    """Человеческое название измерения ограничения вместо кода поля."""
+    return _DIMENSION_LABELS.get(name, name)
+
+
 def _validate_dimension(name: str, dimension: DimensionInput) -> None:
     if dimension.mode == "allow" and not dimension.ids:
         raise ValidationError(
-            f"Режим allow без элементов означает «не видит ничего» — для этого есть "
-            f"блокировка пользователя, не ограничение по {name}",
-            [FieldError(field=name, reason="allow без элементов")],
+            f"Режим «разрешить» без элементов означает «не видит ничего» — для этого есть "
+            f"блокировка пользователя, а не ограничение видимости ({_label(name)})",
+            [FieldError(field=name, reason="Список разрешённых пуст")],
         )
     if dimension.mode == "all" and dimension.ids:
         raise ValidationError(
-            f"Режим all не принимает список id ({name})",
-            [FieldError(field=name, reason="ids должен быть пустым при mode=all")],
+            f"Режим «все» не принимает список ({_label(name)})",
+            [FieldError(field=name, reason="Для режима «все» список не нужен")],
         )
     if len(dimension.ids) > MAX_IDS_PER_DIMENSION:
         raise ValidationError(
-            f"Слишком много элементов в {name} (максимум {MAX_IDS_PER_DIMENSION})",
-            [FieldError(field=name, reason="превышен лимит")],
+            f"Слишком много элементов: {_label(name)} (максимум {MAX_IDS_PER_DIMENSION})",
+            [FieldError(field=name, reason="Превышен лимит")],
         )
 
 
@@ -146,7 +154,7 @@ class AccessRulesService:
         missing = set(ids) - found
         if missing:
             raise ValidationError(
-                f"{label}: {len(missing)} не найдено или удалено",
+                f"{_label(label).capitalize()}: {len(missing)} не найдено или удалено",
                 [FieldError(field=label, reason=str(mid)) for mid in sorted(missing, key=str)[:10]],
             )
 
@@ -162,8 +170,12 @@ class AccessRulesService:
     ) -> AccessRulesView:
         if user.role not in _RESTRICTABLE_ROLES:
             raise ValidationError(
-                "Ограничить видимость можно только роли KAM или HEAD",
-                [FieldError(field="user_id", reason=f"роль {user.role} не поддерживает это")],
+                "Ограничить видимость можно только менеджеру или руководителю",
+                [
+                    FieldError(
+                        field="user_id", reason="Для этой роли ограничения видимости недоступны"
+                    )
+                ],
             )
         _validate_dimension("organizations", organizations)
         _validate_dimension("directions", directions)

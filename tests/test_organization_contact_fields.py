@@ -80,7 +80,7 @@ class TestSchemas:
     @pytest.mark.parametrize(
         ("field", "value", "label"),
         [
-            ("main_email", "not-an-email", "Основной e-mail"),
+            ("main_email", "not-an-email", "Основная почта"),
             ("main_phone", "звоните", "Основной телефон"),
             ("website", "сайт", "Сайт"),
         ],
@@ -116,7 +116,7 @@ class TestApi:
         errors = {item["field"]: item["reason"] for item in response.json()["errors"]}
         assert set(errors) == {"main_phone", "main_email", "website"}
         assert errors["main_phone"].startswith("Основной телефон")
-        assert errors["main_email"].startswith("Основной e-mail")
+        assert errors["main_email"].startswith("Основная почта")
         assert errors["website"].startswith("Сайт")
 
     def test_create_stores_normalised_values(self, client) -> None:

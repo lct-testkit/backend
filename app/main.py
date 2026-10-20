@@ -170,6 +170,10 @@ OPENAPI_TAGS: list[dict[str, str]] = [
     {"name": "imports", "description": "Импорт каталогов и организаций из xlsx/xls/csv/json."},
     {"name": "reporting", "description": "Отчёты и дашборды."},
     {
+        "name": "search",
+        "description": "Общий поиск из шапки: сделки, организации, контакты; раскладка клавиатуры.",
+    },
+    {
         "name": "signing",
         "description": (
             "Простая электронная подпись (ПЭП): документы, запросы, шаблоны, соглашения об ЭДО."

@@ -147,6 +147,6 @@ def enforce_limit(limit: int) -> int:
     if limit > MAX_LIMIT:
         raise ValidationError(
             f"Максимальный размер страницы — {MAX_LIMIT}",
-            [FieldError(field="limit", reason=f"не больше {MAX_LIMIT}", code=ErrorCode.VALIDATION)],
+            [FieldError(field="limit", reason=f"Не больше {MAX_LIMIT}", code=ErrorCode.VALIDATION)],
         )
     return limit

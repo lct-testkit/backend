@@ -240,10 +240,10 @@ def validate_params(spec: ReportSpec, params: dict[str, Any]) -> None:
     known_keys = spec.params | spec.common_filters | _STRUCTURAL_KEYS
     for key in params:
         if key.startswith("_"):
-            errors.append(FieldError(field=key, reason="служебный параметр недопустим"))
+            errors.append(FieldError(field=key, reason="Служебный параметр недопустим"))
             continue
         if key not in known_keys:
-            errors.append(FieldError(field=key, reason="неизвестный параметр"))
+            errors.append(FieldError(field=key, reason="Неизвестный параметр"))
 
     columns_raw = params.get("columns")
     if columns_raw not in (None, []):
@@ -251,11 +251,11 @@ def validate_params(spec: ReportSpec, params: dict[str, Any]) -> None:
             errors.append(
                 FieldError(
                     field="columns",
-                    reason="выбор колонок не поддерживается видом отчёта",
+                    reason="Выбор колонок не поддерживается видом отчёта",
                 )
             )
         elif not isinstance(columns_raw, list):
-            errors.append(FieldError(field="columns", reason="ожидается массив строк"))
+            errors.append(FieldError(field="columns", reason="Ожидается список строк"))
         else:
             valid_keys = {c.key for c in spec.columns}
             seen: set[str] = set()
@@ -265,13 +265,13 @@ def validate_params(spec: ReportSpec, params: dict[str, Any]) -> None:
                         FieldError(
                             field="columns",
                             reason=(
-                                f"неизвестный ключ: {raw_key}; допустимо: "
+                                f"Неизвестный ключ: {raw_key}; допустимо: "
                                 f"{', '.join(sorted(valid_keys))}"
                             ),
                         )
                     )
                 elif raw_key in seen:
-                    errors.append(FieldError(field="columns", reason=f"повтор ключа: {raw_key}"))
+                    errors.append(FieldError(field="columns", reason=f"Повтор ключа: {raw_key}"))
                 seen.add(raw_key)
 
     date_field_raw = params.get("date_field")
@@ -280,14 +280,14 @@ def validate_params(spec: ReportSpec, params: dict[str, Any]) -> None:
             errors.append(
                 FieldError(
                     field="date_field",
-                    reason="параметр date_field не поддерживается этим видом отчёта",
+                    reason="Этот параметр не поддерживается видом отчёта",
                 )
             )
         elif date_field_raw not in spec.date_fields:
             errors.append(
                 FieldError(
                     field="date_field",
-                    reason=f"допустимые значения: {', '.join(spec.date_fields)}",
+                    reason=f"Допустимые значения: {', '.join(spec.date_fields)}",
                 )
             )
 

@@ -67,7 +67,7 @@ class ProgressWhen(BaseModel):
     @model_validator(mode="after")
     def _at_least_one_condition(self) -> ProgressWhen:
         if self.completed is None and self.progress_pct_gte is None:
-            raise ValueError("нужно completed или progress_pct_gte")
+            raise ValueError("Укажите признак завершения или порог прогресса")
         return self
 
 

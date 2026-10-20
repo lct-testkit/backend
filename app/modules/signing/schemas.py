@@ -38,7 +38,9 @@ class SignerSpec(BaseModel):
             for value in (self.role, self.user_id, self.contact_id, self.contact_role)
         ]
         if sum(provided) != 1:
-            raise ValueError("Нужно указать ровно одно из: role, user_id, contact_id, contact_role")
+            raise ValueError(
+                "Укажите ровно одно: роль в сделке, сотрудника, контакт или роль контакта"
+            )
         return self
 
 
@@ -125,7 +127,7 @@ class SignatureDocumentCreateRequest(BaseModel):
     @model_validator(mode="after")
     def _exactly_one_source(self) -> SignatureDocumentCreateRequest:
         if (self.template_code is None) == (self.file_id is None):
-            raise ValueError("Нужно указать ровно одно из: template_code, file_id")
+            raise ValueError("Укажите ровно одно: шаблон или файл")
         return self
 
 

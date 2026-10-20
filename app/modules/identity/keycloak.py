@@ -224,7 +224,7 @@ class KeycloakClient:
         if not settings.keycloak_admin_client_id or not settings.keycloak_admin_client_secret:
             raise AppError(
                 ErrorCode.DEPENDENCY_UNAVAILABLE,
-                "Admin-клиент Keycloak не настроен",
+                "Служебный клиент Keycloak не настроен",
             )
         if self._admin_token and time.monotonic() < self._admin_token_expires_at:
             return self._admin_token
@@ -237,7 +237,9 @@ class KeycloakClient:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(settings.keycloak_token_url, data=data)
         if response.status_code != 200:
-            raise AppError(ErrorCode.DEPENDENCY_UNAVAILABLE, "Keycloak Admin API недоступен")
+            raise AppError(
+                ErrorCode.DEPENDENCY_UNAVAILABLE, "API администрирования Keycloak недоступен"
+            )
         payload = response.json()
         self._admin_token = payload["access_token"]
         # Обновляем чуть раньше истечения, чтобы не попасть в гонку.
@@ -306,7 +308,7 @@ class KeycloakClient:
         if response.status_code == 409:
             raise AppError(
                 ErrorCode.DUPLICATE,
-                "Учётная запись с таким email уже существует в Keycloak",
+                "Учётная запись с такой почтой уже существует в Keycloak",
                 extra={"email": email},
             )
         if response.status_code not in (201, 204):
@@ -436,7 +438,7 @@ class KeycloakClient:
             raise AppError(
                 ErrorCode.VALIDATION,
                 _keycloak_error_text(response) or "Пароль не соответствует политике безопасности",
-                errors=[FieldError(field="new_password", reason="не соответствует политике")],
+                errors=[FieldError(field="new_password", reason="Не соответствует политике")],
             )
         if response.status_code >= 400:
             logger.warning("keycloak_set_password_failed", status=response.status_code)

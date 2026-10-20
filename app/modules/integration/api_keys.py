@@ -70,8 +70,13 @@ class ApiKeyService:
             or user.status != UserStatus.ACTIVE.value
         ):
             raise ValidationError(
-                "Ключ можно выпустить только активной учётке роли INTEGRATION",
-                [FieldError(field="user_id", reason="не найдена или не роль INTEGRATION")],
+                "Ключ можно выпустить только активной учётной записи интеграции",
+                [
+                    FieldError(
+                        field="user_id",
+                        reason="Учётная запись не найдена или не принадлежит интеграции",
+                    )
+                ],
             )
 
         raw_key, key_hash, key_prefix = _generate_api_key()

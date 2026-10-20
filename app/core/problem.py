@@ -7,6 +7,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import Any
+
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -151,6 +154,102 @@ def _loc_to_field(loc: tuple[object, ...]) -> str:
     return ".".join(parts) or "__root__"
 
 
+def _capitalize(text: str) -> str:
+    return text[:1].upper() + text[1:] if text else text
+
+
+def _number(value: object) -> str:
+    """Граница числа без хвоста `.0` и лишних нулей: `0`, `999999999999.99`."""
+    text = str(value)
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def _expected_values(expected: object) -> str:
+    """`'a', 'b' or 'c'` из pydantic -> `a, b, c`."""
+    return str(expected).replace("' or '", "', '").replace("'", "")
+
+
+# Тексты проверки на границе API по-русски: pydantic отдаёт английские фразы, а причина поля
+# показывается пользователю под полем формы. Своя причина (`PydanticCustomError`, `ValueError` из
+# валидатора) уже по-русски — ей добавляем только заглавную букву и убираем служебный префикс.
+_BUILTIN_REASONS: dict[str, str] = {
+    "missing": "Обязательное поле",
+    "string_type": "Нужен текст",
+    "int_type": "Нужно целое число",
+    "int_parsing": "Нужно целое число",
+    "int_from_float": "Нужно целое число",
+    "int_parsing_size": "Число слишком велико",
+    "float_type": "Нужно число",
+    "float_parsing": "Нужно число",
+    "decimal_type": "Нужно число",
+    "decimal_parsing": "Нужно число",
+    "finite_number": "Нужно конечное число",
+    "bool_type": "Нужно значение «да» или «нет»",
+    "bool_parsing": "Нужно значение «да» или «нет»",
+    "date_type": "Некорректная дата",
+    "date_parsing": "Некорректная дата",
+    "date_from_datetime_parsing": "Некорректная дата",
+    "datetime_type": "Некорректные дата и время",
+    "datetime_parsing": "Некорректные дата и время",
+    "datetime_from_date_parsing": "Некорректные дата и время",
+    "uuid_type": "Некорректный идентификатор",
+    "uuid_parsing": "Некорректный идентификатор",
+    "enum": "Недопустимое значение",
+    "list_type": "Нужен список",
+    "dict_type": "Нужен объект",
+    "model_type": "Нужен объект",
+    "model_attributes_type": "Нужен объект",
+    "json_invalid": "Некорректный JSON",
+    "json_type": "Некорректный JSON",
+    "extra_forbidden": "Лишнее поле",
+    "url_parsing": "Некорректный адрес",
+    "url_type": "Некорректный адрес",
+    "url_scheme": "Недопустимый вид адреса",
+    "bytes_type": "Нужны данные",
+    "none_required": "Поле должно быть пустым",
+    "unique_items": "Значения не должны повторяться",
+}
+
+
+def reason_text(error: dict[str, Any]) -> str:
+    """Причина ошибки поля для человека: по-русски и с заглавной буквы."""
+    kind = str(error.get("type", ""))
+    message = str(error.get("msg", ""))
+    ctx = error.get("ctx") or {}
+    if kind == "string_too_short":
+        return f"Слишком коротко: не меньше {ctx.get('min_length')} символов"
+    if kind == "string_too_long":
+        return f"Слишком длинно: не больше {ctx.get('max_length')} символов"
+    if kind == "too_short":
+        return f"Слишком мало элементов: не меньше {ctx.get('min_length')}"
+    if kind == "too_long":
+        return f"Слишком много элементов: не больше {ctx.get('max_length')}"
+    if kind in {"greater_than_equal", "less_than_equal", "greater_than", "less_than"}:
+        words = {
+            "greater_than_equal": ("ge", "не меньше"),
+            "less_than_equal": ("le", "не больше"),
+            "greater_than": ("gt", "больше"),
+            "less_than": ("lt", "меньше"),
+        }[kind]
+        return f"Значение должно быть {words[1]} {_number(ctx.get(words[0]))}"
+    if kind == "literal_error":
+        return f"Допустимые значения: {_expected_values(ctx.get('expected'))}"
+    if kind in _BUILTIN_REASONS:
+        return _BUILTIN_REASONS[kind]
+    if kind == "value_error":
+        message = message.removeprefix("Value error, ")
+    elif kind == "assertion_error":
+        message = message.removeprefix("Assertion failed, ")
+    return _capitalize(message)
+
+
+def _field_errors(errors: Sequence[Any]) -> list[FieldError]:
+    return [
+        FieldError(field=_loc_to_field(e["loc"]), reason=reason_text(e), code=e["type"])
+        for e in errors
+    ]
+
+
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     # Поле называется error_code, а не code: ключ `code` маскируется как
     # секрет (коды OTP и OIDC), и код ошибки превратился бы в звёздочки.
@@ -173,10 +272,7 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
 
 
 async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
-    errors = [
-        FieldError(field=_loc_to_field(e["loc"]), reason=e["msg"], code=e["type"])
-        for e in exc.errors()
-    ]
+    errors = _field_errors(exc.errors())
     return problem_response(
         code=ErrorCode.VALIDATION,
         detail="Запрос не прошёл валидацию",
@@ -187,10 +283,7 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
 
 
 async def pydantic_error_handler(request: Request, exc: PydanticValidationError) -> JSONResponse:
-    errors = [
-        FieldError(field=_loc_to_field(e["loc"]), reason=e["msg"], code=e["type"])
-        for e in exc.errors()
-    ]
+    errors = _field_errors(exc.errors())
     return problem_response(
         code=ErrorCode.VALIDATION,
         detail="Внутренняя схема данных не прошла валидацию",
@@ -200,12 +293,31 @@ async def pydantic_error_handler(request: Request, exc: PydanticValidationError)
     )
 
 
+# Starlette отдаёт английские фразы («Not Found», «Method Not Allowed»): человеку — по-русски.
+_HTTP_DETAILS = {
+    400: "Некорректный запрос",
+    404: "Ресурс не найден",
+    405: "Для этого адреса такой способ обращения не поддерживается",
+    406: "Такой формат ответа не поддерживается",
+    408: "Время ожидания запроса истекло",
+    413: "Слишком большой запрос",
+    414: "Слишком длинный адрес запроса",
+    415: "Такой тип данных не поддерживается",
+}
+
+
+def _http_detail(status: int, detail: str, code: ErrorCode) -> str:
+    if any("а" <= ch.lower() <= "я" or ch.lower() == "ё" for ch in detail):
+        return detail
+    return _HTTP_DETAILS.get(status) or ERROR_CATALOG[code].title
+
+
 async def http_error_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     code = _STATUS_TO_CODE.get(exc.status_code, ErrorCode.INTERNAL)
     return problem_response(
         code=code,
         status=exc.status_code,
-        detail=str(exc.detail),
+        detail=_http_detail(exc.status_code, str(exc.detail), code),
         instance=str(request.url.path),
         headers=getattr(exc, "headers", None),
         request=request,
@@ -255,7 +367,9 @@ async def integrity_error_handler(request: Request, exc: IntegrityError) -> JSON
         code, detail = ErrorCode.VALIDATION, "Обязательное поле не заполнено"
         column = getattr(cause, "column_name", None)
         if column:
-            errors = [FieldError(field=str(column), reason="обязательное поле, не может быть null")]
+            errors = [
+                FieldError(field=str(column), reason="Обязательное поле, оставить пустым нельзя")
+            ]
     elif sqlstate == _PG_CHECK_VIOLATION:
         code, detail = ErrorCode.VALIDATION, "Значение не допускается правилами данных"
     else:

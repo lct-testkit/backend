@@ -223,16 +223,16 @@ class IntegrationSourceService:
                 errors.append(
                     FieldError(
                         field="credentials_ref",
-                        reason="укажите ссылку на секрет с адресом входящего вебхука Bitrix24",
+                        reason="Укажите ссылку на секрет с адресом входящего вебхука Bitrix24",
                     )
                 )
         else:
             default_attr = IntegrationSourceService._DEFAULT_BASE_URL_SETTING.get(source.code)
             default_url = getattr(settings, default_attr, None) if default_attr else None
             if not (final("base_url") or default_url):
-                errors.append(FieldError(field="base_url", reason="укажите адрес системы"))
+                errors.append(FieldError(field="base_url", reason="Укажите адрес системы"))
         if not final("auth_type"):
-            errors.append(FieldError(field="auth_type", reason="выберите способ входа"))
+            errors.append(FieldError(field="auth_type", reason="Выберите способ входа"))
         if errors:
             raise ValidationError("Для включённого источника нужны адрес и способ входа", errors)
 
@@ -437,7 +437,7 @@ class OutboxEventService:
             )
         ).scalar_one_or_none()
         if event is None:
-            raise NotFoundError("Событие outbox", event_id)
+            raise NotFoundError("Событие исходящей очереди", event_id)
         retryable = (OutboxStatus.FAILED.value, OutboxStatus.DEAD.value)
         if event.status not in retryable:
             raise AppError(

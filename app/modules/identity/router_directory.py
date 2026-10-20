@@ -77,13 +77,13 @@ async def directory(
                 parsed.append(uuid.UUID(raw))
             except ValueError:
                 raise ValidationError(
-                    "Некорректный идентификатор в `ids`",
-                    [FieldError(field="ids", reason=f"не UUID: {raw[:40]}")],
+                    "Некорректный идентификатор в списке",
+                    [FieldError(field="ids", reason=f"Некорректный идентификатор: {raw[:40]}")],
                 ) from None
         if len(parsed) > _MAX_IDS:
             raise ValidationError(
                 f"Слишком много идентификаторов (максимум {_MAX_IDS})",
-                [FieldError(field="ids", reason="превышен лимит")],
+                [FieldError(field="ids", reason="Превышен лимит")],
             )
         if not parsed:
             return DirectoryResponse(items=[])
@@ -99,8 +99,8 @@ async def directory(
         unknown = wanted - _ROLES
         if unknown:
             raise ValidationError(
-                "Неизвестная роль в `roles`",
-                [FieldError(field="roles", reason=f"допустимо: {', '.join(sorted(_ROLES))}")],
+                "Неизвестная роль в списке",
+                [FieldError(field="roles", reason=f"Допустимо: {', '.join(sorted(_ROLES))}")],
             )
         stmt = stmt.where(User.role.in_(sorted(wanted)))
 

@@ -501,7 +501,7 @@ class WorkflowService:
         if not new_name:
             raise ValidationError(
                 "Имя статуса не может быть пустым",
-                [FieldError(field="name", reason="обязательное поле")],
+                [FieldError(field="name", reason="Обязательное поле")],
             )
         if new_name == status.name:
             return status  # без изменений — не плодим версию впустую
@@ -542,7 +542,7 @@ class WorkflowService:
             if item.id is not None and item.id in archived_ids:
                 raise ValidationError(
                     "Архивный статус нельзя редактировать через сохранение графа",
-                    [FieldError(field="statuses", reason=f"статус {item.id} архивирован")],
+                    [FieldError(field="statuses", reason=f"Статус {item.id} архивирован")],
                 )
 
         id_map: dict[str, uuid.UUID] = {}
@@ -598,7 +598,7 @@ class WorkflowService:
                         f"Статус «{name}» входит в опубликованную воронку и не удаляется: "
                         "архивируйте его через мастер сопоставления",
                         errors=[
-                            FieldError(field="statuses", reason=f"статус «{name}» опубликован")
+                            FieldError(field="statuses", reason=f"Статус «{name}» опубликован")
                         ],
                         extra={"status_id": str(sid)},
                     )
@@ -612,7 +612,7 @@ class WorkflowService:
                         f"Статус «{name}» используется в сделках или истории: "
                         "сначала архивируйте его через мастер сопоставления",
                         errors=[
-                            FieldError(field="statuses", reason=f"статус «{name}» нельзя удалить")
+                            FieldError(field="statuses", reason=f"Статус «{name}» нельзя удалить")
                         ],
                         extra={"status_id": str(sid)},
                     ) from None
@@ -622,7 +622,7 @@ class WorkflowService:
             if resolved is None:
                 raise ValidationError(
                     f"Статус {ref!r} не найден в теле запроса графа",
-                    [FieldError(field=where, reason=f"неизвестный статус {ref!r}")],
+                    [FieldError(field=where, reason=f"Неизвестный статус {ref!r}")],
                 )
             return resolved
 
@@ -699,7 +699,7 @@ class WorkflowService:
                     ErrorCode.WORKFLOW_TRANSITION_IN_USE,
                     f"Переход «{name}» уже использован в истории сделок и не может быть удалён",
                     errors=[
-                        FieldError(field="transitions", reason=f"переход «{name}» использован")
+                        FieldError(field="transitions", reason=f"Переход «{name}» использован")
                     ],
                     extra={"transition_id": str(transition_id)},
                 ) from None
@@ -768,7 +768,7 @@ class WorkflowService:
         }:
             raise ValidationError(
                 f"Неизвестная роль эскалации {item.escalate_to_role!r}",
-                [FieldError(field="sla_rules.escalate_to_role", reason="неизвестная роль")],
+                [FieldError(field="sla_rules.escalate_to_role", reason="Неизвестная роль")],
             )
         if item.escalate_to_user_id is not None:
             user = await self._session.get(User, item.escalate_to_user_id)
@@ -778,7 +778,7 @@ class WorkflowService:
                     [
                         FieldError(
                             field="sla_rules.escalate_to_user_id",
-                            reason="нужен активный сотрудник",
+                            reason="Нужен активный сотрудник",
                         )
                     ],
                 )
@@ -877,7 +877,7 @@ class WorkflowService:
                     "Целевой статус должен отличаться от архивируемого",
                     [
                         FieldError(
-                            field="target_status_id", reason="совпадает со статусом архивирования"
+                            field="target_status_id", reason="Совпадает со статусом архивирования"
                         )
                     ],
                 )
@@ -885,7 +885,7 @@ class WorkflowService:
             if target.is_archived:
                 raise ValidationError(
                     "Целевой статус архивирован",
-                    [FieldError(field="target_status_id", reason="статус недоступен")],
+                    [FieldError(field="target_status_id", reason="Статус недоступен")],
                 )
 
         workload = await get_deal_status_service().status_workload(
@@ -924,7 +924,7 @@ class WorkflowService:
                 "Целевой статус должен отличаться от архивируемого",
                 [
                     FieldError(
-                        field="target_status_id", reason="совпадает со статусом архивирования"
+                        field="target_status_id", reason="Совпадает со статусом архивирования"
                     )
                 ],
             )
@@ -932,7 +932,7 @@ class WorkflowService:
         if target.is_archived:
             raise ValidationError(
                 "Целевой статус архивирован",
-                [FieldError(field="target_status_id", reason="статус недоступен")],
+                [FieldError(field="target_status_id", reason="Статус недоступен")],
             )
         fallback: WorkflowStatus | None = None
         if fallback_status_id is not None:
@@ -940,7 +940,7 @@ class WorkflowService:
             if fallback.is_archived:
                 raise ValidationError(
                     "Резервный статус архивирован",
-                    [FieldError(field="fallback_status_id", reason="статус недоступен")],
+                    [FieldError(field="fallback_status_id", reason="Статус недоступен")],
                 )
 
         from app.modules.crm.service import get_deal_status_service  # см. status_impact()
@@ -958,7 +958,7 @@ class WorkflowService:
                 [
                     FieldError(
                         field="fallback_status_id",
-                        reason="нужен резервный статус для сделок без обязательных полей",
+                        reason="Нужен резервный статус для сделок без обязательных полей",
                     )
                 ],
             )

@@ -98,9 +98,9 @@ class DealCreateRequest(BaseModel):
     def _requires_party(self) -> DealCreateRequest:
         # new_spec §4.9: для B2B организация обязательна, для B2C — контакт.
         if self.deal_type == "b2b" and self.organization_id is None:
-            raise ValueError("Для сделки B2B обязателен organization_id")
+            raise ValueError("Для сделки B2B укажите организацию")
         if self.deal_type == "b2c" and self.contact_id is None:
-            raise ValueError("Для сделки B2C обязателен contact_id")
+            raise ValueError("Для сделки B2C укажите контакт")
         return self
 
 

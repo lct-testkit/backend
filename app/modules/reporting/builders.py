@@ -147,7 +147,7 @@ def _parse_uuid(params: dict[str, Any], key: str) -> uuid.UUID | None:
     except ValueError as exc:
         raise ValidationError(
             f"Параметр {key!r} должен быть UUID",
-            [FieldError(field=key, reason="некорректный UUID")],
+            [FieldError(field=key, reason="Некорректный идентификатор")],
         ) from exc
 
 
@@ -160,7 +160,7 @@ def _parse_int(
     except (TypeError, ValueError) as exc:
         raise ValidationError(
             f"Параметр {key!r} должен быть целым числом",
-            [FieldError(field=key, reason="ожидается integer")],
+            [FieldError(field=key, reason="Ожидается целое число")],
         ) from exc
     return max(minimum, min(maximum, value))
 
@@ -177,8 +177,8 @@ def _parse_date(params: dict[str, Any], key: str) -> dt.date | None:
         return dt.date.fromisoformat(str(raw))
     except ValueError as exc:
         raise ValidationError(
-            f"Параметр {key!r} должен быть датой в формате YYYY-MM-DD",
-            [FieldError(field=key, reason="ожидается дата ISO-8601")],
+            "Дата должна быть в формате ГГГГ-ММ-ДД",
+            [FieldError(field=key, reason="Ожидается дата в формате ГГГГ-ММ-ДД")],
         ) from exc
 
 
@@ -190,8 +190,8 @@ def _parse_date_range(params: dict[str, Any]) -> tuple[dt.date | None, dt.date |
     date_to = _parse_date(params, "date_to")
     if date_from is not None and date_to is not None and date_from > date_to:
         raise ValidationError(
-            "Параметр 'date_from' не может быть позже 'date_to'",
-            [FieldError(field="date_from", reason="date_from позже date_to")],
+            "Начало периода не может быть позже его конца",
+            [FieldError(field="date_from", reason="Начало периода позже его конца")],
         )
     return date_from, date_to
 
@@ -212,7 +212,7 @@ def _parse_uuid_list(params: dict[str, Any], key: str) -> list[uuid.UUID] | None
     else:
         raise ValidationError(
             f"Параметр {key!r} должен быть списком UUID",
-            [FieldError(field=key, reason="ожидается массив UUID")],
+            [FieldError(field=key, reason="Ожидается список идентификаторов")],
         )
     if not items:
         return None
@@ -221,7 +221,7 @@ def _parse_uuid_list(params: dict[str, Any], key: str) -> list[uuid.UUID] | None
     except ValueError as exc:
         raise ValidationError(
             f"Параметр {key!r} должен быть списком UUID",
-            [FieldError(field=key, reason="некорректный UUID в списке")],
+            [FieldError(field=key, reason="Некорректный идентификатор в списке")],
         ) from exc
     return parsed
 
@@ -431,8 +431,8 @@ async def _resolve_workflow_id(session: AsyncSession, params: dict[str, Any]) ->
     )
     if resolved is None:
         raise ValidationError(
-            "Не удалось определить воронку: укажите workflow_id явно",
-            [FieldError(field="workflow_id", reason="нет опубликованной воронки по умолчанию")],
+            "Не удалось определить воронку: выберите воронку явно",
+            [FieldError(field="workflow_id", reason="Нет опубликованной воронки по умолчанию")],
         )
     return resolved
 
@@ -1197,8 +1197,8 @@ def _parse_register_columns(params: dict[str, Any]) -> list[str]:
         return register_default_columns()
     if not isinstance(raw, list):
         raise ValidationError(
-            "Параметр 'columns' должен быть списком ключей колонок",
-            [FieldError(field="columns", reason="ожидается массив строк")],
+            "Колонки должны быть списком ключей",
+            [FieldError(field="columns", reason="Ожидается список строк")],
         )
     valid_keys = sorted(_REGISTER_COLUMNS_BY_KEY)
     seen: set[str] = set()
@@ -1206,18 +1206,18 @@ def _parse_register_columns(params: dict[str, Any]) -> list[str]:
     for key in raw:
         if key not in _REGISTER_COLUMNS_BY_KEY:
             raise ValidationError(
-                f"Параметр 'columns' содержит неизвестный ключ: {key!r}",
+                f"В списке колонок неизвестный ключ: «{key}»",
                 [
                     FieldError(
                         field="columns",
-                        reason=f"неизвестный ключ: {key}; допустимо: {', '.join(valid_keys)}",
+                        reason=f"Неизвестный ключ: {key}; допустимо: {', '.join(valid_keys)}",
                     )
                 ],
             )
         if key in seen:
             raise ValidationError(
-                f"Параметр 'columns' содержит повтор ключа: {key!r}",
-                [FieldError(field="columns", reason=f"повтор ключа: {key}")],
+                f"В списке колонок ключ повторяется: «{key}»",
+                [FieldError(field="columns", reason=f"Ключ повторяется: {key}")],
             )
         seen.add(key)
         result.append(key)
@@ -1510,8 +1510,8 @@ def _parse_progress_columns(params: dict[str, Any]) -> list[str]:
         return [c.key for c in LEARNING_PROGRESS_COLUMNS if c.default]
     if not isinstance(raw, list):
         raise ValidationError(
-            "Параметр 'columns' должен быть списком ключей колонок",
-            [FieldError(field="columns", reason="ожидается массив строк")],
+            "Колонки должны быть списком ключей",
+            [FieldError(field="columns", reason="Ожидается список строк")],
         )
     valid_keys = sorted(LEARNING_PROGRESS_COLUMNS_BY_KEY)
     seen: set[str] = set()
@@ -1519,18 +1519,18 @@ def _parse_progress_columns(params: dict[str, Any]) -> list[str]:
     for key in raw:
         if key not in LEARNING_PROGRESS_COLUMNS_BY_KEY:
             raise ValidationError(
-                f"Параметр 'columns' содержит неизвестный ключ: {key!r}",
+                f"В списке колонок неизвестный ключ: «{key}»",
                 [
                     FieldError(
                         field="columns",
-                        reason=f"неизвестный ключ: {key}; допустимо: {', '.join(valid_keys)}",
+                        reason=f"Неизвестный ключ: {key}; допустимо: {', '.join(valid_keys)}",
                     )
                 ],
             )
         if key in seen:
             raise ValidationError(
-                f"Параметр 'columns' содержит повтор ключа: {key!r}",
-                [FieldError(field="columns", reason=f"повтор ключа: {key}")],
+                f"В списке колонок ключ повторяется: «{key}»",
+                [FieldError(field="columns", reason=f"Ключ повторяется: {key}")],
             )
         seen.add(key)
         result.append(key)
@@ -1751,12 +1751,12 @@ def _parse_positive_int(params: dict[str, Any], key: str) -> int | None:
     except (TypeError, ValueError) as exc:
         raise ValidationError(
             f"Параметр {key!r} должен быть целым числом от 1",
-            [FieldError(field=key, reason="ожидается целое число от 1")],
+            [FieldError(field=key, reason="Ожидается целое число от 1")],
         ) from exc
     if not 1 <= value <= _INT32_MAX:
         raise ValidationError(
             f"Параметр {key!r} должен быть целым числом от 1",
-            [FieldError(field=key, reason="ожидается целое число от 1")],
+            [FieldError(field=key, reason="Ожидается целое число от 1")],
         )
     return value
 
@@ -1773,19 +1773,19 @@ def _parse_status_codes(params: dict[str, Any]) -> list[str]:
         items = list(raw)
     else:
         raise ValidationError(
-            "Параметр 'status_codes' должен быть списком кодов статусов",
-            [FieldError(field="status_codes", reason="ожидается массив строк")],
+            "Коды статусов должны быть списком",
+            [FieldError(field="status_codes", reason="Ожидается список строк")],
         )
     if not all(isinstance(item, str) for item in items):
         raise ValidationError(
-            "Параметр 'status_codes' должен быть списком кодов статусов",
-            [FieldError(field="status_codes", reason="ожидается массив строк")],
+            "Коды статусов должны быть списком",
+            [FieldError(field="status_codes", reason="Ожидается список строк")],
         )
     codes = list(dict.fromkeys(item.strip() for item in items if item.strip()))
     if any(len(code) > 64 for code in codes):
         raise ValidationError(
             "Код статуса не длиннее 64 символов",
-            [FieldError(field="status_codes", reason="слишком длинный код статуса")],
+            [FieldError(field="status_codes", reason="Слишком длинный код статуса")],
         )
     return codes or list(LMS_DEFAULT_STATUS_CODES)
 
@@ -2098,16 +2098,19 @@ async def build_product_demand(
     level = params.get("level") or "product"
     if level not in ("product", "direction"):
         raise ValidationError(
-            "Параметр 'level' должен быть 'product' или 'direction'",
-            [FieldError(field="level", reason="допустимо: product, direction")],
+            "Уровень отчёта: допустимы «product» (продукт) или «direction» (направление)",
+            [
+                FieldError(
+                    field="level", reason="Допустимо: product (продукт) или direction (направление)"
+                )
+            ],
         )
     top = _parse_int(params, "top", default=20, minimum=1, maximum=100)
     sort_by = params.get("sort_by") or "index"
     if sort_by not in _PRODUCT_DEMAND_SORT_KEYS:
         raise ValidationError(
-            f"Параметр 'sort_by' должен быть одним из: "
-            f"{', '.join(sorted(_PRODUCT_DEMAND_SORT_KEYS))}",
-            [FieldError(field="sort_by", reason="недопустимое значение")],
+            f"Сортировка: допустимы значения " f"{', '.join(sorted(_PRODUCT_DEMAND_SORT_KEYS))}",
+            [FieldError(field="sort_by", reason="Недопустимое значение")],
         )
 
     raw_rows = await _demand_rows(session, principal, params, level=level)
@@ -2222,8 +2225,8 @@ def _parse_license_columns(params: dict[str, Any]) -> list[str]:
         return [c.key for c in LICENSE_REGISTER_COLUMNS if c.default]
     if not isinstance(raw, list):
         raise ValidationError(
-            "Параметр 'columns' должен быть списком ключей колонок",
-            [FieldError(field="columns", reason="ожидается массив строк")],
+            "Колонки должны быть списком ключей",
+            [FieldError(field="columns", reason="Ожидается список строк")],
         )
     valid_keys = sorted(LICENSE_REGISTER_COLUMNS_BY_KEY)
     seen: set[str] = set()
@@ -2231,18 +2234,18 @@ def _parse_license_columns(params: dict[str, Any]) -> list[str]:
     for key in raw:
         if key not in LICENSE_REGISTER_COLUMNS_BY_KEY:
             raise ValidationError(
-                f"Параметр 'columns' содержит неизвестный ключ: {key!r}",
+                f"В списке колонок неизвестный ключ: «{key}»",
                 [
                     FieldError(
                         field="columns",
-                        reason=f"неизвестный ключ: {key}; допустимо: {', '.join(valid_keys)}",
+                        reason=f"Неизвестный ключ: {key}; допустимо: {', '.join(valid_keys)}",
                     )
                 ],
             )
         if key in seen:
             raise ValidationError(
-                f"Параметр 'columns' содержит повтор ключа: {key!r}",
-                [FieldError(field="columns", reason=f"повтор ключа: {key}")],
+                f"В списке колонок ключ повторяется: «{key}»",
+                [FieldError(field="columns", reason=f"Ключ повторяется: {key}")],
             )
         seen.add(key)
         result.append(key)
@@ -2262,7 +2265,7 @@ def _parse_string_list(params: dict[str, Any], key: str) -> list[str] | None:
     else:
         raise ValidationError(
             f"Параметр {key!r} должен быть списком строк",
-            [FieldError(field=key, reason="ожидается массив строк")],
+            [FieldError(field=key, reason="Ожидается список строк")],
         )
     return items or None
 
@@ -2274,11 +2277,11 @@ def _parse_transfer_statuses(params: dict[str, Any]) -> list[str] | None:
     unknown = [code for code in raw if code not in _LICENSE_TRANSFER_STATUS_VALUES]
     if unknown:
         raise ValidationError(
-            f"Параметр 'transfer_statuses' содержит неизвестный код: {unknown[0]!r}",
+            f"В статусах передачи неизвестный код: «{unknown[0]}»",
             [
                 FieldError(
                     field="transfer_statuses",
-                    reason=f"допустимо: {', '.join(sorted(_LICENSE_TRANSFER_STATUS_VALUES))}",
+                    reason=f"Допустимо: {', '.join(sorted(_LICENSE_TRANSFER_STATUS_VALUES))}",
                 )
             ],
         )
