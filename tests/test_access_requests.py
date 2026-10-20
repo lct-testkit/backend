@@ -677,3 +677,57 @@ class TestConcurrentDecisions:
         assert outcomes.count("refused") == 1
         granted = run(client, lambda: _count_audit("ACCESS_GRANTED", uuid.UUID(org_id)))
         assert granted == (1 if "approve" in outcomes else 0)
+
+
+class TestNotificationCarriesRequestId:
+    """N-1: уведомление о заявке несёт её id, чтобы фронт открыл заявку во «Входящих»
+    (`/access-requests?box=inbox&highlight=<id>`), а не карточку вуза. `entity_*` по-прежнему
+    указывают на вуз."""
+
+    @staticmethod
+    async def _payloads(recipient_id: uuid.UUID, code: str) -> list[dict[str, Any]]:
+        from sqlalchemy import select
+
+        from app.core.db import session_scope
+        from app.modules.notification.models import Notification
+
+        async with session_scope() as session:
+            rows = await session.scalars(
+                select(Notification).where(
+                    Notification.recipient_id == recipient_id,
+                    Notification.template_code == code,
+                )
+            )
+            return [
+                {"payload": n.payload, "entity_type": n.entity_type, "entity_id": n.entity_id}
+                for n in rows
+            ]
+
+    def test_created_approved_and_rejected_carry_access_request_id(self, client) -> None:
+        owner = create_user(client, "KAM")
+        requester = create_user(client, "KAM")
+        org_id = create_organization(client)
+        run(client, lambda: _set_owner(org_id, owner.id))
+
+        sign_in(client, requester)
+        first_id = _create(client, org_id).json()["id"]
+        created = run(client, self._payloads, owner.id, "ACCESS_REQUEST_CREATED")
+        assert len(created) == 1
+        assert created[0]["payload"]["access_request_id"] == first_id
+        assert created[0]["entity_type"] == "organization"
+        assert str(created[0]["entity_id"]) == org_id
+
+        sign_in(client, owner)
+        assert _decide(client, first_id, decision="approve").status_code == 200
+        approved = run(client, self._payloads, requester.id, "ACCESS_REQUEST_APPROVED")
+        assert [n["payload"]["access_request_id"] for n in approved] == [first_id]
+
+        # Новая заявка после отзыва — и отказ несёт id именно своей заявки.
+        assert client.post(f"/api/access-requests/{first_id}/revoke").status_code == 200
+        sign_in(client, requester)
+        second_id = _create(client, org_id).json()["id"]
+        assert second_id != first_id
+        sign_in(client, owner)
+        assert _decide(client, second_id, decision="reject", comment="Не сейчас").status_code == 200
+        rejected = run(client, self._payloads, requester.id, "ACCESS_REQUEST_REJECTED")
+        assert [n["payload"]["access_request_id"] for n in rejected] == [second_id]

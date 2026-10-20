@@ -40,6 +40,12 @@ _DEFAULT_GRANT_DAYS = 30
 _MAX_GRANT_DAYS = 365
 
 
+def _notification_payload(request: AccessRequest) -> dict[str, str]:
+    """N-1: уведомления о заявке несут её id — фронт открывает именно эту заявку
+    (`/access-requests?box=…&highlight=<id>`), а не карточку вуза. `entity_*` остаются вузом."""
+    return {"access_request_id": str(request.id)}
+
+
 def _pending_cutoff() -> dt.datetime:
     return dt.datetime.now(dt.UTC) - dt.timedelta(days=_PENDING_TTL_DAYS)
 
@@ -174,6 +180,7 @@ class AccessRequestService:
                 self._session,
                 recipient_id=recipient_id,
                 template_code="ACCESS_REQUEST_CREATED",
+                payload=_notification_payload(request),
                 priority=NotificationPriority.NORMAL,
                 entity_type="organization",
                 entity_id=organization.id,
@@ -274,6 +281,7 @@ class AccessRequestService:
             self._session,
             recipient_id=request.requester_id,
             template_code="ACCESS_REQUEST_APPROVED",
+            payload=_notification_payload(request),
             priority=NotificationPriority.NORMAL,
             entity_type="organization",
             entity_id=request.entity_id,
@@ -308,6 +316,7 @@ class AccessRequestService:
             self._session,
             recipient_id=request.requester_id,
             template_code="ACCESS_REQUEST_REJECTED",
+            payload=_notification_payload(request),
             priority=NotificationPriority.NORMAL,
             entity_type="organization",
             entity_id=request.entity_id,
