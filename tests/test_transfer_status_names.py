@@ -68,3 +68,46 @@ def test_the_error_hint_lists_the_interface_names() -> None:
 def test_signed_column_shows_the_date_like_the_interface(signed_at, is_signed, expected) -> None:
     license_ = SimpleNamespace(license_signed_at=signed_at, is_signed=is_signed)
     assert _license_signed_label(license_) == expected
+
+
+class TestLicenseEndYear:
+    """Форма лицензии пишет дату окончания или срок в годах, а не `license_valid_year`: без вывода
+    года из них «Срок действия, год» и «Срок» в реестре оставались пустыми."""
+
+    @staticmethod
+    def _license(**fields):
+        base = {
+            "license_valid_year": None,
+            "license_valid_until": None,
+            "license_signed_at": None,
+            "license_term_years": None,
+        }
+        return SimpleNamespace(**{**base, **fields})
+
+    def test_explicit_year_wins(self) -> None:
+        from app.modules.reporting.builders import _license_end_year
+
+        license_ = self._license(license_valid_year=2027, license_valid_until=dt.date(2030, 1, 1))
+        assert _license_end_year(license_) == 2027
+
+    def test_year_from_the_end_date(self) -> None:
+        from app.modules.reporting.builders import _license_end_year
+
+        assert _license_end_year(self._license(license_valid_until=dt.date(2028, 5, 21))) == 2028
+
+    def test_year_from_signing_date_plus_term(self) -> None:
+        from app.modules.reporting.builders import _license_end_year
+
+        license_ = self._license(license_signed_at=dt.date(2026, 9, 1), license_term_years=3)
+        assert _license_end_year(license_) == 2029
+
+    def test_nothing_known(self) -> None:
+        from app.modules.reporting.builders import _license_end_year
+
+        assert _license_end_year(self._license()) is None
+
+    def test_validity_label_for_perpetual(self) -> None:
+        from app.modules.reporting.builders import _license_validity_label
+
+        assert _license_validity_label(None, current_year=2026, perpetual=True) == "Бессрочная"
+        assert _license_validity_label(2025, current_year=2026) == "Истёк"
