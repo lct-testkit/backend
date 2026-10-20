@@ -152,6 +152,15 @@ LicenseDelete = Annotated[Principal, Depends(require_permission(Permission.LICEN
 # =============================================================================
 
 
+async def _organization_out(
+    service: OrganizationService, principal: Principal, organization: Organization
+) -> OrganizationOut:
+    """Q-3: карточка с `can_edit` — вправе ли вызывающий править реквизиты."""
+    return OrganizationOut.from_model(
+        organization, can_edit=await service.can_edit(principal, organization)
+    )
+
+
 @organizations_router.get(
     "",
     summary="Список организаций",
@@ -204,7 +213,13 @@ async def list_organizations(
     if cursor:
         stmt = stmt.where(keyset_before(Organization.created_at, Organization.id, cursor))
     rows = list((await session.execute(stmt.limit(page.fetch_limit))).scalars().all())
-    built: Page = Page.build(rows, limit=page.limit, serializer=OrganizationOut.from_model)
+    service = OrganizationService(session)
+    editable = await service.editable_ids(principal, rows)
+    built: Page = Page.build(
+        rows,
+        limit=page.limit,
+        serializer=lambda o: OrganizationOut.from_model(o, can_edit=o.id in editable),
+    )
     return OrganizationListResponse(items=built.items, next_cursor=built.next_cursor)
 
 
@@ -248,8 +263,9 @@ async def create_organization(
             key=idempotency_key, method=request.method, path=request.url.path, body=body
         )
 
-    organization = await OrganizationService(session).create(principal, payload)
-    result = OrganizationOut.from_model(organization)
+    service = OrganizationService(session)
+    organization = await service.create(principal, payload)
+    result = await _organization_out(service, principal, organization)
 
     if idempotency_key:
         await guard.store(
@@ -346,8 +362,9 @@ async def check_duplicate_organization(
 async def get_organization(
     session: DbSession, principal: OrgRead, organization_id: Annotated[uuid.UUID, Path()]
 ) -> OrganizationOut:
-    organization = await OrganizationService(session).get_or_404(organization_id, principal)
-    return OrganizationOut.from_model(organization)
+    service = OrganizationService(session)
+    organization = await service.get_or_404(organization_id, principal)
+    return await _organization_out(service, principal, organization)
 
 
 @organizations_router.patch(
@@ -369,6 +386,8 @@ async def update_organization(
 ) -> OrganizationOut:
     service = OrganizationService(session)
     organization = await service.get_or_404(organization_id, principal)
+    # Q-3: вуз виден и по собственной сделке, но реквизиты правит ответственный за вуз.
+    await service.ensure_can_edit(principal, organization)
     version = if_match
 
     # B4-1: `owner_id` больше не правится обычным PATCH — только через `set_owner`
@@ -396,7 +415,7 @@ async def update_organization(
         version = organization.version
 
     organization = await service.update(organization, payload, expected_version=version)
-    return OrganizationOut.from_model(organization)
+    return await _organization_out(service, principal, organization)
 
 
 @organizations_router.put(
@@ -424,7 +443,7 @@ async def set_organization_owner(
         reason=payload.reason,
         expected_version=if_match,
     )
-    return OrganizationOut.from_model(organization)
+    return await _organization_out(service, principal, organization)
 
 
 @organizations_router.delete(
@@ -449,7 +468,7 @@ async def remove_organization_owner(
         reason=payload.reason,
         expected_version=if_match,
     )
-    return OrganizationOut.from_model(organization)
+    return await _organization_out(service, principal, organization)
 
 
 @organizations_router.post(
@@ -469,10 +488,11 @@ async def apply_organization_drift(
 ) -> OrganizationOut:
     service = OrganizationService(session)
     organization = await service.get_or_404(organization_id, principal)
+    await service.ensure_can_edit(principal, organization)
     organization = await service.apply_drift(
         organization, principal, fields=payload.fields, expected_version=if_match
     )
-    return OrganizationOut.from_model(organization)
+    return await _organization_out(service, principal, organization)
 
 
 @organizations_router.post(
@@ -494,10 +514,11 @@ async def dismiss_organization_drift(
 ) -> OrganizationOut:
     service = OrganizationService(session)
     organization = await service.get_or_404(organization_id, principal)
+    await service.ensure_can_edit(principal, organization)
     organization = await service.dismiss_drift(
         organization, fields=payload.fields, expected_version=if_match
     )
-    return OrganizationOut.from_model(organization)
+    return await _organization_out(service, principal, organization)
 
 
 @organizations_router.post(
@@ -516,7 +537,9 @@ async def reveal_organization(
     service = OrganizationService(session)
     organization = await service.get_or_404(organization_id, principal)
     await service.reveal(organization)
-    return OrganizationRevealOut.model_validate(organization)
+    revealed = OrganizationRevealOut.model_validate(organization)
+    revealed.can_edit = await service.can_edit(principal, organization)
+    return revealed
 
 
 @organizations_router.delete(
@@ -556,7 +579,7 @@ async def restore_organization(
     service = OrganizationService(session)
     organization = await service.get_deleted_or_404(organization_id, principal)
     organization = await service.restore(organization)
-    return OrganizationOut.from_model(organization)
+    return await _organization_out(service, principal, organization)
 
 
 # --- B4-10 (A-19): филиалы и институты внутри вуза --------------------------

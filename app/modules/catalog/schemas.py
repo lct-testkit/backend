@@ -289,10 +289,15 @@ class OrganizationOut(BaseModel):
     version: int
     created_at: dt.datetime
     updated_at: dt.datetime
+    # Q-3: вправе ли ВЫЗЫВАЮЩИЙ править реквизиты (ответственный, руководитель команды, ADMIN или
+    # одобренный доступ). Вуз виден и через собственную сделку — тогда карточка только для чтения.
+    # Для ответа без вызывающего (кэш идемпотентности создаёт вуз его автору) — `True`.
+    can_edit: bool = True
 
     @classmethod
-    def from_model(cls, organization: Any) -> OrganizationOut:
+    def from_model(cls, organization: Any, *, can_edit: bool = True) -> OrganizationOut:
         out = cls.model_validate(organization)
+        out.can_edit = can_edit
         if organization.org_type == "individual_entrepreneur":
             out.main_phone = mask_phone(organization.main_phone)
             out.main_email = mask_email(organization.main_email)
