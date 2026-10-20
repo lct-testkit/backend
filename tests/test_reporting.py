@@ -928,6 +928,100 @@ class TestReportJobs:
         missing = client.post("/api/reports/preview", json={"template_code": "no_such_report"})
         assert missing.status_code == 404, missing.text
 
+    def test_preview_of_empty_report_is_zero_not_error(self, client) -> None:
+        """Пустой отчёт — это `row_count: 0`, а не ошибка: форма по нулю подсказывает расширить
+        период или убрать фильтры."""
+        self._ensure_templates(client, "license_register")
+        self._kam(client)
+        response = client.post(
+            "/api/reports/preview",
+            json={
+                "template_code": "license_register",
+                "params": {"date_from": "1999-01-01", "date_to": "1999-01-02"},
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.json() == {"row_count": 0, "exact": True}
+
+    def test_preview_of_heavy_report_is_an_estimate(self, client, monkeypatch) -> None:
+        """У тяжёлого отчёта (оценка выше порога sync-пути) число — оценка `COUNT`, и ручка
+        говорит об этом: форма пишет «≈», а не «ровно»."""
+        import app.modules.reporting.service as reporting_service
+
+        self._ensure_templates(client, "license_register")
+        self._kam(client)
+        # Порог ниже нуля: любая оценка (даже 0) считается «тяжёлой».
+        monkeypatch.setattr(reporting_service, "SYNC_ROW_THRESHOLD", -1)
+        response = client.post("/api/reports/preview", json={"template_code": "license_register"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["exact"] is False
+        assert isinstance(body["row_count"], int) and body["row_count"] >= 0
+
+    def test_preview_is_rate_limited_per_user(self, client, monkeypatch) -> None:
+        """Форма зовёт ручку на каждую правку: частота ограничена на сотрудника, лишнее — 429
+        с `Retry-After`; другого сотрудника это не касается."""
+        import app.modules.reporting.service as reporting_service
+
+        self._ensure_templates(client, "sla_compliance")
+        self._kam(client)
+        monkeypatch.setattr(reporting_service, "PREVIEW_RATE_LIMIT_PER_MIN", 3)
+        request = {"template_code": "sla_compliance"}
+        for _ in range(3):
+            assert client.post("/api/reports/preview", json=request).status_code == 200
+        refused = client.post("/api/reports/preview", json=request)
+        assert refused.status_code == 429, refused.text
+        assert int(refused.headers["Retry-After"]) >= 1
+
+        self._kam(client)
+        assert client.post("/api/reports/preview", json=request).status_code == 200
+
+    def test_invalid_preview_does_not_burn_the_rate_limit(self, client, monkeypatch) -> None:
+        """Неверные параметры отсекаются до счётчика: опечатка в фильтре не съедает лимит."""
+        import app.modules.reporting.service as reporting_service
+
+        self._ensure_templates(client, "sla_compliance")
+        self._kam(client)
+        monkeypatch.setattr(reporting_service, "PREVIEW_RATE_LIMIT_PER_MIN", 1)
+        bad = {"template_code": "sla_compliance", "params": {"no_such_param": 1}}
+        for _ in range(3):
+            assert client.post("/api/reports/preview", json=bad).status_code == 422
+        assert (
+            client.post(
+                "/api/reports/preview", json={"template_code": "sla_compliance"}
+            ).status_code
+            == 200
+        )
+
+    def test_preview_respects_template_role_restriction(self, client) -> None:
+        """Шаблон, закрытый для роли, не открывает и своё число строк."""
+        from sqlalchemy import update
+
+        from app.core.db import session_scope
+        from app.modules.reporting.models import ReportTemplate
+
+        self._ensure_templates(client, "sla_compliance")
+
+        async def _restrict() -> None:
+            async with session_scope() as session:
+                await session.execute(
+                    update(ReportTemplate)
+                    .where(ReportTemplate.code == "sla_compliance")
+                    .values(allowed_roles=["HEAD"])
+                )
+
+        run(client, _restrict)
+        self._kam(client)
+        refused = client.post("/api/reports/preview", json={"template_code": "sla_compliance"})
+        assert refused.status_code == 403, refused.text
+
+    def test_preview_requires_report_create_permission(self, client) -> None:
+        self._ensure_templates(client, "sla_compliance")
+        auditor = run(client, _make_user, "AUDITOR")
+        client.headers["X-CSRF-Token"] = authenticate(client, auditor)
+        response = client.post("/api/reports/preview", json={"template_code": "sla_compliance"})
+        assert response.status_code == 403, response.text
+
 
 class TestTemplateTexts:
     """Тексты, которые видит пользователь, не ссылаются на внутренние документы."""
