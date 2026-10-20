@@ -1002,18 +1002,25 @@ class TestReportJobs:
 
         self._ensure_templates(client, "sla_compliance")
 
-        async def _restrict() -> None:
-            async with session_scope() as session:
-                await session.execute(
-                    update(ReportTemplate)
-                    .where(ReportTemplate.code == "sla_compliance")
-                    .values(allowed_roles=["HEAD"])
-                )
+        def _set_roles(roles: list[str]):
+            async def _apply() -> None:
+                async with session_scope() as session:
+                    await session.execute(
+                        update(ReportTemplate)
+                        .where(ReportTemplate.code == "sla_compliance")
+                        .values(allowed_roles=roles)
+                    )
 
-        run(client, _restrict)
-        self._kam(client)
-        refused = client.post("/api/reports/preview", json={"template_code": "sla_compliance"})
-        assert refused.status_code == 403, refused.text
+            return _apply
+
+        # Шаблоны живут в БД между тестами: ограничение обязательно снимается обратно.
+        run(client, _set_roles(["HEAD"]))
+        try:
+            self._kam(client)
+            refused = client.post("/api/reports/preview", json={"template_code": "sla_compliance"})
+            assert refused.status_code == 403, refused.text
+        finally:
+            run(client, _set_roles([]))
 
     def test_preview_requires_report_create_permission(self, client) -> None:
         self._ensure_templates(client, "sla_compliance")
