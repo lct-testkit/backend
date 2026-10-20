@@ -996,21 +996,20 @@ class TestDealListing:
     def test_sort_by_a_date_and_by_a_timestamp(self, client) -> None:
         graph, _ = self._workflow(client)
         workflow_id = graph["workflow"]["id"]
+        # Даты в будущем: сегодняшняя и прошлые при создании сделки отвергаются (D-3 — прошлые).
+        soon, middle, late = (
+            (dt.date.today() + dt.timedelta(days=days)).isoformat() for days in (30, 120, 330)
+        )
         dated = {
             date: create_deal(client, workflow_id, expected_close_date=date)["id"]
-            for date in ("2026-12-01", "2026-03-15", "2026-07-20")
+            for date in (late, soon, middle)
         }
         undated = create_deal(client, workflow_id)["id"]
 
         by_date = self._walk(client, workflow_id=workflow_id, sort="expected_close_date")
-        assert by_date == [dated["2026-03-15"], dated["2026-07-20"], dated["2026-12-01"], undated]
+        assert by_date == [dated[soon], dated[middle], dated[late], undated]
         by_date_desc = self._walk(client, workflow_id=workflow_id, sort="-expected_close_date")
-        assert by_date_desc == [
-            dated["2026-12-01"],
-            dated["2026-07-20"],
-            dated["2026-03-15"],
-            undated,
-        ]
+        assert by_date_desc == [dated[late], dated[middle], dated[soon], undated]
 
         # Курсор по `created_at` восходящей сортировки несёт метку времени с часовым поясом.
         oldest_first = self._walk(client, workflow_id=workflow_id, sort="created_at")

@@ -1520,6 +1520,18 @@ _PATCHABLE_FIELDS = frozenset(
     }
 )
 
+
+def ensure_close_date_not_past(value: dt.date | None, *, today: dt.date | None = None) -> None:
+    """D-3: плановую дату закрытия нельзя поставить задним числом — 422, а не тихое сохранение.
+    Сегодняшняя дата допустима. Вызывается при создании сделки и при правке самой даты; сделка,
+    у которой дата уже в прошлом, остаётся как есть (проверка — только на новое значение)."""
+    if value is not None and value < (today or dt.date.today()):
+        raise ValidationError(
+            "Плановая дата закрытия уже прошла",
+            [FieldError(field="expected_close_date", reason="Плановая дата закрытия уже прошла")],
+        )
+
+
 #: Поля, которые можно закрыть через `fields` при переходе (new_spec §4.9
 #: п.5 — заполнение `required_fields` целевого статуса вместе с переходом).
 #: Колонки сделки NOT NULL, которые PATCH принимает: очищать их нельзя.
@@ -1991,6 +2003,9 @@ class DealService:
             )
 
         if principal.role != Role.INTEGRATION.value:
+            # D-3: заявки интеграций (источник — внешняя система) дату не проверяем: отказ
+            # потерял бы заявку, а не поправил опечатку.
+            ensure_close_date_not_past(payload.expected_close_date)
             # Значения, присланные человеком или его клиентом, проверяем по определениям полей.
             # Служебные потоки (вебхук сайта, импорт оплат) идут от учётки интеграции и пишут свои
             # значения сами: отказ там потерял бы заявку или оплату, а не поправил опечатку.
@@ -2122,6 +2137,14 @@ class DealService:
                 organization_id=data.get("organization_id"),
                 contact_id=data.get("contact_id"),
             )
+            # D-3: проверяем только НОВУЮ дату — форма, шлющая все поля, не должна падать из-за
+            # даты, которая в сделке уже в прошлом и не менялась.
+            if (
+                principal.role != Role.INTEGRATION.value
+                and "expected_close_date" in data
+                and data["expected_close_date"] != deal.expected_close_date
+            ):
+                ensure_close_date_not_past(data["expected_close_date"])
 
         if "custom_fields" in data:
             new_custom = data.pop("custom_fields")
