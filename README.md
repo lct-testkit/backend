@@ -7,7 +7,7 @@
 <sub>Команда **«Тесткит»** — [github.com/lct-testkit](https://github.com/lct-testkit)</sub>
 
 <!--STATS-->
-**284** операции API &nbsp;·&nbsp; **13** модулей &nbsp;·&nbsp; **76** таблиц &nbsp;·&nbsp; **53** миграции &nbsp;·&nbsp; **3527** тестов &nbsp;·&nbsp; **11** сервисов Compose
+**287** операций API &nbsp;·&nbsp; **14** модулей &nbsp;·&nbsp; **76** таблиц &nbsp;·&nbsp; **53** миграции &nbsp;·&nbsp; **3780** тестов &nbsp;·&nbsp; **11** сервисов Compose
 <!--/STATS-->
 
 [Быстрый старт](#быстрый-старт) · [Примеры](#примеры-использования) · [Приём данных](#приём-данных-вендоры-оплаты-учащиеся) · [Как устроено](#как-устроено) · [Модули](#что-внутри) · [Настройка](#настройка) · [Разработка](#разработка) · [Безопасность](#безопасность) · [Ограничения](#ограничения-и-известные-проблемы)
@@ -209,7 +209,7 @@ ls tests/*.py | wc -l
 ls migrations/versions/*.py | wc -l
 ```
 
-На `main` (0e01ec8, 19.10.2026): 284 операции, 219 путей, 347 схем, 53 миграции (до `0053_mail_template_texts`), 3527 тестов в 196 файлах — на момент написания, не контракт; после изменений пересчитайте.
+На `main` после v0.6.3 (21.10.2026): 287 операций, 222 пути, 354 схемы, 53 миграции (до `0053_mail_template_texts`), около 3780 тестов в 212 файлах — на момент написания, не контракт; после изменений пересчитайте.
 
 ### Автоподстановка и проверка ИНН
 
@@ -334,11 +334,11 @@ flowchart LR
 | **sms-gateway-mock** | мок внешнего SMS-провайдера для доставки OTP ПЭП внутри закрытого контура (тот же образ `api`, команда `sms-gateway-mock`) |
 | **web** *(профиль `web`)* | статический SPA-образ фронтенда за тем же Caddy |
 
-Приложение — модульный монолит: один деплоймент-артефакт (`app/main.py`, 40 вызовов `include_router`), внутри — 13 независимых пакетов в `app/modules/`. Модуль не импортирует репозитории другого модуля напрямую; кросс-модульные вызовы идут через сервисные Protocol-интерфейсы (`OwnershipService`, `DealStatusService`, `NotificationService`, `OutboxService`, `SigningService`, `AntivirusScanner`, `OrgLookupProvider`) с регистрацией реализации на старте `api`/`worker` — так любой модуль можно вынести отдельным сервисом без переписывания вызывающего кода.
+Приложение — модульный монолит: один деплоймент-артефакт (`app/main.py`, 47 вызовов `include_router`), внутри — 14 независимых пакетов в `app/modules/`. Модуль не импортирует репозитории другого модуля напрямую; кросс-модульные вызовы идут через сервисные Protocol-интерфейсы (`OwnershipService`, `DealStatusService`, `NotificationService`, `OutboxService`, `SigningService`, `AntivirusScanner`, `OrgLookupProvider`) с регистрацией реализации на старте `api`/`worker` — так любой модуль можно вынести отдельным сервисом без переписывания вызывающего кода.
 
 ## Что внутри
 
-Число операций на модуль — по тегам `GET /api/openapi.json` (команда — в «Проверка чисел» выше); отдельно от 13 модулей есть 2 health-пробы вне модульной системы (`GET /health/live`, `/health/ready` — объявлены в `app/main.py`, ни один `app/modules/*` пакет их не владеет). Число операций на модуль в таблице ниже не приводится — три параллельные ветки эпиков меняют его на каждый PR; состав эндпоинтов и таблиц актуален.
+Число операций на модуль — по тегам `GET /api/openapi.json` (команда — в «Проверка чисел» выше); отдельно от 14 модулей есть 2 health-пробы вне модульной системы (`GET /health/live`, `/health/ready` — объявлены в `app/main.py`, ни один `app/modules/*` пакет их не владеет). Число операций на модуль в таблице ниже не приводится — три параллельные ветки эпиков меняют его на каждый PR; состав эндпоинтов и таблиц актуален.
 
 | Модуль | Что делает | Ключевые эндпоинты · таблицы |
 |---|---|---|
@@ -352,7 +352,8 @@ flowchart LR
 | `integration` | вебхуки CMS/LMS/Bitrix24 с HMAC-подписью, исходящий outbox с backoff, административный контур источников | `POST /api/v1/integrations/{cms,lms,bitrix}/*`, `GET/PATCH /api/admin/integrations/sources`, `POST /api/admin/integrations/outbox-events/{id}/retry` · 6 таблиц (`integration_sources`, `inbound_messages`, `outbox_events`, …) |
 | `notification` | уведомления (in-app, e-mail по SMTP — HTML и текст; telegram — заглушка с записью в лог), шаблоны Jinja2, настройки получателя | `GET /api/notifications`, `/read`, `GET/PUT /api/me/notification-prefs`, `GET/POST/DELETE /api/admin/notification-templates`, `GET /api/notifications/unread-count`, `/event-codes`, `POST /api/admin/notification-templates/preview` · 4 таблицы |
 | `registry` | автоподстановка и проверка ИНН/ОГРН, локальный реестр ЕГРЮЛ, сверка реквизитов (drift) | `GET /api/org-lookup/suggest`, `POST /validate`, `POST /api/admin/registry/import`, `DELETE /api/admin/registry/versions/{id}` · 4 таблицы (`registry_versions`, `egrul_entries`, …) |
-| `reporting` | виды отчётов (xlsx/xls/pdf/png/json через matplotlib и xhtml2pdf; `lms_users_upload` — выгрузка учащихся по шаблону LMS; число видов — `len(_DEFAULT_TEMPLATES)` в `app/modules/reporting/seed.py`, тест `test_reporting.py`), дашборды с виджетами | `GET/POST /api/reports`, `/report-templates`, `GET /{id}/data` (датасет в JSON без файла), `GET/POST /api/dashboards`, `/widgets` · `report_templates`, `report_jobs`, `dashboards`, `dashboard_widgets` |
+| `reporting` | виды отчётов (xlsx/xls/pdf/png/json через matplotlib и xhtml2pdf; `lms_users_upload` — выгрузка учащихся по шаблону LMS; число видов — `len(_DEFAULT_TEMPLATES)` в `app/modules/reporting/seed.py`, тест `test_reporting.py`), дашборды с виджетами | `GET/POST /api/reports`, `/report-templates`, `GET /{id}/data` (датасет в JSON без файла), `POST /api/reports/preview` (сколько строк войдёт в отчёт: `row_count`, `exact`; лимит 120/мин), `GET/POST /api/dashboards`, `/widgets` · `report_templates`, `report_jobs`, `dashboards`, `dashboard_widgets` |
+| `search` | общий поиск по сущностям CRM с исправлением неверной раскладки (`corrected_query`: `gge` → «ппу») | `GET /api/search` · своих таблиц нет |
 | `signing` | ПЭП: документы и запросы на подпись, OTP-код, публичная страница подписания и проверки, соглашения об ЭДО | `POST /api/signature-documents`, `/send`, `POST /api/signature-requests/{id}/{challenge,sign}`, `GET /public/sign/{token}`, `POST /api/signatures/verify`, `GET /public/sign/{token}/file`, `POST /api/signature-requests/{id}/reissue-link` · 6 таблиц |
 | `workflow` | конструктор воронок: статусы, переходы, DSL условий, валидация, публикация со снимком, архивирование статуса, удаление черновика | `GET/POST /api/workflows`, `PUT /{id}/graph`, `POST /{id}/publish`, `POST /{id}/statuses/{sid}/archive`, `DELETE /api/workflows/{id}`, `PATCH /api/workflows/{id}`, `GET /{id}/mapping-jobs/{job_id}` · `workflows`, `workflow_statuses`, `workflow_transitions`, `sla_rules`, `status_mapping_jobs` |
 
@@ -367,7 +368,7 @@ app/
 ├── middleware/          request_context.py: request_id, RED-метрики
 ├── mocks/               sms_gateway.py — мок SMS-провайдера (свой процесс в compose)
 ├── modules/             admin, audit, catalog, crm, files, identity, imports,
-│                        integration, notification, registry, reporting, signing, workflow
+│                        integration, notification, registry, reporting, search, signing, workflow
 ├── assets/fonts/        DejaVu Sans — кириллица в PDF (xhtml2pdf) и графиках (matplotlib)
 └── worker/main.py       arq: воркер и планировщик периодических задач
 migrations/versions/     миграции Alembic: 0001_baseline … 0053_mail_template_texts (53 ревизии;
