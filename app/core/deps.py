@@ -394,13 +394,13 @@ async def get_if_match(
     if if_match is None:
         raise ValidationError(
             "Требуется заголовок If-Match с текущей версией объекта",
-            [FieldError(field="If-Match", reason="заголовок обязателен")],
+            [FieldError(field="If-Match", reason="Заголовок обязателен")],
         )
     value = if_match.strip().strip('"').removeprefix("W/").strip('"')
     if not (value.isascii() and value.isdigit()):
         raise ValidationError(
             "If-Match должен содержать числовую версию объекта",
-            [FieldError(field="If-Match", reason="ожидается целое число")],
+            [FieldError(field="If-Match", reason="Ожидается целое число")],
         )
     return int(value)
 
@@ -414,7 +414,7 @@ async def get_idempotency_key(
     if idempotency_key is not None and not (8 <= len(idempotency_key) <= 255):
         raise ValidationError(
             "Idempotency-Key должен быть длиной от 8 до 255 символов",
-            [FieldError(field="Idempotency-Key", reason="недопустимая длина")],
+            [FieldError(field="Idempotency-Key", reason="Недопустимая длина")],
         )
     return idempotency_key
 

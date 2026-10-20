@@ -123,16 +123,16 @@ def test_required_without_value_warns() -> None:
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
-        ({"target": "course", "transform": "join"}, "join требует sources"),
+        ({"target": "course", "transform": "join"}, "«склейка» нужно не меньше двух"),
         (
             {"target": "course", "source": "x", "transform": "value_map"},
-            "value_map требует словарь",
+            "«таблица значений» нужен словарь",
         ),
         (
             {"target": "course", "source": "x", "transform": "template"},
-            "template требует строку",
+            "«шаблон» нужна строка",
         ),
-        ({"target": "course"}, "нужен source"),
+        ({"target": "course"}, "Нужен источник значения"),
     ],
 )
 def test_rule_shape_validation(kwargs: dict, message: str) -> None:

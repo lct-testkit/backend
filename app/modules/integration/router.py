@@ -232,7 +232,7 @@ async def preview_source_mapping(
         if not base_url:
             raise AppError(
                 ErrorCode.INTEGRATION_SOURCE_INACTIVE,
-                "Адрес источника не настроен — from_remote недоступен",
+                "Адрес источника не настроен — загрузка из внешней системы недоступна",
             )
         base_url = await check_outbound_url_resolved(base_url, strict=settings.is_prod)
         client = CmsClient(base_url, resolve_secret(settings.cms_auth_ref))
@@ -243,7 +243,9 @@ async def preview_source_mapping(
     if record is None:
         # Недостижимо: `MappingPreviewRequest` требует ровно один источник образца, а оба пути
         # выше либо присваивают `record`, либо бросают ошибку раньше.
-        raise AppError(ErrorCode.VALIDATION, "Нужен либо record, либо from_remote: true")
+        raise AppError(
+            ErrorCode.VALIDATION, "Укажите либо готовую запись, либо загрузку из внешней системы"
+        )
 
     mapping = payload.mapping
     if mapping is None:

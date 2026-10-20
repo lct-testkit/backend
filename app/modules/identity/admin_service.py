@@ -343,7 +343,7 @@ class AdminUserService:
         if existing is not None:
             raise AppError(
                 ErrorCode.DUPLICATE,
-                "Пользователь с таким email уже существует",
+                "Пользователь с такой почтой уже существует",
                 extra={"user_id": str(existing.id), "status": existing.status},
             )
 
@@ -473,7 +473,7 @@ class AdminUserService:
             # «Повышение до HEAD без команды бессмысленно» (new_spec §4.6).
             raise AppError(
                 ErrorCode.VALIDATION,
-                "Для роли HEAD нужно указать команду, которую он возглавляет",
+                "Для руководителя укажите команду, которую он возглавляет",
             )
 
     # --- Изменение -------------------------------------------------------
@@ -525,7 +525,7 @@ class AdminUserService:
             # выключенной в Keycloak и сделки — помеченными недоступными.
             raise AppError(
                 ErrorCode.VALIDATION,
-                "Разблокировать можно только через POST /admin/users/{id}/unblock",
+                "Разблокировать пользователя можно только отдельным действием «Разблокировать»",
             )
         new_status = updates.get("status")
         if new_status is not None and new_status != user.status:

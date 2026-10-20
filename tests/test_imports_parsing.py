@@ -308,7 +308,7 @@ class TestImportOptions:
 
         from app.modules.imports.schemas import ImportOptions
 
-        with pytest.raises(ValidationError, match="взаимоисключающие"):
+        with pytest.raises(ValidationError, match="либо один лист, либо несколько"):
             ImportOptions(sheet="2024", sheets=["*"])
 
         assert ImportOptions(sheet="2024").sheets is None

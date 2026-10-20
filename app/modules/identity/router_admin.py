@@ -402,7 +402,7 @@ async def resend_invite(
     if user.status != UserStatus.INVITED.value and not expired:
         raise AppError(
             ErrorCode.VALIDATION,
-            "Приглашение выдаётся только пользователю в статусе invited",
+            "Приглашение выдаётся только приглашённому пользователю",
             extra={"status": user.status},
         )
 

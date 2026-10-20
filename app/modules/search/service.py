@@ -59,16 +59,16 @@ class SearchService:
     async def _search_once(self, principal: Principal, text: str, limit: int) -> SearchResult:
         result = SearchResult(query=text)
         if has_permission(principal.role, Permission.DEAL_READ):
-            stmt = await DealService(self._session).list_query(principal, DealFilters(q=text))
+            deal_stmt = await DealService(self._session).list_query(principal, DealFilters(q=text))
             result.deals = await self._rows(
-                stmt.order_by(Deal.created_at.desc(), Deal.id.desc()), limit
+                deal_stmt.order_by(Deal.created_at.desc(), Deal.id.desc()), limit
             )
         if has_permission(principal.role, Permission.ORG_READ):
-            stmt = await OrganizationService(self._session).list_query(
+            org_stmt = await OrganizationService(self._session).list_query(
                 principal, OrganizationFilters(q=text)
             )
             result.organizations = await self._rows(
-                stmt.order_by(Organization.created_at.desc(), Organization.id.desc()), limit
+                org_stmt.order_by(Organization.created_at.desc(), Organization.id.desc()), limit
             )
         if has_permission(principal.role, Permission.CONTACT_READ):
             stmt = await ContactService(self._session).list_query(principal, ContactFilters(q=text))

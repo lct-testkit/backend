@@ -211,7 +211,7 @@ class MappingPreviewRequest(BaseModel):
     @model_validator(mode="after")
     def _exactly_one_sample_source(self) -> MappingPreviewRequest:
         if (self.record is None) == (not self.from_remote):
-            raise ValueError("нужен либо record, либо from_remote: true")
+            raise ValueError("Укажите либо готовую запись, либо загрузку из внешней системы")
         return self
 
 

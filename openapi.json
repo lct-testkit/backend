@@ -208,7 +208,7 @@
                 {
                   "code": "missing",
                   "field": "title",
-                  "reason": "Field required"
+                  "reason": "Обязательное поле"
                 }
               ],
               "instance": "/api/deals",
@@ -12525,6 +12525,11 @@
             ],
             "title": "Actual Address"
           },
+          "can_edit": {
+            "default": true,
+            "title": "Can Edit",
+            "type": "boolean"
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -12861,6 +12866,11 @@
               }
             ],
             "title": "Actual Address"
+          },
+          "can_edit": {
+            "default": true,
+            "title": "Can Edit",
+            "type": "boolean"
           },
           "created_at": {
             "format": "date-time",
@@ -15741,6 +15751,155 @@
           "message"
         ],
         "title": "RowIssueOut",
+        "type": "object"
+      },
+      "SearchContactOut": {
+        "properties": {
+          "first_name": {
+            "title": "First Name",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "last_name": {
+            "title": "Last Name",
+            "type": "string"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Position"
+          }
+        },
+        "required": [
+          "id",
+          "last_name",
+          "first_name"
+        ],
+        "title": "SearchContactOut",
+        "type": "object"
+      },
+      "SearchDealOut": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "number": {
+            "title": "Number",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "number",
+          "title"
+        ],
+        "title": "SearchDealOut",
+        "type": "object"
+      },
+      "SearchOrganizationOut": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "inn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inn"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "short_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Short Name"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "SearchOrganizationOut",
+        "type": "object"
+      },
+      "SearchResponse": {
+        "description": "Результат общего поиска. `corrected_query` пуст, если ищется ровно то, что набрано;\nиначе по набранному строке не нашлось, и показаны результаты для строки в другой раскладке.",
+        "properties": {
+          "contacts": {
+            "items": {
+              "$ref": "#/components/schemas/SearchContactOut"
+            },
+            "title": "Contacts",
+            "type": "array"
+          },
+          "corrected_query": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Corrected Query"
+          },
+          "deals": {
+            "items": {
+              "$ref": "#/components/schemas/SearchDealOut"
+            },
+            "title": "Deals",
+            "type": "array"
+          },
+          "organizations": {
+            "items": {
+              "$ref": "#/components/schemas/SearchOrganizationOut"
+            },
+            "title": "Organizations",
+            "type": "array"
+          },
+          "query": {
+            "title": "Query",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "deals",
+          "organizations",
+          "contacts"
+        ],
+        "title": "SearchResponse",
         "type": "object"
       },
       "SecurityEventListResponse": {
@@ -45804,6 +45963,100 @@
         "summary": "Ссылка на файл отчёта",
         "tags": [
           "reporting"
+        ]
+      }
+    },
+    "/api/search": {
+      "get": {
+        "description": "Сделки (название, номер, вуз), организации (название, ИНН) и контакты (ФИО) одним запросом; в каждой группе не больше `limit` записей, видимость — как в списках. Группа, на которую у роли нет права чтения, пуста. Если по набранной строке ничего не нашлось ни в одной группе, поиск повторяется со строкой в другой раскладке (`gge` → «ппу», «ппу» → `gge`): тогда `corrected_query` — та строка, по которой показаны результаты, иначе он `null`. Роль: любая с правом чтения сделок, организаций или контактов.",
+        "operationId": "search_api_search_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 2,
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 5,
+              "maximum": 20,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          }
+        },
+        "summary": "Общий поиск",
+        "tags": [
+          "search"
         ]
       }
     },

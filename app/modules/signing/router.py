@@ -181,8 +181,8 @@ def _parse_batch_ids(raw_ids: str) -> list[uuid.UUID]:
             value = uuid.UUID(raw)
         except ValueError:
             raise ValidationError(
-                "Некорректный идентификатор в `ids`",
-                [FieldError(field="ids", reason=f"не UUID: {raw[:40]}")],
+                "Некорректный идентификатор в списке",
+                [FieldError(field="ids", reason=f"Некорректный идентификатор: {raw[:40]}")],
             ) from None
         if value not in seen:
             seen.add(value)
@@ -190,7 +190,7 @@ def _parse_batch_ids(raw_ids: str) -> list[uuid.UUID]:
     if len(parsed) > _MAX_BATCH_IDS:
         raise ValidationError(
             f"Слишком много идентификаторов (максимум {_MAX_BATCH_IDS})",
-            [FieldError(field="ids", reason="превышен лимит")],
+            [FieldError(field="ids", reason="Превышен лимит")],
         )
     return parsed
 

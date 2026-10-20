@@ -94,12 +94,12 @@ class ProductIndex:
         title = clean_text(name)
         if title is None:
             raise ValidationError(
-                "Пустое название продукта", [FieldError(field="name", reason="обязательное поле")]
+                "Пустое название продукта", [FieldError(field="name", reason="Обязательное поле")]
             )
         if len(title) > _PRODUCT_NAME_MAX:
             raise ValidationError(
                 "Слишком длинное название продукта",
-                [FieldError(field="name", reason=f"не больше {_PRODUCT_NAME_MAX} символов")],
+                [FieldError(field="name", reason=f"Не больше {_PRODUCT_NAME_MAX} символов")],
             )
         index = await self._load()
         existing = index.get(company_key(title))
@@ -188,12 +188,12 @@ class OrganizationIndex:
         title = clean_text(name)
         if title is None:
             raise ValidationError(
-                "Пустое название компании", [FieldError(field="name", reason="обязательное поле")]
+                "Пустое название компании", [FieldError(field="name", reason="Обязательное поле")]
             )
         if len(title) > _ORGANIZATION_NAME_MAX:
             raise ValidationError(
                 "Слишком длинное название компании",
-                [FieldError(field="name", reason=f"не больше {_ORGANIZATION_NAME_MAX} символов")],
+                [FieldError(field="name", reason=f"Не больше {_ORGANIZATION_NAME_MAX} символов")],
             )
         index = await self._load()
         existing = index.get(company_key(title))

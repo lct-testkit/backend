@@ -178,14 +178,14 @@ class WebhookSubscriptionService:
     async def get_or_404(self, subscription_id: uuid.UUID) -> WebhookSubscription:
         subscription = await self._session.get(WebhookSubscription, subscription_id)
         if subscription is None:
-            raise NotFoundError("Подписка webhook", subscription_id)
+            raise NotFoundError("Подписка вебхука", subscription_id)
         return subscription
 
     def _validate_event_types(self, event_types: list[str]) -> None:
         if not event_types:
             raise ValidationError(
                 "Нужен хотя бы один тип события",
-                [FieldError(field="event_types", reason="пустой список")],
+                [FieldError(field="event_types", reason="Пустой список")],
             )
         unknown = sorted(set(event_types) - WEBHOOK_EVENT_TYPES)
         if unknown:
@@ -193,7 +193,7 @@ class WebhookSubscriptionService:
                 "Неизвестный тип события",
                 [
                     FieldError(
-                        field="event_types", reason=f"неизвестные значения: {', '.join(unknown)}"
+                        field="event_types", reason=f"Неизвестные значения: {', '.join(unknown)}"
                     )
                 ],
             )
@@ -202,7 +202,7 @@ class WebhookSubscriptionService:
         if len(filters) > _MAX_FILTER_KEYS:
             raise ValidationError(
                 "Слишком много условий фильтра",
-                [FieldError(field="filters", reason=f"не более {_MAX_FILTER_KEYS} ключей")],
+                [FieldError(field="filters", reason=f"Не более {_MAX_FILTER_KEYS} ключей")],
             )
 
     async def _validated_url(self, url: str) -> str:
@@ -367,7 +367,7 @@ class WebhookSubscriptionService:
             )
         ).scalar_one_or_none()
         if delivery is None:
-            raise NotFoundError("Доставка webhook", delivery_id)
+            raise NotFoundError("Доставка вебхука", delivery_id)
         retryable = (WebhookDeliveryStatus.FAILED.value, WebhookDeliveryStatus.DEAD.value)
         if delivery.status not in retryable:
             raise AppError(

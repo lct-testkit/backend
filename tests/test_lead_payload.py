@@ -333,10 +333,10 @@ class TestContactValues:
         assert {e.field for e in caught.value.errors} == {"email", "phone"}
 
     def test_invalid_email_is_not_reported_as_missing(self) -> None:
-        assert _errors({"email": "nope"}) == {"email": ["некорректный адрес электронной почты"]}
+        assert _errors({"email": "nope"}) == {"email": ["Некорректный адрес электронной почты"]}
 
     def test_invalid_phone_is_not_reported_as_missing(self) -> None:
-        assert _errors({"phone": "123"}) == {"phone": ["некорректный номер телефона"]}
+        assert _errors({"phone": "123"}) == {"phone": ["Некорректный номер телефона"]}
 
     def test_invalid_email_is_refused_even_with_a_good_phone(self) -> None:
         assert list(_errors({"email": "nope", "phone": "+79001112233"})) == ["email"]
@@ -502,8 +502,8 @@ class TestOrderRules:
         payload = {k: v for k, v in self._ORDER.items() if k not in ("first_name", "last_name")}
 
         assert _errors(payload) == {
-            "last_name": ["обязательное поле"],
-            "first_name": ["обязательное поле"],
+            "last_name": ["Обязательное поле"],
+            "first_name": ["Обязательное поле"],
         }
 
     def test_name_may_come_as_a_full_name_string(self) -> None:

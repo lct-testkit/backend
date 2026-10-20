@@ -102,15 +102,15 @@ class MappingRule(BaseModel):
     def _shape_matches_transform(self) -> MappingRule:
         if self.transform == "join":
             if not self.sources or len(self.sources) < 2:
-                raise ValueError("transform=join требует sources (не меньше двух)")
+                raise ValueError("Для преобразования «склейка» нужно не меньше двух источников")
         elif self.transform == "constant":
             pass
         elif not self.source:
-            raise ValueError("нужен source (кроме join и constant)")
+            raise ValueError("Нужен источник значения (кроме склейки и константы)")
         if self.transform == "value_map" and not self.value_map:
-            raise ValueError("transform=value_map требует словарь value_map")
+            raise ValueError("Для преобразования «таблица значений» нужен словарь соответствий")
         if self.transform == "template" and not self.template:
-            raise ValueError("transform=template требует строку template")
+            raise ValueError("Для преобразования «шаблон» нужна строка шаблона")
         return self
 
 
@@ -227,7 +227,7 @@ def apply_mapping(
         used |= consumed
         if value in (None, ""):
             if rule.required:
-                warnings.append(f"обязательное поле {rule.target} не заполнено")
+                warnings.append(f"Обязательное поле {rule.target} не заполнено")
             continue
         _set_target(payload, rule.target, value)
 

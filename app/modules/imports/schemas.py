@@ -57,7 +57,7 @@ class ImportOptions(BaseModel):
     def _sheet_xor_sheets(self) -> ImportOptions:
         # `parse_table` при непустом `sheets` склеивает листы и молча игнорирует `sheet`.
         if self.sheet is not None and self.sheets:
-            raise ValueError("`sheet` и `sheets` взаимоисключающие: укажите что-то одно")
+            raise ValueError("Укажите либо один лист, либо несколько — что-то одно")
         return self
 
 

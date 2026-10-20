@@ -60,7 +60,7 @@ _ANY_SPACE = re.compile(r"\s+")
 _GENERIC_DETAIL = "Некорректные данные заявки"
 _CONTACT_REQUIRED = "Укажите email или телефон"
 _COURSE_REQUIRED = "Для заказа укажите курс"
-_REQUIRED = "обязательное поле"
+_REQUIRED = "Обязательное поле"
 
 
 def _canonical(key: object) -> str:
@@ -133,13 +133,13 @@ class LeadPayload:
 
 
 def _reject_constant(name: str) -> Any:
-    raise ValueError(f"недопустимое значение {name}")
+    raise ValueError(f"Недопустимое значение {name}")
 
 
 def _parse_float(text: str) -> float:
     value = float(text)
     if not math.isfinite(value):  # `1e999` разбирается в `inf`
-        raise ValueError("число вне диапазона")
+        raise ValueError("Число вне диапазона")
     return value
 
 
@@ -204,12 +204,12 @@ def _as_text(value: Any, *, allow_number: bool) -> str:
     if allow_number and isinstance(value, float) and value.is_integer():
         # Телефон и номер заказа числом: `79990234365` или `7.9990234365e10`, но не `2.5`.
         return str(int(value))
-    raise _FieldProblem("ожидалась строка или число" if allow_number else "ожидалась строка")
+    raise _FieldProblem("Ожидалась строка или число" if allow_number else "Ожидалась строка")
 
 
 def _parse_stream_number(value: Any) -> int:
     if isinstance(value, bool):
-        raise _FieldProblem("номер потока — целое число")
+        raise _FieldProblem("Номер потока — целое число")
     number: int
     if isinstance(value, int):
         number = value
@@ -217,20 +217,20 @@ def _parse_stream_number(value: Any) -> int:
         try:
             parsed = float(value.strip()) if isinstance(value, str) else float(value)
         except (TypeError, ValueError, OverflowError) as exc:
-            raise _FieldProblem("номер потока — целое число") from exc
+            raise _FieldProblem("Номер потока — целое число") from exc
         if not parsed.is_integer():  # 2.5, inf, nan
-            raise _FieldProblem("номер потока — целое число")
+            raise _FieldProblem("Номер потока — целое число")
         number = int(parsed)
     if number < 1:
-        raise _FieldProblem("номер потока — целое от 1")
+        raise _FieldProblem("Номер потока — целое от 1")
     if number > _STREAM_MAX:
-        raise _FieldProblem("слишком большой номер потока")
+        raise _FieldProblem("Слишком большой номер потока")
     return number
 
 
 def _parse_amount(value: Any) -> Decimal:
     if isinstance(value, bool):
-        raise _FieldProblem("сумма — число")
+        raise _FieldProblem("Сумма — число")
     if isinstance(value, int | float):
         text = repr(value)  # `1500.5`, без двоичных «хвостов» `Decimal(float)`
     elif isinstance(value, str):
@@ -244,18 +244,18 @@ def _parse_amount(value: Any) -> Decimal:
         else:
             text = text.replace(",", ".")
     else:
-        raise _FieldProblem("сумма — число")
+        raise _FieldProblem("Сумма — число")
     try:
         number = Decimal(text)
     except InvalidOperation as exc:
-        raise _FieldProblem("сумма — число") from exc
+        raise _FieldProblem("Сумма — число") from exc
     if not number.is_finite() or number <= 0:
-        raise _FieldProblem("сумма должна быть положительным числом")
+        raise _FieldProblem("Сумма должна быть положительным числом")
     if number >= _AMOUNT_LIMIT:
-        raise _FieldProblem("слишком большая сумма")
+        raise _FieldProblem("Слишком большая сумма")
     cents = number.quantize(_CENT)
     if cents <= 0:  # 0.001 округляется до нуля
-        raise _FieldProblem("сумма должна быть положительным числом")
+        raise _FieldProblem("Сумма должна быть положительным числом")
     return cents
 
 
@@ -316,7 +316,7 @@ def parse_lead_payload(payload: Mapping[str, Any]) -> LeadPayload:
             return None
         if value is not None and len(value) > limit:
             if not informational:
-                fail(field, f"не длиннее {limit} символов")
+                fail(field, f"Не длиннее {limit} символов")
                 return None
             value = value[:limit]
         return value
@@ -337,21 +337,21 @@ def parse_lead_payload(payload: Mapping[str, Any]) -> LeadPayload:
             ("middle_name", middle_name),
         ):
             if value is not None and len(value) > _NAME_MAX:
-                fail(field, f"не длиннее {_NAME_MAX} символов")
+                fail(field, f"Не длиннее {_NAME_MAX} символов")
 
     email: str | None = None
     raw_email = pick_text("email", limit=_EMAIL_MAX)
     if raw_email is not None:
         email = normalize_email(raw_email)
         if email is None:
-            fail("email", "некорректный адрес электронной почты")
+            fail("email", "Некорректный адрес электронной почты")
 
     phone: str | None = None
     raw_phone = pick_text("phone", limit=_PHONE_MAX, allow_number=True)
     if raw_phone is not None:
         phone = normalize_phone(raw_phone)
         if phone is None:
-            fail("phone", "некорректный номер телефона")
+            fail("phone", "Некорректный номер телефона")
 
     candidates: list[str] = []
     for raw in present("course"):
@@ -363,7 +363,7 @@ def parse_lead_payload(payload: Mapping[str, Any]) -> LeadPayload:
         if candidate is None or candidate in candidates:
             continue
         if len(candidate) > _COURSE_MAX:
-            fail("course", f"не длиннее {_COURSE_MAX} символов")
+            fail("course", f"Не длиннее {_COURSE_MAX} символов")
             continue
         candidates.append(candidate)
     course = candidates[0] if candidates else None

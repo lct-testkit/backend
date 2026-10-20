@@ -94,12 +94,12 @@ class AccessRequestService:
         ) and await OrganizationService(self._session).can_edit(principal, organization):
             raise ValidationError(
                 "Доступ к этому вузу уже есть",
-                [FieldError(field="entity_id", reason="организация уже в вашем скоупе")],
+                [FieldError(field="entity_id", reason="Вуз уже вам доступен")],
             )
         if organization.owner_id is None:
             raise ValidationError(
                 "У вуза нет ответственного — заведите сделку, чтобы получить к нему доступ",
-                [FieldError(field="entity_id", reason="вуз без ответственного")],
+                [FieldError(field="entity_id", reason="Вуз без ответственного")],
             )
         rules = await load_access_rules(self._session, principal)
         if rules is not None:
@@ -109,7 +109,7 @@ class AccessRequestService:
             ):
                 raise ValidationError(
                     "Этот вуз вне ваших ограничений видимости — запрос доступа не поможет",
-                    [FieldError(field="entity_id", reason="вуз вне ограничения доступа")],
+                    [FieldError(field="entity_id", reason="Вуз вне ограничения доступа")],
                 )
 
         pending_count = (
@@ -126,7 +126,7 @@ class AccessRequestService:
                 "Слишком много ожидающих запросов доступа",
                 [
                     FieldError(
-                        field="entity_id", reason=f"не более {_MAX_PENDING_PER_USER} ожидающих"
+                        field="entity_id", reason=f"Не более {_MAX_PENDING_PER_USER} ожидающих"
                     )
                 ],
             )

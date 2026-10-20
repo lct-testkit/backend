@@ -86,7 +86,7 @@ def check_outbound_url(url: str, *, strict: bool) -> str:
     except ValueError as exc:
         raise ValueError("Адрес не разбирается как URL") from exc
     if parts.scheme not in ("http", "https"):
-        raise ValueError("Допустимы только адреса http:// и https://")
+        raise ValueError("Допустимы только адреса, начинающиеся с http:// или https://")
     host = parts.hostname
     if not host:
         raise ValueError("В адресе нет хоста")

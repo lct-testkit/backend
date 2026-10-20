@@ -70,8 +70,8 @@ class HandoverRuleMatch(BaseModel):
         ]
         if len(present) != 1:
             raise ValueError(
-                "match должен содержать ровно одно поле: direction_id, product_id, "
-                "organization_id или deal_type"
+                "Условие должно содержать ровно одно поле: направление, продукт, вуз "
+                "или тип сделки"
             )
         return self
 

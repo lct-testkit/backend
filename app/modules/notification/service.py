@@ -726,7 +726,7 @@ class NotificationTemplateService:
         if existing is not None:
             raise ValidationError(
                 "Шаблон с таким кодом и каналом уже существует",
-                [FieldError(field="code", reason="комбинация code+channel уже используется")],
+                [FieldError(field="code", reason="Такое сочетание кода события и канала уже есть")],
             )
         template = NotificationTemplate(
             code=payload.code,

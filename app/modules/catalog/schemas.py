@@ -66,7 +66,7 @@ def _valid_email(value: str | None) -> str | None:
         return None
     normalized = normalize_email(value)
     if normalized is None:
-        raise PydanticCustomError("invalid_email", "некорректный адрес электронной почты")
+        raise PydanticCustomError("invalid_email", "Некорректный адрес электронной почты")
     return normalized
 
 
@@ -76,7 +76,7 @@ def _valid_phone(value: str | None) -> str | None:
         return None
     normalized = normalize_phone(value)
     if normalized is None:
-        raise PydanticCustomError("invalid_phone", "некорректный номер телефона")
+        raise PydanticCustomError("invalid_phone", "Некорректный номер телефона")
     return normalized
 
 
@@ -87,7 +87,7 @@ def _org_email(value: str | None) -> str | None:
         return _valid_email(value)
     except PydanticCustomError:
         raise PydanticCustomError(
-            "invalid_email", "Основной e-mail: некорректный адрес электронной почты"
+            "invalid_email", "Основная почта: некорректный адрес электронной почты"
         ) from None
 
 
@@ -365,7 +365,9 @@ class BulkOrganizationOwnerRequest(BaseModel):
     @model_validator(mode="after")
     def _exactly_one_selector(self) -> BulkOrganizationOwnerRequest:
         if (self.from_owner_id is None) == (self.organization_ids is None):
-            raise ValueError("Нужен ровно один из from_owner_id или organization_ids")
+            raise ValueError(
+                "Укажите либо прежнего ответственного, либо список вузов — что-то одно"
+            )
         return self
 
 
@@ -455,12 +457,12 @@ class ContactChannelIn(BaseModel):
         if channel_type in ("phone_extra", "whatsapp"):
             normalized = normalize_phone(value)
             if normalized is None:
-                raise PydanticCustomError("invalid_phone", "некорректный номер телефона")
+                raise PydanticCustomError("invalid_phone", "Некорректный номер телефона")
             return normalized
         if channel_type == "email_extra":
             normalized = normalize_email(value)
             if normalized is None:
-                raise PydanticCustomError("invalid_email", "некорректный адрес электронной почты")
+                raise PydanticCustomError("invalid_email", "Некорректный адрес электронной почты")
             return normalized
         if channel_type == "telegram":
             text = value.strip()
@@ -469,7 +471,8 @@ class ContactChannelIn(BaseModel):
             if not _TELEGRAM_HANDLE.fullmatch(handle):
                 raise PydanticCustomError(
                     "invalid_telegram",
-                    "некорректный Telegram: нужен @handle из 5-32 латинских букв/цифр/_",
+                    "Некорректный Telegram: нужен @имя из 5–32 латинских букв, цифр "
+                    "или знаков подчёркивания",
                 )
             return f"@{handle}"
         return value
@@ -482,7 +485,7 @@ def _at_most_one_primary_per_type(channels: list[ContactChannelIn]) -> list[Cont
             if channel.type in seen_primary:
                 raise PydanticCustomError(
                     "duplicate_primary_channel",
-                    f"два первичных канала типа {channel.type!r}",
+                    f"Два основных канала одного типа ({channel.type})",
                 )
             seen_primary.add(channel.type)
     return channels
@@ -1194,5 +1197,5 @@ class AccessRequestDecisionRequest(BaseModel):
     @model_validator(mode="after")
     def _reject_requires_comment(self) -> AccessRequestDecisionRequest:
         if self.decision == "reject" and not (self.comment and self.comment.strip()):
-            raise ValueError("отказ требует комментарий")
+            raise ValueError("Отказ требует комментария")
         return self

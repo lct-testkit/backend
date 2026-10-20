@@ -99,8 +99,8 @@ def _reject_null_fields(data: dict[str, Any]) -> None:
     nulls = [key for key, value in data.items() if value is None]
     if nulls:
         raise ValidationError(
-            "Поле нельзя очистить: значение null не допускается",
-            [FieldError(field=key, reason="не может быть null") for key in nulls],
+            "Это поле нельзя очистить",
+            [FieldError(field=key, reason="Нельзя оставить пустым") for key in nulls],
         )
 
 
@@ -255,7 +255,7 @@ class ReportJobService:
                 [
                     FieldError(
                         field="format",
-                        reason=f"допустимо: {', '.join(template.output_formats)}",
+                        reason=f"Допустимо: {', '.join(template.output_formats)}",
                     )
                 ],
             )
@@ -337,7 +337,7 @@ class ReportJobService:
                     [
                         FieldError(
                             field="format",
-                            reason=f"оценка строк ({row_estimate}) превышает лимит xls",
+                            reason=f"Оценка строк ({row_estimate}) превышает лимит xls",
                         )
                     ],
                 )
@@ -547,8 +547,7 @@ class ReportJobService:
             # Отчёт с ПДн целиком (например, выгрузка для LMS: СНИЛС, паспорт, адрес). У `/data`
             # нет записи `REPORT_EXPORTED`, значит, отдать его здесь — вынести ПДн мимо аудита.
             raise ForbiddenError(
-                "Отчёт содержит персональные данные и доступен только файлом: скачайте его "
-                "через GET /api/reports/{id}/download"
+                "Отчёт содержит персональные данные и доступен только файлом: скачайте его"
             )
         builder = REPORT_BUILDERS[kind]
         return await builder(self._session, principal, job.params)

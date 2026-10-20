@@ -117,23 +117,23 @@ class OrderIngestService:
         first_name = clean_text(data.first_name)
         errors: list[FieldError] = []
         if not order_number:
-            errors.append(FieldError(field="order_number", reason="обязательное поле"))
+            errors.append(FieldError(field="order_number", reason="Обязательное поле"))
         elif len(order_number) > _ORDER_NUMBER_MAX:
             errors.append(
-                FieldError(field="order_number", reason=f"не больше {_ORDER_NUMBER_MAX} символов")
+                FieldError(field="order_number", reason=f"Не больше {_ORDER_NUMBER_MAX} символов")
             )
         if not course:
-            errors.append(FieldError(field="course", reason="обязательное поле"))
+            errors.append(FieldError(field="course", reason="Обязательное поле"))
         if not last_name:
-            errors.append(FieldError(field="last_name", reason="обязательное поле"))
+            errors.append(FieldError(field="last_name", reason="Обязательное поле"))
         if not first_name:
-            errors.append(FieldError(field="first_name", reason="обязательное поле"))
+            errors.append(FieldError(field="first_name", reason="Обязательное поле"))
         if data.amount is not None and (not data.amount.is_finite() or data.amount <= 0):
             errors.append(
-                FieldError(field="amount", reason="сумма должна быть положительным числом")
+                FieldError(field="amount", reason="Сумма должна быть положительным числом")
             )
         if data.stream_number is not None and data.stream_number < 1:
-            errors.append(FieldError(field="stream_number", reason="номер потока — целое от 1"))
+            errors.append(FieldError(field="stream_number", reason="Номер потока — целое от 1"))
         if errors:
             raise ValidationError("Некорректные данные заказа", errors)
         return order_number or "", course or "", last_name or "", first_name or ""
@@ -147,7 +147,7 @@ class OrderIngestService:
         if mode == "update":
             raise ValidationError(
                 "Заказ для обновления не найден",
-                [FieldError(field="order_number", reason="нет сделки с таким номером заявки")],
+                [FieldError(field="order_number", reason="Нет сделки с таким номером заявки")],
             )
 
         # Контакт до сделки: даже если сделку не удастся создать, человек остаётся в базе — это не
@@ -246,7 +246,7 @@ class OrderIngestService:
         if contact is None:  # B2C-сделка без контакта запрещена CHECK'ом; защита на случай данных
             raise ValidationError(
                 "У сделки заказа нет контакта",
-                [FieldError(field="order_number", reason="сделка заказа повреждена")],
+                [FieldError(field="order_number", reason="Сделка заказа повреждена")],
             )
         lines = (
             (

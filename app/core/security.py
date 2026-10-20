@@ -286,7 +286,7 @@ async def decode_logout_token(token: str) -> dict[str, Any]:
 
     events = claims.get("events", {})
     if "http://schemas.openid.net/event/backchannel-logout" not in events:
-        raise AppError(ErrorCode.UNAUTHENTICATED, "Токен не является logout-токеном")
+        raise AppError(ErrorCode.UNAUTHENTICATED, "Это не токен выхода из системы")
     return claims
 
 

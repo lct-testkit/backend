@@ -131,7 +131,7 @@ def _require_names(row: dict[str, Any]) -> tuple[str, str, str | None]:
     last, first, middle = person_names(row)
     if not last or not first:
         raise ValidationError(
-            "Не указаны фамилия и имя", [FieldError(field="full_name", reason="обязательное поле")]
+            "Не указаны фамилия и имя", [FieldError(field="full_name", reason="Обязательное поле")]
         )
     return last, first, middle
 
@@ -792,7 +792,7 @@ class DirectionHandler(EntityHandler):
         if not code or not name:
             raise ValidationError(
                 "Строка без кода/названия направления",
-                [FieldError(field="name", reason="обязательное поле")],
+                [FieldError(field="name", reason="Обязательное поле")],
             )
 
         parent_code = clean_text(data.get("parent_code"))

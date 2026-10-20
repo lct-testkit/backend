@@ -158,7 +158,7 @@ _STANDARD_RESPONSES: dict[str, tuple[str, str, dict[str, Any], dict[str, Any]]] 
             422,
             "Ошибка валидации запроса",
             "Запрос не прошёл валидацию",
-            errors=[{"field": "title", "reason": "Field required", "code": "missing"}],
+            errors=[{"field": "title", "reason": "Обязательное поле", "code": "missing"}],
         ),
         {},
     ),

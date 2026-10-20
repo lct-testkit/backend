@@ -694,8 +694,13 @@ async def _resolve_signers(
             user = await _resolve_role_user(session, deal, role)
             if user is None:
                 raise ValidationError(
-                    f"Не удалось определить подписанта для роли {role!r}",
-                    [FieldError(field="signers", reason=f"роль {role} не резолвится в сделке")],
+                    f"Не удалось определить подписанта для роли «{role}»",
+                    [
+                        FieldError(
+                            field="signers",
+                            reason=f"Для роли «{role}» в сделке не нашлось человека",
+                        )
+                    ],
                 )
             resolved.append(
                 ResolvedSigner(
@@ -715,11 +720,11 @@ async def _resolve_signers(
             if contact is None:
                 raise ValidationError(
                     f"Не удалось определить подписанта для роли контакта {contact_role!r}",
-                    [FieldError(field="signers", reason="контакт не найден")],
+                    [FieldError(field="signers", reason="Контакт не найден")],
                 )
             resolved.append(_contact_to_signer(contact, contact_role))
             continue
-        raise ValidationError("Подписант не указан", [FieldError(field="signers", reason="пусто")])
+        raise ValidationError("Подписант не указан", [FieldError(field="signers", reason="Пусто")])
     return resolved
 
 
@@ -776,7 +781,9 @@ class SignatureDocumentService:
 
             return await DealService(self._session).get_or_404(entity_id, principal)
         if not principal.is_admin:
-            raise ForbiddenError(f"Создание документов для {entity_type!r} доступно только ADMIN")
+            raise ForbiddenError(
+                f"Создание документов для объекта «{entity_type}» доступно только администратору"
+            )
         return None
 
     async def list_for_entity(
@@ -865,7 +872,7 @@ class SignatureDocumentService:
         except RenderError as exc:
             raise ValidationError(
                 "Файл не читается как PDF: загрузите исправный документ",
-                [FieldError(field="file_id", reason="повреждённый или пустой PDF")],
+                [FieldError(field="file_id", reason="Повреждённый или пустой PDF")],
             ) from exc
 
     async def create(self, principal: Principal, payload: Any) -> SignatureDocument:
@@ -896,10 +903,16 @@ class SignatureDocumentService:
             if file.mime_type != "application/pdf":
                 raise ValidationError(
                     "Документ на подпись должен быть PDF",
-                    [FieldError(field="file_id", reason=f"mime_type={file.mime_type!r}")],
+                    [
+                        FieldError(
+                            field="file_id", reason=f"Тип файла не подходит: {file.mime_type}"
+                        )
+                    ],
                 )
             if not file.sha256:
-                raise ValidationError("У файла не посчитан sha256 — повторите commit")
+                raise ValidationError(
+                    "Для файла не посчитана контрольная сумма — загрузите файл заново"
+                )
             await self._ensure_pdf_readable(file)
             file_id = file.id
             content_hash = file.sha256
@@ -1802,8 +1815,8 @@ class SignatureRequestService:
         if email:
             return "email", email, mask_email(email) or "***"
         raise ValidationError(
-            "У подписанта нет верифицированного канала связи (телефон/email)",
-            [FieldError(field="signer", reason="phone и email пусты")],
+            "У подписанта нет верифицированного канала связи (телефон или почта)",
+            [FieldError(field="signer", reason="Не указаны ни телефон, ни почта")],
         )
 
     async def _lock_for_action(self, request: SignatureRequest) -> SignatureDocument:

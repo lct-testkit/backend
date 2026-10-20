@@ -565,7 +565,7 @@ class OrganizationService:
         if organization.owner_id == owner_id:
             raise ValidationError(
                 "Новый ответственный совпадает с текущим",
-                [FieldError(field="owner_id", reason="совпадает с текущим ответственным")],
+                [FieldError(field="owner_id", reason="Совпадает с текущим ответственным")],
             )
 
         new_owner: User | None = None
@@ -1139,7 +1139,7 @@ class OrganizationService:
                     [
                         FieldError(
                             field="registry_status",
-                            reason="юридически значимое предупреждение, не стилистическое "
+                            reason="Юридически значимое предупреждение, не стилистическое "
                             "расхождение",
                         )
                     ],
@@ -1186,7 +1186,7 @@ class OrganizationService:
             raise AppError(
                 ErrorCode.VALIDATION,
                 "Удаление/обезличивание по 152-ФЗ применимо только к "
-                "организациям типа individual_entrepreneur",
+                "индивидуальным предпринимателям",
                 extra={"org_type": organization.org_type},
             )
 
@@ -1324,9 +1324,9 @@ class ContactService:
         email_n, phone_n = normalize_email(email), normalize_phone(phone)
         errors: list[FieldError] = []
         if clean_text(email) and email_n is None:
-            errors.append(FieldError(field="email", reason="некорректный адрес электронной почты"))
+            errors.append(FieldError(field="email", reason="Некорректный адрес электронной почты"))
         if clean_text(phone) and phone_n is None:
-            errors.append(FieldError(field="phone", reason="некорректный номер телефона"))
+            errors.append(FieldError(field="phone", reason="Некорректный номер телефона"))
         if errors:
             raise ValidationError("Некорректные контактные данные", errors)
         return email_n, phone_n
@@ -1496,9 +1496,9 @@ class ContactService:
             # создания ещё нет — валидным может быть только `null`, привязка вторым
             # шагом через `PATCH` (когда у согласия есть на что указывать).
             raise ValidationError(
-                "При создании контакта consent_id должен быть пустым — привяжите "
-                "согласие через PATCH после создания",
-                [FieldError(field="consent_id", reason="контакт ещё не создан")],
+                "При создании контакта согласие указать нельзя — привяжите его "
+                "после создания контакта",
+                [FieldError(field="consent_id", reason="Контакт ещё не создан")],
             )
         if payload.organization_id is not None:
             organization = await self._session.get(Organization, payload.organization_id)
@@ -1529,7 +1529,7 @@ class ContactService:
                 )
             raise AppError(
                 ErrorCode.DUPLICATE,
-                "Контакт с таким email или телефоном уже существует",
+                "Контакт с такой почтой или телефоном уже существует",
                 extra={"candidates": candidates},
             )
 
@@ -1754,7 +1754,7 @@ class ContactService:
         if null_required:
             raise ValidationError(
                 "Обязательные поля нельзя очистить",
-                [FieldError(field=k, reason="обязательное поле") for k in null_required],
+                [FieldError(field=k, reason="Обязательное поле") for k in null_required],
             )
         if data.get("organization_id") is not None:
             organization = await self._session.get(Organization, data["organization_id"])
@@ -1783,7 +1783,7 @@ class ContactService:
                 if clash:
                     raise AppError(
                         ErrorCode.DUPLICATE,
-                        "Контакт с таким email или телефоном уже существует",
+                        "Контакт с такой почтой или телефоном уже существует",
                         extra={
                             "candidates": [
                                 {"match": by, "accessible": False} for _existing, by in clash
@@ -1862,7 +1862,7 @@ class ContactService:
         if not valid:
             raise ValidationError(
                 "Согласие не найдено, принадлежит другому субъекту или отозвано",
-                [FieldError(field="consent_id", reason="недействительное согласие")],
+                [FieldError(field="consent_id", reason="Недействительное согласие")],
             )
 
     async def _replace_channels(self, contact: Contact, items: list[Any]) -> dict[str, Any] | None:
@@ -1960,7 +1960,7 @@ async def ensure_no_cycle(
         if ancestor.id == node.id:
             raise ValidationError(
                 f"{entity_name} не может быть родителем самого себя или своего потомка",
-                [FieldError(field="parent_id", reason="цикл в иерархии")],
+                [FieldError(field="parent_id", reason="Цикл в иерархии")],
             )
         visited.add(ancestor.id)
         ancestor = (
@@ -2014,7 +2014,7 @@ class DirectionService:
             raise AppError(
                 ErrorCode.DUPLICATE,
                 "Направление с таким кодом уже существует",
-                errors=[FieldError(field="code", reason="код уже используется")],
+                errors=[FieldError(field="code", reason="Код уже используется")],
             )
         if payload.parent_id is not None:
             await self._check_parent(None, payload.parent_id)
@@ -2155,7 +2155,7 @@ class OrganizationBranchService:
         if parent.organization_id != organization.id:
             raise ValidationError(
                 "Родительский филиал принадлежит другой организации",
-                [FieldError(field="parent_id", reason="филиал другой организации")],
+                [FieldError(field="parent_id", reason="Филиал другой организации")],
             )
 
     async def create(self, organization: Organization, payload: Any) -> OrganizationBranch:
@@ -2168,7 +2168,7 @@ class OrganizationBranchService:
         if (count or 0) >= _MAX_BRANCHES_PER_ORG:
             raise ValidationError(
                 f"У вуза не может быть больше {_MAX_BRANCHES_PER_ORG} филиалов",
-                [FieldError(field="name", reason="превышен лимит филиалов")],
+                [FieldError(field="name", reason="Превышен лимит филиалов")],
             )
         if payload.parent_id is not None:
             await self._check_parent(organization, None, payload.parent_id)
@@ -2262,7 +2262,7 @@ def _check_validity_period(valid_from: dt.date | None, valid_to: dt.date | None)
     if valid_from is not None and valid_to is not None and valid_from > valid_to:
         raise ValidationError(
             "Срок действия продукта заканчивается раньше, чем начинается",
-            [FieldError(field="valid_to", reason="не может быть раньше valid_from")],
+            [FieldError(field="valid_to", reason="Не может быть раньше даты начала действия")],
         )
 
 
@@ -2324,14 +2324,14 @@ class ProductService:
             raise AppError(
                 ErrorCode.DUPLICATE,
                 "Код занят удалённым продуктом: выберите другой код",
-                errors=[FieldError(field="code", reason="код занят удалённым продуктом")],
+                errors=[FieldError(field="code", reason="Код занят удалённым продуктом")],
                 extra={"product_id": str(existing.id), "deleted": True},
             )
         if existing is not None:
             raise AppError(
                 ErrorCode.DUPLICATE,
                 "Продукт с таким кодом уже существует",
-                errors=[FieldError(field="code", reason="код уже используется")],
+                errors=[FieldError(field="code", reason="Код уже используется")],
             )
         _check_validity_period(payload.valid_from, payload.valid_to)
         if payload.vendor_id is not None:
@@ -2597,7 +2597,7 @@ class LearnerProfileService:
         errors: list[FieldError] = []
         for name, raw in values.items():
             if name not in learner.PROFILE_TARGETS:
-                errors.append(FieldError(field=name, reason="неизвестное поле профиля"))
+                errors.append(FieldError(field=name, reason="Неизвестное поле профиля"))
                 continue
             text_value = (raw or "").strip()
             if not text_value:
@@ -2663,7 +2663,7 @@ class LossReasonService:
             raise AppError(
                 ErrorCode.DUPLICATE,
                 "Причина с таким кодом уже существует",
-                errors=[FieldError(field="code", reason="код уже используется")],
+                errors=[FieldError(field="code", reason="Код уже используется")],
             )
         reason = LossReason(
             code=payload.code,
@@ -2765,7 +2765,7 @@ class HolidayService:
             raise AppError(
                 ErrorCode.DUPLICATE,
                 "Дата уже есть в производственном календаре",
-                errors=[FieldError(field="date", reason="дата уже существует")],
+                errors=[FieldError(field="date", reason="Дата уже существует")],
             )
         holiday = Holiday(
             date=payload.date, name=payload.name, is_working_day=payload.is_working_day
@@ -2857,7 +2857,7 @@ class CustomFieldDefService:
             raise AppError(
                 ErrorCode.DUPLICATE,
                 "Поле с таким кодом уже существует для этого типа сущности",
-                errors=[FieldError(field="code", reason="код уже используется")],
+                errors=[FieldError(field="code", reason="Код уже используется")],
             )
         field = CustomFieldDef(
             entity_type=payload.entity_type,
@@ -3112,7 +3112,7 @@ class OrganizationLicenseService:
         if text is None:
             raise ValidationError(
                 "Укажите вендора",
-                [FieldError(field="vendor", reason="укажите vendor_id или vendor")],
+                [FieldError(field="vendor", reason="Укажите вендора")],
             )
         match = await LicenseMatcher(self._session).match_vendor(text)
         return text, (match.entity.id if match.is_unique and match.entity else None)
@@ -3129,7 +3129,7 @@ class OrganizationLicenseService:
         if text is None:
             raise ValidationError(
                 "Укажите ПО",
-                [FieldError(field="product_name", reason="укажите product_id или product_name")],
+                [FieldError(field="product_name", reason="Укажите продукт")],
             )
         match = await LicenseMatcher(self._session).match_software(text, vendor_id=vendor_id)
         return text, (match.entity.id if match.is_unique and match.entity else None)

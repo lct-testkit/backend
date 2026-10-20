@@ -1314,7 +1314,7 @@ class ImportService:
         if job.status != ImportJobStatus.VALIDATED.value:
             raise AppError(
                 ErrorCode.IMPORT_NOT_APPLICABLE,
-                "Сначала выполните проверку (dry-run) без ошибок в маппинге",
+                "Сначала выполните пробную проверку: в сопоставлении колонок не должно быть ошибок",
             )
         if job.ok_rows + job.warn_rows == 0:
             raise AppError(ErrorCode.IMPORT_NOT_APPLICABLE, "Нет строк, пригодных к применению")

@@ -86,9 +86,9 @@ class FeatureFlagPatch(BaseModel):
     def _required_fields_are_not_nulled(self) -> FeatureFlagPatch:
         # `null` в PATCH обязательного поля — не «оставить как есть»: в колонку NOT NULL он
         # доходил до БД и давал 500. Чтобы не менять поле, его просто не передают.
-        for name in ("is_enabled", "rollout"):
+        for name, label in (("is_enabled", "Включение флага"), ("rollout", "Доля раскатки")):
             if name in self.model_fields_set and getattr(self, name) is None:
-                raise ValueError(f"{name} не может быть null")
+                raise ValueError(f"{label} нельзя очистить")
         return self
 
 

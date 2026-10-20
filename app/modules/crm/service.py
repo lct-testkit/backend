@@ -1179,19 +1179,19 @@ async def ensure_assignable_user(
     if not user.is_active:
         raise ValidationError(
             "Ответственным можно назначить только активного сотрудника",
-            [FieldError(field="owner_id", reason="сотрудник неактивен")],
+            [FieldError(field="owner_id", reason="Сотрудник неактивен")],
         )
     if roles is not None and user.role not in roles:
         raise ValidationError(
             "Ответственным за вуз можно назначить только КАМа или руководителя",
-            [FieldError(field="owner_id", reason="недопустимая роль")],
+            [FieldError(field="owner_id", reason="Недопустимая роль")],
         )
     if organization_id is not None and not await user_organization_allowed(
         session, user, organization_id
     ):
         raise ValidationError(
             "Пользователь не может быть ответственным: вуз вне его ограничений видимости",
-            [FieldError(field="owner_id", reason="вуз вне ограничения доступа")],
+            [FieldError(field="owner_id", reason="Вуз вне ограничения доступа")],
         )
     return user
 
@@ -1450,7 +1450,7 @@ def parse_deal_sort(raw: str | None) -> DealSort:
         allowed = ", ".join(_DEAL_SORT_COLUMNS)
         raise ValidationError(
             f"Сортировка по полю {name!r} не поддерживается; допустимы {allowed}",
-            [FieldError(field="sort", reason=f"допустимы {allowed}; минус — по убыванию")],
+            [FieldError(field="sort", reason=f"Допустимы {allowed}; минус — по убыванию")],
         )
     return DealSort(field=name, descending=value.startswith("-"))
 
@@ -1519,6 +1519,26 @@ _PATCHABLE_FIELDS = frozenset(
         "source",
     }
 )
+
+
+#: Названия полей сделки для текстов ошибок: человеку нужно «Сумма», а не `amount`.
+_DEAL_FIELD_LABELS = {
+    "amount": "Сумма",
+    "currency": "Валюта",
+    "expected_close_date": "Плановая дата закрытия",
+    "students_planned": "Количество обучающихся",
+    "loss_reason_id": "Причина отказа",
+    "title": "Название",
+    "organization_id": "Организация",
+    "contact_id": "Контакт",
+    "priority": "Приоритет",
+    "source": "Источник",
+}
+
+
+def _field_label(name: str) -> str:
+    """Название обязательного поля перехода; пользовательское `custom_fields.x` — как есть."""
+    return _DEAL_FIELD_LABELS.get(name, name.removeprefix("custom_fields."))
 
 
 def ensure_close_date_not_past(value: dt.date | None, *, today: dt.date | None = None) -> None:
@@ -1865,12 +1885,12 @@ class DealService:
         if workflow.state != WorkflowState.PUBLISHED.value:
             raise ValidationError(
                 "Воронка не опубликована",
-                [FieldError(field="workflow_id", reason="воронка не опубликована")],
+                [FieldError(field="workflow_id", reason="Воронка не опубликована")],
             )
         if workflow.deal_type != deal_type:
             raise ValidationError(
                 "Тип воронки не совпадает с типом сделки",
-                [FieldError(field="workflow_id", reason="deal_type не совпадает")],
+                [FieldError(field="workflow_id", reason="Тип сделки не совпадает с типом воронки")],
             )
         return workflow
 
@@ -1995,10 +2015,10 @@ class DealService:
             # обратная трассировка к системе-источнику (CMS/LMS/Bitrix)
             # ломаются на первом же повторе вебхука.
             raise ValidationError(
-                "Для сделки, создаваемой интеграцией, обязательны source и external_ids",
+                "Для сделки от интеграции обязательны источник и внешние идентификаторы",
                 [
-                    FieldError(field="source", reason="обязателен для источника INTEGRATION"),
-                    FieldError(field="external_ids", reason="обязателен для источника INTEGRATION"),
+                    FieldError(field="source", reason="Обязательно для заявки от интеграции"),
+                    FieldError(field="external_ids", reason="Обязательно для заявки от интеграции"),
                 ],
             )
 
@@ -2128,7 +2148,7 @@ class DealService:
         if null_required:
             raise ValidationError(
                 "Обязательное поле нельзя очистить",
-                [FieldError(field=key, reason="не может быть null") for key in null_required],
+                [FieldError(field=key, reason="Нельзя оставить пустым") for key in null_required],
             )
         changes: dict[str, dict[str, Any]] = {}
         if principal is not None:
@@ -2459,8 +2479,8 @@ class DealService:
             return
         if key not in _TRANSITION_DIRECT_FIELDS:
             raise ValidationError(
-                f"Поле {key!r} нельзя задать через переход",
-                [FieldError(field=key, reason="недопустимое поле")],
+                "Это поле нельзя задать при переходе",
+                [FieldError(field=key, reason="Недопустимое поле")],
             )
         if value is not None:
             if key == "loss_reason_id":
@@ -2474,12 +2494,12 @@ class DealService:
                 except ArithmeticError:
                     raise ValidationError(
                         "Сумма должна быть числом",
-                        [FieldError(field=key, reason="сумма должна быть числом")],
+                        [FieldError(field=key, reason="Сумма должна быть числом")],
                     ) from None
                 if not value.is_finite() or value < 0 or value > MAX_DEAL_AMOUNT:
                     raise ValidationError(
                         "Сумма должна быть неотрицательным числом",
-                        [FieldError(field=key, reason="сумма не может быть отрицательной")],
+                        [FieldError(field=key, reason="Сумма не может быть отрицательной")],
                     )
         setattr(deal, key, value)
 
@@ -2617,9 +2637,10 @@ class DealService:
         if missing:
             raise AppError(
                 ErrorCode.TRANSITION_FIELDS_REQUIRED,
-                f"Для перехода в статус «{to_status['name']}» заполните поля: {', '.join(missing)}",
+                f"Для перехода в статус «{to_status['name']}» заполните поля: "
+                f"{', '.join(_field_label(name) for name in missing)}",
                 errors=[
-                    FieldError(field=name, reason="обязательно для целевого статуса")
+                    FieldError(field=name, reason="Обязательно для целевого статуса")
                     for name in missing
                 ],
                 extra={"missing_fields": missing},
@@ -2781,7 +2802,7 @@ class DealService:
         if len(unique_ids) != len(attachment_ids):
             raise ValidationError(
                 "Вложение указано в списке дважды",
-                errors=[FieldError(field="attachments", reason="дублирующийся id вложения")],
+                errors=[FieldError(field="attachments", reason="Дублирующийся id вложения")],
             )
         rows = (
             await self._session.execute(
@@ -2800,25 +2821,25 @@ class DealService:
             pair = found.get(attachment_id)
             if pair is None:
                 errors.append(
-                    FieldError(field="attachments", reason=f"вложение {attachment_id} не найдено")
+                    FieldError(field="attachments", reason=f"Вложение {attachment_id} не найдено")
                 )
                 continue
             attachment, file = pair
             if attachment.entity_type != "deal" or attachment.entity_id != deal.id:
                 errors.append(
-                    FieldError(field="attachments", reason="вложение принадлежит другой сделке")
+                    FieldError(field="attachments", reason="Вложение принадлежит другой сделке")
                 )
             elif attachment.deleted_at is not None:
-                errors.append(FieldError(field="attachments", reason="вложение удалено"))
+                errors.append(FieldError(field="attachments", reason="Вложение удалено"))
             elif attachment.status_history_id is not None:
                 errors.append(
                     FieldError(
                         field="attachments",
-                        reason="вложение уже приложено к другому переходу",
+                        reason="Вложение уже приложено к другому переходу",
                     )
                 )
             elif file.status != FileStatus.READY.value:
-                errors.append(FieldError(field="attachments", reason="файл ещё не прошёл проверку"))
+                errors.append(FieldError(field="attachments", reason="Файл ещё не прошёл проверку"))
             else:
                 attachments.append(attachment)
         if errors:
@@ -3010,7 +3031,7 @@ class DealService:
         if deal.owner_id == owner_id:
             raise ValidationError(
                 "Новый ответственный совпадает с текущим",
-                [FieldError(field="owner_id", reason="совпадает с текущим владельцем")],
+                [FieldError(field="owner_id", reason="Совпадает с текущим владельцем")],
             )
         # B4-14 (п.2): раньше проверялось только существование — Руководитель мог отдать
         # сделку неактивному сотруднику или сотруднику чужой команды. `bulk_reassign` ниже
@@ -3252,7 +3273,7 @@ class ParticipantService:
         if not user.is_active:
             raise ValidationError(
                 "Участником можно сделать только активного сотрудника",
-                [FieldError(field="user_id", reason="сотрудник неактивен")],
+                [FieldError(field="user_id", reason="Сотрудник неактивен")],
             )
 
         existing = await self._session.scalar(
@@ -3430,7 +3451,7 @@ class CommentService:
         if len(unique) > MAX_MENTIONS:
             raise ValidationError(
                 f"В комментарии можно упомянуть не больше {MAX_MENTIONS} сотрудников",
-                [FieldError(field="mentions", reason=f"не больше {MAX_MENTIONS}")],
+                [FieldError(field="mentions", reason=f"Не больше {MAX_MENTIONS}")],
             )
         if not unique:
             return []
@@ -3450,7 +3471,7 @@ class CommentService:
             raise ValidationError(
                 "Упомянуть можно только активного сотрудника",
                 [
-                    FieldError(field="mentions", reason=f"нет активного сотрудника {u}")
+                    FieldError(field="mentions", reason=f"Нет активного сотрудника {u}")
                     for u in unknown
                 ],
             )
@@ -3620,7 +3641,7 @@ class TaskService:
         if not user.is_active:
             raise ValidationError(
                 "Исполнителем можно назначить только активного сотрудника",
-                [FieldError(field="assignee_id", reason="сотрудник неактивен")],
+                [FieldError(field="assignee_id", reason="Сотрудник неактивен")],
             )
 
     async def update(self, task: Task, principal: Principal, payload: Any) -> Task:
@@ -3634,7 +3655,7 @@ class TaskService:
         if null_required:
             raise ValidationError(
                 "Обязательное поле нельзя очистить",
-                [FieldError(field=key, reason="не может быть null") for key in null_required],
+                [FieldError(field=key, reason="Нельзя оставить пустым") for key in null_required],
             )
         if "assignee_id" in data and data["assignee_id"] != task.assignee_id:
             await self._ensure_assignee(data["assignee_id"])
