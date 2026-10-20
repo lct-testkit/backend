@@ -464,11 +464,13 @@ def validate_field(spec: FieldSpec, raw: str) -> tuple[object | None, str | None
         try:
             return learner.parse_profile_value(spec.target, value), None
         except ValueError as exc:
-            # Сообщения разбора начинаются с названия поля («СНИЛС — 11 цифр») или, у дат и
-            # справочников, не называют его — тогда добавляем заголовок колонки.
+            # Сообщения разбора часто сами называют поле («СНИЛС — 11 цифр», «Дата рождения не может
+            # быть…»): тогда заголовок колонки второй раз не добавляем.
             message = str(exc)
-            known = ("СНИЛС", "Серия", "Номер", "Код", "Индекс")
-            return None, message if message.startswith(known) else f"«{spec.label}»: {message}"
+            names_field = message.casefold().startswith(
+                spec.label.casefold()
+            ) or message.startswith("Индекс")
+            return None, message if names_field else f"«{spec.label}»: {message}"
     if spec.kind in ("region_code", "direction_code", "organization_name"):
         # Существование проверяется в сервисе (нужен доступ к БД) — здесь
         # только формат непустой строки. `imports.service._extract_row`
