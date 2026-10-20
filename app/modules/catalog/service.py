@@ -407,6 +407,58 @@ class OrganizationService:
             raise NotFoundError("Организация", organization_id)
         return organization
 
+    async def editable_ids(
+        self, principal: Principal, organizations: Iterable[Organization]
+    ) -> set[uuid.UUID]:
+        """Q-3: какие из этих вузов вызывающий вправе править (реквизиты, расхождения).
+
+        Видеть вуз и править его — разные права: скоуп чтения включает вузы, где у КАМа есть
+        лишь своя сделка. Править реквизиты может тот, кто за вуз отвечает: ADMIN; владелец
+        (`owner_id`); руководитель — вузы своей команды; тот, у кого есть одобренный и
+        действующий запрос доступа. У вуза без ответственного просить доступ не у кого
+        (`AccessRequestService.create` даёт 422), поэтому такой вуз правит любой, кто его видит."""
+        rows = list(organizations)
+        if principal.is_admin or principal.role == Role.INTEGRATION.value:
+            return {o.id for o in rows}
+        team_ids: set[uuid.UUID] = {principal.user_id}
+        if principal.role == Role.HEAD.value:
+            from app.modules.crm.service import head_scope_member_ids
+
+            team_ids = await head_scope_member_ids(self._session, principal)
+        allowed = {o.id for o in rows if o.owner_id is None or o.owner_id in team_ids}
+        pending = [o.id for o in rows if o.id not in allowed]
+        if pending:
+            granted = await self._session.scalars(
+                select(AccessRequest.entity_id).where(
+                    AccessRequest.requester_id == principal.user_id,
+                    AccessRequest.entity_type == "organization",
+                    AccessRequest.entity_id.in_(pending),
+                    AccessRequest.status == AccessRequestStatus.APPROVED.value,
+                    AccessRequest.expires_at > func.now(),
+                )
+            )
+            allowed.update(granted.all())
+        return allowed
+
+    async def can_edit(self, principal: Principal, organization: Organization) -> bool:
+        return organization.id in await self.editable_ids(principal, [organization])
+
+    async def ensure_can_edit(self, principal: Principal, organization: Organization) -> None:
+        """Q-3: правка реквизитов чужого вуза — 403, а не 200 (читать можно, править нельзя)."""
+        if await self.can_edit(principal, organization):
+            return
+        defer_denied_audit(
+            self._session,
+            entity_type="organization",
+            entity_id=organization.id,
+            reason="requisites_edit_forbidden",
+        )
+        raise ForbiddenError(
+            "Менять реквизиты вуза может ответственный за него или руководитель. "
+            "Запросите доступ",
+            organization_id=str(organization.id),
+        )
+
     async def restore(self, organization: Organization) -> Organization:
         """Возвращает мягко удалённую организацию в активное состояние (A-18).
 

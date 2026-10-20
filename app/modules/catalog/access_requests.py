@@ -27,7 +27,7 @@ from app.core.security import Principal
 from app.modules.audit.actions import AuditAction
 from app.modules.audit.service import AuditService
 from app.modules.catalog.models import AccessRequest, AccessRequestStatus, Organization
-from app.modules.catalog.service import organization_in_scope
+from app.modules.catalog.service import OrganizationService, organization_in_scope
 from app.modules.identity.models import Role, Team, User
 from app.modules.notification.service import NotificationPriority, get_notification_service
 
@@ -87,7 +87,11 @@ class AccessRequestService:
         if organization is None or organization.deleted_at is not None:
             raise NotFoundError("Организация", entity_id)
 
-        if await organization_in_scope(self._session, principal, organization):
+        # Q-3: вуз, видимый лишь через собственную сделку, открыт для чтения, но не для правки —
+        # просить доступ к нему можно. «Уже есть» — когда вызывающий и так вправе его править.
+        if await organization_in_scope(
+            self._session, principal, organization
+        ) and await OrganizationService(self._session).can_edit(principal, organization):
             raise ValidationError(
                 "Доступ к этому вузу уже есть",
                 [FieldError(field="entity_id", reason="организация уже в вашем скоупе")],
