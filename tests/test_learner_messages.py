@@ -64,3 +64,32 @@ def test_too_long_text() -> None:
 )
 def test_digit_word_agreement(count: int, expected: str) -> None:
     assert learner._digits_word(count) == expected
+
+
+class TestImportMessages:
+    """В импорте к тексту добавляется заголовок колонки, но не дважды: если сообщение уже называет поле,
+    заголовок не повторяется."""
+
+    @staticmethod
+    def _message(target: str, raw: str) -> str:
+        from app.modules.imports.fields import LEARNER_FIELDS, validate_field
+
+        spec = next(f for f in LEARNER_FIELDS if f.target == target)
+        value, error = validate_field(spec, raw)
+        assert value is None and error is not None
+        return error
+
+    def test_message_that_names_the_field_is_not_prefixed(self) -> None:
+        assert self._message("passport_series", "12") == "Серия паспорта — 4 цифры"
+        assert self._message("snils", "123") == "СНИЛС — 11 цифр"
+        assert self._message("reg_zip", "1") == "Индекс — 6 цифр"
+        assert self._message("sex", "?") == "Пол — «М» или «Ж»"
+        assert self._message("birth_date", "01.01.2999") == "Дата рождения не может быть в будущем"
+
+    def test_message_without_a_field_name_gets_the_column_title(self) -> None:
+        assert self._message("birth_date", "завтра") == (
+            "«Дата рождения»: Неверная дата — укажите в формате ДД.ММ.ГГГГ"
+        )
+        assert self._message("diploma_issued_at", "01.01.2999") == (
+            "«Дата выдачи диплома»: Дата не может быть в будущем"
+        )
